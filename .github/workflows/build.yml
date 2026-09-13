@@ -155,7 +155,6 @@ jobs:
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: ${{ github.repository }}
-      HOMELAB_DISPATCH_TOKEN: ${{ secrets.HOMELAB_DISPATCH_TOKEN }}
 
     steps:
       - name: Checkout
@@ -213,6 +212,8 @@ jobs:
 
       - name: Dispatch image digest to homelab
         if: env.HOMELAB_DISPATCH_TOKEN != '' && github.ref == 'refs/heads/main'
+        env:
+          HOMELAB_DISPATCH_TOKEN: ${{ secrets.HOMELAB_DISPATCH_TOKEN }}
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
           token: ${{ secrets.HOMELAB_DISPATCH_TOKEN }}
