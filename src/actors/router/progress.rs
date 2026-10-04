@@ -22,6 +22,25 @@ impl TransferProgressStore {
     /// Resumable downloads may temporarily exceed the count cap for their 60-second
     /// continuation window. Active and canceling transfers are never history victims.
     pub(crate) fn prune_terminal_history(&mut self, now: UnixTimestampSeconds) -> bool {
+        // Deliver before eviction so observers retain even immediately pruned terminal rows.
+        let terminal_ids = self
+            .terminal_observers
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.entries.get(id).is_some_and(|entry| {
+                    !matches!(
+                        entry.state,
+                        TransferProgressState::Active | TransferProgressState::Canceling
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for id in terminal_ids {
+            if let Some(sender) = self.terminal_observers.remove(&id) {
+                sender.send_replace(self.entries.get(&id).cloned());
+            }
+        }
         let previous_len = self.entries.len();
         self.last_pruned_at = Some(now);
         let mut candidates = Vec::new();
@@ -496,6 +515,38 @@ mod tests {
         );
         entry.ended_at = Some(UnixTimestampSeconds::new(ended_at));
         entry
+    }
+
+    /// Terminal notifications must survive eviction before the consumer is scheduled.
+    #[tokio::test]
+    async fn terminal_observers_retain_outcomes_after_history_pruning() {
+        for terminal_state in [
+            TransferProgressState::Completed,
+            TransferProgressState::Errored,
+            TransferProgressState::Canceled,
+        ] {
+            let mut store = TransferProgressStore::default();
+            let mut entry = terminal_entry(1, 1);
+            entry.state = terminal_state.clone();
+            let (sender, mut receiver) = tokio::sync::watch::channel(None);
+            store.terminal_observers.insert(entry.request_id, sender);
+            store.entries.insert(entry.request_id, entry);
+            store.prune_terminal_history(UnixTimestampSeconds::new(4000));
+            assert!(
+                store.entries.is_empty(),
+                "the terminal row must actually be evicted to exercise delayed consumption"
+            );
+            receiver.changed().await.unwrap();
+            assert_eq!(
+                std::mem::discriminant(&receiver.borrow().as_ref().unwrap().state),
+                std::mem::discriminant(&terminal_state),
+                "completion, failure, and cancellation must remain available after history eviction"
+            );
+            assert!(
+                store.terminal_observers.is_empty(),
+                "terminal delivery must release router observer storage"
+            );
+        }
     }
 
     /// Mixed transfer domains must share one history budget while in-flight rows remain owned.

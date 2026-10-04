@@ -383,6 +383,9 @@ impl CopyRegistry {
 pub struct TransferProgressStore {
     /// Progress entries keyed by their public transfer id.
     pub(crate) entries: HashMap<TransferId, TransferProgressEntry>,
+    /// One-shot terminal observers retain acknowledgements after public history is pruned.
+    pub(crate) terminal_observers:
+        HashMap<TransferId, tokio::sync::watch::Sender<Option<TransferProgressEntry>>>,
     /// Last maintenance pass avoids scanning history on every UI tick.
     pub(crate) last_pruned_at: Option<UnixTimestampSeconds>,
     /// Downloads that received a later-discovered archive total.

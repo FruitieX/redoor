@@ -37,6 +37,8 @@ import {
     createMcpTestClient,
 } from "./mcp-client";
 
+import { registerMcpTransferRegressionTests } from "./mcp-transfer-regressions";
+
 const processManager = new ProcessManager();
 const baseUrl = `http://127.0.0.1:${VITEST_SERVER_PORT}`;
 const endpoint = `${baseUrl}/mcp`;
@@ -523,6 +525,22 @@ describe("stateless authenticated MCP", () => {
         });
     });
 
+    registerMcpTransferRegressionTests({
+        endpoint,
+        baseUrl,
+        token: () => deviceToken,
+        sourceDevice: testDeviceId,
+        destinationDevice: secondDeviceId,
+        sourceRoot: agentRoot,
+        destinationRoot: secondAgentRoot,
+        metadataPath: join(
+            TEST_SERVER_HOME,
+            ".local/share",
+            TEST_APP_NAME,
+            "mcp/operations/operations.json",
+        ),
+    });
+
     it("bounds retained output, cancels background execution, and keeps searches independent", async () => {
         const client = createMcpTestClient({ endpoint, token: deviceToken });
         const large = await client.callTool("run_command", {
@@ -815,6 +833,14 @@ describe("stateless authenticated MCP", () => {
             termination: {
                 reason: "server_restarted_before_terminal_acknowledgement",
             },
+        });
+        const cancellation = await client.callTool("cancel_operation", {
+            operation_id: operationId,
+        });
+        // Router counters reset on restart; stale work must never send a new cancellation.
+        expect(cancellation.result.structuredContent).toMatchObject({
+            cancellation_accepted: false,
+            termination_acknowledged: true,
         });
     });
 

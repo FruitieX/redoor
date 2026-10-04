@@ -217,7 +217,13 @@ pub(super) async fn start_transfer(
     destination_path: &str,
     mode: CopyExistingMode,
     is_move: bool,
-) -> Result<u64, String> {
+) -> Result<
+    (
+        u64,
+        tokio::sync::watch::Receiver<Option<redoor::commands::TransferProgressEntry>>,
+    ),
+    String,
+> {
     let metadata_command = if is_move {
         Command::MoveMetadata {
             path: source_path.to_string(),
@@ -246,6 +252,7 @@ pub(super) async fn start_transfer(
     } else {
         return Err("Transfers support regular files and directories only".to_string());
     };
+    let (terminal_sender, terminal_receiver) = tokio::sync::watch::channel(None);
     let id = state
         .router_ref
         .request(30_000, |reply| {
@@ -263,11 +270,12 @@ pub(super) async fn start_transfer(
                     actors::router::CopyOperation::Copy
                 },
                 source_identity: identity,
+                terminal: Some(terminal_sender.clone()),
                 reply,
             })
         })
         .await
         .map_err(|error| format!("Transfer admission failed: {error:?}"))?
         .map_err(|error| format!("Transfer rejected: {error:?}"))?;
-    Ok(id.0)
+    Ok((id.0, terminal_receiver))
 }

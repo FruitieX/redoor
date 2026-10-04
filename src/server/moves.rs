@@ -128,6 +128,7 @@ pub(crate) async fn move_file_handler(
                 on_existing: payload.on_existing,
                 operation: actors::router::CopyOperation::Move,
                 source_identity: Some(source_metadata.identity),
+                terminal: None,
                 reply,
             })
         })

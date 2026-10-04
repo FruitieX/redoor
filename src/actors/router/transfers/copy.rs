@@ -192,6 +192,13 @@ pub(crate) fn start(state: &mut RouterState, request: StartCopyRequest) {
                 },
             );
 
+            if let Some(terminal) = request.terminal.clone() {
+                state
+                    .progress
+                    .terminal_observers
+                    .insert(public_request_id, terminal);
+            }
+
             if request.operation == CopyOperation::Move {
                 log!(
                     Level::Debug,

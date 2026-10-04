@@ -528,6 +528,7 @@ async fn finish_execution(
         _ => "failed",
     }
     .to_string();
+    current.remote_id = None;
     current.terminal = serde_json::to_value(event).ok();
     drop(current);
     let _ = operations.update(record).await;
@@ -551,7 +552,7 @@ async fn owned_operation(
     policy::require_owner(principal, record.lock().await.owner_grant, id)?;
     Ok(record)
 }
-/// Refreshes router-backed work before returning an owned operation snapshot.
+/// Returns durable state without depending on the router's prunable transfer history.
 async fn get_operation(
     state: &ServerState,
     principal: &MachinePrincipal,
@@ -563,55 +564,52 @@ async fn get_operation(
         let current = record.lock().await;
         recheck_operation_access(principal, &current, id)?;
     }
-    refresh_transfer_operation(state, &record).await;
     let record = record.lock().await;
     operation_json(&record)
 }
 
-/// Projects the existing transfer registry into the MCP operation lifecycle.
-async fn refresh_transfer_operation(
-    state: &ServerState,
-    record: &std::sync::Arc<tokio::sync::Mutex<super::operations::OperationRecord>>,
+/// Drains a retained terminal notification independently of client polling and router history.
+async fn collect_transfer(
+    operations: super::operations::OperationRegistry,
+    record: std::sync::Arc<tokio::sync::Mutex<super::operations::OperationRecord>>,
+    mut terminal: tokio::sync::watch::Receiver<Option<redoor::commands::TransferProgressEntry>>,
 ) {
-    let (kind, remote_id) = {
-        let current = record.lock().await;
-        (current.kind.clone(), current.remote_id)
-    };
-    if !matches!(kind.as_str(), "copy" | "move") {
-        return;
+    loop {
+        let transfer = terminal.borrow_and_update().clone();
+        if let Some(transfer) = transfer {
+            let mut current = record.lock().await;
+            current.state = match transfer.state {
+                redoor::commands::TransferProgressState::Canceled => "canceled",
+                redoor::commands::TransferProgressState::Errored => "failed",
+                redoor::commands::TransferProgressState::Completed => "completed",
+                _ => "unknown",
+            }
+            .to_string();
+            current.remote_id = None;
+            current.terminal = Some(json!({
+                "transferred_bytes": transfer.transferred_bytes,
+                "total_bytes": transfer.total_bytes,
+                "error": transfer.error,
+                "atomic": transfer.atomic
+            }));
+            drop(current);
+            if let Err(error) = operations.update(&record).await {
+                redoor::log!(
+                    redoor::logging::Level::Error,
+                    "Failed persisting MCP transfer completion: {error:#}"
+                );
+            }
+            return;
+        }
+        if terminal.changed().await.is_err() {
+            let mut current = record.lock().await;
+            current.state = "unknown".to_string();
+            current.remote_id = None;
+            drop(current);
+            let _ = operations.update(&record).await;
+            return;
+        }
     }
-    let Some(remote_id) = remote_id else { return };
-    let Ok(progress) = state
-        .router_ref
-        .request(5_000, |reply| RouterMsg::GetTransferProgress { reply })
-        .await
-    else {
-        return;
-    };
-    let Some(transfer) = progress
-        .transfers
-        .into_iter()
-        .find(|entry| entry.request_id == TransferId::new(remote_id))
-    else {
-        return;
-    };
-    let mut current = record.lock().await;
-    current.state = match transfer.state {
-        redoor::commands::TransferProgressState::Active => "running",
-        redoor::commands::TransferProgressState::Canceling => "canceling",
-        redoor::commands::TransferProgressState::Canceled => "canceled",
-        redoor::commands::TransferProgressState::Errored => "failed",
-        redoor::commands::TransferProgressState::Completed => "completed",
-    }
-    .to_string();
-    current.terminal = Some(json!({
-        "transferred_bytes": transfer.transferred_bytes,
-        "total_bytes": transfer.total_bytes,
-        "error": transfer.error,
-        "atomic": transfer.atomic
-    }));
-    drop(current);
-    let _ = state.mcp.operations.update(record).await;
 }
 /// Serializes lifecycle metadata without embedding retained output.
 fn operation_json(record: &super::operations::OperationRecord) -> Result<Value, McpError> {
@@ -659,6 +657,16 @@ async fn cancel_operation(
     let record = owned_operation(state, principal, args, id).await?;
     let mut current = record.lock().await;
     recheck_operation_access(principal, &current, id)?;
+    if !matches!(
+        current.state.as_str(),
+        "admitted" | "running" | "canceling" | "unknown"
+    ) {
+        return Ok(json!({
+            "operation_id": current.id,
+            "cancellation_accepted": false,
+            "termination_acknowledged": true
+        }));
+    }
     current.cancel_requested = true;
     let operation_id = current.id;
     let kind = current.kind.clone();
@@ -851,8 +859,21 @@ async fn transfer(
         policy::require_device(principal, MachineScope::FilesDelete, source_device, id)?
     }
     let mode = conflict_mode(string(args, "on_existing", id)?, id)?;
-    let fingerprint = serde_json::to_string(args).unwrap_or_default();
-    if let Some(key) = args.get("idempotency_key").and_then(Value::as_str) {
+    let kind = if is_move { "move" } else { "copy" };
+    let fingerprint = json!({"kind": kind, "arguments": args}).to_string();
+    let key = args.get("idempotency_key").and_then(Value::as_str);
+    let _admission = if let Some(key) = key {
+        Some(
+            state
+                .mcp
+                .operations
+                .lock_admission(principal.grant.id, key)
+                .await,
+        )
+    } else {
+        None
+    };
+    if let Some(key) = key {
         match state
             .mcp
             .operations
@@ -869,7 +890,6 @@ async fn transfer(
             Ok(None) => {}
         }
     }
-    let kind = if is_move { "move" } else { "copy" };
     let record = state
         .mcp
         .operations
@@ -885,7 +905,27 @@ async fn transfer(
                 id,
             )
         })?;
-    let remote_id = match services::start_transfer(
+    let result = json!({"operation_id":record.lock().await.id,"state":"running"});
+    // Persist the reservation before remote work so an ambiguous admission cannot be repeated.
+    if let Some(key) = key {
+        state
+            .mcp
+            .operations
+            .remember(
+                principal.grant.id,
+                key.to_string(),
+                fingerprint,
+                result.clone(),
+            )
+            .await
+            .map_err(|error| {
+                op(
+                    format!("Failed persisting idempotency record: {error:#}"),
+                    id,
+                )
+            })?;
+    }
+    let (remote_id, terminal) = match services::start_transfer(
         state,
         source_device,
         source_path,
@@ -903,7 +943,12 @@ async fn transfer(
             current.terminal = Some(json!({"reason":"admission_failed","error":error}));
             drop(current);
             let _ = state.mcp.operations.update(&record).await;
-            return Err(op("Transfer admission failed", id));
+            // Keyed callers share the durable admission even when its remote start fails.
+            return if key.is_some() {
+                Ok(result)
+            } else {
+                Err(op("Transfer admission failed", id))
+            };
         }
     };
     {
@@ -911,31 +956,17 @@ async fn transfer(
         record.remote_id = Some(remote_id);
         record.state = "running".to_string();
     }
+    tokio::spawn(collect_transfer(
+        state.mcp.operations.clone(),
+        record.clone(),
+        terminal,
+    ));
     state
         .mcp
         .operations
         .update(&record)
         .await
         .map_err(|error| op(format!("Failed persisting transfer: {error:#}"), id))?;
-    let result = json!({"operation_id":record.lock().await.id,"state":"running"});
-    if let Some(key) = args.get("idempotency_key").and_then(Value::as_str) {
-        state
-            .mcp
-            .operations
-            .remember(
-                principal.grant.id,
-                key.to_string(),
-                fingerprint,
-                result.clone(),
-            )
-            .await
-            .map_err(|error| {
-                op(
-                    format!("Failed persisting idempotency record: {error:#}"),
-                    id,
-                )
-            })?
-    }
     Ok(result)
 }
 /// Requires explicit deletion mode and recursive intent before mutation.

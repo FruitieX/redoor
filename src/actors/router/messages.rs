@@ -372,6 +372,9 @@ pub struct StartCopyRequest {
     pub operation: super::state::CopyOperation,
     /// Prevents move cleanup from deleting a replacement created while copying.
     pub source_identity: Option<crate::commands::MoveSourceIdentity>,
+    /// Retains terminal progress independently of the prunable public history.
+    pub terminal:
+        Option<tokio::sync::watch::Sender<Option<crate::commands::TransferProgressEntry>>>,
     /// Reply port that returns the public transfer id.
     pub reply: RouterReply<Result<TransferId, RouterError>>,
 }

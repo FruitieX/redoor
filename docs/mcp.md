@@ -143,8 +143,13 @@ admitted the work; rotating a credential can therefore preserve ownership.
 Current device and scope permissions are checked again when work is inspected
 or canceled. Cancellation acceptance is reported separately from remote
 termination acknowledgement. Optional `idempotency_key` values on transfer
-admission are principal-scoped and bound to the normalized request; reusing a
-key for different arguments is rejected.
+admission are principal-scoped and bound to the tool and its arguments; reusing
+a key for a different tool or different arguments is rejected. Concurrent
+retries share one durable operation UUID. If a keyed admission's remote start
+fails, inspect that operation for the failure; retrying the same key returns
+the original admission without starting new work. Transfer completion is
+persisted independently of client polling. After a server restart, retained
+operations cannot cancel work admitted by the new server.
 
 `read_file` and `write_file` are limited to 64 KiB per call. Command retention
 defaults to 1 MiB per operation and 64 MiB globally, reports truncation while

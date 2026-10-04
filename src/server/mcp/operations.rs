@@ -4,7 +4,12 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
@@ -53,6 +58,7 @@ struct PersistedOperations {
 pub(super) struct OperationRegistry {
     records: Arc<Mutex<HashMap<Uuid, Arc<Mutex<OperationRecord>>>>>,
     idempotency: Arc<Mutex<HashMap<String, IdempotencyRecord>>>,
+    admission_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
     directory: Arc<PathBuf>,
     metadata_path: Arc<PathBuf>,
     io_lock: Arc<Mutex<()>>,
@@ -65,6 +71,11 @@ impl OperationRegistry {
     /// Loads durable admissions and marks unacknowledged work interrupted after restart.
     pub(super) async fn for_application() -> Result<Self> {
         let directory = crate::app_name::user_data_directory()?.join("mcp/operations");
+        Self::in_directory(directory).await
+    }
+
+    /// Accepts an isolated directory so restart recovery can be verified without application state.
+    async fn in_directory(directory: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(&directory)
             .await
             .context("creating MCP operation directory")?;
@@ -95,6 +106,8 @@ impl OperationRegistry {
             if record.updated_at < cutoff {
                 continue;
             }
+            // Router counters belong to one process and must never survive recovery.
+            record.remote_id = None;
             record.spool_path = directory.join(format!("{}.output", record.id));
             if matches!(record.state.as_str(), "admitted" | "running" | "canceling") {
                 record.state = "interrupted".to_string();
@@ -108,6 +121,7 @@ impl OperationRegistry {
         let registry = Self {
             records: Arc::new(Mutex::new(records)),
             idempotency: Arc::new(Mutex::new(persisted.idempotency)),
+            admission_locks: Arc::default(),
             directory: Arc::new(directory),
             metadata_path: Arc::new(metadata_path),
             io_lock: Arc::default(),
@@ -222,6 +236,27 @@ impl OperationRegistry {
         let mut bytes = vec![0; length];
         file.read_exact(&mut bytes).await?;
         Ok(bytes)
+    }
+
+    /// Reserves one principal's retry key through admission and durable result publication.
+    pub(super) async fn lock_admission(
+        &self,
+        owner: Uuid,
+        key: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let mut locks = self.admission_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = locks
+            .entry(idempotency_key(owner, key))
+            .or_default()
+            .upgrade()
+            .unwrap_or_else(|| {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(idempotency_key(owner, key), Arc::downgrade(&lock));
+                lock
+            });
+        drop(locks);
+        lock.lock_owned().await
     }
 
     /// Returns a prior idempotent result only for an identical normalized request.
@@ -342,4 +377,57 @@ fn environment_usize(name: &str, default: usize) -> usize {
 /// Names idempotency entries without exposing bearer credential identifiers.
 fn idempotency_key(owner: Uuid, key: &str) -> String {
     format!("{owner}:{key}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recovery must detach all persisted states from counters reused by the next router.
+    #[tokio::test]
+    async fn restart_invalidates_remote_ids_for_active_and_terminal_operations() {
+        let directory = std::env::temp_dir().join(format!("mcp-recovery-{}", Uuid::new_v4()));
+        let registry = OperationRegistry::in_directory(directory.clone())
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4();
+        let mut ids = Vec::new();
+        for state in [
+            "running",
+            "completed",
+            "failed",
+            "canceled",
+            "interrupted",
+            "unknown",
+        ] {
+            let record = registry.create(owner, vec![], "copy").await.unwrap();
+            let mut current = record.lock().await;
+            current.remote_id = Some(1);
+            current.state = state.to_string();
+            ids.push((current.id, state));
+            drop(current);
+            registry.update(&record).await.unwrap();
+        }
+        let recovered = OperationRegistry::in_directory(directory.clone())
+            .await
+            .unwrap();
+        for (id, state) in ids {
+            let record = recovered.get(id).await.unwrap().unwrap();
+            let current = record.lock().await;
+            assert_eq!(
+                current.remote_id, None,
+                "no recovered record may target a new router counter"
+            );
+            assert_eq!(
+                current.state,
+                if state == "running" {
+                    "interrupted"
+                } else {
+                    state
+                },
+                "recovery preserves terminal outcomes and marks only unacknowledged active work interrupted"
+            );
+        }
+        redoor::safe_fs::safe_rm_all(&directory).await.unwrap();
+    }
 }
