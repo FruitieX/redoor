@@ -48,8 +48,9 @@ use super::{
 /// Builds public login/agent entry points and protects every browser-facing API route.
 pub(crate) fn build_app(server_state: ServerState) -> Router {
     let auth = server_state.auth.clone();
+    let mcp_router = super::mcp::router(server_state.clone());
 
-    Router::new()
+    let browser_router = Router::new()
         .route("/ws", get(websocket_handler))
         .route(
             "/api/v1/agent-transfer/ws",
@@ -260,6 +261,18 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route("/api/v1/diff", post(diff_files_handler))
         .route("/api/v1/agents/{agent}/echo", post(echo_agent_handler))
         .route("/api/v1/server/restart", post(restart_server_handler))
+        .route(
+            "/api/v1/mcp/tokens",
+            get(super::mcp_tokens::list_handler).post(super::mcp_tokens::create_handler),
+        )
+        .route(
+            "/api/v1/mcp/tokens/{token_id}",
+            axum::routing::delete(super::mcp_tokens::revoke_handler),
+        )
+        .route(
+            "/api/v1/mcp/tokens/{token_id}/rotate",
+            post(super::mcp_tokens::rotate_handler),
+        )
         .layer(middleware::from_fn_with_state(auth, require_authentication))
         .layer(
             CorsLayer::new()
@@ -267,6 +280,7 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
-        .with_state(server_state)
-        .fallback_service(ui_service())
+        .fallback_service(ui_service());
+
+    browser_router.merge(mcp_router).with_state(server_state)
 }

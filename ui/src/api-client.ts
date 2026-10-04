@@ -87,6 +87,12 @@ import type { ChmodPathResponse } from "#bindings/ChmodPathResponse";
 import type { Level } from "#bindings/Level";
 import type { LoggingLevelRequest } from "#bindings/LoggingLevelRequest";
 import type { LoggingLevelResponse } from "#bindings/LoggingLevelResponse";
+import type { CreateMcpTokenRequest } from "#bindings/CreateMcpTokenRequest";
+import type { McpTokenListResponse } from "#bindings/McpTokenListResponse";
+import type { McpTokenSecretResponse } from "#bindings/McpTokenSecretResponse";
+import type { RevokeMcpTokenResponse } from "#bindings/RevokeMcpTokenResponse";
+import type { McpTokenScope } from "#bindings/McpTokenScope";
+import type { McpTokenMetadataResponse } from "#bindings/McpTokenMetadataResponse";
 import {
     apiRequest,
     requireSuccessfulResponse,
@@ -173,6 +179,12 @@ export type {
     Level,
     LoggingLevelRequest,
     LoggingLevelResponse,
+    CreateMcpTokenRequest,
+    McpTokenListResponse,
+    McpTokenSecretResponse,
+    RevokeMcpTokenResponse,
+    McpTokenScope,
+    McpTokenMetadataResponse,
 };
 
 export class Agent {
@@ -1118,6 +1130,48 @@ export class ApiClient {
         return apiRequest<ServerInfoResponse>(
             `${this.baseUrl}/api/v1/server`,
             undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Lists secret-free MCP credential metadata owned by the browser account. */
+    async listMcpTokens(): Promise<McpTokenListResponse> {
+        return apiRequest<McpTokenListResponse>(
+            `${this.baseUrl}/api/v1/mcp/tokens`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Creates one MCP credential whose bearer secret is never retained by this client. */
+    async createMcpToken(
+        request: CreateMcpTokenRequest,
+    ): Promise<McpTokenSecretResponse> {
+        return apiRequest<McpTokenSecretResponse>(
+            `${this.baseUrl}/api/v1/mcp/tokens`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Atomically replaces an active credential while keeping its authorization grant. */
+    async rotateMcpToken(tokenId: string): Promise<McpTokenSecretResponse> {
+        return apiRequest<McpTokenSecretResponse>(
+            `${this.baseUrl}/api/v1/mcp/tokens/${encodeURIComponent(tokenId)}/rotate`,
+            { method: "POST" },
+            this.requestContext(),
+        );
+    }
+
+    /** Immediately rejects future MCP and streaming requests using this credential. */
+    async revokeMcpToken(tokenId: string): Promise<RevokeMcpTokenResponse> {
+        return apiRequest<RevokeMcpTokenResponse>(
+            `${this.baseUrl}/api/v1/mcp/tokens/${encodeURIComponent(tokenId)}`,
+            { method: "DELETE" },
             this.requestContext(),
         );
     }

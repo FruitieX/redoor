@@ -121,6 +121,8 @@ enum ServerCommand {
     Systemd(systemd::SystemdArgs),
     /// Install or manage the server as a macOS LaunchAgent.
     Launchd(launchd::LaunchdArgs),
+    /// Create, inspect, or revoke durable MCP machine credentials.
+    McpToken(server::machine_tokens::MachineTokenArgs),
 }
 
 /// Options used to locate and limit server file logs.
@@ -304,6 +306,9 @@ async fn main() {
             }
             Some(ServerCommand::Launchd(launchd)) => {
                 run_utility(launchd::run(launchd, ServiceRole::Server)).await;
+            }
+            Some(ServerCommand::McpToken(tokens)) => {
+                run_utility(server::machine_tokens::run_cli(tokens)).await;
             }
             None => {
                 run_role(
@@ -647,6 +652,21 @@ async fn run_server(args: server::CoordinatorArgs) -> anyhow::Result<()> {
         eprintln!("Failed to initialize authentication: {error}");
         std::process::exit(1);
     });
+    let machine_tokens = server::machine_tokens::MachineTokenService::for_application()
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to initialize MCP credential storage: {error:#}");
+            std::process::exit(1);
+        });
+    let mcp = server::mcp::McpState::new(
+        machine_tokens.clone(),
+        server_section.mcp_allowed_origins.clone(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        eprintln!("Failed to initialize MCP operation storage: {error:#}");
+        std::process::exit(1);
+    });
 
     let terminal_registry = redoor::terminal_registry::TerminalRegistry::new();
     let log_registry = redoor::log_registry::LogRegistry::new();
@@ -672,6 +692,8 @@ async fn run_server(args: server::CoordinatorArgs) -> anyhow::Result<()> {
         one_time_token_registry,
         upload_requests: server::upload_requests::UploadRequests::default(),
         auth,
+        machine_tokens,
+        mcp,
         config_path,
         config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
         port,

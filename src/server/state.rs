@@ -11,6 +11,8 @@ use redoor::terminal_registry::TerminalRegistry;
 use redoor::watchdog::WatchdogRegistry;
 
 use super::auth::AuthState;
+use super::machine_tokens::MachineTokenService;
+use super::mcp::McpState;
 
 #[derive(Clone)]
 pub(crate) struct ServerState {
@@ -31,6 +33,11 @@ pub(crate) struct ServerState {
     pub(crate) upload_requests: super::upload_requests::UploadRequests,
     /// Validates opaque cookies against durable, server-side session files.
     pub(crate) auth: AuthState,
+    /// Reads durable MCP grants on every request so CLI revocations take effect immediately.
+    #[allow(dead_code)]
+    pub(crate) machine_tokens: MachineTokenService,
+    /// Enforces MCP-specific origin, rate, and concurrency policy outside browser auth.
+    pub(crate) mcp: McpState,
     /// Absolute path of the TOML config loaded at process start (for the server
     /// home UI and so restart can re-validate the same file).
     pub(crate) config_path: PathBuf,

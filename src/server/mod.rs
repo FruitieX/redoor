@@ -13,6 +13,9 @@ mod files;
 mod git;
 mod logging_levels;
 mod logs;
+pub(crate) mod machine_tokens;
+pub(crate) mod mcp;
+mod mcp_tokens;
 mod moves;
 #[cfg(target_os = "linux")]
 mod pam;

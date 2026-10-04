@@ -11,6 +11,8 @@
 
 ## Failure history
 
+- 2026-10-04 `pn test` integration (stateless MCP implementation): `real-ssh.test.ts` failed in `runs and controls multiple relays independently on one SSH host` because the shared SSH relay port was not ready after 50 retries. The exact test passed on immediate isolated rerun (1 passed, 4 skipped).
+
 - 2026-10-03 `pn test` Playwright (R9 memory-retention fix): `server-home.spec.ts` failed in `shows a measuring badge until a directory archive total arrives` while waiting for the measuring-badge tooltip at line 205. Rust and integration checks passed in that run. The browser case passed in subsequent isolated fix suites and the final combined `pn test` run; no UI implementation or test change was needed.
 
 - 2026-10-03 `pn test` Playwright (compact editor search): `terminal.spec.ts` failed in `opens or focuses the current agent terminal with t` while waiting for terminal focus at line 622. All 12 tests in the focused terminal run and its dependencies passed on immediate rerun.

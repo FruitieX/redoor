@@ -24,8 +24,8 @@ use super::{
 mod upload;
 
 pub(crate) use upload::{
-    AgentUpload, AgentUploadStartError, forward_request_body, raw_agent_put_handler,
-    required_content_length,
+    AgentUpload, AgentUploadStartError, RawUploadQueryParams, forward_request_body,
+    raw_agent_put_handler, required_content_length,
 };
 
 /// Records the bytes one token-authorized HTTP body handed off, including partial bodies on drop.
@@ -63,9 +63,9 @@ impl Drop for OneTimeDownloadProgress {
 #[derive(Deserialize)]
 pub(crate) struct RawQueryParams {
     /// Preserves the authenticated API's explicit attachment option.
-    download: Option<String>,
+    pub(crate) download: Option<String>,
     /// Authorizes exactly one download for the token's bound agent and absolute path.
-    one_time_token: Option<Uuid>,
+    pub(crate) one_time_token: Option<Uuid>,
 }
 
 /// Parse Range header and return (start, end) byte positions (inclusive)

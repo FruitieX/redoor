@@ -44,15 +44,15 @@ pub(crate) enum AgentUploadStartError {
 pub(crate) struct RawUploadQueryParams {
     /// Keeps existing raw PUT clients replacing files unless they opt into strict creation.
     #[serde(default = "redoor::commands::CopyExistingMode::override_mode")]
-    on_existing: redoor::commands::CopyExistingMode,
+    pub(crate) on_existing: redoor::commands::CopyExistingMode,
     /// Accepts either a user name or numeric UID for the new file.
-    owner: Option<String>,
+    pub(crate) owner: Option<String>,
     /// Accepts either a group name or numeric GID for the new file.
-    group: Option<String>,
+    pub(crate) group: Option<String>,
     /// Lets callers explicitly request or disable parent-owner inheritance.
-    inherit_owner: Option<bool>,
+    pub(crate) inherit_owner: Option<bool>,
     /// Lets callers explicitly request or disable parent-group inheritance.
-    inherit_group: Option<bool>,
+    pub(crate) inherit_group: Option<bool>,
 }
 
 impl RawUploadQueryParams {

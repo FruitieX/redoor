@@ -989,7 +989,7 @@ describe("Agents API", () => {
         expect(result.results).toEqual([]);
     });
 
-    it("should cancel an older grep while unrelated control commands remain responsive", async () => {
+    it("should keep concurrent greps independent while control commands remain responsive", async () => {
         const testAgent = await getConnectedTestAgent();
         const grepRoot = tempFiles.tempDirectory({ suffix: "-latest-grep" });
         const chunk = "x".repeat(1024 * 1024 + 1);
@@ -1052,12 +1052,12 @@ describe("Agents API", () => {
         const firstResponse = contentGrepResponseSchema.parse(
             await (await firstRequest).json(),
         );
-        // Latest-grep-wins returns a bounded terminal response to the superseded caller.
+        // A later grep must not supersede an unrelated caller that owns a distinct request token.
         expect(firstResponse).toMatchObject({
-            cancelled: true,
+            cancelled: false,
             timed_out: false,
         });
-        // The newest request acquires the one grep slot after its predecessor releases it.
+        // The bounded scan pool allows both callers to reach their own terminal result.
         expect(replacement.cancelled).toBe(false);
     });
 

@@ -10,10 +10,10 @@ and process commands retain `agent` terminology.
 
 When `--config` is omitted, Redoor loads (and may create) a conventional path:
 
-| Privileges | Path |
-| --- | --- |
-| Non-root | `~/.config/redoor/config.toml` |
-| Root | `/etc/redoor/config.toml` |
+| Privileges | Path                           |
+| ---------- | ------------------------------ |
+| Non-root   | `~/.config/redoor/config.toml` |
+| Root       | `/etc/redoor/config.toml`      |
 
 The `redoor` segment follows `--app-name` / `REDOOR_APP_NAME` (default `redoor`).
 
@@ -35,9 +35,9 @@ Unknown top-level keys and unknown keys inside `[server]` / `[agent]` are reject
 
 ## Top-level
 
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `agent_token` | string | yes | Shared registration secret. Agents present this when connecting over `/ws`. Must be non-empty. |
+| Key           | Type   | Required | Description                                                                                    |
+| ------------- | ------ | -------- | ---------------------------------------------------------------------------------------------- |
+| `agent_token` | string | yes      | Shared registration secret. Agents present this when connecting over `/ws`. Must be non-empty. |
 
 ```toml
 agent_token = "long-private-secret"
@@ -49,16 +49,16 @@ CLI/env overrides for the agent process: `--token` / `REDOOR_AGENT_TOKEN`.
 
 Required when running `redoor server`. Optional in agent-only configs.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `port` | integer (u16) | `7666` | HTTP listen port. Override with `--port` / `REDOOR_PORT`. |
-| `bind` | string | `127.0.0.1` | Listen address. Use `0.0.0.0` only when intentionally exposing beyond localhost. Override with `--bind`. |
-| `log` | string | platform default\* | Server log file path. Override with `--log` / `REDOOR_SERVER_LOG`. |
-| `log_level` | string | `info` | Initial threshold: `trace`, `debug`, `info`, `warning`, or `error`. Override with `--log-level` or `REDOOR_SERVER_LOG_LEVEL`. Runtime UI/API changes last only until restart. |
-| `log_format` | string | `line` | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_SERVER_LOG_FORMAT`. Browser streams are always structured. |
-| `username` | string | see auth below | Browser UI login username. Non-empty when set. |
-| `password` | string | see auth below | Browser UI login password. Non-empty when set. |
-| `cookie_secure` | bool | `false` | When `true`, session cookies are marked `Secure` (use behind HTTPS). |
+| Key             | Type          | Default            | Description                                                                                                                                                                   |
+| --------------- | ------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `port`          | integer (u16) | `7666`             | HTTP listen port. Override with `--port` / `REDOOR_PORT`.                                                                                                                     |
+| `bind`          | string        | `127.0.0.1`        | Listen address. Use `0.0.0.0` only when intentionally exposing beyond localhost. Override with `--bind`.                                                                      |
+| `log`           | string        | platform default\* | Server log file path. Override with `--log` / `REDOOR_SERVER_LOG`.                                                                                                            |
+| `log_level`     | string        | `info`             | Initial threshold: `trace`, `debug`, `info`, `warning`, or `error`. Override with `--log-level` or `REDOOR_SERVER_LOG_LEVEL`. Runtime UI/API changes last only until restart. |
+| `log_format`    | string        | `line`             | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_SERVER_LOG_FORMAT`. Browser streams are always structured.            |
+| `username`      | string        | see auth below     | Browser UI login username. Non-empty when set.                                                                                                                                |
+| `password`      | string        | see auth below     | Browser UI login password. Non-empty when set.                                                                                                                                |
+| `cookie_secure` | bool          | `false`            | When `true`, session cookies are marked `Secure` (use behind HTTPS).                                                                                                          |
 
 \*Default log path: `~/.local/share/redoor/server.log` (non-root) or `/var/log/redoor/server.log` (root).
 
@@ -88,14 +88,14 @@ password = "long-private-password"
 
 Used by a standalone `redoor agent` process (and by systemd/launchd agent units). Not used for server-managed `[[agents]]` entries.
 
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `server` | string | none (required to connect) | Redoor server URL (`http(s)://` or `ws(s)://`). Path is optional and forced to `/ws`. Override with positional `SERVER` / `REDOOR_AGENT_WS`. |
-| `name` | string | computer hostname | Device name shown in the UI and remote CLI. Override with `--name` / `REDOOR_AGENT_NAME`. |
-| `home` | string | process user home directory | Home directory opened in the UI; does not limit filesystem access. Override with `--home` / `REDOOR_AGENT_HOME`. |
-| `log` | string | platform default\* | Agent log file path. Override with `--log` / `REDOOR_AGENT_LOG`. |
-| `log_level` | string | `info` | Initial threshold. Override with `--log-level` or `REDOOR_AGENT_LOG_LEVEL`. Runtime changes are not written to TOML. |
-| `log_format` | string | `line` | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_AGENT_LOG_FORMAT`. |
+| Key          | Type   | Default                     | Description                                                                                                                                  |
+| ------------ | ------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`     | string | none (required to connect)  | Redoor server URL (`http(s)://` or `ws(s)://`). Path is optional and forced to `/ws`. Override with positional `SERVER` / `REDOOR_AGENT_WS`. |
+| `name`       | string | computer hostname           | Device name shown in the UI and remote CLI. Override with `--name` / `REDOOR_AGENT_NAME`.                                                    |
+| `home`       | string | process user home directory | Home directory opened in the UI; does not limit filesystem access. Override with `--home` / `REDOOR_AGENT_HOME`.                             |
+| `log`        | string | platform default\*          | Agent log file path. Override with `--log` / `REDOOR_AGENT_LOG`.                                                                             |
+| `log_level`  | string | `info`                      | Initial threshold. Override with `--log-level` or `REDOOR_AGENT_LOG_LEVEL`. Runtime changes are not written to TOML.                         |
+| `log_format` | string | `line`                      | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_AGENT_LOG_FORMAT`.                   |
 
 \*Default log path: `~/.local/share/redoor/agent.log` (non-root) or `/var/log/redoor/agent.log` (root).
 
@@ -121,17 +121,17 @@ Optional array of device connections with server-managed agents. Only the server
 
 Default when `local` is omitted or `false`. The server SSHes to the host, ensures a matching binary, and starts `redoor agent` with reverse port forwarding.
 
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `target` | string | yes | SSH destination (`host` or `user@host`). |
-| `local` | bool | no | Must be absent or `false`. |
-| `username` | string | no | SSH login via `ssh -l`. When omitted, OpenSSH config or `user@host` supplies it. |
-| `ssh_port` | integer (u16) | no | SSH port. When omitted, OpenSSH host config / default applies (not forced to 22). |
-| `name` | string | no | Device name. Defaults to the host portion of `target`. |
-| `remote_bin` | string | no | Path to the redoor binary on the remote host. When omitted, uses the versioned install layout under `${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/<version>/redoor`. |
-| `home` | string | no | Home directory opened on the remote device. When omitted, the remote process user's home directory is published. |
-| `log` | string | no | Local file that captures the SSH process stdout/stderr (append mode). |
-| `password` | string | no | Plaintext SSH login password. When set, the server answers OpenSSH via `SSH_ASKPASS`. Prefer keys or `ssh-agent` when possible. |
+| Key          | Type          | Required | Description                                                                                                                                                                  |
+| ------------ | ------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `target`     | string        | yes      | SSH destination (`host` or `user@host`).                                                                                                                                     |
+| `local`      | bool          | no       | Must be absent or `false`.                                                                                                                                                   |
+| `username`   | string        | no       | SSH login via `ssh -l`. When omitted, OpenSSH config or `user@host` supplies it.                                                                                             |
+| `ssh_port`   | integer (u16) | no       | SSH port. When omitted, OpenSSH host config / default applies (not forced to 22).                                                                                            |
+| `name`       | string        | no       | Device name. Defaults to the host portion of `target`.                                                                                                                       |
+| `remote_bin` | string        | no       | Path to the redoor binary on the remote host. When omitted, uses the versioned install layout under `${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/<version>/redoor`. |
+| `home`       | string        | no       | Home directory opened on the remote device. When omitted, the remote process user's home directory is published.                                                             |
+| `log`        | string        | no       | Local file that captures the SSH process stdout/stderr (append mode).                                                                                                        |
+| `password`   | string        | no       | Plaintext SSH login password. When set, the server answers OpenSSH via `SSH_ASKPASS`. Prefer keys or `ssh-agent` when possible.                                              |
 
 ```toml
 [[agents]]
@@ -149,12 +149,12 @@ target = "user@example.com"
 
 Runs on the same machine as the server. The server reuses its own binary (`std::env::current_exe`); no `remote_bin` is needed.
 
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `local` | bool | yes | Must be `true`. |
-| `name` | string | no | Device name. Defaults to the system hostname. |
-| `home` | string | no | Home directory opened in the UI. Defaults to the spawned process user's home directory. |
-| `log` | string | no | File for the spawned agent stdout/stderr (append). When omitted, stdio is inherited from the server. |
+| Key     | Type   | Required | Description                                                                                          |
+| ------- | ------ | -------- | ---------------------------------------------------------------------------------------------------- |
+| `local` | bool   | yes      | Must be `true`.                                                                                      |
+| `name`  | string | no       | Device name. Defaults to the system hostname.                                                        |
+| `home`  | string | no       | Home directory opened in the UI. Defaults to the spawned process user's home directory.              |
+| `log`   | string | no       | File for the spawned agent stdout/stderr (append). When omitted, stdio is inherited from the server. |
 
 SSH-only keys (`target`, `username`, `ssh_port`, `remote_bin`, `password`) are rejected on local entries.
 
@@ -170,21 +170,21 @@ log = "~/.local/share/redoor/log/local.log"
 
 Optional named SSH relays started explicitly with `redoor agent relay start ID`. Configuring an entry does not start it.
 
-| Key | Type | Required | Description |
-| --- | --- | --- | --- |
-| `id` | string | yes | Unique lifecycle ID. Allowed characters: ASCII letters, numbers, `.`, `_`, `-`. |
-| `target` | string | yes | SSH destination (`host` or `user@host`). |
-| `server` | string | yes | Redoor server URL reached by the relay machine (`http(s)://` or `ws(s)://`). |
-| `username` | string | no | SSH login via `ssh -l`. |
-| `ssh_port` | integer (u16) | no | SSH port; omission preserves OpenSSH configuration. |
-| `name` | string | no | Device name shown by the server. Defaults to the host portion of `target`. |
-| `agent_app_name` | string | no | Remote agent process namespace. Defaults to `<local-app-name>-relay-<id>`. |
-| `remote_bin` | string | no | Remote Redoor binary path. |
-| `binary_source` | string | no | Local Redoor binary to upload unconditionally. |
-| `home` | string | no | Home directory published by the remote agent. |
-| `log` | string | no | Local relay and remote-agent log. Defaults to a per-ID path. |
-| `password` | string | no | Plaintext SSH login password delivered through `SSH_ASKPASS`. |
-| `insecure` | bool | no | Disable routed TLS certificate verification. Requires a secure server URL. Default `false`. |
+| Key              | Type          | Required | Description                                                                                 |
+| ---------------- | ------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `id`             | string        | yes      | Unique lifecycle ID. Allowed characters: ASCII letters, numbers, `.`, `_`, `-`.             |
+| `target`         | string        | yes      | SSH destination (`host` or `user@host`).                                                    |
+| `server`         | string        | yes      | Redoor server URL reached by the relay machine (`http(s)://` or `ws(s)://`).                |
+| `username`       | string        | no       | SSH login via `ssh -l`.                                                                     |
+| `ssh_port`       | integer (u16) | no       | SSH port; omission preserves OpenSSH configuration.                                         |
+| `name`           | string        | no       | Device name shown by the server. Defaults to the host portion of `target`.                  |
+| `agent_app_name` | string        | no       | Remote agent process namespace. Defaults to `<local-app-name>-relay-<id>`.                  |
+| `remote_bin`     | string        | no       | Remote Redoor binary path.                                                                  |
+| `binary_source`  | string        | no       | Local Redoor binary to upload unconditionally.                                              |
+| `home`           | string        | no       | Home directory published by the remote agent.                                               |
+| `log`            | string        | no       | Local relay and remote-agent log. Defaults to a per-ID path.                                |
+| `password`       | string        | no       | Plaintext SSH login password delivered through `SSH_ASKPASS`.                               |
+| `insecure`       | bool          | no       | Disable routed TLS certificate verification. Requires a secure server URL. Default `false`. |
 
 ```toml
 [[relays]]
@@ -241,14 +241,32 @@ name = "production-relay-agent"
 
 These override matching config keys when set (CLI still wins):
 
-| Variable | Affects |
-| --- | --- |
-| `REDOOR_APP_NAME` | Config/data/log namespace (default `redoor`) |
-| `REDOOR_PORT` | `[server].port` |
-| `REDOOR_SERVER_LOG` | `[server].log` |
-| `REDOOR_AGENT_WS` | `[agent].server` |
-| `REDOOR_AGENT_TOKEN` | top-level `agent_token` (agent process) |
-| `REDOOR_AGENT_NAME` | `[agent].name` |
-| `REDOOR_AGENT_HOME` | `[agent].home` |
-| `REDOOR_AGENT_LOG` | `[agent].log` |
+| Variable                    | Affects                                                   |
+| --------------------------- | --------------------------------------------------------- |
+| `REDOOR_APP_NAME`           | Config/data/log namespace (default `redoor`)              |
+| `REDOOR_PORT`               | `[server].port`                                           |
+| `REDOOR_SERVER_LOG`         | `[server].log`                                            |
+| `REDOOR_AGENT_WS`           | `[agent].server`                                          |
+| `REDOOR_AGENT_TOKEN`        | top-level `agent_token` (agent process)                   |
+| `REDOOR_AGENT_NAME`         | `[agent].name`                                            |
+| `REDOOR_AGENT_HOME`         | `[agent].home`                                            |
+| `REDOOR_AGENT_LOG`          | `[agent].log`                                             |
 | `REDOOR_AGENT_NOTIFICATION` | desktop notification delay after connect (`off` disables) |
+
+## MCP browser origins
+
+MCP accepts origin-less native clients. To allow a browser-based MCP client,
+list its exact HTTP(S) origin under `[server]`:
+
+```toml
+[server]
+mcp_allowed_origins = ["https://trusted-client.example"]
+```
+
+See [MCP](mcp.md) for credential creation, client headers, and protocol limits.
+
+Retained MCP operation output and metadata can be bounded or expired with
+`REDOOR_MCP_OPERATION_JOB_QUOTA` (bytes per operation),
+`REDOOR_MCP_OPERATION_GLOBAL_QUOTA` (bytes across retained operations), and
+`REDOOR_MCP_OPERATION_EXPIRY_SECONDS` (terminal record lifetime). Invalid or
+zero values use the documented safe defaults.

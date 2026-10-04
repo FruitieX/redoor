@@ -7,6 +7,7 @@ import {
     LoaderCircle,
     LogOut,
     ScrollText,
+    KeyRound,
     Users,
     X,
 } from "lucide-react";
@@ -82,6 +83,12 @@ function ApplicationMenu(props: {
         },
         { to: "/logs", label: "Server logs", icon: ScrollText },
         { to: "/transfers", label: "Transfers", icon: ArrowLeftRight },
+        {
+            to: "/settings/mcp",
+            label: "MCP tokens",
+            ariaLabel: "Manage MCP tokens",
+            icon: KeyRound,
+        },
     ] as const;
 
     return (

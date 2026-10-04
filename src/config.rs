@@ -85,6 +85,8 @@ pub(crate) struct ServerSection {
     pub(crate) password: Option<String>,
     /// When true, session cookies are marked `Secure` for HTTPS deployments.
     pub(crate) cookie_secure: bool,
+    /// Browser origins allowed to call MCP; origin-less native clients do not need an entry.
+    pub(crate) mcp_allowed_origins: Vec<String>,
 }
 
 /// Parsed `[agent]` table for a standalone `redoor agent` process.
@@ -265,7 +267,7 @@ fn parse_server_section(doc: &ParsedDocument<'_>) -> Result<Option<ServerSection
     // instead of silently falling back to a default the operator didn't mean.
     // agent_token moved to the document root; keep rejecting it here with a
     // pointer so existing files fail with an actionable message.
-    const KNOWN_KEYS: [&str; 8] = [
+    const KNOWN_KEYS: [&str; 9] = [
         "port",
         "bind",
         "log",
@@ -274,6 +276,7 @@ fn parse_server_section(doc: &ParsedDocument<'_>) -> Result<Option<ServerSection
         "username",
         "password",
         "cookie_secure",
+        "mcp_allowed_origins",
     ];
     for (key, _) in table.iter() {
         if key == "agent_token" {
@@ -376,6 +379,25 @@ fn parse_server_section(doc: &ParsedDocument<'_>) -> Result<Option<ServerSection
             .as_bool()
             .with_context(|| "server.cookie_secure must be a boolean")?,
     };
+    let mcp_allowed_origins = match table.get("mcp_allowed_origins") {
+        None => Vec::new(),
+        Some(item) => item
+            .as_array()
+            .with_context(|| "server.mcp_allowed_origins must be an array of origin strings")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|origin| {
+                        origin.starts_with("http://") || origin.starts_with("https://")
+                    })
+                    .map(str::to_string)
+                    .with_context(
+                        || "server.mcp_allowed_origins entries must be absolute HTTP(S) origins",
+                    )
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
 
     Ok(Some(ServerSection {
         port,
@@ -386,6 +408,7 @@ fn parse_server_section(doc: &ParsedDocument<'_>) -> Result<Option<ServerSection
         username,
         password,
         cookie_secure,
+        mcp_allowed_origins,
     }))
 }
 

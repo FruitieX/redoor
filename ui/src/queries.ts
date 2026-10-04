@@ -43,6 +43,7 @@ export const queryKeys = {
     transfers: () => [...queryKeys.all, "transfers"] as const,
     serverInfo: () => [...queryKeys.all, "server-info"] as const,
     userState: () => [...queryKeys.all, "user-state"] as const,
+    mcpTokens: () => [...queryKeys.all, "mcp-tokens"] as const,
     serverLoggingLevel: () =>
         [...queryKeys.all, "server-logging-level"] as const,
     agentLoggingLevel: (agentId: string) =>
@@ -123,6 +124,14 @@ export function agentsQueryOptions(api: ApiClient) {
     return queryOptions({
         queryKey: queryKeys.agents(),
         queryFn: () => api.listAgents(),
+    });
+}
+
+/** Shares only secret-free token metadata between the settings loader and page. */
+export function mcpTokensQueryOptions(api: ApiClient) {
+    return queryOptions({
+        queryKey: queryKeys.mcpTokens(),
+        queryFn: () => api.listMcpTokens(),
     });
 }
 
