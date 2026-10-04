@@ -128,4 +128,37 @@ export function registerMcpTransferRegressionTests(options: {
             termination: { reason: "admission_failed" },
         });
     });
+
+    it("prepares a usable replacement upload URL and validates conflict policy", async () => {
+        const client = createMcpTestClient({
+            endpoint: options.endpoint,
+            token: options.token(),
+        });
+        const path = join(options.sourceRoot, "replacement-upload.txt");
+        writeFileSync(path, "old bytes");
+        const prepared = await client.callTool<
+            JsonObject & { endpoint: string }
+        >("prepare_file_upload", {
+            device_id: options.sourceDevice,
+            path,
+            on_existing: "replace",
+        });
+        const url = prepared.result.structuredContent?.endpoint;
+        if (url === undefined) throw new Error("Prepared upload URL missing");
+        const response = await client.stream(`${options.baseUrl}${url}`, {
+            method: "PUT",
+            body: "replacement bytes",
+        });
+        // Following the returned URL must accept the MCP replacement policy and replace existing bytes.
+        expect(response.status).toBe(200);
+        expect(readFileSync(path, "utf8")).toBe("replacement bytes");
+        // Bad conflict policies must fail during preparation rather than issuing an unusable URL.
+        await expect(
+            client.callTool("prepare_file_upload", {
+                device_id: options.sourceDevice,
+                path,
+                on_existing: "invalid",
+            }),
+        ).rejects.toThrow("on_existing");
+    });
 }

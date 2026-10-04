@@ -1205,7 +1205,13 @@ fn prepare_transfer(
         .and_then(Value::as_str)
         .unwrap_or("error");
     let suffix = if upload {
-        format!("?on_existing={conflict}")
+        let mode = conflict_mode(conflict, id)?;
+        let normalized = match mode {
+            CopyExistingMode::Error => "error",
+            CopyExistingMode::Override => "override",
+            CopyExistingMode::Merge => "merge",
+        };
+        format!("?on_existing={normalized}")
     } else {
         String::new()
     };
