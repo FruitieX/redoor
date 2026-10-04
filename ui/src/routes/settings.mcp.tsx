@@ -1,7 +1,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, RotateCw, ShieldX } from "lucide-react";
+import { KeyRound, Pencil, Plus, RotateCw, ShieldX } from "lucide-react";
 
 import type { McpTokenMetadataResponse, McpTokenScope } from "#ui/api-client";
 import { Route as RootRoute } from "./__root";
@@ -71,6 +71,8 @@ function McpTokenSettingsPage() {
     const queryClient = useQueryClient();
     const tokensQuery = useQuery(mcpTokensQueryOptions(api));
     const [createOpen, setCreateOpen] = React.useState(false);
+    const [editing, setEditing] =
+        React.useState<McpTokenMetadataResponse | null>(null);
     const [secret, setSecret] = React.useState<{
         value: string;
         action: "created" | "rotated";
@@ -155,6 +157,7 @@ function McpTokenSettingsPage() {
                                 key={token.credential_id}
                                 token={token}
                                 agents={agents}
+                                onEdit={() => setEditing(token)}
                                 onRotate={() =>
                                     setSelected({ token, action: "rotate" })
                                 }
@@ -166,17 +169,32 @@ function McpTokenSettingsPage() {
                     </div>
                 )}
             </div>
-            <CreateTokenDialog
-                isOpen={createOpen}
-                agents={agents}
-                isBusy={false}
-                onClose={() => setCreateOpen(false)}
-                onCreated={async (value) => {
-                    setCreateOpen(false);
-                    setSecret({ value, action: "created" });
-                    await refresh();
-                }}
-            />
+            {createOpen ? (
+                <TokenDialog
+                    agents={agents}
+                    onClose={() => setCreateOpen(false)}
+                    onCreated={async (value) => {
+                        setCreateOpen(false);
+                        setSecret({ value, action: "created" });
+                        await refresh();
+                    }}
+                />
+            ) : null}
+            {editing ? (
+                <TokenDialog
+                    key={editing.credential_id}
+                    token={editing}
+                    agents={agents}
+                    onClose={() => setEditing(null)}
+                    onUpdated={async () => {
+                        setEditing(null);
+                        setNotice(
+                            "Token updated. New permissions apply to future requests.",
+                        );
+                        await refresh();
+                    }}
+                />
+            ) : null}
             <ConfirmationDialog
                 isOpen={selected?.action === "rotate"}
                 title="Rotate MCP token?"
@@ -225,6 +243,7 @@ function McpTokenSettingsPage() {
 function TokenCard(props: {
     token: McpTokenMetadataResponse;
     agents: Array<{ id: string; name: string }>;
+    onEdit: () => void;
     onRotate: () => void;
     onRevoke: () => void;
 }) {
@@ -301,6 +320,17 @@ function TokenCard(props: {
                     </dl>
                 </div>
                 <div className="flex items-start gap-2">
+                    <Tooltip content="Edit token name, permissions, and allowed devices">
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={status !== "Active"}
+                            onClick={props.onEdit}
+                        >
+                            <Pencil className="h-4 w-4" />
+                            Edit
+                        </Button>
+                    </Tooltip>
                     <Button
                         type="button"
                         variant="secondary"
@@ -325,53 +355,61 @@ function TokenCard(props: {
     );
 }
 
-/** Collects an explicit grant; read-only scopes are the safe default and devices default empty. */
-function CreateTokenDialog(props: {
-    isOpen: boolean;
-    agents: Array<{ id: string; name: string }>;
-    isBusy: boolean;
-    onClose: () => void;
-    onCreated: (secret: string) => Promise<void>;
-}) {
+/** Shares policy controls between creation and editing so permission descriptions stay consistent. */
+function TokenDialog(
+    props: {
+        agents: Array<{ id: string; name: string }>;
+        onClose: () => void;
+    } & (
+        | { token?: undefined; onCreated: (secret: string) => Promise<void> }
+        | { token: McpTokenMetadataResponse; onUpdated: () => Promise<void> }
+    ),
+) {
     const { api } = RootRoute.useRouteContext();
-    const [name, setName] = React.useState("");
+    const [name, setName] = React.useState(props.token?.name ?? "");
     const [expiry, setExpiry] = React.useState("30");
-    const [scopes, setScopes] = React.useState<McpTokenScope[]>([
-        "devices:read",
-        "files:read",
-    ]);
-    const [devices, setDevices] = React.useState<string[]>([]);
+    const [scopes, setScopes] = React.useState<McpTokenScope[]>(
+        props.token?.scopes ?? ["devices:read", "files:read"],
+    );
+    const [devices, setDevices] = React.useState<string[]>(
+        props.token?.device_ids ?? [],
+    );
     const mutation = useMutation({
-        mutationFn: () =>
-            api.createMcpToken({
-                name,
-                scopes,
-                device_ids: devices,
-                expires_at:
-                    expiry === "never"
-                        ? null
-                        : new Date(
-                              Date.now() + Number(expiry) * 86_400_000,
-                          ).toISOString(),
-            }),
-        onSuccess: (result) => props.onCreated(result.token),
+        mutationFn: async () => {
+            const policy = { name, scopes, device_ids: devices };
+            if (props.token) {
+                await api.updateMcpToken(props.token.credential_id, policy);
+                await props.onUpdated();
+            } else {
+                const result = await api.createMcpToken({
+                    ...policy,
+                    expires_at:
+                        expiry === "never"
+                            ? null
+                            : new Date(
+                                  Date.now() + Number(expiry) * 86_400_000,
+                              ).toISOString(),
+                });
+                await props.onCreated(result.token);
+            }
+        },
     });
+    /** Keeps the dialog open during saving so failures remain visible beside the draft. */
     const close = () => {
-        if (!mutation.isPending) {
-            setName("");
-            setExpiry("30");
-            setScopes(["devices:read", "files:read"]);
-            setDevices([]);
-            mutation.reset();
-            props.onClose();
-        }
+        if (!mutation.isPending) props.onClose();
     };
     return (
         <Dialog
-            isOpen={props.isOpen}
-            title="Create MCP token"
-            description="Choose the least access this client needs. Empty device access intentionally grants no device tools."
-            closeAriaLabel="Close token creation"
+            isOpen
+            title={props.token ? "Edit MCP token" : "Create MCP token"}
+            description={
+                props.token
+                    ? "Changes apply to future requests using the same bearer token. Choose the least access this client needs."
+                    : "Choose the least access this client needs. Empty device access intentionally grants no device tools."
+            }
+            closeAriaLabel={
+                props.token ? "Close token editing" : "Close token creation"
+            }
             isBusy={mutation.isPending}
             errorMessage={
                 mutation.error instanceof Error ? mutation.error.message : null
@@ -389,25 +427,27 @@ function CreateTokenDialog(props: {
                     disabled={mutation.isPending}
                     onChange={setName}
                 />
-                <label className="text-sm font-medium text-slate-300">
-                    Expiry
-                    <Select
-                        aria-label="Token expiry"
-                        value={expiry}
-                        disabled={mutation.isPending}
-                        containerClassName="mt-2 block"
-                        onChange={(event) => setExpiry(event.target.value)}
-                    >
-                        <option value="7">7 days</option>
-                        <option value="30">30 days</option>
-                        <option value="90">90 days</option>
-                        <option value="never">Never</option>
-                    </Select>
-                    <span className="mt-1.5 block text-xs font-normal text-slate-500">
-                        Short expiries limit exposure if a client leaks its
-                        token.
-                    </span>
-                </label>
+                {props.token ? null : (
+                    <label className="text-sm font-medium text-slate-300">
+                        Expiry
+                        <Select
+                            aria-label="Token expiry"
+                            value={expiry}
+                            disabled={mutation.isPending}
+                            containerClassName="mt-2 block"
+                            onChange={(event) => setExpiry(event.target.value)}
+                        >
+                            <option value="7">7 days</option>
+                            <option value="30">30 days</option>
+                            <option value="90">90 days</option>
+                            <option value="never">Never</option>
+                        </Select>
+                        <span className="mt-1.5 block text-xs font-normal text-slate-500">
+                            Short expiries limit exposure if a client leaks its
+                            token.
+                        </span>
+                    </label>
+                )}
                 <fieldset className="space-y-2">
                     <legend className="mb-2 text-sm font-medium text-slate-300">
                         Permissions
@@ -495,7 +535,7 @@ function CreateTokenDialog(props: {
                     disabled={name.trim().length === 0}
                     onClick={() => mutation.mutate()}
                 >
-                    Create token
+                    {props.token ? "Save changes" : "Create token"}
                 </Button>
             </DialogActions>
         </Dialog>

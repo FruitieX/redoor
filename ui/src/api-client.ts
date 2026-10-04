@@ -87,6 +87,8 @@ import type { ChmodPathResponse } from "#bindings/ChmodPathResponse";
 import type { Level } from "#bindings/Level";
 import type { LoggingLevelRequest } from "#bindings/LoggingLevelRequest";
 import type { LoggingLevelResponse } from "#bindings/LoggingLevelResponse";
+import type { UpdateMcpTokenRequest } from "#bindings/UpdateMcpTokenRequest";
+import type { UpdateMcpTokenResponse } from "#bindings/UpdateMcpTokenResponse";
 import type { CreateMcpTokenRequest } from "#bindings/CreateMcpTokenRequest";
 import type { McpTokenListResponse } from "#bindings/McpTokenListResponse";
 import type { McpTokenSecretResponse } from "#bindings/McpTokenSecretResponse";
@@ -179,6 +181,8 @@ export type {
     Level,
     LoggingLevelRequest,
     LoggingLevelResponse,
+    UpdateMcpTokenRequest,
+    UpdateMcpTokenResponse,
     CreateMcpTokenRequest,
     McpTokenListResponse,
     McpTokenSecretResponse,
@@ -1151,6 +1155,22 @@ export class ApiClient {
             `${this.baseUrl}/api/v1/mcp/tokens`,
             {
                 method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Saves token policy while retaining the client's existing bearer credential. */
+    async updateMcpToken(
+        tokenId: string,
+        request: UpdateMcpTokenRequest,
+    ): Promise<UpdateMcpTokenResponse> {
+        return apiRequest<UpdateMcpTokenResponse>(
+            `${this.baseUrl}/api/v1/mcp/tokens/${encodeURIComponent(tokenId)}`,
+            {
+                method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(request),
             },

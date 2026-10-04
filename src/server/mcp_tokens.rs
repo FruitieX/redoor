@@ -16,7 +16,8 @@ use axum::{
 use chrono::{DateTime, Utc};
 use redoor::commands::{
     CreateMcpTokenRequest, ErrorResponse, McpTokenListResponse, McpTokenMetadataResponse,
-    McpTokenScope, McpTokenSecretResponse, RevokeMcpTokenResponse,
+    McpTokenScope, McpTokenSecretResponse, RevokeMcpTokenResponse, UpdateMcpTokenRequest,
+    UpdateMcpTokenResponse,
 };
 use redoor::{Level, log};
 use std::collections::BTreeSet;
@@ -159,6 +160,62 @@ pub(crate) async fn create_handler(
     match state.machine_tokens.create(input).await {
         Ok(created) => secret_response(created),
         Err(error) => bad_request(&error.to_string()),
+    }
+}
+
+/// Saves editable policy for an owned active credential without issuing a new secret.
+pub(crate) async fn update_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Path(token_id): Path<String>,
+    Json(request): Json<UpdateMcpTokenRequest>,
+) -> Response {
+    if let Err(message) = validate_mutation_origin(&headers) {
+        return forbidden(message);
+    }
+    let Ok(token_id) = Uuid::parse_str(&token_id) else {
+        return bad_request("token id must be a UUID");
+    };
+    if request.name.trim().is_empty() || request.name.len() > 100 {
+        return bad_request("token name must contain 1 to 100 characters");
+    }
+    let devices = request.device_ids.into_iter().collect::<BTreeSet<_>>();
+    let known = match list_agent_snapshots(&state).await {
+        Ok(agents) => agents
+            .into_iter()
+            .map(|agent| agent.id.to_string())
+            .collect::<BTreeSet<_>>(),
+        Err(error) => return internal_error(anyhow::anyhow!(error)),
+    };
+    if let Some(unknown) = devices.iter().find(|device| !known.contains(*device)) {
+        return bad_request(&format!("unknown device id '{unknown}'"));
+    }
+    match state
+        .machine_tokens
+        .update_for_owner(
+            state.auth.username().to_string(),
+            token_id,
+            request.name,
+            request.scopes.into_iter().map(machine_scope).collect(),
+            devices,
+        )
+        .await
+    {
+        Ok(Some(credential)) => no_store(
+            Json(UpdateMcpTokenResponse {
+                credential: metadata_response(credential),
+            })
+            .into_response(),
+        ),
+        Ok(None) => not_found(),
+        Err(error) if error.to_string().contains("active MCP credential") => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: error.to_string(),
+            }),
+        )
+            .into_response(),
+        Err(error) => internal_error(error),
     }
 }
 

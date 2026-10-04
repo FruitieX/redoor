@@ -105,6 +105,22 @@ pub struct CreateMcpTokenRequest {
     pub expires_at: Option<String>,
 }
 
+/// Replaces editable policy without changing the bearer secret or expiry.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateMcpTokenRequest {
+    pub name: String,
+    pub scopes: Vec<McpTokenScope>,
+    pub device_ids: Vec<String>,
+}
+
+/// Returns saved policy without revealing or replacing credential material.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateMcpTokenResponse {
+    pub credential: McpTokenMetadataResponse,
+}
+
 /// Secret-free lifecycle and stable-grant metadata safe for settings-page caching.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

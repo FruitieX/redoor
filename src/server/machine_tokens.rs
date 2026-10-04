@@ -359,6 +359,45 @@ impl MachineTokenService {
         .await
     }
 
+    /// Updates an owner's active grant atomically so later requests use the saved permissions.
+    pub(crate) async fn update_for_owner(
+        &self,
+        owner_id: String,
+        credential_id: Uuid,
+        name: String,
+        scopes: BTreeSet<MachineScope>,
+        device_ids: BTreeSet<String>,
+    ) -> Result<Option<MachineCredentialMetadata>> {
+        self.mutate(move |store| {
+            let Some(credential) = store
+                .credentials
+                .iter_mut()
+                .find(|item| item.id == credential_id)
+            else {
+                return Ok(None);
+            };
+            let Some(grant) = store
+                .grants
+                .iter_mut()
+                .find(|grant| grant.id == credential.grant_id && grant.owner_id == owner_id)
+            else {
+                return Ok(None);
+            };
+            if credential.revoked_at.is_some()
+                || credential
+                    .expires_at
+                    .is_some_and(|expiry| expiry <= Utc::now())
+            {
+                bail!("only an active MCP credential can be updated");
+            }
+            credential.name = name;
+            grant.scopes = scopes;
+            grant.device_ids = device_ids;
+            Ok(Some(metadata(grant, credential)))
+        })
+        .await
+    }
+
     /// Issues a replacement and revokes its predecessor in one durable transaction.
     pub(crate) async fn rotate_for_owner(
         &self,

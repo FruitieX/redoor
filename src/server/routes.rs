@@ -267,7 +267,8 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         )
         .route(
             "/api/v1/mcp/tokens/{token_id}",
-            axum::routing::delete(super::mcp_tokens::revoke_handler),
+            axum::routing::delete(super::mcp_tokens::revoke_handler)
+                .put(super::mcp_tokens::update_handler),
         )
         .route(
             "/api/v1/mcp/tokens/{token_id}/rotate",
