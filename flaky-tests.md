@@ -32,3 +32,7 @@
 - 2026-08-30 `pn playwright -- git-browser.spec.ts`: `content-search.spec.ts` briefly observed two active grep requests while checking cancellation of a superseded search. The exact test passed on immediate rerun.
 - 2026-08-30 `pn test` Playwright: `content-search.spec.ts` briefly observed two active grep requests while checking cancellation of a superseded search. The exact test and its dependencies passed on immediate rerun.
 - 2026-08-30 `pn test` integration: `agent-logs.test.ts` timed out in `uses CLI log format over environment and TOML` while conflicting processes were running. The isolated test passed after those processes were stopped.
+
+- 2026-10-04 `pn test` integration (MCP token editing): `tests/raw-download.test.ts` skipped all 22 tests after setup failed with `Port 35237 not ready after 50 retries`. The related agent log contained only an older run, so no agent started during the failed setup. All 22 tests passed on the immediate isolated rerun with `pn exec node scripts/test/run-integration-tests.mts tests/raw-download.test.ts`; no code or test changes were needed.
+
+- 2026-10-04 `pn test` Playwright (MCP token editing): `agent-management.spec.ts` failed in `adds and connects an SSH agent with password auth` at line 465 when the 30-second test timeout expired while waiting for the connected device link. The case passed on the immediate rerun of `agent-management.spec.ts` with the existing SSH fixture and no code or test changes.
