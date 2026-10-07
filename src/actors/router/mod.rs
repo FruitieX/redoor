@@ -260,7 +260,7 @@ impl RouterState {
                         if let Some(known) = self.agents.known_by_id.get_mut(&agent_id) {
                             known.connected_at = None;
                             known.last_seen_at = Some(crate::types::UnixTimestampSeconds::new(
-                                chrono::Utc::now().timestamp(),
+                                jiff::Timestamp::now().as_second(),
                             ));
                             known.socket_id = None;
                             known.status = if known.managed {
@@ -378,7 +378,7 @@ impl RouterState {
                 }
                 RouterMsg::CheckPendingUiRefresh => {
                     if self.progress.prune_history_if_due(crate::types::UnixTimestampSeconds::new(
-                        chrono::Utc::now().timestamp(),
+                        jiff::Timestamp::now().as_second(),
                     )) {
                         ui::notify_transfer_refresh(&mut self);
                     }

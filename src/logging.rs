@@ -204,7 +204,9 @@ impl LogEntry {
     /// Captures time before enqueueing so output backlog does not alter event chronology.
     fn new(level: Level, message: String, error: Option<LogErrorDetails>) -> Self {
         Self {
-            timestamp: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
+            timestamp: jiff::Zoned::now()
+                .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
+                .to_string(),
             level,
             message,
             error,
@@ -213,9 +215,9 @@ impl LogEntry {
 
     /// Preserves the established human-readable line format for existing consumers.
     fn render_line(&self) -> String {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&self.timestamp)
+        let timestamp = jiff::Zoned::strptime("%Y-%m-%dT%H:%M:%S%.f%:z", &self.timestamp)
             .expect("logger-created timestamps must remain valid RFC 3339 values")
-            .format("%Y-%m-%d %H:%M:%S%.3f");
+            .strftime("%Y-%m-%d %H:%M:%S%.3f");
         format!("[{timestamp}] [{}] {}", self.level.as_str(), self.message)
     }
 }
@@ -707,7 +709,7 @@ mod tests {
     fn structured_entry_has_rfc3339_millisecond_timestamp() {
         let entry = LogEntry::new(Level::Info, "ready".to_string(), None);
         // Parsing proves the timestamp contains a valid explicit RFC 3339 offset.
-        assert!(chrono::DateTime::parse_from_rfc3339(&entry.timestamp).is_ok());
+        assert!(entry.timestamp.parse::<jiff::Timestamp>().is_ok());
         // The fractional component remains exactly milliseconds for stable display.
         assert!(entry.timestamp.contains('.') && entry.timestamp.len() >= 29);
         let json = serde_json::to_value(&entry).expect("entry serializes");

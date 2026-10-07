@@ -280,7 +280,7 @@ impl AuthState {
             return false;
         };
 
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         if session.session_id != session_id
             || session.username != self.username
             || session.credentials_fingerprint != self.credentials_fingerprint
@@ -307,7 +307,7 @@ impl AuthState {
             session_id: session_id.clone(),
             username: self.username.clone(),
             credentials_fingerprint: self.credentials_fingerprint.clone(),
-            expires_at: chrono::Utc::now().timestamp() + SESSION_LIFETIME.as_secs() as i64,
+            expires_at: (jiff::Timestamp::now() + SESSION_LIFETIME).as_second(),
         };
         let contents = serde_json::to_vec(&session)?;
         write_private_file(&temporary_path, &contents).await?;

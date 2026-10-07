@@ -26,7 +26,9 @@ impl AgentConnection {
             outgoing_priority: request.outgoing_priority,
             transfer_token: uuid::Uuid::new_v4().to_string(),
             transfer: None,
-            connected_at: crate::types::UnixTimestampSeconds::new(chrono::Utc::now().timestamp()),
+            connected_at: crate::types::UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ),
             os: request.os,
             arch: request.arch,
             hostname: request.hostname,
@@ -252,7 +254,7 @@ pub(crate) async fn register(state: &mut RouterState, request: RegisterAgentRequ
             old_connection.shutdown_transfer();
             if let Some(known) = state.agents.known_by_id.get_mut(&old_agent_id) {
                 known.last_seen_at = Some(crate::types::UnixTimestampSeconds::new(
-                    chrono::Utc::now().timestamp(),
+                    jiff::Timestamp::now().as_second(),
                 ));
                 known.connected_at = None;
                 known.socket_id = None;
@@ -526,7 +528,7 @@ pub(crate) async fn apply_managed_lifecycle(
         connection.shutdown_transfer();
         if let Some(known) = state.agents.known_by_id.get_mut(&agent_id) {
             known.last_seen_at = Some(crate::types::UnixTimestampSeconds::new(
-                chrono::Utc::now().timestamp(),
+                jiff::Timestamp::now().as_second(),
             ));
             known.connected_at = None;
             known.socket_id = None;
@@ -577,7 +579,7 @@ pub(crate) async fn apply_managed_lifecycle(
     {
         connection.shutdown_transfer();
         known.last_seen_at = Some(crate::types::UnixTimestampSeconds::new(
-            chrono::Utc::now().timestamp(),
+            jiff::Timestamp::now().as_second(),
         ));
         known.socket_id = None;
         let _ = connection.send_priority_message(crate::types::Message::Error {

@@ -487,7 +487,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -3020,7 +3019,6 @@ dependencies = [
  "axum-extra",
  "base64",
  "bytes",
- "chrono",
  "clap",
  "cookie_store",
  "fastrand",
@@ -3032,6 +3030,7 @@ dependencies = [
  "grep-regex",
  "headers",
  "ignore",
+ "jiff",
  "libc",
  "libloading",
  "mime_guess",

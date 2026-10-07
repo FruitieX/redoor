@@ -7,9 +7,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fs2::FileExt;
+use jiff::Timestamp;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,7 +71,7 @@ pub(crate) struct MachineGrant {
     pub(crate) scopes: BTreeSet<MachineScope>,
     /// An empty set intentionally grants no device access.
     pub(crate) device_ids: BTreeSet<String>,
-    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) created_at: Timestamp,
 }
 
 /// Replaceable credential stores only a verifier and lifecycle metadata, never its secret.
@@ -81,10 +81,10 @@ pub(crate) struct MachineCredential {
     pub(crate) grant_id: Uuid,
     pub(crate) name: String,
     verifier: String,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) expires_at: Option<DateTime<Utc>>,
-    pub(crate) revoked_at: Option<DateTime<Utc>>,
-    pub(crate) last_used_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: Timestamp,
+    pub(crate) expires_at: Option<Timestamp>,
+    pub(crate) revoked_at: Option<Timestamp>,
+    pub(crate) last_used_at: Option<Timestamp>,
 }
 
 /// Safe metadata returned by CLI and later token-management APIs.
@@ -96,10 +96,10 @@ pub(crate) struct MachineCredentialMetadata {
     pub(crate) name: String,
     pub(crate) scopes: BTreeSet<MachineScope>,
     pub(crate) device_ids: BTreeSet<String>,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) expires_at: Option<DateTime<Utc>>,
-    pub(crate) revoked_at: Option<DateTime<Utc>>,
-    pub(crate) last_used_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: Timestamp,
+    pub(crate) expires_at: Option<Timestamp>,
+    pub(crate) revoked_at: Option<Timestamp>,
+    pub(crate) last_used_at: Option<Timestamp>,
 }
 
 /// Authenticated identity passed to policy and audit code without retaining the bearer secret.
@@ -117,7 +117,7 @@ pub(crate) struct CreateMachineToken {
     pub(crate) name: String,
     pub(crate) scopes: BTreeSet<MachineScope>,
     pub(crate) device_ids: BTreeSet<String>,
-    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) expires_at: Option<Timestamp>,
 }
 
 /// Creation returns the secret exactly once beside its safe persisted metadata.
@@ -168,7 +168,7 @@ enum MachineTokenCommand {
         devices: Vec<String>,
         /// Optional RFC 3339 expiration timestamp.
         #[arg(long, value_parser = parse_expiry)]
-        expires_at: Option<DateTime<Utc>>,
+        expires_at: Option<Timestamp>,
     },
     /// List metadata without secrets or stored verifiers.
     List,
@@ -220,10 +220,10 @@ pub(crate) async fn run_cli(args: MachineTokenArgs) -> Result<()> {
     Ok(())
 }
 
-/// Parses CLI timestamps as UTC while preserving explicit offsets from RFC 3339 input.
-fn parse_expiry(value: &str) -> std::result::Result<DateTime<Utc>, String> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| timestamp.with_timezone(&Utc))
+/// Normalizes offset-bearing CLI input to an instant so expiry comparisons are timezone-independent.
+fn parse_expiry(value: &str) -> std::result::Result<Timestamp, String> {
+    value
+        .parse::<Timestamp>()
         .map_err(|error| format!("invalid RFC 3339 expiry: {error}"))
 }
 
@@ -241,7 +241,7 @@ impl MachineTokenService {
     /// Creates a stable grant and one credential while revealing random secret material once.
     pub(crate) async fn create(&self, input: CreateMachineToken) -> Result<CreatedMachineToken> {
         validate_create(&input)?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let grant = MachineGrant {
             id: Uuid::new_v4(),
             owner_id: input.owner_id,
@@ -328,7 +328,7 @@ impl MachineTokenService {
                 return Ok(false);
             };
             if credential.revoked_at.is_none() {
-                credential.revoked_at = Some(Utc::now());
+                credential.revoked_at = Some(Timestamp::now());
             }
             Ok(true)
         })
@@ -352,7 +352,7 @@ impl MachineTokenService {
                 return Ok(false);
             };
             if store.credentials[index].revoked_at.is_none() {
-                store.credentials[index].revoked_at = Some(Utc::now());
+                store.credentials[index].revoked_at = Some(Timestamp::now());
             }
             Ok(true)
         })
@@ -386,7 +386,7 @@ impl MachineTokenService {
             if credential.revoked_at.is_some()
                 || credential
                     .expires_at
-                    .is_some_and(|expiry| expiry <= Utc::now())
+                    .is_some_and(|expiry| expiry <= Timestamp::now())
             {
                 bail!("only an active MCP credential can be updated");
             }
@@ -418,13 +418,16 @@ impl MachineTokenService {
                 return Ok(None);
             };
             let old = &store.credentials[old_index];
-            if old.revoked_at.is_some() || old.expires_at.is_some_and(|expiry| expiry <= Utc::now())
+            if old.revoked_at.is_some()
+                || old
+                    .expires_at
+                    .is_some_and(|expiry| expiry <= Timestamp::now())
             {
                 bail!("only an active MCP credential can be rotated");
             }
             let replacement_id = Uuid::new_v4();
             let secret = format!("{TOKEN_PREFIX}_{replacement_id}_{random_secret}");
-            let now = Utc::now();
+            let now = Timestamp::now();
             let replacement = MachineCredential {
                 id: replacement_id,
                 grant_id: old.grant_id,
@@ -461,7 +464,7 @@ impl MachineTokenService {
         };
         let presented = verifier(secret);
         self.mutate(move |store| {
-            let now = Utc::now();
+            let now = Timestamp::now();
             let Some(credential) = store
                 .credentials
                 .iter_mut()
@@ -536,7 +539,10 @@ fn validate_create(input: &CreateMachineToken) -> Result<()> {
     if input.owner_id.trim().is_empty() || input.owner_id.len() > 200 {
         bail!("owner identity must contain 1 to 200 characters");
     }
-    if input.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+    if input
+        .expires_at
+        .is_some_and(|expiry| expiry <= Timestamp::now())
+    {
         bail!("token expiry must be in the future");
     }
     if input
@@ -649,5 +655,39 @@ fn metadata(grant: &MachineGrant, credential: &MachineCredential) -> MachineCred
         expires_at: credential.expires_at,
         revoked_at: credential.revoked_at,
         last_used_at: credential.last_used_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Existing credential documents must remain readable after changing datetime libraries.
+    #[test]
+    fn persisted_credential_timestamps_preserve_instants_and_precision() {
+        let document = serde_json::json!({
+            "id": Uuid::nil(),
+            "grant_id": Uuid::nil(),
+            "name": "existing credential",
+            "verifier": "stored verifier",
+            "created_at": "2026-08-27T12:34:56.123456789Z",
+            "expires_at": "2026-08-28T15:34:56.123456789+03:00",
+            "revoked_at": null,
+            "last_used_at": "2026-08-27T12:35:00+00:00"
+        });
+        let credential: MachineCredential = serde_json::from_value(document).unwrap();
+        // Explicit offsets must represent the same expiry instant as UTC input.
+        assert_eq!(
+            credential.expires_at,
+            Some(parse_expiry("2026-08-28T12:34:56.123456789Z").unwrap())
+        );
+        let saved = serde_json::to_value(&credential).unwrap();
+        // Durable timestamps must retain nanosecond precision and the RFC 3339 string representation.
+        assert_eq!(saved["created_at"], "2026-08-27T12:34:56.123456789Z");
+        let reloaded: MachineCredential = serde_json::from_value(saved).unwrap();
+        // Rewriting the store must preserve lifecycle timestamps, including optional fields.
+        assert_eq!(reloaded.expires_at, credential.expires_at);
+        assert_eq!(reloaded.last_used_at, credential.last_used_at);
+        assert_eq!(reloaded.revoked_at, None);
     }
 }

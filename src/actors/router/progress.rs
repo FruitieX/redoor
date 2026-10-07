@@ -155,7 +155,7 @@ pub(crate) fn record_download_start(
     context: DownloadStartContext,
 ) -> TransferId {
     let transfer_id = context.request_id.as_transfer_id();
-    let now = UnixTimestampSeconds::new(chrono::Utc::now().timestamp());
+    let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
     let restart_offset = context
         .full_size
         .map(|_| context.resume_offset.unwrap_or(0));
@@ -224,7 +224,7 @@ pub(crate) fn record_download_start(
 /// Creates a progress entry and direct-upload state for a newly started upload.
 pub(crate) fn record_upload_start(state: &mut RouterState, context: UploadStartContext) {
     let transfer_id = context.request_id.as_transfer_id();
-    let now = UnixTimestampSeconds::new(chrono::Utc::now().timestamp());
+    let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
     state.progress.entries.insert(
         transfer_id,
         TransferProgressEntry {
@@ -262,7 +262,7 @@ pub(crate) fn record_upload_start(state: &mut RouterState, context: UploadStartC
 
 /// Creates a progress entry for a newly started logical copy transfer.
 pub(crate) fn record_copy_start(state: &mut RouterState, context: CopyStartContext) {
-    let now = UnixTimestampSeconds::new(chrono::Utc::now().timestamp());
+    let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
     state.progress.entries.insert(
         context.request_id,
         TransferProgressEntry {
@@ -376,7 +376,9 @@ pub(crate) fn mark_transfer_completed(state: &mut RouterState, transfer_id: Tran
         } else {
             progress.transferred_bytes = progress.total_bytes;
         }
-        progress.ended_at = Some(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+        progress.ended_at = Some(UnixTimestampSeconds::new(
+            jiff::Timestamp::now().as_second(),
+        ));
         progress.error = None;
         updated = true;
         routes_changed = matches!(
@@ -387,7 +389,9 @@ pub(crate) fn mark_transfer_completed(state: &mut RouterState, transfer_id: Tran
     if updated {
         state
             .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+            .prune_terminal_history(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
         ui::notify_transfer_refresh_immediately(state);
         if routes_changed {
             ui::notify_routes_changed(state);
@@ -409,14 +413,18 @@ pub(crate) fn mark_copy_transfer_completed(
         progress.state = TransferProgressState::Completed;
         progress.cancelable = false;
         progress.transferred_bytes = progress.total_bytes;
-        progress.ended_at = Some(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+        progress.ended_at = Some(UnixTimestampSeconds::new(
+            jiff::Timestamp::now().as_second(),
+        ));
         progress.error = None;
         updated = true;
     }
     if updated {
         state
             .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+            .prune_terminal_history(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
         ui::notify_transfer_refresh_immediately(state);
         ui::notify_routes_changed(state);
     }
@@ -436,7 +444,9 @@ pub(crate) fn mark_transfer_errored(
             matches!(progress.direction, TransferDirection::Edit) && !progress.cancelable;
         progress.state = TransferProgressState::Errored;
         progress.cancelable = false;
-        progress.ended_at = Some(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+        progress.ended_at = Some(UnixTimestampSeconds::new(
+            jiff::Timestamp::now().as_second(),
+        ));
         progress.error = Some(error_message);
         state
             .progress
@@ -447,7 +457,9 @@ pub(crate) fn mark_transfer_errored(
     if updated {
         state
             .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+            .prune_terminal_history(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
         ui::notify_transfer_refresh_immediately(state);
         if routes_changed {
             ui::notify_routes_changed(state);
@@ -470,7 +482,9 @@ pub(crate) fn mark_transfer_canceled(state: &mut RouterState, transfer_id: Trans
     if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
         progress.state = TransferProgressState::Canceled;
         progress.cancelable = false;
-        progress.ended_at = Some(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+        progress.ended_at = Some(UnixTimestampSeconds::new(
+            jiff::Timestamp::now().as_second(),
+        ));
         progress.error = None;
         state
             .progress
@@ -478,7 +492,9 @@ pub(crate) fn mark_transfer_canceled(state: &mut RouterState, transfer_id: Trans
             .remove(&transfer_id);
         state
             .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(chrono::Utc::now().timestamp()));
+            .prune_terminal_history(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
         ui::notify_transfer_refresh_immediately(state);
     }
 }
@@ -663,7 +679,7 @@ mod tests {
             crate::terminal_registry::TerminalRegistry::new(),
             crate::log_registry::LogRegistry::new(),
         );
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         for id in 1..=1500 {
             state
                 .progress

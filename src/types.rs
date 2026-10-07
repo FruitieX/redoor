@@ -205,7 +205,7 @@ pub struct UnixTimestampMillis(pub i64);
 impl UnixTimestampMillis {
     /// Captures the current instant so step deltas can include milliseconds.
     pub fn now() -> Self {
-        Self(chrono::Utc::now().timestamp_millis())
+        Self(jiff::Timestamp::now().as_millisecond())
     }
 }
 

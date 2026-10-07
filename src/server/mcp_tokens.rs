@@ -13,7 +13,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use redoor::commands::{
     CreateMcpTokenRequest, ErrorResponse, McpTokenListResponse, McpTokenMetadataResponse,
     McpTokenScope, McpTokenSecretResponse, RevokeMcpTokenResponse, UpdateMcpTokenRequest,
@@ -64,10 +64,10 @@ fn metadata_response(metadata: MachineCredentialMetadata) -> McpTokenMetadataRes
         name: metadata.name,
         scopes: metadata.scopes.into_iter().map(response_scope).collect(),
         device_ids: metadata.device_ids.into_iter().collect(),
-        created_at: metadata.created_at.to_rfc3339(),
-        expires_at: metadata.expires_at.map(|v| v.to_rfc3339()),
-        revoked_at: metadata.revoked_at.map(|v| v.to_rfc3339()),
-        last_used_at: metadata.last_used_at.map(|v| v.to_rfc3339()),
+        created_at: metadata.created_at.to_string(),
+        expires_at: metadata.expires_at.map(|v| v.to_string()),
+        revoked_at: metadata.revoked_at.map(|v| v.to_string()),
+        last_used_at: metadata.last_used_at.map(|v| v.to_string()),
     }
 }
 
@@ -133,8 +133,8 @@ pub(crate) async fn create_handler(
         return forbidden(message);
     }
     let expiry = match request.expires_at {
-        Some(value) => match DateTime::parse_from_rfc3339(&value) {
-            Ok(value) => Some(value.with_timezone(&Utc)),
+        Some(value) => match value.parse::<Timestamp>() {
+            Ok(value) => Some(value),
             Err(_) => return bad_request("expiry must be an RFC 3339 timestamp"),
         },
         None => None,

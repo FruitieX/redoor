@@ -431,7 +431,7 @@ async fn run_named_relay(args: RelayStartArgs) {
     let metadata = process_control::RelayPidMetadata {
         pid: 0,
         id: relay.id.clone(),
-        started_at: chrono::Utc::now().to_rfc3339(),
+        started_at: jiff::Timestamp::now().to_string(),
         target: relay.agent.target.clone(),
         server: relay.server.clone(),
         agent_name,

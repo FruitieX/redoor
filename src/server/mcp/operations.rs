@@ -1,7 +1,7 @@
 //! Durable principal-owned operation lifecycle and quota-bounded command output.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -33,8 +33,8 @@ pub(super) struct OperationRecord {
     pub(super) terminal: Option<Value>,
     pub(super) remote_id: Option<u64>,
     pub(super) cancel_requested: bool,
-    pub(super) created_at: DateTime<Utc>,
-    pub(super) updated_at: DateTime<Utc>,
+    pub(super) created_at: Timestamp,
+    pub(super) updated_at: Timestamp,
     #[serde(skip)]
     pub(super) spool_path: PathBuf,
 }
@@ -100,7 +100,7 @@ impl OperationRegistry {
             "REDOOR_MCP_OPERATION_EXPIRY_SECONDS",
             DEFAULT_EXPIRY_SECONDS as usize,
         ) as u64);
-        let cutoff = Utc::now() - chrono::Duration::from_std(expiry).unwrap_or_default();
+        let cutoff = Timestamp::now().checked_sub(expiry)?;
         let mut records = HashMap::new();
         for mut record in persisted.records {
             if record.updated_at < cutoff {
@@ -114,7 +114,7 @@ impl OperationRegistry {
                 record.terminal = Some(
                     serde_json::json!({"reason":"server_restarted_before_terminal_acknowledgement"}),
                 );
-                record.updated_at = Utc::now();
+                record.updated_at = Timestamp::now();
             }
             records.insert(record.id, Arc::new(Mutex::new(record)));
         }
@@ -151,7 +151,7 @@ impl OperationRegistry {
     ) -> Result<Arc<Mutex<OperationRecord>>> {
         self.expire().await?;
         let id = Uuid::new_v4();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let record = Arc::new(Mutex::new(OperationRecord {
             id,
             owner_grant,
@@ -180,7 +180,7 @@ impl OperationRegistry {
 
     /// Persists state transitions after a remote acknowledgement or cancellation request.
     pub(super) async fn update(&self, record: &Arc<Mutex<OperationRecord>>) -> Result<()> {
-        record.lock().await.updated_at = Utc::now();
+        record.lock().await.updated_at = Timestamp::now();
         self.persist().await
     }
 
@@ -204,7 +204,7 @@ impl OperationRegistry {
             .min(self.global_quota.saturating_sub(global_used));
         current.output_truncated |= allowed < data.len();
         current.output_size += allowed;
-        current.updated_at = Utc::now();
+        current.updated_at = Timestamp::now();
         let path = current.spool_path.clone();
         drop(current);
         if allowed > 0 {
@@ -294,7 +294,7 @@ impl OperationRegistry {
 
     /// Removes expired records and their private spools without touching active work.
     async fn expire(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::from_std(self.expiry).unwrap_or_default();
+        let cutoff = Timestamp::now().checked_sub(self.expiry)?;
         let entries = self
             .records
             .lock()

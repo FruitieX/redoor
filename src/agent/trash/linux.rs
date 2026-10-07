@@ -3,7 +3,11 @@ use crate::agent::{
     AgentActor,
     transfers::{copy::LocalCopyResponseContext, r#move::move_source_identity},
 };
-use chrono::{Local, NaiveDateTime, TimeZone};
+use jiff::{
+    Zoned,
+    civil::DateTime,
+    tz::{AmbiguousOffset, TimeZone},
+};
 use redoor::{
     Level,
     atomic_rename::{AtomicRenameOutcome, rename_without_replacement},
@@ -144,7 +148,7 @@ pub(super) async fn trash(service: &TrashService, path: PathBuf) -> Result<(), T
         metadata_path.display(),
         root_metadata.dev()
     );
-    let deletion_date = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let deletion_date = Zoned::now().strftime("%Y-%m-%dT%H:%M:%S").to_string();
     for attempt in 0..1024_u32 {
         let name = collision_name(basename, attempt);
         let payload = location.root.join("files").join(&name);
@@ -565,10 +569,17 @@ fn parse_trashinfo(contents: &str, mount_top: Option<&Path>) -> Option<(i64, Opt
         if let Some(value) = line.strip_prefix("Path=") {
             path = strict_percent_decode(value.as_bytes());
         } else if let Some(value) = line.strip_prefix("DeletionDate=") {
-            deletion_date = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+            deletion_date = DateTime::strptime("%Y-%m-%dT%H:%M:%S", value)
                 .ok()
-                .and_then(|date| Local.from_local_datetime(&date).earliest())
-                .map(|date| date.timestamp());
+                .and_then(|date| {
+                    let ambiguous = TimeZone::system().to_ambiguous_timestamp(date);
+                    // A skipped local time is invalid metadata; repeated times use the first instant.
+                    if matches!(ambiguous.offset(), AmbiguousOffset::Gap { .. }) {
+                        return None;
+                    }
+                    ambiguous.earlier().ok()
+                })
+                .map(|date| date.as_second());
         }
     }
     let deleted_at = deletion_date?;
@@ -928,9 +939,11 @@ mod tests {
 
     #[test]
     fn deletion_dates_are_interpreted_in_local_time() {
-        let naive =
-            NaiveDateTime::parse_from_str("2020-01-01T00:00:00", "%Y-%m-%dT%H:%M:%S").unwrap();
-        let expected = Local.from_local_datetime(&naive).earliest().unwrap();
+        let naive = DateTime::strptime("%Y-%m-%dT%H:%M:%S", "2020-01-01T00:00:00").unwrap();
+        let expected = TimeZone::system()
+            .to_ambiguous_timestamp(naive)
+            .earlier()
+            .unwrap();
 
         let parsed = parse_trashinfo(
             "[Trash Info]
@@ -942,7 +955,7 @@ DeletionDate=2020-01-01T00:00:00
         .unwrap();
 
         // Freedesktop metadata omits an offset, so parsing must use the host's local timezone.
-        assert_eq!(parsed.0, expected.timestamp());
+        assert_eq!(parsed.0, expected.as_second());
     }
 
     #[tokio::test]
