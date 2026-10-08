@@ -166,11 +166,11 @@ test.describe.serial("Bookmarks", () => {
         await expect(
             page.getByRole("button", { name: "Bookmark", exact: true }),
         ).toHaveCount(0);
-        await page.getByRole("button", { name: "Editor options" }).click();
-        const editorOptions = page.getByRole("dialog", {
-            name: "Editor options",
+        await page.getByRole("button", { name: "Editor actions" }).click();
+        const editorActions = page.getByRole("dialog", {
+            name: "Editor actions",
         });
-        await editorOptions
+        await editorActions
             .getByRole("button", { name: "Bookmark", exact: true })
             .click();
         const agentBookmarks = page.getByRole("list", {
@@ -182,9 +182,9 @@ test.describe.serial("Bookmarks", () => {
         ).toBeVisible();
 
         // Selecting the action closes the menu, matching the details view workflow.
-        await expect(editorOptions).not.toBeVisible();
-        await page.getByRole("button", { name: "Editor options" }).click();
-        await editorOptions
+        await expect(editorActions).not.toBeVisible();
+        await page.getByRole("button", { name: "Editor actions" }).click();
+        await editorActions
             .getByRole("button", { name: "Remove bookmark", exact: true })
             .click();
         // Reopening the menu exposes the removal action for the bookmarked file.

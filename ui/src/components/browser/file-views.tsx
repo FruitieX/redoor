@@ -18,6 +18,7 @@ import {
     Search,
     ScanText,
     Terminal,
+    Trash2,
     X,
 } from "lucide-react";
 import type { Agent } from "#ui/api-client";
@@ -43,7 +44,11 @@ import {
     PersistentPathActions,
     SelectPathMenuButton,
 } from "#ui/components/browser/path-actions";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import {
+    getErrorMessage,
+    getImmediateParentPath,
+} from "#ui/components/browser/utils";
+import { DeletePathsDialog } from "#ui/components/browser/delete-paths-dialog";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { FullWindowToggle } from "#ui/components/full-window-toggle";
@@ -55,7 +60,8 @@ import { ToggleButton } from "#ui/components/toggle-button";
 import { fileContentQueryOptions } from "#ui/queries";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
-import { useUserState } from "#ui/user-state";
+import { unpinFile, useUserState } from "#ui/user-state";
+import { unselectFileAtom } from "#ui/selected-files";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { MarkdownPreview } from "#ui/components/browser/markdown-preview";
 
@@ -221,8 +227,8 @@ ${props.selection.text}
     );
 }
 
-/** Keeps editor-specific preferences close to the surface they immediately affect. */
-function EditorOptionsMenu(props: {
+/** Keeps file operations and editor preferences close to the surface they affect. */
+function EditorActionsMenu(props: {
     agent: Agent;
     path: string;
     fileName: string;
@@ -231,14 +237,15 @@ function EditorOptionsMenu(props: {
     isSaving: boolean;
     downloadUrl: string;
     onReload: () => void;
+    onDelete: () => void;
 }) {
     const [userState, setUserState] = useUserState();
 
     return (
         <ActionMenu
-            label="Editor options"
-            title="Editor options"
-            closeAriaLabel="Close editor options"
+            label="Editor actions"
+            title="Editor actions"
+            closeAriaLabel="Close editor actions"
             hideTitle={false}
             icon={<MoreHorizontal className="h-4 w-4" />}
             variant="icon"
@@ -268,6 +275,21 @@ function EditorOptionsMenu(props: {
                             <Download className="h-4 w-4 text-slate-400" />
                             Download
                         </a>
+                    </ActionMenuButton>
+                    <ActionMenuButton
+                        tone="danger"
+                        disabled={
+                            !props.canEdit ||
+                            props.isSaving ||
+                            getImmediateParentPath(props.path) === null
+                        }
+                        onClick={() => {
+                            close();
+                            props.onDelete();
+                        }}
+                    >
+                        <Trash2 className="h-4 w-4" />
+                        Delete file
                     </ActionMenuButton>
                     <div className="my-1 border-t border-slate-800" />
                     <SelectPathMenuButton
@@ -348,6 +370,7 @@ function FileEditorSecondaryActions(props: {
     isFullWindow: boolean;
     onToggleFullWindow: () => void;
     onReload: () => void;
+    onDelete: () => void;
 }) {
     const requestTerminalOpen = useSetAtom(terminalOpenRequestedAtom);
     const [isDrawerCollapsed, setDrawerCollapsed] = useAtom(
@@ -382,7 +405,7 @@ function FileEditorSecondaryActions(props: {
                 isFullWindow={props.isFullWindow}
                 onToggle={props.onToggleFullWindow}
             />
-            <EditorOptionsMenu
+            <EditorActionsMenu
                 agent={props.agent}
                 path={props.path}
                 fileName={props.fileName}
@@ -391,6 +414,7 @@ function FileEditorSecondaryActions(props: {
                 isSaving={props.isSaving}
                 downloadUrl={props.downloadUrl}
                 onReload={props.onReload}
+                onDelete={props.onDelete}
             />
         </div>
     );
@@ -517,6 +541,65 @@ function getFileEditorStatus(props: {
     return props.isDirty ? "Unsaved changes" : null;
 }
 
+/** Makes file removal confirm draft loss for both trash and permanent deletion. */
+function EditorDeleteConfirmation(props: {
+    isOpen: boolean;
+    agent: Agent;
+    filePath: string;
+    fileName: string;
+    isDirty: boolean;
+    onClose: () => void;
+    onDeleted: () => void;
+}) {
+    const navigate = agentRoute.useNavigate();
+    const [, setUserState] = useUserState();
+    const unselectFile = useSetAtom(unselectFileAtom);
+    return (
+        <DeletePathsDialog
+            isOpen={props.isOpen}
+            title="Delete this file?"
+            description={
+                props.agent.supportsTrash
+                    ? `Move ${props.fileName} to trash. You can restore it later from the Trash tab.`
+                    : `Move ${props.fileName} to the device's native Trash.`
+            }
+            targets={[{ agent: props.agent, path: props.filePath }]}
+            trashConfirmLabel="Move to trash"
+            permanentConfirmLabel="Delete file"
+            onClose={props.onClose}
+            onDeleted={async () => {
+                const target = {
+                    agentId: props.agent.id,
+                    path: props.filePath,
+                };
+                // Removed files must disappear from navigation and pending selection actions.
+                unselectFile(target);
+                setUserState((current) => ({
+                    ...current,
+                    pinnedFiles: unpinFile(current.pinnedFiles, target),
+                }));
+                props.onDeleted();
+                const parentPath = getImmediateParentPath(props.filePath);
+                if (parentPath !== null) {
+                    await navigate({
+                        to: props.agent.getBrowserUrl(parentPath),
+                        replace: true,
+                    });
+                }
+            }}
+        >
+            <p className="break-all font-mono text-sm text-slate-300">
+                {props.filePath}
+            </p>
+            {props.isDirty ? (
+                <p className="mt-3 text-sm text-amber-300">
+                    Unsaved edits will be discarded if you remove this file.
+                </p>
+            ) : null}
+        </DeletePathsDialog>
+    );
+}
+
 /** Presents reload and navigation discard decisions without conflating their callbacks. */
 function EditorConfirmations(props: {
     reloadOpen: boolean;
@@ -587,6 +670,7 @@ function FileEditHeader(props: {
     onPreviewChange: ((preview: boolean) => void) | undefined;
     onToggleFullWindow: () => void;
     onReload: () => void;
+    onDelete: () => void;
 }) {
     return (
         <header className="shrink-0 border-b border-slate-800 p-3">
@@ -628,6 +712,7 @@ function FileEditHeader(props: {
                     isFullWindow={props.isFullWindow}
                     onToggleFullWindow={props.onToggleFullWindow}
                     onReload={props.onReload}
+                    onDelete={props.onDelete}
                 />
             </div>
         </header>
@@ -640,6 +725,9 @@ function FileEditHeader(props: {
  */
 export function FileEditView(props: FileEditViewProps) {
     const queryClient = useQueryClient();
+    const [deleteConfirmationOpen, setDeleteConfirmationOpen] =
+        React.useState(false);
+    const isDeletedRef = React.useRef(false);
     const [userState] = useUserState();
     const fileQuery = fileContentQueryOptions(props.agent, props.filePath);
     const contentQuery = useQuery(fileQuery);
@@ -690,7 +778,10 @@ export function FileEditView(props: FileEditViewProps) {
         path: props.filePath,
         isDirty,
     });
-    const navigationBlocker = useUnsavedEditorNavigationGuard(isDirty);
+    const navigationBlocker = useUnsavedEditorNavigationGuard(
+        isDirty,
+        isDeletedRef,
+    );
 
     const reloadFile = React.useCallback(() => {
         if (!canEdit || saveMutation.isPending || reloadPromiseRef.current) {
@@ -774,6 +865,7 @@ export function FileEditView(props: FileEditViewProps) {
                     }
                     onToggleFullWindow={props.onToggleFullWindow}
                     onReload={handleReload}
+                    onDelete={() => setDeleteConfirmationOpen(true)}
                 />
 
                 <div className="flex min-h-0 flex-1 flex-col">
@@ -814,6 +906,19 @@ export function FileEditView(props: FileEditViewProps) {
                     />
                 </div>
             </article>
+            <EditorDeleteConfirmation
+                isOpen={deleteConfirmationOpen}
+                agent={props.agent}
+                filePath={props.filePath}
+                fileName={props.fileName}
+                isDirty={isDirty}
+                onClose={() => setDeleteConfirmationOpen(false)}
+                onDeleted={() => {
+                    // Deletion already confirms losing the buffer; do not ask again while leaving.
+                    isDeletedRef.current = true;
+                    setDraft(null);
+                }}
+            />
             <EditorConfirmations
                 reloadOpen={reloadConfirmationOpen}
                 navigationOpen={navigationBlocker.status === "blocked"}
@@ -832,17 +937,24 @@ export function FileEditView(props: FileEditViewProps) {
 /**
  * Blocks in-app navigation and tab close/refresh so a dirty buffer cannot disappear silently.
  */
-function useUnsavedEditorNavigationGuard(isDirty: boolean) {
+function useUnsavedEditorNavigationGuard(
+    isDirty: boolean,
+    isDeletedRef: React.RefObject<boolean>,
+) {
     const isDirtyRef = React.useRef(isDirty);
     isDirtyRef.current = isDirty;
 
     const shouldBlockFn: ShouldBlockFn = React.useCallback(
         (args) =>
             isDirtyRef.current &&
+            !isDeletedRef.current &&
             !isPreviewOnlyNavigation(args.current, args.next),
-        [],
+        [isDeletedRef],
     );
-    const enableBeforeUnload = React.useCallback(() => isDirtyRef.current, []);
+    const enableBeforeUnload = React.useCallback(
+        () => isDirtyRef.current && !isDeletedRef.current,
+        [isDeletedRef],
+    );
 
     return useBlocker({
         shouldBlockFn,

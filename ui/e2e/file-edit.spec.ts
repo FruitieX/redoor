@@ -24,9 +24,9 @@ async function fillEditor(editor: Locator, text: string) {
 }
 
 /** Opens the editor overflow so secondary actions can be exercised by accessible name. */
-async function openEditorOptions(page: Page) {
-    await page.getByRole("button", { name: "Editor options" }).click();
-    return page.getByRole("dialog", { name: "Editor options" });
+async function openEditorActions(page: Page) {
+    await page.getByRole("button", { name: "Editor actions" }).click();
+    return page.getByRole("dialog", { name: "Editor actions" });
 }
 
 test.describe.serial("File Edit View", () => {
@@ -102,12 +102,12 @@ test.describe.serial("File Edit View", () => {
         await expect(searchSelectionButton).toBeDisabled();
         await expect(copyReferenceButton).toHaveText("");
         await expect(searchSelectionButton).toHaveText("");
-        const editorOptions = await openEditorOptions(page);
+        const editorActions = await openEditorActions(page);
         await expect(
-            editorOptions.getByRole("button", { name: "Reload", exact: true }),
+            editorActions.getByRole("button", { name: "Reload", exact: true }),
         ).toBeEnabled();
         await expect(
-            editorOptions.getByRole("link", { name: "Download", exact: true }),
+            editorActions.getByRole("link", { name: "Download", exact: true }),
         ).toHaveAttribute("href", /[?&]download=1$/);
     });
 
@@ -265,7 +265,7 @@ test.describe.serial("File Edit View", () => {
             name: "Expand editor to full window",
         });
         const optionsButton = page.getByRole("button", {
-            name: "Editor options",
+            name: "Editor actions",
         });
         const expandBox = await expandButton.boundingBox();
         const optionsBox = await optionsButton.boundingBox();
@@ -295,12 +295,12 @@ test.describe.serial("File Edit View", () => {
         await expect(
             editorPanel.getByRole("button", { name: "Save file" }),
         ).toBeVisible();
-        const editorOptions = await openEditorOptions(page);
+        const editorActions = await openEditorActions(page);
         await expect(
-            editorOptions.getByRole("button", { name: "Reload", exact: true }),
+            editorActions.getByRole("button", { name: "Reload", exact: true }),
         ).toBeVisible();
         await page.keyboard.press("Escape");
-        await expect(editorOptions).toBeHidden();
+        await expect(editorActions).toBeHidden();
 
         await page
             .getByLabel("File editor", { exact: true })
@@ -330,11 +330,11 @@ test.describe.serial("File Edit View", () => {
             "content1",
         );
 
-        await page.getByRole("button", { name: "Editor options" }).click();
-        const editorOptions = page.getByRole("dialog", {
-            name: "Editor options",
+        await page.getByRole("button", { name: "Editor actions" }).click();
+        const editorActions = page.getByRole("dialog", {
+            name: "Editor actions",
         });
-        const selectFile = editorOptions.getByRole("button", {
+        const selectFile = editorActions.getByRole("button", {
             name: "Select",
             exact: true,
         });
@@ -357,8 +357,8 @@ test.describe.serial("File Edit View", () => {
             }),
         ).toBeVisible();
 
-        await page.getByRole("button", { name: "Editor options" }).click();
-        const unselectFile = editorOptions.getByRole("button", {
+        await page.getByRole("button", { name: "Editor actions" }).click();
+        const unselectFile = editorActions.getByRole("button", {
             name: "Unselect",
             exact: true,
         });
@@ -446,7 +446,7 @@ test.describe.serial("File Edit View", () => {
         expect(downloadsAfterOpen).toBeGreaterThan(0);
         expect(downloadsAfterOpen).toBeLessThanOrEqual(2);
         await page
-            .getByRole("button", { name: "Editor options", exact: true })
+            .getByRole("button", { name: "Editor actions", exact: true })
             .focus();
         await fs.writeFile(filePath, "changed before refocus");
         await editor.focus();
@@ -476,8 +476,8 @@ test.describe.serial("File Edit View", () => {
         await fillEditor(editor, "temporary unsaved text");
         await expectEditorText(editor, "temporary unsaved text");
         // Reload must not discard the draft before the existing confirmation is accepted.
-        let editorOptions = await openEditorOptions(page);
-        await editorOptions
+        let editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         const confirmDialog = page.getByRole("dialog", {
@@ -487,8 +487,8 @@ test.describe.serial("File Edit View", () => {
         await confirmDialog.getByRole("button", { name: "Cancel" }).click();
         await expectEditorText(editor, "temporary unsaved text");
 
-        editorOptions = await openEditorOptions(page);
-        await editorOptions
+        editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         await confirmDialog
@@ -507,8 +507,8 @@ test.describe.serial("File Edit View", () => {
         await expectEditorText(editor, "original buffer");
 
         await fs.writeFile(filePath, "manually reloaded");
-        const editorOptions = await openEditorOptions(page);
-        await editorOptions
+        const editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
 
@@ -970,8 +970,8 @@ gamma
 
         const editor = page.getByLabel("File editor", { exact: true });
         await fillEditor(editor, "temporary draft");
-        const editorOptions = await openEditorOptions(page);
-        await editorOptions
+        const editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         await page
@@ -1021,8 +1021,8 @@ gamma
         expect(dirtyReloadBlocked).toBe(true);
         await expectEditorText(editor, "do not lose this");
 
-        const editorOptions = await openEditorOptions(page);
-        await editorOptions
+        const editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         await page
