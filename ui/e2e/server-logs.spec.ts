@@ -39,9 +39,11 @@ test.describe.serial("Server logs", () => {
         await expect(
             page.getByRole("heading", { name: "Server logs" }),
         ).toBeVisible();
+
         const agentLogsLink = page.getByRole("link", {
             name: "View logs for agent1_src",
         });
+
         // Connected agents must be discoverable directly from the server-log view.
         await expect(agentLogsLink).toBeVisible();
         const autoScroll = page.getByRole("checkbox", { name: "Auto-scroll" });
@@ -54,6 +56,7 @@ test.describe.serial("Server logs", () => {
         const logRegion = page.getByRole("log", {
             name: "Server log entries",
         });
+
         // Process startup records must be replayed without scanning pre-existing file contents.
         await expect(logRegion).toContainText("Loaded server config");
         // Wrapped entries must use preformatted wrapping while preserving logger whitespace.
@@ -96,6 +99,7 @@ test.describe.serial("Server logs", () => {
         const loggingLevel = page.getByRole("combobox", {
             name: "Server logging level",
         });
+
         await loggingLevel.selectOption("debug");
         // The selected option must reflect the value confirmed by the runtime REST response.
         await expect(loggingLevel).toHaveValue("debug");
@@ -141,14 +145,18 @@ test.describe.serial("Server logs", () => {
         });
 
         await navigateToServerLogs(page);
+
         const connectionStatus = page.getByRole("status", {
             name: "Server log connection status",
         });
+
         // A Live status proves the initial snapshot arrived before testing live behavior.
         await expect(connectionStatus).toHaveText("Live");
+
         const logRegion = page.getByRole("log", {
             name: "Server log entries",
         });
+
         await expect(logRegion).toBeVisible();
 
         await expect
@@ -175,9 +183,11 @@ test.describe.serial("Server logs", () => {
         await logRegion.evaluate((element) => {
             element.scrollTop = 0;
         });
+
         const scrollTopBefore = await logRegion.evaluate(
             (element) => element.scrollTop,
         );
+
         // Explicitly moving to the top establishes the position that live rendering must preserve.
         expect(scrollTopBefore).toBeLessThanOrEqual(1);
 
@@ -185,9 +195,11 @@ test.describe.serial("Server logs", () => {
         await page.evaluate(async (value) => {
             const protocol =
                 window.location.protocol === "https:" ? "wss:" : "ws:";
+
             const socket = new WebSocket(
                 `${protocol}//${window.location.host}/ws`,
             );
+
             await new Promise<void>((resolve, reject) => {
                 socket.addEventListener("open", () => resolve(), {
                     once: true,
@@ -204,11 +216,13 @@ test.describe.serial("Server logs", () => {
 
         // The unique malformed agent payload must reach the page through the logger broadcast path.
         await expect(logRegion).toContainText(marker);
+
         const newestEntryTexts = await logRegion.evaluate((element) =>
             Array.from(element.children)
                 .slice(-3)
                 .map((child) => child.textContent ?? ""),
         );
+
         // The marker must append near the bottom; the authentic socket shutdown may follow it.
         expect(newestEntryTexts.some((entry) => entry.includes(marker))).toBe(
             true,
@@ -221,6 +235,7 @@ test.describe.serial("Server logs", () => {
         const errorRow = page.getByRole("button", {
             name: new RegExp(`Open error details: .*${marker}`),
         });
+
         // Error records must expose keyboard-operable semantics rather than relying on color.
         await errorRow.focus();
         await errorRow.press("Enter");
@@ -267,11 +282,13 @@ test.describe.serial("Server logs", () => {
         const activeSocket = logSockets.find((socket) => !socket.isClosed());
         // The preceding poll guarantees an open socket is available to observe closing.
         expect(activeSocket).toBeDefined();
+
         if (!activeSocket) {
             throw new Error(
                 "active server log socket disappeared before navigation",
             );
         }
+
         const closed = activeSocket.waitForEvent("close");
 
         await page

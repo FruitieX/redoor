@@ -46,6 +46,7 @@ describe("transfer progress animation", () => {
 
     it("caps projected and reported active progress at 99 percent", () => {
         const projected = getAnimatedTransferProgress(transfer(), 10, 102_000);
+
         const reportedComplete = getAnimatedTransferProgress(
             transfer({ transferred_bytes: 1000 }),
             0,

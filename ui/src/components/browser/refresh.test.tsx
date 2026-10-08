@@ -51,9 +51,11 @@ afterEach(() => {
 
 test("refreshes the listing and a clean editor when terminal focus leaves", async () => {
     const view = render(<RefreshHarness isDirty={false} />);
+
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
     });
+
     const editor = view.getByRole("button", { name: "Editor" });
 
     fireEvent.focusOut(terminalInput, { relatedTarget: editor });
@@ -88,9 +90,11 @@ test("refreshes the listing and a clean editor when terminal focus leaves", asyn
 
 test("keeps an unsaved editor while refreshing the listing", async () => {
     const view = render(<RefreshHarness isDirty />);
+
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
     });
+
     const editor = view.getByRole("button", { name: "Editor" });
 
     fireEvent.focusOut(terminalInput, { relatedTarget: editor });
@@ -111,9 +115,11 @@ test("keeps an unsaved editor while refreshing the listing", async () => {
 
 test("ignores focus movement within the terminal", () => {
     const view = render(<RefreshHarness isDirty={false} />);
+
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
     });
+
     const terminalControl = view.getByRole("button", {
         name: "Terminal control",
     });

@@ -29,6 +29,7 @@ describe("Git browser REST API", () => {
             agentName: AGENT_NAME,
             agentCwd: tempFiles.tempDirectory({ suffix: "-agent-cwd" }),
         });
+
         serverPort = setup.serverPort;
         testAgent = setup.testAgent;
     }, 30_000);
@@ -48,15 +49,19 @@ describe("Git browser REST API", () => {
             .split("/")
             .map((part) => encodeURIComponent(part))
             .join("/");
+
         const response = await fetch(
             `http://127.0.0.1:${serverPort}/api/v1/agents/${encodeURIComponent(testAgent.id)}/git/${domain}${encodedPath}${query}`,
             { headers: testAgent.getAuthHeaders() },
         );
+
         const body: ResponseBody & Partial<ErrorResponse> =
             await response.json();
+
         if (!response.ok) {
             throw new Error(`${response.status}: ${String(body.error)}`);
         }
+
         return body;
     }
 
@@ -84,10 +89,13 @@ describe("Git browser REST API", () => {
             [path],
             query === "?mode=staged" ? "staged" : "full",
         );
+
         const diff = response.diffs[0];
+
         if (diff === undefined) {
             throw new Error("Git diff response omitted the requested file");
         }
+
         return diff;
     }
 
@@ -207,9 +215,11 @@ describe("Git browser REST API", () => {
             join(linked, ".gitattributes"),
             "*.txt diff=redoor-test\n",
         );
+
         const outsideTarget = tempFiles.create("outside worktree\n", {
             suffix: ".txt",
         });
+
         await rm(linkedFile);
         await symlink(outsideTarget, linkedFile);
         const symlinkDiff = await gitDiff(linkedFile);
@@ -250,9 +260,11 @@ describe("Git browser REST API", () => {
 
         const full = await gitDiff(file);
         const staged = await gitDiff(file, "?mode=staged");
+
         if (full.result.type !== "text" || staged.result.type !== "text") {
             throw new Error("modified text files should produce text diffs");
         }
+
         const fullPatch = full.result.unified_diff;
         const stagedPatch = staged.result.unified_diff;
         // Full mode compares HEAD directly with current worktree content.
@@ -283,11 +295,13 @@ describe("Git browser REST API", () => {
         const second = join(repo, "second.txt");
         await writeFile(first, "first");
         await writeFile(second, "second");
+
         const response = await gitDiffFiles([
             ...Array.from({ length: 200 }, () => second),
             first,
             second,
         ]);
+
         // Repeated paths cannot amplify work, and the first occurrence determines order.
         expect(response.diffs.map((diff) => diff.path)).toEqual([second, first]);
         // Distinct-file rejection happens before invalid or missing paths reach repository reads.
@@ -309,9 +323,11 @@ describe("Git browser REST API", () => {
         expect(response.diffs.map((diff) => diff.result.type)).toEqual([
             "text", "text", "text", "text", "too_large", "text",
         ]);
+
         const bytes = response.diffs.reduce((total, diff) => total + (
             diff.result.type === "text" ? Buffer.byteLength(diff.result.unified_diff) : 0
         ), 0);
+
         // The shared budget bounds the complete retained response, beyond the per-file ceiling.
         expect(bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
         // Large patches really fill the batch; this is not merely a per-file rejection test.
@@ -360,6 +376,7 @@ describe("Git browser REST API", () => {
     it("rejects invalid modes and bare repository status", async () => {
         const repo = tempFiles.tempDirectory({ suffix: "-git-invalid" });
         await initRepository(repo);
+
         const invalidModeResponse = await fetch(
             `http://127.0.0.1:${serverPort}/api/v1/agents/${encodeURIComponent(testAgent.id)}/git/diff`,
             {
@@ -374,6 +391,7 @@ describe("Git browser REST API", () => {
                 }),
             },
         );
+
         // Axum rejects values outside the generated mode enum before dispatching an agent command.
         expect(invalidModeResponse.status).toBe(422);
 
@@ -401,9 +419,11 @@ describe("Git browser REST API", () => {
         );
 
         const conflictStatus = await gitStatus(repo);
+
         const conflictEntry = conflictStatus.entries.find(
             (entry) => entry.repository_relative_path === "conflict.txt",
         );
+
         // Unmerged index stages become an explicit conflict marker for grouping in clients.
         expect(conflictEntry?.conflict_state).toBe("conflicted");
         const conflictDiff = await gitDiff(conflict, "?mode=staged");
@@ -413,13 +433,16 @@ describe("Git browser REST API", () => {
 
         const many = join(repo, "many");
         await mkdir(many);
+
         if (process.platform === "linux") {
             const invalidUtf8Path = Buffer.concat([
                 Buffer.from(`${many}/invalid-`),
                 Buffer.from([0xff]),
             ]);
+
             await writeFile(invalidUtf8Path, "not utf8\n");
         }
+
         await Promise.all(
             Array.from({ length: 5_001 }, (_, index) =>
                 writeFile(
@@ -430,31 +453,39 @@ describe("Git browser REST API", () => {
         );
         const statusPromise = gitStatus(many);
         const echoPromise = testAgent.echo("control-lane");
+
         const firstResult = await Promise.race([
             statusPromise.then(() => "status"),
             echoPromise.then(() => "echo"),
         ]);
+
         // The lightweight control command completes before the already-started large status walk.
         expect(firstResult).toBe("echo");
+
         const [boundedStatus, echo] = await Promise.all([
             statusPromise,
             echoPromise,
         ]);
+
         // The status response never exceeds its named authoritative entry limit.
         expect(boundedStatus.entries).toHaveLength(5_000);
         // Additional matching entries are represented explicitly rather than silently dropped.
         expect(boundedStatus.truncated).toBe(true);
+
         if (process.platform === "linux") {
             // Invalid UTF-8 paths are counted instead of being linked through lossy conversion.
             expect(
                 Number(boundedStatus.omitted_non_utf8_entries),
             ).toBeGreaterThan(0);
         }
+
         // The echoed payload also confirms the concurrent command was routed successfully.
         expect(echo.message).toBe("control-lane");
+
         const paths = boundedStatus.entries.map((entry) =>
             String(entry.repository_relative_path),
         );
+
         // BTree ordering makes truncation stable across filesystem enumeration order.
         expect(paths).toEqual([...paths].sort());
     });

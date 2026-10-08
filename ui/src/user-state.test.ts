@@ -55,6 +55,7 @@ test("resolves device order from saved ids, then unsaved inventory order", () =>
 
 test("keeps unavailable device ids when the visible order changes", () => {
     const saved = ["a", "missing", "b"];
+
     const next = commitDeviceOrder(saved, ["a", "b", "c"], {
         activeId: "c",
         overId: "a",
@@ -96,10 +97,12 @@ test("renames do not affect id-based device placement", () => {
 
 test("reorders pins and one bookmark scope against the latest arrays", () => {
     const pins = [pin("a", "one"), pin("b", "two"), pin("a", "three")];
+
     const movedPins = reorderPinnedFiles(pins, {
         activeId: "a:/three",
         overId: "a:/one",
     });
+
     expect(movedPins.map((file) => file.name)).toEqual(["three", "one", "two"]);
     expect(movedPins[1]).toBe(pins[0]);
 
@@ -110,10 +113,12 @@ test("reorders pins and one bookmark scope against the latest arrays", () => {
         bookmark("b", "b2"),
         bookmark("a", "a3"),
     ];
+
     const moved = reorderBookmarks(bookmarks, "a", {
         activeId: "a:/a/a3",
         overId: "a:/a/a1",
     });
+
     expect(moved.map((entry) => entry.name)).toEqual([
         "a3",
         "b1",

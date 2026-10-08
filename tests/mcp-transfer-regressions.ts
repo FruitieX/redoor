@@ -20,15 +20,19 @@ export function registerMcpTransferRegressionTests(options: {
             endpoint: options.endpoint,
             token: options.token(),
         });
+
         const sourcePath = join(
             options.sourceRoot,
             "concurrent-copy-source.txt",
         );
+
         const destinationPath = join(
             options.destinationRoot,
             "concurrent-copy-destination.txt",
         );
+
         writeFileSync(sourcePath, "one transfer only");
+
         const arguments_: JsonObject = {
             source: { device_id: options.sourceDevice, path: sourcePath },
             destination: {
@@ -38,6 +42,7 @@ export function registerMcpTransferRegressionTests(options: {
             on_existing: "error",
             idempotency_key: "concurrent-transfer",
         };
+
         const responses = await Promise.all(
             Array.from({ length: 8 }, () =>
                 client.callTool<JsonObject & { operation_id: string }>(
@@ -46,8 +51,10 @@ export function registerMcpTransferRegressionTests(options: {
                 ),
             ),
         );
+
         const operationId =
             responses[0]?.result.structuredContent?.operation_id;
+
         if (operationId === undefined)
             throw new Error("Transfer admission missing");
         // Concurrent retries must share one admitted operation, including while metadata is being fetched.
@@ -65,6 +72,7 @@ export function registerMcpTransferRegressionTests(options: {
             .poll(() => {
                 const metadata: { records: { id: string; state: string }[] } =
                     JSON.parse(readFileSync(options.metadataPath, "utf8"));
+
                 return metadata.records.find(
                     (record) => record.id === operationId,
                 )?.state;
@@ -76,9 +84,11 @@ export function registerMcpTransferRegressionTests(options: {
                 .structuredContent?.state,
         ).toBe("completed");
         expect(readFileSync(destinationPath, "utf8")).toBe("one transfer only");
+
         const canceled = await client.callTool("cancel_operation", {
             operation_id: operationId,
         });
+
         // A terminal record cannot route cancellation to any live router work.
         expect(canceled.result.structuredContent).toMatchObject({
             cancellation_accepted: false,
@@ -91,6 +101,7 @@ export function registerMcpTransferRegressionTests(options: {
             endpoint: options.endpoint,
             token: options.token(),
         });
+
         const arguments_: JsonObject = {
             source: {
                 device_id: options.sourceDevice,
@@ -103,6 +114,7 @@ export function registerMcpTransferRegressionTests(options: {
             on_existing: "error",
             idempotency_key: "failed-concurrent-transfer",
         };
+
         const responses = await Promise.all(
             Array.from({ length: 4 }, () =>
                 client.callTool<JsonObject & { operation_id: string }>(
@@ -111,8 +123,10 @@ export function registerMcpTransferRegressionTests(options: {
                 ),
             ),
         );
+
         const operationId =
             responses[0]?.result.structuredContent?.operation_id;
+
         if (operationId === undefined)
             throw new Error("Failed admission missing");
         // Even failed remote starts belong to the same durable keyed admission.
@@ -134,8 +148,10 @@ export function registerMcpTransferRegressionTests(options: {
             endpoint: options.endpoint,
             token: options.token(),
         });
+
         const path = join(options.sourceRoot, "replacement-upload.txt");
         writeFileSync(path, "old bytes");
+
         const prepared = await client.callTool<
             JsonObject & { endpoint: string }
         >("prepare_file_upload", {
@@ -143,12 +159,16 @@ export function registerMcpTransferRegressionTests(options: {
             path,
             on_existing: "replace",
         });
+
         const url = prepared.result.structuredContent?.endpoint;
+
         if (url === undefined) throw new Error("Prepared upload URL missing");
+
         const response = await client.stream(`${options.baseUrl}${url}`, {
             method: "PUT",
             body: "replacement bytes",
         });
+
         // Following the returned URL must accept the MCP replacement policy and replace existing bytes.
         expect(response.status).toBe(200);
         expect(readFileSync(path, "utf8")).toBe("replacement bytes");

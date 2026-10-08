@@ -13,6 +13,7 @@ describe("provisioning step elapsed time", () => {
         { at: 1_700_000_130_250 },
         { at: 1_700_000_145_000 },
     ];
+
     const nowMs = 1_700_000_160_500;
 
     test("visible labels accumulate from the first stamp", () => {

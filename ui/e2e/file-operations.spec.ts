@@ -22,6 +22,7 @@ async function interceptMacosTrashMove(
     if (process.platform !== "darwin") {
         return;
     }
+
     await page.route("**/raw/**?trash=true", async (route) => {
         // The native-trash action must retain the same destructive API method.
         expect(route.request().method()).toBe("DELETE");
@@ -49,6 +50,7 @@ test.describe.serial("File Operations", () => {
         const uploadSourceDir = await fs.mkdtemp(
             path.join(os.tmpdir(), "redoor-upload-"),
         );
+
         const firstUploadPath = path.join(uploadSourceDir, "uploaded-a.txt");
         const secondUploadPath = path.join(uploadSourceDir, "uploaded-b.txt");
 
@@ -87,6 +89,7 @@ test.describe.serial("File Operations", () => {
                         response.ok(),
                 ),
             ]);
+
             await page
                 .getByLabel("Choose files to upload")
                 .setInputFiles([firstUploadPath, secondUploadPath]);
@@ -150,18 +153,24 @@ test.describe.serial("File Operations", () => {
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
         const uploadName = `single-upload-${Date.now()}.txt`;
         let releaseUpload = () => {};
+
         let notifyUploadStarted = () => {};
+
         const uploadStarted = new Promise<void>((resolve) => {
             notifyUploadStarted = resolve;
         });
+
         const uploadGate = new Promise<void>((resolve) => {
             releaseUpload = resolve;
         });
+
         await page.route("**/raw/**", async (route) => {
             if (route.request().method() !== "PUT") {
                 await route.continue();
+
                 return;
             }
+
             notifyUploadStarted();
             await uploadGate;
             await route.continue();
@@ -207,13 +216,16 @@ test.describe.serial("File Operations", () => {
         const sourceParent = await fs.mkdtemp(
             path.join(os.tmpdir(), "redoor-directory-upload-"),
         );
+
         const sourceDirectory = path.join(sourceParent, "selected-directory");
         const nestedDirectory = path.join(sourceDirectory, "nested");
+
         const destinationDirectory = path.join(
             ctx.testDirPath,
             "subdir3",
             "selected-directory",
         );
+
         await fs.mkdir(nestedDirectory, { recursive: true });
         await fs.writeFile(
             path.join(sourceDirectory, "root.txt"),
@@ -270,6 +282,7 @@ test.describe.serial("File Operations", () => {
     test("should reject selections over 100 files", async ({ page }) => {
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         await page.goto(directoryUrl);
+
         const files = Array.from({ length: 101 }, (_value, index) => ({
             name: `over-limit-${index}.txt`,
             mimeType: "text/plain",
@@ -292,14 +305,18 @@ test.describe.serial("File Operations", () => {
         let maximumActiveUploads = 0;
         let enteredUploads = 0;
         let releaseUploads = () => {};
+
         const uploadGate = new Promise<void>((resolve) => {
             releaseUploads = resolve;
         });
+
         await page.route("**/raw/**", async (route) => {
             if (route.request().method() !== "PUT") {
                 await route.continue();
+
                 return;
             }
+
             activeUploads += 1;
             enteredUploads += 1;
             maximumActiveUploads = Math.max(
@@ -311,6 +328,7 @@ test.describe.serial("File Operations", () => {
             activeUploads -= 1;
         });
         await page.goto(directoryUrl);
+
         const files = Array.from({ length: 6 }, (_value, index) => ({
             name: `concurrency-${index}.txt`,
             mimeType: "text/plain",
@@ -339,6 +357,7 @@ test.describe.serial("File Operations", () => {
 
     test("should create directory from directory view", async ({ page }) => {
         const createdDirectoryName = `created-via-ui-${Date.now()}`;
+
         const createdDirectoryPath = path.join(
             ctx.testDirPath,
             "subdir3",
@@ -378,6 +397,7 @@ test.describe.serial("File Operations", () => {
         const directoryNameInput = page.getByRole("textbox", {
             name: "Directory name",
         });
+
         await page.keyboard.type("d");
         // Typing the shortcut key into an input must enter text instead of reopening the dialog.
         await expect(directoryNameInput).toHaveValue("d");
@@ -425,6 +445,7 @@ test.describe.serial("File Operations", () => {
             scrollHeight: element.scrollHeight,
             scrollTop: element.scrollTop,
         }));
+
         // A constrained dialog must own the overflow instead of placing its actions beyond the viewport.
         expect(initialScrollState.scrollHeight).toBeGreaterThan(
             initialScrollState.clientHeight,
@@ -561,9 +582,11 @@ test.describe.serial("File Operations", () => {
             .getByRole("button", { name: "Rename", exact: true })
             .click();
         const dialog = page.getByRole("dialog", { name: "Rename file" });
+
         const renameInput = dialog.getByRole("textbox", {
             name: "Rename file",
         });
+
         // The row action must open the shared focused rename workflow.
         await expect(dialog).toBeVisible();
         await expect(renameInput).toBeFocused();
@@ -632,12 +655,15 @@ test.describe.serial("File Operations", () => {
             })
             .getByRole("button", { name: "Rename", exact: true })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Rename directory",
         });
+
         const renameInput = dialog.getByRole("textbox", {
             name: "Rename directory",
         });
+
         // Extensionless directory names are selected in full for immediate replacement.
         await expect
             .poll(() =>
@@ -689,9 +715,11 @@ test.describe.serial("File Operations", () => {
             .getByRole("dialog", { name: `Actions for file ${fileName}` })
             .getByRole("button", { name: "Delete file", exact: true })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Delete this file?",
         });
+
         // Row deletion retains an explicit destructive confirmation step.
         await expect(dialog).toBeVisible();
         // Permanent deletion remains an explicit opt-in instead of the default action.
@@ -723,6 +751,7 @@ test.describe.serial("File Operations", () => {
             "subdir3",
             "delete-me.txt",
         );
+
         await fs.writeFile(deletableFilePath, "temporary content");
         await interceptMacosTrashMove(page, deletableFilePath);
 
@@ -749,14 +778,17 @@ test.describe.serial("File Operations", () => {
         await page
             .getByRole("button", { name: "Delete file", exact: true })
             .click();
+
         const confirmDialog = page.getByRole("dialog", {
             name: "Delete this file?",
         });
+
         if (!supportsMoveToTrash) {
             await confirmDialog
                 .getByRole("checkbox", { name: "Delete permanently" })
                 .click();
         }
+
         await confirmDialog
             .getByRole("button", {
                 name: supportsMoveToTrash ? "Move to trash" : "Delete file",
@@ -800,9 +832,11 @@ test.describe.serial("File Operations", () => {
             .getByRole("dialog", { name: `Actions for file ${fileName}` })
             .getByRole("button", { name: "Delete file", exact: true })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Delete this file?",
         });
+
         await dialog.getByRole("button", { name: "Move to trash" }).click();
 
         // Keeping the API message in the modal lets the user retry or choose permanent deletion.
@@ -819,10 +853,12 @@ test.describe.serial("File Operations", () => {
     }) => {
         const parentDirectoryPath = path.join(ctx.testDirPath, "subdir3");
         const deletableDirectoryName = `delete-directory-${Date.now()}`;
+
         const deletableDirectoryPath = path.join(
             parentDirectoryPath,
             deletableDirectoryName,
         );
+
         const parentDirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(parentDirectoryPath)}`;
         await fs.mkdir(deletableDirectoryPath);
         await interceptMacosTrashMove(page, deletableDirectoryPath);
@@ -834,16 +870,20 @@ test.describe.serial("File Operations", () => {
         await page
             .getByRole("button", { name: "Delete directory", exact: true })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Delete this directory?",
         });
+
         // The directory action must retain the same explicit destructive confirmation as file deletion.
         await expect(dialog).toBeVisible();
+
         if (!supportsMoveToTrash) {
             await dialog
                 .getByRole("checkbox", { name: "Delete permanently" })
                 .click();
         }
+
         await dialog
             .getByRole("button", {
                 name: supportsMoveToTrash
@@ -878,10 +918,12 @@ test.describe.serial("File Operations", () => {
 
         await page.getByRole("button", { name: "More", exact: true }).click();
         const moreMenu = page.getByRole("dialog", { name: "More" });
+
         const selectDirectory = moreMenu.getByRole("button", {
             name: "Select",
             exact: true,
         });
+
         // An unselected path must render the empty checkbox, not a checked icon.
         await expect(selectDirectory).toHaveAttribute("aria-pressed", "false");
         await selectDirectory.click();
@@ -902,10 +944,12 @@ test.describe.serial("File Operations", () => {
         ).toBeVisible();
 
         await page.getByRole("button", { name: "More", exact: true }).click();
+
         const unselectDirectory = moreMenu.getByRole("button", {
             name: "Unselect",
             exact: true,
         });
+
         // Reopening the menu must show the path as already selected.
         await expect(unselectDirectory).toHaveAttribute("aria-pressed", "true");
         await unselectDirectory.click();
@@ -962,10 +1006,12 @@ test.describe.serial("File Operations", () => {
         await expect(deleteSelectedItemsDialog).toContainText(
             deletableFilePath,
         );
+
         const deleteConfirmation = deleteSelectedItemsDialog.getByRole(
             "textbox",
             { name: "Type DELETE to confirm" },
         );
+
         const confirmDeleteButton = deleteSelectedItemsDialog.getByRole(
             "button",
             {
@@ -974,16 +1020,19 @@ test.describe.serial("File Operations", () => {
                     : "Delete selected item",
             },
         );
+
         // Destructive confirmation is exact and case-sensitive.
         await deleteConfirmation.fill("delete");
         await expect(confirmDeleteButton).toBeDisabled();
         await deleteConfirmation.fill("DELETE");
         await expect(confirmDeleteButton).toBeEnabled();
+
         if (!supportsMoveToTrash) {
             await deleteSelectedItemsDialog
                 .getByRole("checkbox", { name: "Delete permanently" })
                 .click();
         }
+
         await confirmDeleteButton.click();
 
         // The file name is rendered in both the listing and the selected-items panel, so wait on disk state first.
@@ -991,6 +1040,7 @@ test.describe.serial("File Operations", () => {
             .poll(async () => {
                 try {
                     await fs.stat(deletableFilePath);
+
                     return "present";
                 } catch {
                     return "missing";
@@ -1056,6 +1106,7 @@ test.describe.serial("File Operations", () => {
             await expect(
                 page.getByRole("link", { name, exact: true }),
             ).toHaveCount(0);
+
             if (index === 0) {
                 const firstDeletionSecond = Math.floor(Date.now() / 1000);
                 // Polling the clock avoids a sleep while giving the second item a newer provider timestamp.
@@ -1072,13 +1123,16 @@ test.describe.serial("File Operations", () => {
         const trashedRows = page.getByRole("article");
         // The most recently trashed file must lead the globally sorted inventory.
         await expect(trashedRows.first()).toContainText(secondName);
+
         const secondRow = page.getByRole("article", {
             name: `Trashed item ${secondName}`,
         });
+
         const expectedTrashPayload = path.resolve(
             ".test-playwright-home/agent1-trash/files",
             secondName,
         );
+
         // The item name links to the payload inside the isolated Playwright trash root.
         await expect(
             secondRow.getByRole("link", { name: secondName, exact: true }),
@@ -1098,9 +1152,11 @@ test.describe.serial("File Operations", () => {
             .getByRole("dialog", { name: "More" })
             .getByRole("button", { name: "Delete file", exact: true })
             .click();
+
         const payloadDeleteDialog = page.getByRole("dialog", {
             name: "Delete this file?",
         });
+
         // A payload already in trash must expose only irreversible deletion.
         await expect(
             payloadDeleteDialog.getByRole("checkbox", {
@@ -1120,18 +1176,23 @@ test.describe.serial("File Operations", () => {
             .getByLabel("Device view")
             .getByRole("link", { name: "Trash", exact: true })
             .click();
+
         const refreshedSecondRow = page.getByRole("article", {
             name: `Trashed item ${secondName}`,
         });
+
         await refreshedSecondRow
             .getByRole("button", { name: "Restore" })
             .click();
+
         const restoreDialog = page.getByRole("dialog", {
             name: "Restore trashed item",
         });
+
         const restorePathInput = restoreDialog.getByRole("textbox", {
             name: "Restore path",
         });
+
         // Metadata supplies the safe default while leaving the destination editable.
         await expect(restorePathInput).toHaveValue(secondPath);
         await restorePathInput.fill(restoredPath);

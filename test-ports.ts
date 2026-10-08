@@ -10,6 +10,7 @@ export type TestPorts = {
 const TEST_PORTS_PATH = fileURLToPath(
     new URL("./test_ports.json", import.meta.url),
 );
+
 const testPortsSchema = z
     .object({
         vitest: z.number().int(),

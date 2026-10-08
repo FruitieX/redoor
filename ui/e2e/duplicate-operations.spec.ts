@@ -45,9 +45,11 @@ test.describe.serial("Duplicate Operations", () => {
             .getByRole("button", { name: "Duplicate", exact: true })
             .click();
         const dialog = page.getByRole("dialog", { name: "Duplicate file" });
+
         const duplicateInput = dialog.getByRole("textbox", {
             name: "Duplicate file",
         });
+
         // The row action must open a focused copy workflow seeded with the current leaf name.
         await expect(dialog).toBeVisible();
         await expect(duplicateInput).toHaveValue(originalName);
@@ -121,12 +123,15 @@ test.describe.serial("Duplicate Operations", () => {
             })
             .getByRole("button", { name: "Duplicate", exact: true })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Duplicate directory",
         });
+
         const duplicateInput = dialog.getByRole("textbox", {
             name: "Duplicate directory",
         });
+
         // Extensionless directory names are selected in full for immediate replacement.
         await expect(duplicateInput).toHaveValue(originalName);
         await expect

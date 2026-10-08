@@ -53,9 +53,11 @@ test.describe.serial("File editor options", () => {
 
         const editor = page.getByLabel("File editor");
         await expect(editor).toHaveText("content1");
+
         const optionsButton = page.getByRole("button", {
             name: "Editor actions",
         });
+
         await expect(optionsButton).toHaveAttribute("aria-expanded", "false");
         await optionsButton.click();
         const options = page.getByRole("dialog", { name: "Editor actions" });
@@ -116,19 +118,25 @@ test.describe.serial("File editor options", () => {
 
         const status = page.getByText("--NORMAL--");
         await expect(status).toBeVisible();
+
         const applicationMenu = page.getByRole("navigation", {
             name: "Application",
         });
+
         await expect(applicationMenu).toBeVisible();
+
         const editorViewport = page.getByRole("region", {
             name: "Editor viewport",
         });
+
         const statusBox = await status.boundingBox();
         const menuBox = await applicationMenu.boundingBox();
         const editorBox = await editorViewport.boundingBox();
+
         if (statusBox === null || menuBox === null || editorBox === null) {
             throw new Error("expected Vim status, menu, and editor boxes");
         }
+
         // Sticky left:0 must not stretch the mode line across the sidebar.
         expect(statusBox.x).toBeGreaterThanOrEqual(menuBox.x + menuBox.width);
         expect(statusBox.x).toBeGreaterThanOrEqual(editorBox.x);
@@ -158,12 +166,15 @@ five`,
             .getByRole("button", { name: "Close editor actions" })
             .click();
         const editor = page.getByLabel("File editor");
+
         const lineHighlights = editor.locator(
             '[data-vim-yank-highlight="line"]',
         );
+
         const characterHighlights = editor.locator(
             '[data-vim-yank-highlight="character"]',
         );
+
         await editor.focus();
 
         await page.keyboard.type("yy");
@@ -264,9 +275,11 @@ five`,
         await expect(editor).toBeFocused();
 
         await page.keyboard.press("Alt+t");
+
         const terminalInput = page.getByRole("textbox", {
             name: `agent1_src 1 for ${ctx.agentName}`,
         });
+
         // Vim must not treat Alt+t as till, or the buffer and mode would change.
         await expectTerminalFocused(terminalInput);
         await expect(editor).toHaveText("content1");

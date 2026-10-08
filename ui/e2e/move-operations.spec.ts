@@ -59,6 +59,7 @@ test.describe.serial("Move Operations", () => {
         let moveButton = page.getByRole("button", {
             name: "Move selected items to this directory",
         });
+
         // An empty selection has no destination action to offer.
         await expect(moveButton).toHaveCount(0);
 
@@ -96,16 +97,19 @@ test.describe.serial("Move Operations", () => {
         const secondName = `move-file-b-${suffix}.txt`;
         const firstSourcePath = path.join(ctx.testDirPath, firstName);
         const secondSourcePath = path.join(ctx.testDirPath, secondName);
+
         const firstDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             firstName,
         );
+
         const secondDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             secondName,
         );
+
         await fs.writeFile(firstSourcePath, "move content a");
         await fs.writeFile(secondSourcePath, "move content b");
 
@@ -139,9 +143,11 @@ test.describe.serial("Move Operations", () => {
                 name: "Move selected items to this directory",
             })
             .click();
+
         const confirmation = page.getByRole("dialog", {
             name: "Move selected items?",
         });
+
         // The confirmation lists every source before either move request starts.
         await expect(confirmation).toContainText(firstName);
         await expect(confirmation).toContainText(secondName);
@@ -183,11 +189,13 @@ test.describe.serial("Move Operations", () => {
         const nestedName = `nested-${suffix}.txt`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
         const nestedSourcePath = path.join(sourcePath, nestedName);
+
         const destinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             sourceName,
         );
+
         await fs.mkdir(sourcePath);
         await fs.writeFile(nestedSourcePath, "moved directory child");
 
@@ -267,11 +275,13 @@ test.describe.serial("Move Operations", () => {
         test.setTimeout(60_000);
         const sourceName = `keep-existing-move-${Date.now()}.txt`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
+
         const destinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             sourceName,
         );
+
         await fs.writeFile(sourcePath, "source content");
         await fs.writeFile(destinationPath, "destination content");
 
@@ -282,9 +292,11 @@ test.describe.serial("Move Operations", () => {
             sourceType: "file",
             destinationDirectoryName: "subdir1",
         });
+
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // A same-named destination must interrupt the move before any request starts.
         await expect(dialog).toBeVisible();
         // Keeping the destination is the safe default conflict policy.
@@ -301,6 +313,7 @@ test.describe.serial("Move Operations", () => {
                 request.url() === `${WEB_BASE_URL}/api/v1/move` &&
                 request.method() === "POST",
         );
+
         await dialog.getByRole("button", { name: "Continue moving" }).click();
         // The selected dialog action must be forwarded to the move API.
         expect((await moveRequest).postDataJSON().on_existing).toBe("error");

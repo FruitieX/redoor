@@ -8,6 +8,7 @@ import { WEB_BASE_URL } from "./helpers";
 export default async function globalSetup(): Promise<void> {
     const storagePath = path.resolve(".test-playwright-auth.json");
     const context = await request.newContext({ baseURL: WEB_BASE_URL });
+
     try {
         const response = await context.post("/api/v1/login", {
             data: {
@@ -15,6 +16,7 @@ export default async function globalSetup(): Promise<void> {
                 password: "test-password",
             },
         });
+
         if (!response.ok()) {
             throw new Error(`Playwright login failed: ${response.status()}`);
         }

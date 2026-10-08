@@ -12,8 +12,10 @@ async function runIntegrationTests(arguments_: string[]): Promise<void> {
     const stagingDirectory = await mkdtemp(
         join(tmpdir(), "redoor-integration-"),
     );
+
     const stagedBinary = join(stagingDirectory, "redoor");
     const filters = arguments_.length === 0 ? ["tests"] : arguments_;
+
     try {
         await copyFile(join(PROJECT_ROOT, "target/debug/redoor"), stagedBinary);
         await chmod(stagedBinary, 0o755);

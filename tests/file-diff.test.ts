@@ -32,6 +32,7 @@ describe("File Diff API", () => {
             agentName: AGENT_NAME,
             agentCwd: tempFiles.tempDirectory({ suffix: "-agent-cwd" }),
         });
+
         serverPort = setup.serverPort;
         serverPid = setup.serverPid;
         apiClient = setup.apiClient;
@@ -51,6 +52,7 @@ describe("File Diff API", () => {
         const leftPath = tempFiles.create("alpha\nbeta\ngamma\n", {
             suffix: "-left.txt",
         });
+
         const rightPath = tempFiles.create("alpha\nchanged\ngamma\n", {
             suffix: "-right.txt",
         });
@@ -71,10 +73,13 @@ describe("File Diff API", () => {
 
     it("returns a unified diff across different agents", async () => {
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
+
         const secondAgentName = "file-diff-second-agent";
+
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
@@ -82,15 +87,18 @@ describe("File Diff API", () => {
             ),
             10000,
         );
+
         const secondAgentPid = processManager.spawnAgent({
             wsAddress: `ws://127.0.0.1:${serverPort}/ws`,
             name: secondAgentName,
             cwd: tempFiles.tempDirectory({ suffix: "-second-agent-cwd" }),
         });
+
         onTestFinished(() => {
             processManager.kill(secondAgentPid);
         });
         await waitForSecondAgent;
+
         const secondAgent = await waitForValue({
             description: "second diff agent",
             predicate: async () =>
@@ -98,9 +106,11 @@ describe("File Diff API", () => {
                     (agent) => agent.name === secondAgentName,
                 ),
         });
+
         const leftPath = tempFiles.create("shared\nold\n", {
             suffix: "-cross-left.txt",
         });
+
         const rightPath = tempFiles.create("shared\nnew\n", {
             suffix: "-cross-right.txt",
         });
@@ -118,6 +128,7 @@ describe("File Diff API", () => {
         const firstPath = tempFiles.create("same\ncontent\n", {
             suffix: "-same-first.txt",
         });
+
         const secondPath = tempFiles.create("same\ncontent\n", {
             suffix: "-same-second.txt",
         });
@@ -133,6 +144,7 @@ describe("File Diff API", () => {
 
     it("rejects files that fail editable detection", async () => {
         const textPath = tempFiles.create("editable text", { suffix: ".txt" });
+
         const binaryPath = tempFiles.create(Buffer.from([0xff, 0xfe, 0xfd]), {
             suffix: ".txt",
         });
@@ -148,6 +160,7 @@ describe("File Diff API", () => {
 
     it("rejects oversized text that fails editable detection", async () => {
         const textPath = tempFiles.create("editable text", { suffix: ".txt" });
+
         const oversizedPath = tempFiles.create(
             "x".repeat(2 * 1024 * 1024 + 1),
             {

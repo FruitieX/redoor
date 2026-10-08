@@ -44,10 +44,12 @@ describe("Create Directory API", () => {
         const mkdirUrl = testAgent
             .getRawUrl(createdDirectoryPath)
             .replace("/raw/", "/mkdir/");
+
         const rawResponse = await fetch(mkdirUrl, {
             method: "POST",
             headers: testAgent.getAuthHeaders(),
         });
+
         // Resource creation uses 201 so callers can distinguish it from command-style success.
         expect(rawResponse.status).toBe(201);
         const response: { path: string } = await rawResponse.json();
@@ -64,9 +66,11 @@ describe("Create Directory API", () => {
     it("should apply explicit numeric ownership", async () => {
         const uid = process.getuid?.();
         const gid = process.getgid?.();
+
         if (uid === undefined || gid === undefined) {
             throw new Error("Unix ownership APIs are required for this test");
         }
+
         const createdDirectoryPath = path.join(
             tempFiles.tempDirectory({ suffix: "-mkdir-owner" }),
             "owned",
@@ -87,6 +91,7 @@ describe("Create Directory API", () => {
         const parentPath = tempFiles.tempDirectory({
             suffix: "-mkdir-inherit",
         });
+
         const createdDirectoryPath = path.join(parentPath, "inherited");
         const parentStats = await fs.stat(parentPath);
 
@@ -122,6 +127,7 @@ describe("Create Directory API", () => {
             tempFiles.tempDirectory({ suffix: "-mkdir-unknown-owner" }),
             "not-created",
         );
+
         const owner = `redoor-missing-${process.pid}-${Date.now()}`;
 
         await expect(

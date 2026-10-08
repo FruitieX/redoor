@@ -75,9 +75,11 @@ describe("Raw Upload API", () => {
     it("should apply explicit numeric ownership to a new upload", async () => {
         const uid = process.getuid?.();
         const gid = process.getgid?.();
+
         if (uid === undefined || gid === undefined) {
             throw new Error("Unix ownership APIs are required for this test");
         }
+
         const uploadedFilePath = tempFiles.tempFile({ suffix: "-owned.txt" });
 
         await testAgent.upload(
@@ -96,6 +98,7 @@ describe("Raw Upload API", () => {
         const parentPath = tempFiles.tempDirectory({
             suffix: "-upload-inherit",
         });
+
         const uploadedFilePath = path.join(parentPath, "inherited.txt");
         const parentStats = fs.statSync(parentPath);
 
@@ -148,6 +151,7 @@ describe("Raw Upload API", () => {
     it("should replace existing file contents on upload", async () => {
         const originalContent = "old content";
         const replacementContent = "new content from upload";
+
         const uploadedFilePath = tempFiles.create(originalContent, {
             suffix: ".txt",
         });
@@ -189,6 +193,7 @@ describe("Raw Upload API", () => {
         const uploadedFilePath = tempFiles.create("old executable", {
             suffix: ".bin",
         });
+
         fs.chmodSync(uploadedFilePath, 0o751);
         onTestFinished(() => fs.chmodSync(uploadedFilePath, 0o600));
 
@@ -235,6 +240,7 @@ describe("Raw Upload API", () => {
         const directory = tempFiles.tempDirectory({
             suffix: "-dangling-symlink",
         });
+
         const missingTarget = path.join(directory, "missing.txt");
         const linkPath = path.join(directory, "link.txt");
         fs.symlinkSync("missing.txt", linkPath);
@@ -253,6 +259,7 @@ describe("Raw Upload API", () => {
         const directory = tempFiles.tempDirectory({
             suffix: "-inaccessible-symlink",
         });
+
         const targetDirectory = path.join(directory, "private");
         const targetPath = path.join(targetDirectory, "target.txt");
         const linkPath = path.join(directory, "link.txt");
@@ -338,6 +345,7 @@ describe("Raw Upload API", () => {
         const uploadedFilePath = tempFiles.tempFile({ suffix: ".txt" });
 
         let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+
         const uploadBody = new ReadableStream<Uint8Array>({
             start(streamController) {
                 controller = streamController;
@@ -355,6 +363,7 @@ describe("Raw Upload API", () => {
             body: uploadBody,
             duplex: "half",
         };
+
         const uploadPromise = fetch(
             testAgent.getRawUrl(uploadedFilePath),
             uploadOptions,
@@ -364,6 +373,7 @@ describe("Raw Upload API", () => {
             description: "active upload progress row",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -403,6 +413,7 @@ describe("Raw Upload API", () => {
             description: "completed upload progress row",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -435,6 +446,7 @@ describe("Raw Upload API", () => {
         const totalBytes = firstChunk.length * 2;
         const uploadedFilePath = tempFiles.tempFile({ suffix: ".bin" });
         const controller = new AbortController();
+
         let streamController:
             ReadableStreamDefaultController<Uint8Array> | undefined;
 
@@ -456,6 +468,7 @@ describe("Raw Upload API", () => {
             duplex: "half",
             signal: controller.signal,
         };
+
         const uploadPromise = fetch(
             testAgent.getRawUrl(uploadedFilePath),
             uploadOptions,
@@ -465,6 +478,7 @@ describe("Raw Upload API", () => {
             description: "active upload progress row before client abort",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -491,6 +505,7 @@ describe("Raw Upload API", () => {
             description: "errored upload progress row after client abort",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -568,6 +583,7 @@ describe("Raw Upload API", () => {
                     apiClient.getAuthHeaders().Cookie ?? null,
             },
         );
+
         const uploadFile = new File(["content"], "content.txt", {
             type: "text/plain",
         });
@@ -584,6 +600,7 @@ describe("Raw Upload API", () => {
             "..",
             `blocked-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         );
+
         fs.mkdirSync(protectedDir, 0o555);
 
         onTestFinished(() => {
@@ -592,6 +609,7 @@ describe("Raw Upload API", () => {
         });
 
         const uploadedFilePath = path.join(protectedDir, "blocked.txt");
+
         const uploadFile = new File(["secret"], "blocked.txt", {
             type: "text/plain",
         });

@@ -83,10 +83,12 @@ test.describe("Authentication", () => {
             page.getByRole("heading", { name: "Build date" }),
         ).toBeVisible();
         await expect(page.getByText("debug", { exact: true })).toBeVisible();
+
         // Account actions remain available in the persistent application sidebar.
         const applicationNavigation = page.getByRole("navigation", {
             name: "Application",
         });
+
         await expect(applicationNavigation).toBeVisible();
         await expect(
             applicationNavigation.getByRole("link", { name: "Server home" }),

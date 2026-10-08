@@ -22,6 +22,7 @@ test.describe.serial("Transfer cancellation", () => {
         page,
     }) => {
         let canceled = false;
+
         const transfer = {
             request_id: 987654,
             agent_id: ctx.agentId,
@@ -38,6 +39,7 @@ test.describe.serial("Transfer cancellation", () => {
             error: null,
             atomic: false,
         };
+
         await page.route("**/api/v1/transfers/progress", async (route) => {
             await route.fulfill({
                 json: {
@@ -70,9 +72,11 @@ test.describe.serial("Transfer cancellation", () => {
         );
 
         await page.goto(`${WEB_BASE_URL}/transfers`);
+
         const row = page
             .getByRole("row")
             .filter({ hasText: "large-upload.bin" });
+
         await expect(
             row.getByRole("button", { name: "Cancel transfer" }),
         ).toBeVisible();

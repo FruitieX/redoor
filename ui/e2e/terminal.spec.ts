@@ -72,13 +72,16 @@ test.describe.serial("Terminal panel lifecycle", () => {
             .getByRole("link", { name: "file1.txt", exact: true })
             .click();
         const editor = page.getByLabel("File editor");
+
         const openTerminal = page.getByRole("button", {
             name: "Open terminal",
             exact: true,
         });
+
         const expandEditor = page.getByRole("button", {
             name: "Expand editor to full window",
         });
+
         await openTerminal.hover();
         // The toolbar must advertise both existing ways to reach the shell.
         await expect(page.getByRole("tooltip")).toContainText(
@@ -86,9 +89,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         );
         const terminalBox = await openTerminal.boundingBox();
         const expandBox = await expandEditor.boundingBox();
+
         if (terminalBox === null || expandBox === null) {
             throw new Error("expected editor secondary action measurements");
         }
+
         // The terminal belongs immediately before full-window in the right-hand actions.
         expect(terminalBox.x + terminalBox.width).toBeLessThanOrEqual(
             expandBox.x,
@@ -143,6 +148,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
             if (!socket.url().includes("/terminal/ws")) {
                 return;
             }
+
             socket.on("framereceived", (event) => {
                 terminalOutput += terminalFrameSchema.parse(event.payload);
             });
@@ -160,6 +166,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalInput = page
             .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
             .locator("textarea");
+
         await terminalInput.focus();
         // Octal escapes print "terminal-ok" without putting that marker in the echoed command.
         await terminalInput.pressSequentially(
@@ -193,9 +200,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalPanel = page.getByRole("region", {
             name: "Terminal panel",
         });
+
         const expandButton = page.getByRole("button", {
             name: "Expand terminal to full window",
         });
+
         await expect(expandButton).toHaveAttribute("aria-pressed", "false");
         await expandButton.click();
 
@@ -203,9 +212,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const viewport = page.viewportSize();
         expect(panelBox).not.toBeNull();
         expect(viewport).not.toBeNull();
+
         if (panelBox === null || viewport === null) {
             throw new Error("expected expanded terminal measurements");
         }
+
         // The terminal panel, including its tabs and controls, fills the browser window.
         expect(panelBox.x).toBe(0);
         expect(panelBox.y).toBe(0);
@@ -245,10 +256,12 @@ test.describe.serial("Terminal panel lifecycle", () => {
                 terminalSockets.push(socket);
                 socket.on("framesent", (event) => {
                     const frame = terminalFrameSchema.parse(event.payload);
+
                     try {
                         const message = terminalResizeFrameSchema.safeParse(
                             JSON.parse(frame),
                         );
+
                         if (message.success) {
                             terminalSizes.push(message.data.size);
                         }
@@ -258,9 +271,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
                 });
             }
         });
+
         const detailsResponse = await request.get(
             `${WEB_BASE_URL}/api/v1/agents/${ctx.agentId}`,
         );
+
         const agentDetails = z
             .object({ cwd: z.string() })
             .parse(await detailsResponse.json());
@@ -392,13 +407,17 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toBe(ctx.testDirPath);
 
         const secondSocket = terminalSockets[1];
+
         if (!secondSocket) {
             throw new Error("second terminal socket was not created");
         }
+
         const secondSocketClosed = secondSocket.waitForEvent("close");
+
         const terminalTabs = page.getByRole("tablist", {
             name: "Terminal tabs",
         });
+
         await dragReorderRow(
             page,
             page.locator(
@@ -436,9 +455,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toHaveCount(0);
 
         const thirdSocket = terminalSockets[2];
+
         if (!thirdSocket) {
             throw new Error("third terminal socket was not created");
         }
+
         const thirdSocketClosed = thirdSocket.waitForEvent("close");
         await page.getByRole("button", { name: "Close agent1_src 3" }).click();
         await thirdSocketClosed;
@@ -448,9 +469,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toHaveAttribute("aria-selected", "true");
 
         const firstSocket = terminalSockets[0];
+
         if (!firstSocket) {
             throw new Error("first terminal socket was not created");
         }
+
         const firstSocketClosed = firstSocket.waitForEvent("close");
         await page.getByRole("button", { name: "Close agent1_src 1" }).click();
         await firstSocketClosed;
@@ -473,9 +496,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toBeVisible();
         const fourthSocket = terminalSockets[3];
         const fifthSocket = terminalSockets[4];
+
         if (!fourthSocket || !fifthSocket) {
             throw new Error("replacement terminal sockets were not created");
         }
+
         await page
             .getByRole("link", { name: "agent2_custom, connected" })
             .click();
@@ -551,9 +576,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toBeVisible();
 
         await page.getByRole("tab", { name: "agent1_src 1" }).click();
+
         const firstTerminalInput = page
             .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
             .locator("textarea");
+
         await firstTerminalInput.pressSequentially("exit");
         await firstTerminalInput.press("Enter");
 
@@ -602,9 +629,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await expect(
             page.getByRole("tab", { name: "agent1_src 1" }),
         ).toHaveAttribute("aria-selected", "true");
+
         const firstTerminal = page.getByRole("textbox", {
             name: `agent1_src 1 for ${ctx.agentName}`,
         });
+
         // The shortcut must land in the shell so the user can type immediately.
         await expectTerminalFocused(firstTerminal);
 
@@ -701,6 +730,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const filterInput = page.getByRole("searchbox", {
             name: "Filter files",
         });
+
         await filterInput.focus();
         await page.keyboard.type("t");
         // Typing the shortcut key into an input must enter text instead of opening a terminal.
@@ -720,9 +750,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalInput = page.getByRole("textbox", {
             name: `agent1_src 1 for ${ctx.agentName}`,
         });
+
         const terminalPanel = page.getByRole("tabpanel", {
             name: "agent1_src 1",
         });
+
         await expectTerminalFocused(terminalInput);
         // A focused shell must show a blue frame so keyboard ownership is visible.
         await expect(terminalPanel).toHaveCSS(
@@ -762,6 +794,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
             if (!socket.url().includes("/terminal/ws")) {
                 return;
             }
+
             socket.on("framereceived", (event) => {
                 terminalOutput += terminalFrameSchema.parse(event.payload);
             });
@@ -782,6 +815,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalHost = page
             .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
             .filter({ has: page.locator("textarea") });
+
         const terminalInput = terminalHost.locator("textarea");
         await terminalHost.click({ button: "right" });
         const actions = page.getByRole("dialog", { name: "Terminal actions" });
@@ -804,9 +838,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
 
         await terminalHost.evaluate((host) => {
             const selection = window.getSelection();
+
             if (!selection) {
                 throw new Error("browser selection is unavailable");
             }
+
             const range = document.createRange();
             range.selectNodeContents(host);
             selection.removeAllRanges();

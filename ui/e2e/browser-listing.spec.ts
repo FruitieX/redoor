@@ -35,10 +35,12 @@ test.describe.serial("File Browser Listing", () => {
         await expect(
             page.getByRole("link", { name: "Device home" }),
         ).toHaveAttribute("href", new URL(ctx.agentBrowserUrl).pathname);
+
         const backToAgentButton = page.getByRole("link", {
             name: ctx.agentName,
             exact: true,
         });
+
         await backToAgentButton.click();
 
         await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentId}$`));
@@ -112,21 +114,25 @@ test.describe.serial("File Browser Listing", () => {
         const dirLinks = page.getByRole("link", {
             name: /^(subdir1|subdir2|subdir3)$/,
         });
+
         await expect(dirLinks).toHaveCount(3);
 
         const fileEntries = page
             .locator("td")
             .filter({ hasText: /^(file1|file2)\.txt$/ });
+
         await expect(fileEntries).toHaveCount(2);
 
         const dirSizeColumn = page.getByRole("cell", {
             name: "Size for subdir1",
         });
+
         await expect(dirSizeColumn).toBeVisible();
 
         const fileSizeColumn = page.getByRole("cell", {
             name: "Size for file1.txt",
         });
+
         await expect(fileSizeColumn).not.toHaveText("-");
     });
 
@@ -143,6 +149,7 @@ test.describe.serial("File Browser Listing", () => {
             ctx.testDirPath,
             "appeared-on-focus.txt",
         );
+
         await fs.writeFile(appearedPath, "new listing entry");
         await simulateTabRefocus(page);
 
@@ -168,6 +175,7 @@ test.describe.serial("File Browser Listing", () => {
             ctx.testDirPath,
             "appeared-from-reload.txt",
         );
+
         await fs.writeFile(appearedPath, "new listing entry");
         await page
             .getByRole("button", { name: "Reload directory listing" })
@@ -256,6 +264,7 @@ test.describe.serial("File Browser Listing", () => {
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         const filesActions = page.getByLabel("Files view actions");
+
         const toolbarTooltips = [
             {
                 control: filesActions.getByRole("button", {

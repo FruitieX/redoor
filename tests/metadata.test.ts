@@ -59,6 +59,7 @@ describe("Metadata Content-Type Detection", () => {
         const pngHeader = Buffer.from([
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
         ]);
+
         const pngPath = tempFiles.create(pngHeader, { suffix: "" });
 
         const response = await testAgent.download(pngPath);
@@ -107,6 +108,7 @@ describe("Metadata Content-Type Detection", () => {
         const unknownContent = Buffer.from([
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
         ]);
+
         const unknownPath = tempFiles.create(unknownContent, { suffix: "" });
 
         const response = await testAgent.download(unknownPath);
@@ -137,6 +139,7 @@ describe("Metadata Content-Type Detection", () => {
         const filePath = tempFiles.create(Buffer.from([0xff, 0xfe, 0xfd]), {
             suffix: ".txt",
         });
+
         const metadata = await testAgent.metadata(filePath);
         // Extension must not override the UTF-8 validity check used by the editor gate.
         expect(metadata.editable).toBe(false);
@@ -154,6 +157,7 @@ describe("Metadata Content-Type Detection", () => {
         const pngHeader = Buffer.from([
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
         ]);
+
         const filePath = tempFiles.create(pngHeader, { suffix: ".txt" });
         const metadata = await testAgent.metadata(filePath);
         // Image viewing is gated on content magic, not the filename suffix.
@@ -166,6 +170,7 @@ describe("Metadata Content-Type Detection", () => {
         const filePath = tempFiles.create(Buffer.from([0x00, 0x01, 0x02, 0x03]), {
             suffix: ".png",
         });
+
         const metadata = await testAgent.metadata(filePath);
         // A .png suffix alone must not open the image viewer.
         expect(metadata.viewable_image).toBe(false);

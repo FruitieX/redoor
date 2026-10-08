@@ -19,10 +19,15 @@ import {
 import type { Agent, TerminalServerMessage } from "#ui/api-client";
 
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
+
 const agentCwd = tempFiles.tempDirectory({ suffix: "-terminal-agent" });
+
 const alternateCwd = join(agentCwd, "alternate");
+
 mkdirSync(alternateCwd);
+
 let testAgent: Agent;
 
 const terminalServerMessageSchema: z.ZodType<TerminalServerMessage> =
@@ -42,6 +47,7 @@ beforeAll(async () => {
         agentName: "terminal-agent",
         agentCwd,
     });
+
     testAgent = started.testAgent;
 }, 30_000);
 
@@ -60,6 +66,7 @@ async function openTerminal(
         testAgent.getTerminalWebSocketUrl({ rows, cols }, cwd),
         { headers: testAgent.getAuthHeaders() },
     );
+
     socket.binaryType = "arraybuffer";
     onTestFinished(() => socket.close());
     await new Promise<void>((resolve, reject) => {
@@ -67,6 +74,7 @@ async function openTerminal(
             () => reject(new Error("terminal did not become ready")),
             10_000,
         );
+
         socket.addEventListener(
             "error",
             () => {
@@ -77,12 +85,15 @@ async function openTerminal(
         );
         socket.addEventListener("message", (event) => {
             const controlFrame = z.string().safeParse(event.data);
+
             if (!controlFrame.success) {
                 return;
             }
+
             const message = terminalServerMessageSchema.parse(
                 JSON.parse(controlFrame.data),
             );
+
             if (message.type === "error") {
                 clearTimeout(timeout);
                 reject(new Error(message.message));
@@ -92,6 +103,7 @@ async function openTerminal(
             }
         });
     });
+
     return socket;
 }
 
@@ -114,14 +126,18 @@ async function waitForReady(socket: WebSocket): Promise<void> {
             () => reject(new Error("terminal did not become ready")),
             10_000,
         );
+
         socket.addEventListener("message", (event) => {
             const controlFrame = z.string().safeParse(event.data);
+
             if (!controlFrame.success) {
                 return;
             }
+
             const message = terminalServerMessageSchema.parse(
                 JSON.parse(controlFrame.data),
             );
+
             if (message.type === "error") {
                 clearTimeout(timeout);
                 reject(new Error(message.message));
@@ -138,24 +154,29 @@ function waitForMarker(socket: WebSocket, marker: string): Promise<string> {
     return new Promise((resolve, reject) => {
         const decoder = new TextDecoder();
         let output = "";
+
         const timeout = setTimeout(
             () => reject(new Error(`terminal marker not received: ${marker}`)),
             10_000,
         );
+
         const onMessage = (event: WebSocket.MessageEvent) => {
             if (!(event.data instanceof ArrayBuffer)) {
                 return;
             }
+
             output =
                 `${output}${decoder.decode(new Uint8Array(event.data), { stream: true })}`.slice(
                     -65_536,
                 );
+
             if (output.includes(marker)) {
                 clearTimeout(timeout);
                 socket.removeEventListener("message", onMessage);
                 resolve(output);
             }
         };
+
         socket.addEventListener("message", onMessage);
     });
 }
@@ -168,6 +189,7 @@ async function waitForPing(socket: WebSocket): Promise<void> {
             // The suite sets REDOOR_WEBSOCKET_KEEPALIVE=200ms, so a live ping arrives far sooner than production's 10s.
             2_000,
         );
+
         socket.once("ping", () => {
             clearTimeout(timeout);
             resolve();
@@ -211,6 +233,7 @@ describe("dedicated terminal tunnel", () => {
             firstOutputPromise,
             secondOutputPromise,
         ]);
+
         // The first marker proves its bootstrap cwd reached shell process creation.
         expect(firstOutput).toContain(firstMarker);
         // The distinct second marker proves concurrent terminals do not share mutable cwd state.
@@ -227,9 +250,11 @@ describe("dedicated terminal tunnel", () => {
             ),
         );
         const output = await outputPromise;
+
         const pidMatch = output.match(
             /__REDOOR_TERMINAL_MARKER__(\d+)__(\d+)__/,
         );
+
         // Receiving both PIDs proves bytes crossed the tunnel and the shell launched a separate background job.
         expect(pidMatch?.[1]).toBeDefined();
         expect(pidMatch?.[2]).toBeDefined();
@@ -262,6 +287,7 @@ describe("dedicated terminal tunnel", () => {
                         return true;
                     }
                 }
+
                 return undefined;
             },
             timeoutMs: 5_000,
@@ -278,6 +304,7 @@ describe("dedicated terminal tunnel", () => {
             testAgent.getTerminalWebSocketUrl({ rows: 24, cols: 80 }, agentCwd),
             { headers: testAgent.getAuthHeaders() },
         );
+
         socket.binaryType = "arraybuffer";
         onTestFinished(() => socket.close());
         const marker = "__REDOOR_EARLY_INPUT__";

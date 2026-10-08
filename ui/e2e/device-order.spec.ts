@@ -51,20 +51,26 @@ test.describe.serial("Device order", () => {
         const inventory = { includeExtra: true, extraName };
         await page.route("**/api/v1/agents", async (route) => {
             const url = new URL(route.request().url());
+
             if (
                 route.request().method() !== "GET" ||
                 url.pathname !== "/api/v1/agents"
             ) {
                 await route.continue();
+
                 return;
             }
+
             const response = await route.fetch();
             const body: AgentListResponse = await response.json();
+
             if (inventory.includeExtra) {
                 const template = body.agents[0];
+
                 if (!template) {
                     throw new Error("Expected at least one agent to clone");
                 }
+
                 body.agents.push({
                     ...template,
                     id: extraId,
@@ -78,17 +84,20 @@ test.describe.serial("Device order", () => {
                     connected_at: null,
                 });
             }
+
             await route.fulfill({ json: body });
         });
 
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
+
         const bookmarks = Array.from({ length: 8 }, (_, index) => ({
             agentId: ctx.agentId,
             path: path.join(ctx.testDirPath, `mark-${index}.txt`),
             name: `mark-${index}.txt`,
             entryType: "file" as const,
         }));
+
         await api.updateUserState({
             state: {
                 bookmarks,
@@ -102,12 +111,15 @@ test.describe.serial("Device order", () => {
         const deviceList = page.getByRole("list", { name: "Device list" });
         const devices = deviceList.getByRole("listitem", { name: /^Device / });
         await expect(devices).toHaveCount(realAgents.length + 1);
+
         const before = await devices.evaluateAll((items) =>
             items.map((item) => item.getAttribute("aria-label")),
         );
+
         const tall = deviceList.getByRole("listitem", {
             name: `Device ${ctx.agentName}`,
         });
+
         // A tall bookmark group must travel with its device rather than becoming a device row.
         await expect(
             tall.getByRole("link", { name: "mark-7.txt" }),
@@ -158,9 +170,11 @@ test.describe.serial("Device order", () => {
         const trigger = page.getByRole("button", { name: "Open device menu" });
         await trigger.click();
         const dialog = page.getByRole("dialog", { name: "Device menu" });
+
         const handle = dialog
             .getByRole("listitem", { name: /^Device / })
             .first();
+
         await handle.focus();
         await page.keyboard.press("Space");
         await expect(handle).toHaveAttribute("data-dragging", "true");

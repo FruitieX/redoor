@@ -86,8 +86,10 @@ home = "${agentHome}/missing"
     /** Intentional shutdown resets the real supervisor so every workflow begins with dormant agents. */
     async function stop(...ids: string[]) {
         const agents = await api.listAgents();
+
         for (const id of ids) {
             const agent = agents.find((entry) => entry.id === id);
+
             if (agent === undefined) throw new Error(`Missing managed agent ${id}`);
             await agent.shutdown();
         }

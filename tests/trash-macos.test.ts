@@ -25,11 +25,13 @@ describe.skipIf(process.platform !== "darwin")("macOS Trash API", () => {
 
     beforeAll(async () => {
         root = tempFiles.tempDirectory({ suffix: "-macos-trash-suite" });
+
         const setup = await startServerAndAgent({
             processManager,
             agentName: "macos-trash-test-agent",
             agentCwd: root,
         });
+
         testAgent = setup.testAgent;
     }, 30000);
 

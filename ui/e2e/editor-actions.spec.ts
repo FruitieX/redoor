@@ -15,6 +15,7 @@ import {
 /** Opens the overflow menu by its public name so renames stay covered. */
 async function openEditorActions(page: Page) {
     await page.getByRole("button", { name: "Editor actions" }).click();
+
     return page.getByRole("dialog", { name: "Editor actions" });
 }
 
@@ -50,11 +51,14 @@ test.describe.serial("Editor file actions", () => {
                     process.platform !== "darwin",
                 "Trash requires platform support",
             );
+
             const fileName = permanently
                 ? "removable-delete.txt"
                 : "removable-trash.txt";
+
             const filePath = path.join(ctx.testDirPath, fileName);
             await fs.writeFile(filePath, "original content");
+
             // macOS native Trash cannot use the isolated Linux test trash root.
             if (!permanently && process.platform === "darwin") {
                 await page.route("**/raw/**?trash=true", async (route) => {
@@ -66,6 +70,7 @@ test.describe.serial("Editor file actions", () => {
                     });
                 });
             }
+
             await page.goto(
                 `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
             );
@@ -76,9 +81,11 @@ test.describe.serial("Editor file actions", () => {
             await actions
                 .getByRole("button", { name: "Delete file", exact: true })
                 .click();
+
             const confirmation = page.getByRole("dialog", {
                 name: "Delete this file?",
             });
+
             // Removing the file must explicitly explain that the dirty buffer will be lost.
             await expect(
                 confirmation.getByText(
@@ -98,18 +105,22 @@ test.describe.serial("Editor file actions", () => {
             )
                 .getByRole("button", { name: "Delete file", exact: true })
                 .click();
+
             const permanentCheckbox = confirmation.getByRole("checkbox", {
                 name: "Delete permanently",
             });
+
             if (permanently && (await permanentCheckbox.isVisible())) {
                 await permanentCheckbox.check();
             }
+
             const deletion = page.waitForRequest(
                 (request) =>
                     request.method() === "DELETE" &&
                     new URL(request.url()).searchParams.get("trash") ===
                         String(!permanently),
             );
+
             await confirmation
                 .getByRole("button", {
                     name: permanently ? "Delete file" : "Move to trash",
@@ -162,15 +173,19 @@ test.describe.serial("Editor file actions", () => {
         )
             .getByRole("button", { name: "Delete file", exact: true })
             .click();
+
         const confirmation = page.getByRole("dialog", {
             name: "Delete this file?",
         });
+
         const permanentCheckbox = confirmation.getByRole("checkbox", {
             name: "Delete permanently",
         });
+
         if (await permanentCheckbox.isVisible()) {
             await permanentCheckbox.check();
         }
+
         await confirmation
             .getByRole("button", { name: "Delete file", exact: true })
             .click();

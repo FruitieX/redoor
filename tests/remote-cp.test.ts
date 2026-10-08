@@ -26,6 +26,7 @@ describe("Remote cp and streaming archive upload", () => {
     let setup: Awaited<ReturnType<typeof startServerAndAgent>>;
     let secondId: string;
     let home: string;
+
     const binary =
         process.env.REDOOR_TEST_BINARY ?? path.resolve("target/debug/redoor");
 
@@ -36,6 +37,7 @@ describe("Remote cp and streaming archive upload", () => {
             agentCwd: files.tempDirectory(),
         });
         const server = processes.getProcess(setup.serverPid);
+
         if (server === undefined) throw new Error("Missing server process");
         const ready = waitForAgentTransfer(server, "remote-cp-dest");
         processes.spawnAgent({
@@ -45,9 +47,11 @@ describe("Remote cp and streaming archive upload", () => {
             home: files.tempDirectory(),
         });
         await ready;
+
         const second = (await setup.apiClient.listAgents()).find(
             (agent) => agent.name === "remote-cp-dest",
         );
+
         if (second === undefined) throw new Error("Missing second agent");
         secondId = second.id;
         home = files.tempDirectory();
@@ -94,6 +98,7 @@ describe("Remote cp and streaming archive upload", () => {
             .filter(Boolean)
             .map(encodeURIComponent)
             .join("/");
+
         return `${setup.apiClient.baseUrl}/api/v1/agents/${encodeURIComponent(setup.testAgent.id)}/archive/${encoded}?on_existing=${mode}`;
     }
 
@@ -116,6 +121,7 @@ describe("Remote cp and streaming archive upload", () => {
         expect(conflict.exitCode).toBe(1);
         expect(JSON.parse(conflict.stdout).status).toBe("failed");
         await fs.writeFile(source, "replacement");
+
         const overwrite = await cp(
             "--quiet",
             "--on-existing",
@@ -123,32 +129,39 @@ describe("Remote cp and streaming archive upload", () => {
             source,
             remote,
         );
+
         // Quiet suppresses successful progress/completion in both streams.
         expect(overwrite.exitCode, overwrite.stderr).toBe(0);
         expect(overwrite.stdout + overwrite.stderr).toBe("");
         const second = path.join(files.tempDirectory(), "renamed.txt");
+
         const copy = await cp(
             "--json",
             `${remote}/${path.basename(source)}`,
             `${secondId}:${second}`,
         );
+
         // Server-side copying must wait for the second agent to publish before returning.
         expect(copy.exitCode, copy.stderr).toBe(0);
         expect(await fs.readFile(second, "utf8")).toBe("replacement");
+
         const copyConflict = await cp(
             "--json",
             `${remote}/${path.basename(source)}`,
             `${secondId}:${second}`,
         );
+
         // An asynchronous server-side conflict must become a CLI failure after progress reaches its terminal state.
         expect(copyConflict.exitCode).toBe(1);
         expect(JSON.parse(copyConflict.stdout).status).toBe("failed");
         const downloadDirectory = files.tempDirectory();
+
         const download = await cp(
             "--json",
             `${secondId}:${second}`,
             downloadDirectory,
         );
+
         expect(download.exitCode, download.stderr).toBe(0);
         // Existing local directories use exactly the same basename rule as remote destinations.
         expect(
@@ -157,14 +170,17 @@ describe("Remote cp and streaming archive upload", () => {
                 "utf8",
             ),
         ).toBe("replacement");
+
         const downloadConflict = await cp(
             "--json",
             `${secondId}:${second}`,
             downloadDirectory,
         );
+
         // Strict downloads must preserve an existing resolved file rather than silently replacing it.
         expect(downloadConflict.exitCode).toBe(1);
         expect(JSON.parse(downloadConflict.stdout).status).toBe("failed");
+
         const merge = await cp(
             "--quiet",
             "--on-existing",
@@ -172,12 +188,15 @@ describe("Remote cp and streaming archive upload", () => {
             `${secondId}:${second}`,
             downloadDirectory,
         );
+
         expect(merge.exitCode, merge.stderr).toBe(0);
+
         const badRemote = await cp(
             "--json",
             localSource,
             `${setup.testAgent.id}:relative`,
         );
+
         expect(badRemote.exitCode).toBe(1);
         expect(JSON.parse(badRemote.stdout).error).toContain("absolute");
     });
@@ -192,16 +211,19 @@ describe("Remote cp and streaming archive upload", () => {
             const parent = files.tempDirectory();
             const destination = path.join(parent, "result.bin");
             const remoteSource = `${setup.testAgent.id}:${source}`;
+
             const args =
                 direction === "upload"
                     ? [source, `${setup.testAgent.id}:${destination}`]
                     : direction === "download"
                       ? [remoteSource, destination]
                       : [remoteSource, `${secondId}:${destination}`];
+
             const command = cp("--json", ...args);
             onTestFinished(async () => {
                 if (command.output === null) await command.kill("SIGKILL");
             });
+
             const active = await waitForValue({
                 description: `CLI ${direction} streaming`,
                 predicate: async () =>
@@ -217,6 +239,7 @@ describe("Remote cp and streaming archive upload", () => {
                                   entry.path === destination),
                     ),
             });
+
             // Source progress can precede destination setup; interrupt only after output staging exists.
             await waitForValue({
                 description: `CLI ${direction} destination staging created`,
@@ -235,6 +258,7 @@ describe("Remote cp and streaming archive upload", () => {
                     ).transfers.find(
                         (entry) => entry.request_id === active.request_id,
                     );
+
                     return (
                         state !== undefined &&
                         !["active", "canceling"].includes(state.state) &&
@@ -265,20 +289,24 @@ describe("Remote cp and streaming archive upload", () => {
         const upload = await cp("-r", "--json", source, remote);
         expect(upload.exitCode, upload.stderr).toBe(0);
         const secondPath = path.join(files.tempDirectory(), "second-tree");
+
         const copied = await cp(
             "-r",
             "--quiet",
             remote,
             `${secondId}:${secondPath}`,
         );
+
         expect(copied.exitCode, copied.stderr).toBe(0);
         const local = path.join(files.tempDirectory(), "downloaded");
+
         const downloaded = await cp(
             "-r",
             "--json",
             `${secondId}:${secondPath}`,
             local,
         );
+
         expect(downloaded.exitCode, downloaded.stderr).toBe(0);
         // Extraction must remove only the server's archive root, not add an extra source-name layer.
         expect(
@@ -295,6 +323,7 @@ describe("Remote cp and streaming archive upload", () => {
         const resolved = path.join(local, path.basename(secondPath));
         await fs.mkdir(resolved);
         await fs.writeFile(path.join(resolved, "destination-only"), "keep");
+
         const merged = await cp(
             "-r",
             "--quiet",
@@ -303,11 +332,13 @@ describe("Remote cp and streaming archive upload", () => {
             `${secondId}:${secondPath}`,
             local,
         );
+
         expect(merged.exitCode, merged.stderr).toBe(0);
         // Merge preserves destination-only entries inside the resolved resulting tree.
         expect(
             await fs.readFile(path.join(resolved, "destination-only"), "utf8"),
         ).toBe("keep");
+
         const overridden = await cp(
             "-r",
             "--quiet",
@@ -316,6 +347,7 @@ describe("Remote cp and streaming archive upload", () => {
             `${secondId}:${secondPath}`,
             local,
         );
+
         expect(overridden.exitCode, overridden.stderr).toBe(0);
         expect(
             await fs
@@ -334,15 +366,19 @@ describe("Remote cp and streaming archive upload", () => {
         const destination = path.join(parent, "tree");
         const abort = new AbortController();
         onTestFinished(() => abort.abort());
+
         let bodyController:
             ReadableStreamDefaultController<Uint8Array> | undefined;
+
         const body = new ReadableStream<Uint8Array>({
             start(controller) {
                 bodyController = controller;
                 controller.enqueue(tar.subarray(0, 512));
             },
         });
+
         const token = randomUUID();
+
         const request: RequestInit & { duplex: "half" } = {
             method: "PUT",
             headers: {
@@ -353,9 +389,11 @@ describe("Remote cp and streaming archive upload", () => {
             duplex: "half",
             signal: abort.signal,
         };
+
         const uploading = fetch(archiveUrl(destination), request).catch(
             () => undefined,
         );
+
         const transfer = await waitForValue({
             description: "chunked archive admitted",
             predicate: async () =>
@@ -364,6 +402,7 @@ describe("Remote cp and streaming archive upload", () => {
                         entry.path === destination && entry.state === "active",
                 ),
         });
+
         // Admission precedes agent setup, so an empty directory alone cannot yet prove cleanup.
         await waitForValue({
             description: "chunked archive staging created",
@@ -373,6 +412,7 @@ describe("Remote cp and streaming archive upload", () => {
         // The body remains blocked, so echo success proves control is independent of payload IO.
         expect(echo.message).toBe("control still responsive");
         const competing = path.join(parent, "competing");
+
         const duplicate = await fetch(archiveUrl(competing), {
             method: "PUT",
             headers: {
@@ -381,9 +421,11 @@ describe("Remote cp and streaming archive upload", () => {
             },
             body: tar,
         });
+
         // A second request must not take ownership of the first upload's cancellation token.
         expect(duplicate.status).toBe(409);
         expect(await fs.stat(competing).catch(() => null)).toBeNull();
+
         const malformed = await fetch(archiveUrl(competing), {
             method: "PUT",
             headers: {
@@ -392,16 +434,20 @@ describe("Remote cp and streaming archive upload", () => {
             },
             body: tar,
         });
+
         // Header validation must fail before starting a competing agent extraction worker.
         expect(malformed.status).toBe(400);
+
         const canceled = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/upload-requests/${token}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         const cancellation: CancelUploadRequestResponse = await canceled.json();
         // Correlation must cancel this upload without relying on an ambiguous destination-path lookup.
         expect(canceled.status).toBe(200);
         expect(cancellation.request_token).toBe(token);
+
         if (cancellation.transfer === null)
             throw new Error(
                 "A streaming upload must already have an active transfer ID",
@@ -418,6 +464,7 @@ describe("Remote cp and streaming archive upload", () => {
                 ).transfers.find(
                     (entry) => entry.request_id === transfer.request_id,
                 );
+
                 // The canceled state acknowledges the worker; staging must also be gone before reuse.
                 return (
                     state?.state === "canceled" &&
@@ -428,6 +475,7 @@ describe("Remote cp and streaming archive upload", () => {
         // Cancellation must leave neither the result nor a partial extracted staging directory.
         expect(await fs.readdir(parent)).toEqual([]);
         const successfulToken = randomUUID();
+
         const successful = await fetch(archiveUrl(destination), {
             method: "PUT",
             headers: {
@@ -436,6 +484,7 @@ describe("Remote cp and streaming archive upload", () => {
             },
             body: tar,
         });
+
         const result: ArchiveUploadResponse = await successful.json();
         // The dedicated response confirms tar worker completion and reports its streamed byte count.
         expect(successful.status).toBe(200);
@@ -443,24 +492,30 @@ describe("Remote cp and streaming archive upload", () => {
             path: destination,
             bytes_written: tar.length,
         });
+
         const noLongerActive = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/upload-requests/${successfulToken}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         // Completed HTTP handlers must release token mappings rather than retaining an unbounded registry.
         expect(noLongerActive.status).toBe(404);
+
         const conflict = await fetch(archiveUrl(destination), {
             method: "PUT",
             headers: setup.apiClient.getAuthHeaders(),
             body: tar,
         });
+
         expect(conflict.status).toBe(409);
         await fs.writeFile(path.join(destination, "destination-only"), "keep");
+
         const merged = await fetch(archiveUrl(destination, "merge"), {
             method: "PUT",
             headers: setup.apiClient.getAuthHeaders(),
             body: tar,
         });
+
         // Archive uploads must expose the same merge policy as server-side copies.
         expect(merged.status).toBe(200);
         expect(
@@ -469,11 +524,13 @@ describe("Remote cp and streaming archive upload", () => {
                 "utf8",
             ),
         ).toBe("keep");
+
         const replaced = await fetch(archiveUrl(destination, "override"), {
             method: "PUT",
             headers: setup.apiClient.getAuthHeaders(),
             body: tar,
         });
+
         expect(replaced.status).toBe(200);
         expect(
             await fs
@@ -488,6 +545,7 @@ describe("Remote cp and streaming archive upload", () => {
         const tarPath = files.tempFile({ suffix: ".tar" });
         await $({ quiet: true })`tar -cf ${tarPath} -C ${source} file.txt`;
         const tar = await fs.readFile(tarPath);
+
         const invalidBodies = [
             Buffer.alloc(0),
             tar.subarray(0, 1024), // Complete member, no terminators.
@@ -499,10 +557,12 @@ describe("Remote cp and streaming archive upload", () => {
             Buffer.concat([tar, Buffer.alloc(512, 120)]),
             Buffer.concat([tar, Buffer.alloc(1)]),
         ];
+
         for (const existing of [false, true]) {
             for (const body of invalidBodies) {
                 const parent = files.tempDirectory();
                 const destination = path.join(parent, "result");
+
                 if (existing) {
                     await fs.mkdir(destination);
                     await fs.writeFile(
@@ -510,6 +570,7 @@ describe("Remote cp and streaming archive upload", () => {
                         "original",
                     );
                 }
+
                 const response = await fetch(
                     archiveUrl(destination, "override"),
                     {
@@ -518,6 +579,7 @@ describe("Remote cp and streaming archive upload", () => {
                         body,
                     },
                 );
+
                 // Even a complete extracted member must not authorize publication without valid termination.
                 expect(
                     response.ok,
@@ -535,6 +597,7 @@ describe("Remote cp and streaming archive upload", () => {
                 expect(await fs.readdir(parent)).toEqual(
                     existing ? ["result"] : [],
                 );
+
                 if (existing) {
                     expect(await fs.readdir(destination)).toEqual(["keep.txt"]);
                     expect(
@@ -546,6 +609,7 @@ describe("Remote cp and streaming archive upload", () => {
                 }
             }
         }
+
         for (const body of [
             tar,
             tar.subarray(0, 2048),
@@ -556,11 +620,13 @@ describe("Remote cp and streaming archive upload", () => {
             const destination = path.join(parent, "result");
             await fs.mkdir(destination);
             await fs.writeFile(path.join(destination, "old.txt"), "old");
+
             const response = await fetch(archiveUrl(destination, "override"), {
                 method: "PUT",
                 headers: setup.apiClient.getAuthHeaders(),
                 body,
             });
+
             // Both minimal and record-padded termination must permit legitimate replacement, including empty trees.
             expect(response.status).toBe(200);
             expect((await response.json()).bytes_written).toBe(body.length);
@@ -569,6 +635,7 @@ describe("Remote cp and streaming archive upload", () => {
             expect(await fs.readdir(destination)).toEqual(
                 hasFile ? ["file.txt"] : [],
             );
+
             if (hasFile) {
                 expect(
                     await fs.readFile(
@@ -588,12 +655,14 @@ describe("Remote cp and streaming archive upload", () => {
         const abort = new AbortController();
         onTestFinished(() => abort.abort());
         let producer: ReadableStreamDefaultController<Uint8Array> | undefined;
+
         const body = new ReadableStream<Uint8Array>({
             start(controller) {
                 producer = controller;
                 controller.enqueue(Buffer.alloc(1024));
             },
         });
+
         const request: RequestInit & { duplex: "half" } = {
             method: "PUT",
             headers: setup.apiClient.getAuthHeaders(),
@@ -601,6 +670,7 @@ describe("Remote cp and streaming archive upload", () => {
             duplex: "half",
             signal: abort.signal,
         };
+
         const uploading = fetch(archiveUrl(destination, "override"), request);
         await waitForValue({
             description: "terminated archive still receiving producer bytes",
@@ -619,6 +689,7 @@ describe("Remote cp and streaming archive upload", () => {
         expect((await setup.testAgent.echo("draining archive")).message).toBe(
             "draining archive",
         );
+
         if (producer === undefined) throw new Error("Missing archive producer");
         producer.enqueue(Buffer.alloc(512, 120));
         producer.close();
@@ -644,6 +715,7 @@ describe("Remote cp and streaming archive upload", () => {
         const tarPath = files.tempFile({ suffix: ".tar" });
         await $({ quiet: true })`tar -cf ${tarPath} -C ${source} file.txt`;
         const tar = await fs.readFile(tarPath);
+
         for (const kind of ["L", "K", "x", "g"]) {
             const header = Buffer.from(tar.subarray(0, 512));
             header[156] = kind.charCodeAt(0);
@@ -655,11 +727,13 @@ describe("Remote cp and streaming archive upload", () => {
             header[154] = 0;
             header[155] = 32;
             const parent = files.tempDirectory();
+
             const response = await fetch(archiveUrl(path.join(parent, "result")), {
                 method: "PUT",
                 headers: setup.apiClient.getAuthHeaders(),
                 body: header,
             });
+
             // A header-only huge declaration must be input rejection, not truncated-metadata/internal failure.
             expect(response.status).toBe(400);
             expect((await response.json()).error).toContain("64 KiB limit");
@@ -682,23 +756,28 @@ describe("Remote cp and streaming archive upload", () => {
         escaping.fill(0, 0, 100);
         escaping.write("../escaped", 0);
         escaping.fill(32, 148, 156);
+
         const checksum = escaping
             .subarray(0, 512)
             .reduce((sum, byte) => sum + byte, 0);
+
         escaping.write(checksum.toString(8).padStart(6, "0"), 148);
         escaping[154] = 0;
         escaping[155] = 32;
         await fs.symlink("file.txt", path.join(source, "link"));
         await $({ quiet: true })`tar -cf ${tarPath} -C ${source} link`;
         const linked = await fs.readFile(tarPath);
+
         for (const body of [escaping, linked, tar.subarray(0, 515)]) {
             const parent = files.tempDirectory();
             const destination = path.join(parent, "result");
+
             const response = await fetch(archiveUrl(destination), {
                 method: "PUT",
                 headers: setup.apiClient.getAuthHeaders(),
                 body,
             });
+
             // Invalid extraction must report failure, not a completed archive response.
             expect(response.ok).toBe(false);
             await waitForValue({

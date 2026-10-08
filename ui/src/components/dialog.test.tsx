@@ -19,8 +19,10 @@ function AnchoredDialog(props: {
     anchorRight: number;
 }) {
     const anchorRef = React.useRef<HTMLButtonElement>(null);
+
     const setAnchor = (element: HTMLButtonElement | null) => {
         anchorRef.current = element;
+
         if (element) {
             element.getBoundingClientRect = () => ({
                 top: props.anchorTop,
@@ -71,12 +73,15 @@ function renderAnchoredDialog(anchor: {
             anchorRight={anchor.right ?? 440}
         />,
     );
+
     const panel = screen.getByRole("dialog", {
         name: "Options",
     }).firstElementChild;
+
     if (!(panel instanceof HTMLElement)) {
         throw new Error("Expected the dialog panel to render");
     }
+
     return panel;
 }
 

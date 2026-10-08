@@ -23,6 +23,7 @@ import { Toxiproxy } from "toxiproxy-node-client";
 import { z } from "zod";
 
 const AGENT_NAME = "raw-test-agent";
+
 const createOneTimeTokenResponseSchema = z.object({
     one_time_token: z.string(),
 });
@@ -74,18 +75,24 @@ describe("Raw Download API", () => {
                 suffix: ".bin",
             },
         );
+
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
+
         const toxiproxy = new Toxiproxy("http://127.0.0.1:8474");
         const proxyPort = await getAvailablePort();
+
         const proxy = await toxiproxy.createProxy({
             name: `raw-download-explicit-cancel-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             listen: `127.0.0.1:${proxyPort}`,
             upstream: `127.0.0.1:${serverPort}`,
         });
+
         const proxiedAgentName = "raw-download-explicit-cancel-agent";
+
         const connected = waitForLogMessage(
             serverProcess,
             new RegExp(
@@ -93,6 +100,7 @@ describe("Raw Download API", () => {
             ),
             10000,
         );
+
         const proxiedAgentPid = processManager.spawnAgent({
             wsAddress: `ws://${proxy.listen}/ws`,
             name: proxiedAgentName,
@@ -100,6 +108,7 @@ describe("Raw Download API", () => {
                 suffix: "-explicit-cancel-agent-cwd",
             }),
         });
+
         onTestFinished(async () => {
             processManager.kill(proxiedAgentPid);
             await proxy.remove().catch(() => undefined);
@@ -112,6 +121,7 @@ describe("Raw Download API", () => {
             attributes: { rate: 512 },
         });
         await connected;
+
         const proxiedAgent = await waitForValue({
             description: "explicit cancellation proxied agent",
             predicate: async () =>
@@ -123,12 +133,15 @@ describe("Raw Download API", () => {
         const response = await proxiedAgent.download(testFilePath);
         const reader = response.body?.getReader();
         expect(reader).toBeDefined();
+
         if (reader === undefined) {
             throw new Error("download response did not expose a body reader");
         }
+
         const firstChunk = await reader.read();
         // Receiving bytes proves the download worker and throttled HTTP response were both live.
         expect(firstChunk.value?.byteLength ?? 0).toBeGreaterThan(0);
+
         const active = await waitForValue({
             description:
                 "partially downloaded row before explicit cancellation",
@@ -146,6 +159,7 @@ describe("Raw Download API", () => {
             "accepted",
         );
         let streamClosedByServer = false;
+
         try {
             while (!streamClosedByServer) {
                 const read = await reader.read();
@@ -156,8 +170,10 @@ describe("Raw Download API", () => {
             expect(error).toBeInstanceOf(Error);
             streamClosedByServer = true;
         }
+
         // Explicit cancellation, not consumer-side reader cancellation, must close the HTTP body.
         expect(streamClosedByServer).toBe(true);
+
         const canceled = await waitForValue({
             description: "terminal canceled download row",
             predicate: async () =>
@@ -167,6 +183,7 @@ describe("Raw Download API", () => {
                         transfer.state === "canceled",
                 ),
         });
+
         // Cancellation preserves the byte snapshot instead of converting the row into an error.
         expect(canceled.transferred_bytes).toBeGreaterThan(0);
         reader.releaseLock();
@@ -179,20 +196,26 @@ describe("Raw Download API", () => {
     it("should authorize an exact raw path with a one-time token", async () => {
         const testContent = "one-time download";
         const testFilePath = tempFiles.create(testContent, { suffix: ".txt" });
+
         const mismatchedPath = tempFiles.create("other file", {
             suffix: ".txt",
         });
+
         const createTokenUrl = testAgent
             .getRawUrl(testFilePath)
             .replace("/raw/", "/one-time-token/");
+
         const createResponse = await fetch(createTokenUrl, {
             method: "POST",
             headers: testAgent.getAuthHeaders(),
         });
+
         // Token creation remains protected by the normal authenticated API boundary.
         expect(createResponse.status).toBe(200);
+
         const { one_time_token: oneTimeToken } =
             createOneTimeTokenResponseSchema.parse(await createResponse.json());
+
         const metadataBefore = await testAgent.metadata(testFilePath);
         // Metadata exposes the still-outstanding token only for its exact path.
         expect(metadataBefore.one_time_tokens).toContain(oneTimeToken);
@@ -200,6 +223,7 @@ describe("Raw Download API", () => {
         const mismatchResponse = await fetch(
             `${testAgent.getRawUrl(mismatchedPath)}?one_time_token=${encodeURIComponent(oneTimeToken)}`,
         );
+
         // A path mismatch fails before file work without consuming the valid token.
         expect(mismatchResponse.status).toBe(401);
         const metadataAfterMismatch = await testAgent.metadata(testFilePath);
@@ -228,18 +252,23 @@ describe("Raw Download API", () => {
     it("should retain a one-time token until an interrupted download is resumed", async () => {
         const totalBytes = 4 * 1024 * 1024;
         const downloadContent = Buffer.alloc(totalBytes, "t");
+
         const sourcePath = tempFiles.create(downloadContent, {
             suffix: ".bin",
         });
+
         const { one_time_token: oneTimeToken } =
             await testAgent.createOneTimeToken(sourcePath);
+
         const toxiproxy = new Toxiproxy("http://127.0.0.1:8474");
         const proxyPort = await getAvailablePort();
+
         const proxy = await toxiproxy.createProxy({
             name: `one-time-download-retry-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             listen: `127.0.0.1:${proxyPort}`,
             upstream: `127.0.0.1:${serverPort}`,
         });
+
         const bandwidthToxic = await proxy.addToxic({
             name: "slow-one-time-download",
             type: "bandwidth",
@@ -259,15 +288,19 @@ describe("Raw Download API", () => {
         // The outstanding token authorizes the first anonymous request.
         expect(initialResponse.status).toBe(200);
         const reader = initialResponse.body?.getReader();
+
         if (!reader) {
             throw new Error("One-time download response body was unavailable");
         }
+
         const firstChunk = await reader.read();
         // Receiving a non-final prefix gives the retry a deterministic range offset.
         expect(firstChunk.done).toBe(false);
+
         if (!firstChunk.value) {
             throw new Error("One-time download returned no prefix bytes");
         }
+
         const resumeOffset = firstChunk.value.byteLength;
         await reader.cancel();
 
@@ -276,6 +309,7 @@ describe("Raw Download API", () => {
             timeoutMs: 30000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -290,9 +324,11 @@ describe("Raw Download API", () => {
         expect(metadataAfterCancel.one_time_tokens).toContain(oneTimeToken);
 
         await bandwidthToxic.remove();
+
         const resumedResponse = await fetch(tokenUrl, {
             headers: { Range: `bytes=${resumeOffset}-` },
         });
+
         // The same anonymous token authorizes the remaining byte range.
         expect(resumedResponse.status).toBe(206);
         const resumedBytes = Buffer.from(await resumedResponse.arrayBuffer());
@@ -309,6 +345,7 @@ describe("Raw Download API", () => {
             timeoutMs: 10000,
             predicate: async () => {
                 const metadata = await testAgent.metadata(sourcePath);
+
                 return metadata.one_time_tokens.includes(oneTimeToken)
                     ? undefined
                     : true;
@@ -331,6 +368,7 @@ describe("Raw Download API", () => {
 
     it("should handle binary file download", async () => {
         const binaryContent = Buffer.from([0, 1, 2, 3, 255, 254, 253]);
+
         const testFilePath = tempFiles.create(binaryContent, {
             suffix: ".bin",
         });
@@ -374,6 +412,7 @@ describe("Raw Download API", () => {
                     apiClient.getAuthHeaders().Cookie ?? null,
             },
         );
+
         // Server should return an error instead of hanging forever
         await expect(fakeAgent.raw("/tmp/somefile")).rejects.toThrow(
             /not found/i,
@@ -383,9 +422,11 @@ describe("Raw Download API", () => {
     it("should handle agent disconnect during download", async () => {
         // Create a large file that takes multiple chunks to transfer
         const largeContent = "x".repeat(32 * 1024 * 1024);
+
         const testFilePath = tempFiles.create(largeContent, {
             suffix: ".txt",
         });
+
         const fileSize = Buffer.byteLength(largeContent);
 
         const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
@@ -393,6 +434,7 @@ describe("Raw Download API", () => {
 
         // Spawn a second agent that we can kill mid-transfer
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
@@ -414,16 +456,20 @@ describe("Raw Download API", () => {
         await waitForEphemeralAgent;
 
         const agents = await apiClient.listAgents();
+
         const ephemeralAgent = agents.find(
             (a) => a.name === ephemeralAgentName,
         );
+
         if (!ephemeralAgent) {
             throw new Error(`Agent ${ephemeralAgentName} was not registered`);
         }
+
         expect(ephemeralAgent).toBeDefined();
 
         const ephemeralAgentProcess =
             processManager.getProcess(ephemeralAgentPid);
+
         if (!ephemeralAgentProcess) {
             throw new Error("Ephemeral agent process not found");
         }
@@ -439,6 +485,7 @@ describe("Raw Download API", () => {
             timeoutMs: 20000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === ephemeralAgent.id &&
@@ -491,6 +538,7 @@ describe("Raw Download API", () => {
             description: "finished download progress row after disconnect",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === observedTransfer.request_id &&
@@ -502,6 +550,7 @@ describe("Raw Download API", () => {
 
         // Reaching this assertion confirms router cleanup closed the request path instead of hanging the client.
         expect(result).toBeDefined();
+
         if (finishedTransfer.state === "errored") {
             // The errored state check ensures disconnect cleanup keeps the transfer row queryable when the transfer is interrupted.
             expect(finishedTransfer.transferred_bytes).toBeLessThan(
@@ -527,22 +576,28 @@ describe("Raw Download API", () => {
         const chunkSizeBytes = 1024 * 1024;
         const totalBytes = chunkSizeBytes * 8 + 123;
         const downloadContent = Buffer.alloc(totalBytes, "d");
+
         const sourcePath = tempFiles.create(downloadContent, {
             suffix: ".bin",
         });
+
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
 
         const toxiproxy = new Toxiproxy("http://127.0.0.1:8474");
         const proxyPort = await getAvailablePort();
+
         const proxy = await toxiproxy.createProxy({
             name: `raw-download-concurrent-command-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             listen: `127.0.0.1:${proxyPort}`,
             upstream: `127.0.0.1:${serverPort}`,
         });
+
         const proxiedAgentName = "raw-download-proxied-agent";
+
         const waitForProxiedAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
@@ -550,6 +605,7 @@ describe("Raw Download API", () => {
             ),
             10000,
         );
+
         const proxiedAgentPid = processManager.spawnAgent({
             wsAddress: `ws://${proxy.listen}/ws`,
             name: proxiedAgentName,
@@ -566,9 +622,11 @@ describe("Raw Download API", () => {
         await waitForProxiedAgent;
 
         const agents = await apiClient.listAgents();
+
         const proxiedAgent = agents.find(
             (agent) => agent.name === proxiedAgentName,
         );
+
         if (!proxiedAgent) {
             throw new Error(`Agent ${proxiedAgentName} was not registered`);
         }
@@ -590,6 +648,7 @@ describe("Raw Download API", () => {
             timeoutMs: 30000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === proxiedAgent.id &&
@@ -603,6 +662,7 @@ describe("Raw Download API", () => {
         });
 
         const detailsPromise = proxiedAgent.getDetails();
+
         const firstCompletion = await Promise.race([
             detailsPromise.then((details) => ({
                 winner: "details" as const,
@@ -618,11 +678,13 @@ describe("Raw Download API", () => {
         expect(activeTransfer.state).toBe("active");
         // Finishing the command before the payload proves control messages are not stuck behind the throttled download stream.
         expect(firstCompletion.winner).toBe("details");
+
         if (firstCompletion.winner !== "details") {
             throw new Error(
                 "Download completed before getDetails responded during throttled transfer",
             );
         }
+
         // Returning the proxied agent name proves the responsive command still reached the intended agent during the download.
         expect(firstCompletion.details.name).toBe(proxiedAgent.name);
 
@@ -635,21 +697,26 @@ describe("Raw Download API", () => {
     it("should cancel throttled download cleanly when client aborts", async () => {
         const totalBytes = 8 * 1024 * 1024;
         const downloadContent = Buffer.alloc(totalBytes, "c");
+
         const sourcePath = tempFiles.create(downloadContent, {
             suffix: ".bin",
         });
+
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
 
         const toxiproxy = new Toxiproxy("http://127.0.0.1:8474");
         const proxyPort = await getAvailablePort();
+
         const proxy = await toxiproxy.createProxy({
             name: `raw-download-cancel-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             listen: `127.0.0.1:${proxyPort}`,
             upstream: `127.0.0.1:${serverPort}`,
         });
+
         // Limit the transfer socket from birth so the agent cannot finish the file before abort.
         await proxy.addToxic({
             name: "slow-cancel-download",
@@ -661,6 +728,7 @@ describe("Raw Download API", () => {
             },
         });
         const proxiedAgentName = "raw-download-cancel-agent";
+
         const waitForProxiedAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
@@ -668,6 +736,7 @@ describe("Raw Download API", () => {
             ),
             10000,
         );
+
         const proxiedAgentPid = processManager.spawnAgent({
             wsAddress: `ws://${proxy.listen}/ws`,
             name: proxiedAgentName,
@@ -684,14 +753,17 @@ describe("Raw Download API", () => {
         await waitForProxiedAgent;
 
         const agents = await apiClient.listAgents();
+
         const proxiedAgent = agents.find(
             (agent) => agent.name === proxiedAgentName,
         );
+
         if (!proxiedAgent) {
             throw new Error(`Agent ${proxiedAgentName} was not registered`);
         }
 
         const controller = new AbortController();
+
         const downloadResponsePromise = fetch(
             proxiedAgent.getRawUrl(sourcePath),
             {
@@ -705,6 +777,7 @@ describe("Raw Download API", () => {
             timeoutMs: 30000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === proxiedAgent.id &&
@@ -721,9 +794,11 @@ describe("Raw Download API", () => {
         const abortReadPromise = response.arrayBuffer();
         const serverLogBeforeAbort = processManager.getStdout(serverPid);
         const proxiedAgentProcess = processManager.getProcess(proxiedAgentPid);
+
         if (!proxiedAgentProcess) {
             throw new Error("Proxied agent process not found");
         }
+
         const waitForAgentCancel = waitForLogMessage(
             proxiedAgentProcess,
             /Received transfer cancel from server: request_id=/,
@@ -740,6 +815,7 @@ describe("Raw Download API", () => {
             timeoutMs: 30000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -760,6 +836,7 @@ describe("Raw Download API", () => {
         const serverLogAfterCancel = processManager
             .getStdout(serverPid)
             .slice(serverLogBeforeAbort.length);
+
         // Keeping canceled routing state until the agent acknowledges avoids noisy orphan chunks.
         expect(serverLogAfterCancel).not.toMatch(
             /No streaming response found for request_id=/,
@@ -777,19 +854,23 @@ describe("Raw Download API", () => {
             timeoutMs: 30000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 const completed = response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
                         transfer.state === "completed",
                 );
+
                 if (completed) {
                     return completed;
                 }
+
                 const matching = response.transfers.filter(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === proxiedAgent.id &&
                         transfer.path === sourcePath,
                 );
+
                 throw new Error(JSON.stringify(matching));
             },
         });
@@ -798,6 +879,7 @@ describe("Raw Download API", () => {
         expect(completedTransfer.error).toBeNull();
         // Full progress confirms the successful retry replaced the original partial count.
         expect(completedTransfer.transferred_bytes).toBe(totalBytes);
+
         const matchingTransfers = (
             await apiClient.getTransferProgress()
         ).transfers.filter(
@@ -806,6 +888,7 @@ describe("Raw Download API", () => {
                 transfer.path === sourcePath &&
                 transfer.direction === "download",
         );
+
         // One row proves the retry was folded into the original logical download instead of reported separately.
         expect(matchingTransfers).toHaveLength(1);
     }, 50000);
@@ -832,6 +915,7 @@ describe("Raw Download API", () => {
         const response = await testAgent.download(testFilePath, {
             download: true,
         });
+
         console.log(
             "Content-Disposition headers:",
             response.headers.get("Content-Disposition"),
@@ -943,7 +1027,9 @@ describe("Raw Download API", () => {
         const expected = new Uint8Array([
             100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
         ]);
+
         const actual = new Uint8Array(data);
+
         for (let i = 0; i < 10; i++) {
             expect(actual[i]).toBe(expected[i]);
         }

@@ -24,10 +24,12 @@ import {
 } from "./test-utils";
 
 const AGENT_NAME = "upgrade-external-agent";
+
 const transferSocketOpenSchema = z.object({
     type: z.literal("transfer_socket_open"),
     token: z.string().min(1),
 });
+
 const controlMessageSchema = z.object({ type: z.string() });
 
 /** Waits for a websocket to become writable without relying on timing delays. */
@@ -72,12 +74,14 @@ describe("connected external agent upgrade", () => {
         executablePath = tempFiles.tempFile({ suffix: "-redoor" });
         copyFileSync(SERVER_PATH, executablePath);
         chmodSync(executablePath, 0o751);
+
         const setup = await startServerAndAgent({
             processManager: processes,
             agentName: AGENT_NAME,
             agentCwd: tempFiles.tempDirectory({ suffix: "-cwd" }),
             agentExecutablePath: executablePath,
         });
+
         api = setup.apiClient;
         agent = setup.testAgent;
         agentPid = setup.agentPid;
@@ -85,6 +89,7 @@ describe("connected external agent upgrade", () => {
         const serverInfo = await api.getServerInfo();
         const details = await agent.getDetails();
         targetVersion = serverInfo.version;
+
         // Seed the namespaced XDG cache the server uses so upgrades never hit GitHub.
         const cachedBinary = join(
             TEST_SERVER_HOME,
@@ -96,6 +101,7 @@ describe("connected external agent upgrade", () => {
             details.arch,
             "redoor",
         );
+
         mkdirSync(join(cachedBinary, ".."), { recursive: true });
         copyFileSync(SERVER_PATH, cachedBinary);
         chmodSync(cachedBinary, 0o755);
@@ -108,11 +114,13 @@ describe("connected external agent upgrade", () => {
 
     it("rejects an invalid target version before replacing the agent", async () => {
         let error: unknown;
+
         try {
             await agent.upgrade("../invalid");
         } catch (caught) {
             error = caught;
         }
+
         // Invalid versions must not become release URL or cache path components.
         expect(error).toBeInstanceOf(ApiError);
         // A client error lets the UI report the bad manual value without implying an outage.
@@ -144,6 +152,7 @@ describe("connected external agent upgrade", () => {
                 const candidate = (await api.listAgents()).find(
                     (entry) => entry.name === AGENT_NAME,
                 );
+
                 return candidate?.status === "connected" &&
                     candidate.connectionId !== originalConnectionId &&
                     candidate.binary?.version === targetVersion
@@ -151,6 +160,7 @@ describe("connected external agent upgrade", () => {
                     : undefined;
             },
         });
+
         const details = await upgraded.getDetails();
         // Self-exec must preserve the process identity instead of relying on a supervisor respawn.
         expect(details.pid).toBe(agentPid);
@@ -166,10 +176,12 @@ describe("connected external agent upgrade", () => {
 
     it("force-installs the exact running server binary", async () => {
         const serverInfo = await api.getServerInfo();
+
         const currentAgent = (await api.listAgents()).find(
             (entry) =>
                 entry.name === AGENT_NAME && entry.status === "connected",
         );
+
         // A connected generation is required to prove force installation reconnects it.
         expect(currentAgent?.connectionId).not.toBeNull();
         expect(currentAgent).toBeDefined();
@@ -188,12 +200,14 @@ describe("connected external agent upgrade", () => {
                 const candidate = (await api.listAgents()).find(
                     (entry) => entry.name === AGENT_NAME,
                 );
+
                 return candidate?.status === "connected" &&
                     candidate.connectionId !== currentAgent?.connectionId
                     ? candidate
                     : undefined;
             },
         });
+
         const details = await upgraded.getDetails();
         // Exact identity equality proves the running image was used instead of a release cache.
         expect(details.binary).toEqual({
@@ -257,17 +271,20 @@ describe("connected external agent upgrade", () => {
                 token: transferOpen.token,
             }),
         );
+
         const oldAgent = await waitForValue({
             description: "unsupported fixture transfer registration",
             predicate: async () => {
                 const candidate = (await api.listAgents()).find(
                     (entry) => entry.name === oldAgentName,
                 );
+
                 return candidate?.status === "connected"
                     ? candidate
                     : undefined;
             },
         });
+
         // An omitted capability must remain visible as unsupported metadata.
         expect(oldAgent.supportsSelfExec).toBe(false);
 
@@ -280,11 +297,13 @@ describe("connected external agent upgrade", () => {
             );
         });
         let error: unknown;
+
         try {
             await oldAgent.upgrade(targetVersion);
         } catch (caught) {
             error = caught;
         }
+
         // Conflict plus remediation tells operators how to make the upgrade safe.
         expect(error).toBeInstanceOf(ApiError);
         expect(error).toMatchObject({

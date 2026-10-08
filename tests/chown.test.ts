@@ -23,11 +23,13 @@ describe("Chown Path API", () => {
 
     beforeAll(async () => {
         agentCwd = tempFiles.tempDirectory({ suffix: "-agent-cwd" });
+
         const setup = await startServerAndAgent({
             processManager,
             agentName: AGENT_NAME,
             agentCwd,
         });
+
         testAgent = setup.testAgent;
     }, 30000);
 
@@ -63,9 +65,11 @@ describe("Chown Path API", () => {
     it("reads owner and group from query parameters", async () => {
         const filePath = path.join(agentCwd, "query-contract.txt");
         await fs.writeFile(filePath, "unchanged");
+
         const url = new URL(
             testAgent.getRawUrl(filePath).replace("/raw/", "/chown/"),
         );
+
         url.searchParams.set("owner", String(os.userInfo().uid));
         url.searchParams.set("group", String(os.userInfo().gid));
 
@@ -73,6 +77,7 @@ describe("Chown Path API", () => {
             method: "POST",
             headers: testAgent.getAuthHeaders(),
         });
+
         // Root accepts the query-only request; non-root rejection still proves route parsing reached the privilege gate.
         expect(response.status).toBe(testAgent.isRoot ? 200 : 403);
         // The direct URL keeps ownership selectors out of the JSON body contract.
@@ -89,8 +94,10 @@ describe("Chown Path API", () => {
             await expect(testAgent.chown(filePath, { owner })).rejects.toThrow(
                 `Owner '${owner}' does not exist on the agent`,
             );
+
             return;
         }
+
         // Non-root agents must not leak whether a name exists; the UI never shows the control.
         await expect(
             testAgent.chown(filePath, { owner }),
@@ -103,6 +110,7 @@ describe("Chown Path API", () => {
         if (testAgent.isRoot) {
             return;
         }
+
         const filePath = path.join(agentCwd, "same-uid.txt");
         await fs.writeFile(filePath, "same");
         const uid = os.userInfo().uid;
@@ -135,21 +143,26 @@ describe("Chown Path API", () => {
             // A rejected chown must not lchown the link; details already shows the followed target.
             expect((await fs.lstat(linkPath)).uid).toBe(linkBefore.uid);
             expect((await fs.stat(targetPath)).uid).toBe(targetBefore.uid);
+
             return;
         }
 
         const accounts = await testAgent.accounts();
+
         const otherUser = accounts.users.find(
             (user) => user.uid !== targetBefore.uid,
         );
+
         if (otherUser === undefined) {
             throw new Error(
                 "Root agent returned no second user for symlink chown",
             );
         }
+
         const response = await testAgent.chown(linkPath, {
             owner: otherUser.name,
         });
+
         // The followed target is the inode details already displayed.
         expect(response.uid).toBe(otherUser.uid);
         expect((await fs.stat(targetPath)).uid).toBe(otherUser.uid);
@@ -162,6 +175,7 @@ describe("Chown Path API", () => {
         if (testAgent.isRoot) {
             return;
         }
+
         const filePath = path.join(agentCwd, "file-chown.txt");
         const directoryPath = path.join(agentCwd, "dir-chown");
         await fs.writeFile(filePath, "file");

@@ -6,12 +6,14 @@ import { expect, test } from "@playwright/test";
 import { WEB_BASE_URL } from "./helpers";
 
 const SERVER_LOG_PATH = path.resolve("log/playwright-redoor.log");
+
 const AGENT_LOG_PATH = path.resolve("log/playwright-agent1_src.log");
 
 /** Counts startup log lines so a post-restart increase proves self-exec ran. */
 async function countLoadedConfigLines(): Promise<number> {
     try {
         const log = await fs.readFile(SERVER_LOG_PATH, "utf8");
+
         return (log.match(/Loaded server config/g) ?? []).length;
     } catch {
         return 0;
@@ -22,6 +24,7 @@ async function countLoadedConfigLines(): Promise<number> {
 async function countAgentStartupLines(): Promise<number> {
     try {
         const log = await fs.readFile(AGENT_LOG_PATH, "utf8");
+
         return (log.match(/Starting agent/g) ?? []).length;
     } catch {
         return 0;
@@ -43,10 +46,12 @@ test.describe("Restart", () => {
         await expect(
             page.getByRole("heading", { name: "Server", exact: true }),
         ).toBeVisible();
+
         // Agents in the right menu prove the suite's external processes are connected before restart.
         const agentNavigation = page.getByRole("navigation", {
             name: "Devices",
         });
+
         await expect(
             agentNavigation.getByRole("link", { name: /agent1_src/ }),
         ).toBeVisible();
@@ -106,9 +111,11 @@ test.describe("Restart", () => {
             .getByRole("dialog", { name: "agent1_src actions" })
             .getByRole("button", { name: "Restart" })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Restart agent agent1_src?",
         });
+
         await dialog.getByRole("button", { name: "Restart" }).click();
 
         // Closing requires the server to observe a replacement connection generation.

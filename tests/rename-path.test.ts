@@ -19,6 +19,7 @@ describe("Rename Path API", () => {
 
     beforeAll(async () => {
         agentCwd = tempFiles.tempDirectory({ suffix: "-agent-cwd" });
+
         const setup = await startServerAndAgent({
             processManager,
             agentName: AGENT_NAME,
@@ -47,6 +48,7 @@ describe("Rename Path API", () => {
             "before.txt",
             "after.txt",
         );
+
         const directoryResponse = await testAgent.renamePath(
             agentCwd,
             "before-directory",

@@ -17,6 +17,7 @@ import {
 } from "./test-utils";
 
 const AGENT_NAME = "trash-test-agent";
+
 const AGENT_LOG_PATH = path.join(
     import.meta.dirname,
     "../log",
@@ -33,12 +34,14 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
     beforeAll(async () => {
         root = tempFiles.tempDirectory({ suffix: "-trash-suite" });
         trashRoot = path.join(root, "trash-root");
+
         const setup = await startServerAndAgent({
             processManager,
             agentName: AGENT_NAME,
             agentCwd: root,
             agentEnv: { REDOOR_AGENT_TRASH_DIRECTORY: trashRoot },
         });
+
         testAgent = setup.testAgent;
     }, 30000);
 
@@ -67,6 +70,7 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
         const listing = await testAgent.listTrash();
         const items = listing.locations.flatMap((location) => location.items);
         const fileItem = items.find((item) => item.original_path === file);
+
         const symlinkItem = items.find(
             (item) => item.original_path === symlink,
         );
@@ -78,12 +82,15 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
             expect.arrayContaining([file, directory, symlink]),
         );
         expect(fileItem).toBeDefined();
+
         if (!fileItem) {
             throw new Error("Trashed file was not listed");
         }
+
         if (!symlinkItem) {
             throw new Error("Trashed symlink was not listed");
         }
+
         const payload = path.join(trashRoot, "files", fileItem.name);
         // Device and inode continuity prove publication used rename semantics.
         expect((await fs.lstat(payload)).dev).toBe(before.dev);
@@ -98,9 +105,11 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
                 await fs.lstat(path.join(trashRoot, "files", symlinkItem.name))
             ).isSymbolicLink(),
         ).toBe(true);
+
         const logs = await waitForValue({
             predicate: async () => {
                 const contents = await fs.readFile(AGENT_LOG_PATH, "utf8");
+
                 return contents.includes(
                     `Trash operation completed: path=${symlink}`,
                 )
@@ -109,6 +118,7 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
             },
             description: "detailed trash debug lifecycle",
         });
+
         // Request logging provides the original operator-selected path before normalization.
         expect(logs).toContain(`Trash operation requested: path=${file}`);
         // Provider selection identifies the exact trash root chosen for diagnosis.
@@ -142,9 +152,11 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
             testAgent.deleteFile(first, { trash: true }),
             testAgent.deleteFile(second, { trash: true }),
         ]);
+
         const items = (await testAgent.listTrash()).locations.flatMap(
             (location) => location.items,
         );
+
         const duplicates = items.filter(
             (item) =>
                 item.original_path === first || item.original_path === second,
@@ -161,9 +173,11 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
         await fs.writeFile(orphan, "existing orphan contents");
 
         await testAgent.deleteFile(source, { trash: true });
+
         const item = (await testAgent.listTrash()).locations
             .flatMap((location) => location.items)
             .find((entry) => entry.original_path === source);
+
         if (!item) {
             throw new Error("Trashed collision source was not listed");
         }
@@ -185,12 +199,15 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
         const before = await fs.lstat(source);
         await testAgent.deleteFile(source, { trash: true });
         const listing = await testAgent.listTrash();
+
         const location = listing.locations.find((entry) =>
             entry.items.some((item) => item.original_path === source),
         );
+
         const item = location?.items.find(
             (entry) => entry.original_path === source,
         );
+
         if (!location || !item) {
             throw new Error("Restore item was not listed");
         }
@@ -218,15 +235,19 @@ describe.skipIf(process.platform !== "linux")("Trash API", () => {
         await fs.writeFile(source, "trashed contents");
         await testAgent.deleteFile(source, { trash: true });
         const listing = await testAgent.listTrash();
+
         const location = listing.locations.find((entry) =>
             entry.items.some((item) => item.original_path === source),
         );
+
         const item = location?.items.find(
             (entry) => entry.original_path === source,
         );
+
         if (!location || !item) {
             throw new Error("Conflict item was not listed");
         }
+
         await fs.writeFile(source, "occupied");
 
         const restore = testAgent.restoreTrashItem({
@@ -309,12 +330,15 @@ DeletionDate=2020-01-01T00:00:00
         await fs.writeFile(source, "custom destination contents");
         await testAgent.deleteFile(source, { trash: true });
         const listing = await testAgent.listTrash();
+
         const location = listing.locations.find((entry) =>
             entry.items.some((item) => item.original_path === source),
         );
+
         const item = location?.items.find(
             (entry) => entry.original_path === source,
         );
+
         if (!location || !item) {
             throw new Error("Custom-destination item was not listed");
         }
@@ -338,21 +362,27 @@ DeletionDate=2020-01-01T00:00:00
     it("restores across devices through the existing transfer path", async () => {
         const sharedMemory = "/dev/shm";
         let sharedMemoryStats: Awaited<ReturnType<typeof fs.stat>>;
+
         try {
             sharedMemoryStats = await fs.stat(sharedMemory);
             await fs.access(sharedMemory, fs.constants.W_OK);
         } catch {
             return;
         }
+
         const rootStats = await fs.stat(root);
+
         if (sharedMemoryStats.dev === rootStats.dev) {
             return;
         }
+
         const source = path.join(root, "cross-device-restore-directory");
+
         const destination = path.join(
             sharedMemory,
             `redoor-trash-restore-${process.pid}`,
         );
+
         await fs.mkdir(source);
         await fs.writeFile(path.join(source, "value.txt"), "restored contents");
         await fs.symlink("value.txt", path.join(source, "value-link"));
@@ -361,12 +391,15 @@ DeletionDate=2020-01-01T00:00:00
         });
         await testAgent.deleteFile(source, { trash: true });
         const listing = await testAgent.listTrash();
+
         const location = listing.locations.find((entry) =>
             entry.items.some((item) => item.original_path === source),
         );
+
         const item = location?.items.find(
             (entry) => entry.original_path === source,
         );
+
         if (!location || !item) {
             throw new Error("Cross-device restore item was not listed");
         }
@@ -395,20 +428,25 @@ DeletionDate=2020-01-01T00:00:00
     it("rejects a forced trash root on another device without copying", async () => {
         const sharedMemory = "/dev/shm";
         let sharedMemoryStats: Awaited<ReturnType<typeof fs.stat>>;
+
         try {
             sharedMemoryStats = await fs.stat(sharedMemory);
             await fs.access(sharedMemory, fs.constants.W_OK);
         } catch {
             return;
         }
+
         const rootStats = await fs.stat(root);
+
         if (sharedMemoryStats.dev === rootStats.dev) {
             return;
         }
+
         const source = path.join(
             sharedMemory,
             `redoor-trash-cross-device-${process.pid}`,
         );
+
         await fs.writeFile(source, "must remain");
         onTestFinished(async () => {
             await fs.rm(source, { force: true });

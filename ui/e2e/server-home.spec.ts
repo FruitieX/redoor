@@ -28,6 +28,7 @@ test.describe("Server home", () => {
                     offset: 43,
                 }),
             ];
+
             await route.fulfill({ json: { transfers } });
         });
 
@@ -36,6 +37,7 @@ test.describe("Server home", () => {
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         const transfersTab = panel.getByRole("tab", { name: /Transfers/ });
         // Active work prioritizes its completion percentage in the compact tab badge.
         await expect(transfersTab).toContainText("50%");
@@ -68,9 +70,11 @@ test.describe("Server home", () => {
         });
 
         await page.goto(`${WEB_BASE_URL}/`);
+
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         await panel.getByRole("tab", { name: /Transfers/ }).press("Enter");
 
         // Completed history stays off the drawer; the empty copy points to the full list.
@@ -107,9 +111,11 @@ test.describe("Server home", () => {
         });
 
         await page.goto(`${WEB_BASE_URL}/`);
+
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         const transfersTab = panel.getByRole("tab", { name: /Transfers/ });
         // The only active transfer is also the one expected to finish last.
         await expect(transfersTab).toContainText(/\d+%/);
@@ -118,14 +124,17 @@ test.describe("Server home", () => {
         const progress = panel.getByRole("img", {
             name: /Transfer progress \d+% .+\/s/,
         });
+
         // Percent comes first so the row reads as completion, then rate, then ETA.
         await expect(progress).toHaveAttribute(
             "aria-label",
             /Transfer progress \d+% .+\/s .+ remaining$/,
         );
+
         const activeTransfer = panel
             .getByRole("row")
             .filter({ hasText: "active.bin" });
+
         // The visible row summary presents the same progress details as the accessible label.
         await expect(
             activeTransfer.getByText(/\d+% .+\/s .+ remaining$/),
@@ -142,6 +151,7 @@ test.describe("Server home", () => {
         const startedAt = Math.floor(Date.now() / 1000) - 10;
         let totalBytes = 0;
         let sendTransfersChanged = () => {};
+
         await page.routeWebSocket("**/api/v1/ui/ws", (ws) => {
             const server = ws.connectToServer();
             ws.onMessage((message) => {
@@ -178,17 +188,21 @@ test.describe("Server home", () => {
         });
 
         await page.goto(`${WEB_BASE_URL}/`);
+
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         await panel.getByRole("tab", { name: /Transfers/ }).press("Enter");
 
         const archiveRow = panel
             .getByRole("row")
             .filter({ hasText: "archive-dir" });
+
         const measuringBadge = archiveRow.getByRole("img", {
             name: "Archive size is still being calculated",
         });
+
         // Unknown totals must keep transferred bytes visible without inventing a percent.
         await expect(measuringBadge).toBeVisible();
         await expect(archiveRow.getByText("47.7 MB")).toBeVisible();
@@ -224,6 +238,7 @@ test.describe("Server home", () => {
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         const scrollArea = page.getByRole("main");
 
         await expect(
@@ -235,6 +250,7 @@ test.describe("Server home", () => {
             .poll(async () => {
                 const inset = await readBottomChromeHeight(scrollArea);
                 const panelHeight = (await panel.boundingBox())?.height ?? 0;
+
                 return Math.abs(inset - panelHeight);
             })
             .toBeLessThan(1);
@@ -250,6 +266,7 @@ test.describe("Server home", () => {
                 const inset = await readBottomChromeHeight(scrollArea);
                 const scrollPadding = await readBottomScrollPadding(scrollArea);
                 const panelHeight = (await panel.boundingBox())?.height ?? 0;
+
                 return {
                     matchesPanel: Math.abs(inset - panelHeight) < 1,
                     matchesScrollPadding: Math.abs(scrollPadding - inset) < 1,
@@ -277,13 +294,16 @@ test.describe("Server home", () => {
         ).toBeVisible();
 
         const browserUrl = new URL(page.url());
+
         const serverProtocol =
             browserUrl.protocol === "https:" ? "https:" : "http:";
+
         const expectedConfig = `agent_token = "test-agent-token"
 
 [agent]
 server = "${serverProtocol}//${browserUrl.host}"
 `;
+
         // Exact text proves the browser generated a complete config from the real token and its own origin.
         await expect(config).toHaveText(expectedConfig);
         // Omitting both options preserves hostname naming and conventional file logging defaults.
@@ -296,15 +316,19 @@ server = "${serverProtocol}//${browserUrl.host}"
         await page.goto(`${WEB_BASE_URL}/`);
 
         const agentNames = page.getByRole("region", { name: "Device names" });
+
         const serverHeading = page.getByRole("heading", {
             name: "Server",
             exact: true,
         });
+
         const appName = page.getByRole("heading", { name: "App name" });
+
         const firstAgent = agentNames.getByRole("link", {
             name: "agent1_src",
             exact: true,
         });
+
         const secondAgent = agentNames.getByRole("link", {
             name: "agent2_custom",
             exact: true,
@@ -345,9 +369,11 @@ server = "${serverProtocol}//${browserUrl.host}"
         await page.goto(`${WEB_BASE_URL}/`);
 
         const agentNames = page.getByRole("region", { name: "Device names" });
+
         const openSidebar = agentNames.getByRole("button", {
             name: "Open device sidebar",
         });
+
         // The device list must expose a control for opening the navigation drawer.
         await expect(openSidebar).toBeVisible();
         await openSidebar.click();
@@ -389,6 +415,7 @@ function createTransfers(
     },
 ) {
     const offset = options?.offset ?? 0;
+
     return Array.from({ length: count }, (_value, index) => ({
         request_id: offset + index + 1,
         agent_id: "agent-1",

@@ -63,6 +63,7 @@ test.describe.serial("Bookmarks", () => {
         const agentBookmarks = page.getByRole("list", {
             name: `${ctx.agentName} bookmarks`,
         });
+
         // The right panel must nest the bookmark under the agent that owns the path.
         await expect(
             agentBookmarks.getByRole("link", { name: fileName, exact: true }),
@@ -138,6 +139,7 @@ test.describe.serial("Bookmarks", () => {
         const agentBookmarks = page.getByRole("list", {
             name: `${ctx.agentName} bookmarks`,
         });
+
         // The details kebab must write the same user-state list as the file-row menu.
         await expect(
             agentBookmarks.getByRole("link", { name: fileName, exact: true }),
@@ -167,15 +169,19 @@ test.describe.serial("Bookmarks", () => {
             page.getByRole("button", { name: "Bookmark", exact: true }),
         ).toHaveCount(0);
         await page.getByRole("button", { name: "Editor actions" }).click();
+
         const editorActions = page.getByRole("dialog", {
             name: "Editor actions",
         });
+
         await editorActions
             .getByRole("button", { name: "Bookmark", exact: true })
             .click();
+
         const agentBookmarks = page.getByRole("list", {
             name: `${ctx.agentName} bookmarks`,
         });
+
         // The editor menu must add the same file represented by the details path menu.
         await expect(
             agentBookmarks.getByRole("link", { name: fileName, exact: true }),
@@ -195,6 +201,7 @@ test.describe.serial("Bookmarks", () => {
         page,
     }) => {
         const thirdName = "file3.txt";
+
         const agent1Bookmarks = ["file1.txt", "file2.txt", thirdName].map(
             (name) => ({
                 agentId: ctx.agentId,
@@ -203,6 +210,7 @@ test.describe.serial("Bookmarks", () => {
                 entryType: "file" as const,
             }),
         );
+
         const agent2Bookmarks = [
             {
                 agentId: ctx.agent2Id,
@@ -217,6 +225,7 @@ test.describe.serial("Bookmarks", () => {
                 entryType: "directory" as const,
             },
         ];
+
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
         await api.updateUserState({
@@ -233,12 +242,15 @@ test.describe.serial("Bookmarks", () => {
         });
         await page.goto(`${WEB_BASE_URL}/`);
         const deviceList = page.getByRole("list", { name: "Device list" });
+
         const firstBookmarks = deviceList
             .getByRole("listitem", { name: `Device ${ctx.agentName}` })
             .getByRole("list", { name: `${ctx.agentName} bookmarks` });
+
         const secondBookmarks = deviceList
             .getByRole("listitem", { name: "Device agent2_custom" })
             .getByRole("list", { name: "agent2_custom bookmarks" });
+
         await expect(firstBookmarks.getByRole("link")).toHaveText([
             "file1.txt",
             "file2.txt",
@@ -257,16 +269,20 @@ test.describe.serial("Bookmarks", () => {
                 puts += 1;
             }
         });
+
         const handle = firstBookmarks.getByRole("listitem", {
             name: `Bookmark ${thirdName} on ${ctx.agentName}`,
         });
+
         const otherList = secondBookmarks;
         await page.mouse.move(0, 0);
         const start = await handle.boundingBox();
         const outside = await otherList.boundingBox();
+
         if (!start || !outside) {
             throw new Error("Expected bookmark lists to be visible");
         }
+
         await page.mouse.move(
             start.x + start.width / 2,
             start.y + start.height / 2,

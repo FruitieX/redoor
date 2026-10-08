@@ -37,21 +37,27 @@ test.describe.serial("File Detail View", () => {
         if (homeSyncFilename === null) {
             return;
         }
+
         const filename = homeSyncFilename;
+
         if (!/^tilde-sync-\d+\.txt$/.test(filename)) {
             throw new Error(
                 `Refusing to clean unsafe path: ${homeSyncFilename}`,
             );
         }
+
         const workspaceRoot = path.resolve(path.dirname(ctx.testDirPath));
         const actualHome = path.resolve(os.homedir());
+
         const safeAgentHomes = [ctx.agentHome, ctx.agent2Home].map(
             (agentHome) => {
                 const resolvedAgentHome = path.resolve(agentHome);
+
                 const relativeHome = path.relative(
                     workspaceRoot,
                     resolvedAgentHome,
                 );
+
                 if (
                     resolvedAgentHome === actualHome ||
                     relativeHome === ".." ||
@@ -62,9 +68,11 @@ test.describe.serial("File Detail View", () => {
                         `Refusing to clean files under unsafe agent home: ${resolvedAgentHome}`,
                     );
                 }
+
                 return resolvedAgentHome;
             },
         );
+
         await Promise.all(
             safeAgentHomes.map((agentHome) =>
                 fs.rm(path.join(agentHome, filename), { force: true }),
@@ -133,9 +141,11 @@ test.describe.serial("File Detail View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?view=details`,
         );
+
         const ownerExecute = page.getByRole("checkbox", {
             name: "Owner Execute",
         });
+
         // Starting unchecked proves the grid reflects the known 0644 fixture rather than a stale mode.
         await expect(ownerExecute).not.toBeChecked();
         await ownerExecute.click();
@@ -166,14 +176,17 @@ test.describe.serial("File Detail View", () => {
         page,
     }) => {
         const wideMarker = "W".repeat(240);
+
         const sourcePath = path.join(
             ctx.testDirPath,
             `sync-source-${Date.now()}.txt`,
         );
+
         const destinationPath = path.join(
             ctx.testDirPath,
             `sync-dest-${Date.now()}.txt`,
         );
+
         await fs.writeFile(sourcePath, `left-${wideMarker}\n`);
         await fs.writeFile(destinationPath, `right-${wideMarker}\n`);
         await page.goto(
@@ -196,6 +209,7 @@ test.describe.serial("File Detail View", () => {
         const confirmation = page.getByRole("dialog", {
             name: "Copy file?",
         });
+
         // Copy must not probe conflicts or start a transfer until it is explicitly confirmed.
         await expect(confirmation).toBeVisible();
         await confirmation.getByRole("button", { name: "Cancel" }).click();
@@ -212,6 +226,7 @@ test.describe.serial("File Detail View", () => {
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // An existing destination must ask for a policy instead of starting the copy.
         await expect(dialog).toBeVisible();
         await dialog.getByRole("radio", { name: "Replace existing" }).check();
@@ -232,10 +247,12 @@ test.describe.serial("File Detail View", () => {
         // Signed fragments prove both endpoints reached the unified-diff API through Sync.
         await expect(diff.getByText(/left-/)).toBeVisible();
         await expect(diff.getByText(/right-/)).toBeVisible();
+
         const overflow = await diff.evaluate((element) => ({
             scrollWidth: element.scrollWidth,
             clientWidth: element.clientWidth,
         }));
+
         // A wide hunk must scroll inside the labeled region instead of clipping the page.
         expect(overflow.scrollWidth).toBeGreaterThan(overflow.clientWidth);
         await expect(
@@ -303,14 +320,17 @@ test.describe.serial("File Detail View", () => {
             ctx.testDirPath,
             `sync-direction-current-${Date.now()}.txt`,
         );
+
         const selectedPath = path.join(
             ctx.testDirPath,
             `sync-direction-selected-${Date.now()}.txt`,
         );
+
         const changedSelectedPath = path.join(
             ctx.testDirPath,
             `sync-direction-changed-${Date.now()}.txt`,
         );
+
         await fs.writeFile(currentPath, "current endpoint\n");
         await fs.writeFile(selectedPath, "selected endpoint\n");
         await fs.writeFile(changedSelectedPath, "changed selected endpoint\n");
@@ -332,16 +352,20 @@ test.describe.serial("File Detail View", () => {
         const forwardDirection = page.getByRole("radio", {
             name: "Send",
         });
+
         const reverseDirection = page.getByRole("radio", {
             name: "Receive",
         });
+
         // Existing Sync behavior remains selected by default for bookmarked workflows.
         await expect(forwardDirection).toBeChecked();
+
         const forwardDiffRequest = page.waitForRequest(
             (request) =>
                 request.url().endsWith("/api/v1/diff") &&
                 request.method() === "POST",
         );
+
         await page.getByRole("button", { name: "Diff", exact: true }).click();
         const forwardDiffBody = (await forwardDiffRequest).postDataJSON();
         // The default direction sends the browser file as the ordered left input.
@@ -350,13 +374,16 @@ test.describe.serial("File Detail View", () => {
             right: { agent: ctx.agent2Id, path: selectedPath },
         });
         const forwardDiff = page.getByRole("region", { name: "File diff" });
+
         // Rendered signs must describe the current endpoint as the source side.
         const forwardCurrentRow = forwardDiff
             .getByRole("row")
             .filter({ hasText: "current endpoint" });
+
         const forwardSelectedRow = forwardDiff
             .getByRole("row")
             .filter({ hasText: "selected endpoint" });
+
         await expect(
             forwardCurrentRow.getByText("-", { exact: true }),
         ).toBeVisible();
@@ -369,11 +396,13 @@ test.describe.serial("File Detail View", () => {
         await expect(
             page.getByRole("region", { name: "File diff" }),
         ).toHaveCount(0);
+
         const reverseDiffRequest = page.waitForRequest(
             (request) =>
                 request.url().endsWith("/api/v1/diff") &&
                 request.method() === "POST",
         );
+
         await page.getByRole("button", { name: "Diff", exact: true }).click();
         const reverseDiffBody = (await reverseDiffRequest).postDataJSON();
         // Reverse mode swaps the API inputs so deletion and addition signs follow transfer direction.
@@ -382,13 +411,16 @@ test.describe.serial("File Detail View", () => {
             right: { agent: ctx.agentId, path: currentPath },
         });
         const reverseDiff = page.getByRole("region", { name: "File diff" });
+
         // Reversing the endpoint order must reverse the visible removal and addition rows.
         const reverseSelectedRow = reverseDiff
             .getByRole("row")
             .filter({ hasText: "selected endpoint" });
+
         const reverseCurrentRow = reverseDiff
             .getByRole("row")
             .filter({ hasText: "current endpoint" });
+
         await expect(
             reverseSelectedRow.getByText("-", { exact: true }),
         ).toBeVisible();
@@ -413,9 +445,11 @@ test.describe.serial("File Detail View", () => {
             .getByRole("dialog", { name: "Copy file?" })
             .getByRole("button", { name: "Confirm copy" })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // Reverse conflict detection probes the current browser path, not the selected source.
         await expect(dialog).toBeVisible();
         await dialog.getByRole("radio", { name: "Replace existing" }).check();
@@ -430,17 +464,21 @@ test.describe.serial("File Detail View", () => {
 
         await fs.writeFile(changedSelectedPath, "moved selected endpoint\n");
         let releaseMoveRequest: (() => void) | undefined;
+
         const moveRequestBlocked = new Promise<void>((resolve) => {
             releaseMoveRequest = resolve;
         });
+
         await page.route("**/api/v1/move", async (route) => {
             await moveRequestBlocked;
             await route.continue();
         });
         await page.getByRole("button", { name: "Move", exact: true }).click();
+
         const moveConfirmation = page.getByRole("dialog", {
             name: "Move file?",
         });
+
         // Move requires an explicit destructive confirmation before conflict handling.
         await expect(moveConfirmation).toBeVisible();
         await moveConfirmation
@@ -472,18 +510,22 @@ test.describe.serial("File Detail View", () => {
             ctx.testDirPath,
             `sync-missing-source-${Date.now()}.txt`,
         );
+
         const copyDestinationPath = path.join(
             ctx.testDirPath,
             `sync-missing-dest-${Date.now()}.txt`,
         );
+
         const moveSourcePath = path.join(
             ctx.testDirPath,
             `sync-move-source-${Date.now()}.txt`,
         );
+
         const moveDestinationPath = path.join(
             ctx.testDirPath,
             `sync-move-dest-${Date.now()}.txt`,
         );
+
         await fs.writeFile(sourcePath, "copy-missing\n");
         await fs.writeFile(moveSourcePath, "move-new\n");
         await page.goto(
@@ -578,10 +620,12 @@ test.describe.serial("File Detail View", () => {
 
         await page.getByRole("button", { name: "More", exact: true }).click();
         const fileActions = page.getByRole("dialog", { name: "More" });
+
         const selectFile = fileActions.getByRole("button", {
             name: "Select",
             exact: true,
         });
+
         // An unselected path must render the empty checkbox, not a checked icon.
         await expect(selectFile).toHaveAttribute("aria-pressed", "false");
         await selectFile.click();
@@ -602,10 +646,12 @@ test.describe.serial("File Detail View", () => {
         ).toBeVisible();
 
         await page.getByRole("button", { name: "More", exact: true }).click();
+
         const unselectFile = fileActions.getByRole("button", {
             name: "Unselect",
             exact: true,
         });
+
         // Reopening the menu must show the path as already selected.
         await expect(unselectFile).toHaveAttribute("aria-pressed", "true");
         await unselectFile.click();
@@ -629,10 +675,12 @@ test.describe.serial("File Detail View", () => {
 
         await page.getByRole("button", { name: "More", exact: true }).click();
         const moreMenu = page.getByRole("dialog", { name: "More" });
+
         const selectDirectory = moreMenu.getByRole("button", {
             name: "Select",
             exact: true,
         });
+
         // Directory details had no object menu before, so selection must work from this header.
         await expect(selectDirectory).toHaveAttribute("aria-pressed", "false");
         await selectDirectory.click();
@@ -659,6 +707,7 @@ test.describe.serial("File Detail View", () => {
             name: "Go to the parent directory",
             exact: true,
         });
+
         await backButton.click();
 
         // This confirms returning from detail view restores the file list without matching the selection control cell.
@@ -702,6 +751,7 @@ test.describe.serial("File Detail View", () => {
             name: ctx.agentName,
             exact: true,
         });
+
         await backToAgentButton.click();
 
         await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentId}$`));
@@ -724,6 +774,7 @@ test.describe.serial("File Detail View", () => {
             name: "Go to the parent directory",
             exact: true,
         });
+
         await backLink.click();
 
         // These assertions verify the nested directory listing is restored after using the back link.
@@ -749,9 +800,11 @@ test.describe.serial("File Detail View", () => {
         const shareableLinks = page.getByRole("region", {
             name: "Shareable links",
         });
+
         const createLinkButton = shareableLinks.getByRole("button", {
             name: "Create shareable link",
         });
+
         await expect(createLinkButton).toBeVisible();
 
         // Metadata loading must only return existing tokens and must not create one as a side effect.
@@ -768,11 +821,13 @@ test.describe.serial("File Detail View", () => {
         const oneTimeLinks = shareableLinks.getByRole("link", {
             name: /\?one_time_token=/,
         });
+
         // Two independently created links prove creation remains available after the first request succeeds.
         await expect(oneTimeLinks).toHaveCount(2);
 
         const firstUrl = await oneTimeLinks.nth(0).getAttribute("href");
         const secondUrl = await oneTimeLinks.nth(1).getAttribute("href");
+
         if (firstUrl === null || secondUrl === null) {
             throw new Error("Shareable links did not expose their URLs");
         }
@@ -823,6 +878,7 @@ test.describe.serial("File Detail View", () => {
         const reloadedShareableLinks = page.getByRole("region", {
             name: "Shareable links",
         });
+
         // Reloaded metadata must omit the consumed token so its stale link disappears.
         await expect(
             reloadedShareableLinks.getByRole("link", {

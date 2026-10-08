@@ -3,7 +3,9 @@ import { onTestFinished } from "vitest";
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
 
 export type JsonPrimitive = string | number | boolean | null;
+
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
+
 export type JsonObject = { [key: string]: JsonValue };
 
 export type McpRequestMetadata = {
@@ -40,10 +42,12 @@ type McpOperationContent = JsonObject & {
 /** Encodes mirrored name values using the 2026-07-28 HTTP sentinel rules. */
 function encodeHeaderValue(value: string): string {
     const safe = /^[\x20-\x7e]+$/.test(value);
+
     const needsEncoding =
         !safe ||
         value.trim() !== value ||
         (value.startsWith("=?base64?") && value.endsWith("?="));
+
     return needsEncoding
         ? `=?base64?${Buffer.from(value).toString("base64")}?=`
         : value;
@@ -111,9 +115,11 @@ export class McpTestClient {
         timeoutMs: number = 30_000,
     ) {
         const deadline = Date.now() + timeoutMs;
+
         for (;;) {
             const response = await this.getOperation(operationId);
             const state = response.result.structuredContent?.state;
+
             if (
                 state !== undefined &&
                 [
@@ -127,11 +133,13 @@ export class McpTestClient {
             ) {
                 return response;
             }
+
             if (Date.now() >= deadline) {
                 throw new Error(
                     `Timed out waiting for operation ${operationId}`,
                 );
             }
+
             await new Promise<void>((resolve) => setTimeout(resolve, 20));
         }
     }
@@ -161,6 +169,7 @@ export class McpTestClient {
         const controller = new AbortController();
         this.requests.add(controller);
         const requestMetadata = { ...this.metadata, ...options.metadata };
+
         const headers = new Headers({
             Authorization: `Bearer ${this.token}`,
             Accept: "application/json, text/event-stream",
@@ -170,9 +179,11 @@ export class McpTestClient {
             ),
             "Mcp-Method": method,
         });
+
         if (options.mirroredName !== undefined) {
             headers.set("Mcp-Name", encodeHeaderValue(options.mirroredName));
         }
+
         try {
             const response = await fetch(this.endpoint, {
                 method: "POST",
@@ -185,14 +196,17 @@ export class McpTestClient {
                 }),
                 signal: controller.signal,
             });
+
             const body: McpResponse<TResult> & {
                 error?: { code: number; message: string };
             } = await response.json();
+
             if (!response.ok || body.error !== undefined) {
                 throw new Error(
                     `MCP ${method} failed (${response.status}): ${JSON.stringify(body.error ?? body)}`,
                 );
             }
+
             return body;
         } finally {
             this.requests.delete(controller);
@@ -204,6 +218,7 @@ export class McpTestClient {
         for (const request of this.requests) {
             request.abort();
         }
+
         this.requests.clear();
     }
 }
@@ -223,6 +238,8 @@ export function createMcpTestClient(options: {
         },
         ...options.metadata,
     });
+
     onTestFinished(() => client.close());
+
     return client;
 }

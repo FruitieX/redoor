@@ -23,8 +23,10 @@ import type { CancelExecutionResponse } from "#bindings/CancelExecutionResponse"
 describe("Remote exec and non-shell streaming API", () => {
     const processes = new ProcessManager();
     const files = new TempFileManager();
+
     const binary =
         process.env.REDOOR_TEST_BINARY ?? path.resolve("target/debug/redoor");
+
     let setup: Awaited<ReturnType<typeof startServerAndAgent>>;
     let home: string;
 
@@ -98,6 +100,7 @@ describe("Remote exec and non-shell streaming API", () => {
     function gone(pid: number): boolean {
         try {
             process.kill(pid, 0);
+
             return false;
         } catch {
             return true;
@@ -114,6 +117,7 @@ describe("Remote exec and non-shell streaming API", () => {
             "a=b",
             "雪",
         ];
+
         const output = await exec(
             setup.testAgent.id,
             "--",
@@ -121,6 +125,7 @@ describe("Remote exec and non-shell streaming API", () => {
             "<%s>",
             ...values,
         );
+
         // Literal output distinguishes direct argv execution from accidental shell quoting or evaluation.
         expect(output.exitCode, output.stderr).toBe(0);
         expect(output.stdout).toBe(
@@ -133,6 +138,7 @@ describe("Remote exec and non-shell streaming API", () => {
 
     it("sets cwd and repeated environment overrides, preserves stderr and returns a remote failure", async () => {
         const cwd = files.tempDirectory();
+
         const output = await exec(
             "--cwd",
             cwd,
@@ -148,6 +154,7 @@ describe("Remote exec and non-shell streaming API", () => {
             "-c",
             'printf "%s|%s|%s" "$PWD" "$VALUE" "$EMPTY"; printf "remote stderr" >&2; exit 37',
         );
+
         // Distinct streams and the exact exit code must survive a successfully transported command failure.
         expect(output.stdout).toBe(`${cwd}|a=b|`);
         expect(output.stderr).toBe("remote stderr");
@@ -163,6 +170,7 @@ describe("Remote exec and non-shell streaming API", () => {
             "-c",
             "printf '\\000\\377'; printf err >&2; exit 125",
         );
+
         const records = events(output.stdout);
         // A reserved remote exit code remains distinguishable from API/transport error events.
         expect(output.exitCode).toBe(125);
@@ -193,12 +201,14 @@ describe("Remote exec and non-shell streaming API", () => {
             "--",
             "/no/such/redoor-exec-command",
         );
+
         // Spawn errors have no remote exit status; a missing agent is an API failure with the same local category.
         expect(missing.exitCode).toBe(125);
         expect(events(missing.stdout).at(-1)?.type).toBe("error");
         const absent = await exec("--json", "absent-agent", "--", "true");
         expect(absent.exitCode).toBe(125);
         expect(events(absent.stdout).at(-1)?.type).toBe("error");
+
         for (const args of [
             ["--timeout", "0s"],
             ["--env", "=value"],
@@ -210,15 +220,18 @@ describe("Remote exec and non-shell streaming API", () => {
                 "--",
                 "true",
             );
+
             // Parser validation must happen before any remote process is admitted.
             expect(invalid.exitCode).toBe(2);
         }
+
         const separator = await exec(setup.testAgent.id, "true");
         expect(separator.exitCode).toBe(2);
     });
 
     it("enforces timeout on the agent and reaps the process", async () => {
         const pidFile = path.join(files.tempDirectory(), "pid");
+
         const output = await exec(
             "--json",
             "--timeout",
@@ -231,6 +244,7 @@ describe("Remote exec and non-shell streaming API", () => {
             "sh",
             pidFile,
         );
+
         const pid = Number(await fs.readFile(pidFile, "utf8"));
         // Agent-side timeout must terminate work rather than merely ending the HTTP wait.
         expect(output.exitCode).toBe(124);
@@ -245,6 +259,7 @@ describe("Remote exec and non-shell streaming API", () => {
         "forwards %s interruption to remote cancellation",
         async (signal) => {
             const pidFile = path.join(files.tempDirectory(), "pid");
+
             const command = exec(
                 "--json",
                 setup.testAgent.id,
@@ -255,18 +270,22 @@ describe("Remote exec and non-shell streaming API", () => {
                 "sh",
                 pidFile,
             );
+
             onTestFinished(async () => {
                 if (command.output === null) await command.kill("SIGKILL");
             });
+
             const pid = await waitForValue({
                 description: "remote command started",
                 predicate: async () => {
                     const text = await fs
                         .readFile(pidFile, "utf8")
                         .catch(() => "");
+
                     return Number(text) || undefined;
                 },
             });
+
             await command.kill(signal);
             const output = await command;
             // Local interruption keeps exit 130 but cannot claim agent-acknowledged termination after closing HTTP.
@@ -286,6 +305,7 @@ describe("Remote exec and non-shell streaming API", () => {
         const abort = new AbortController();
         onTestFinished(() => abort.abort());
         const pidFile = path.join(files.tempDirectory(), "pid");
+
         const response = await api(
             {
                 argv: [
@@ -301,7 +321,9 @@ describe("Remote exec and non-shell streaming API", () => {
             },
             abort.signal,
         );
+
         const reader = response.body?.getReader();
+
         if (reader === undefined) throw new Error("Missing execution body");
         onTestFinished(async () => {
             await reader.cancel().catch(() => undefined);
@@ -318,22 +340,28 @@ describe("Remote exec and non-shell streaming API", () => {
         const id = response.headers.get("X-Redoor-Execution-Id");
         // Execution output must never create a path-bearing file-transfer entry, even while active.
         expect((await setup.apiClient.getTransferProgress()).transfers).toEqual([]);
+
         const wrongAgent = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/agents/another-agent/exec/${id}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         // An execution id cannot authorize cancellation under a different agent's resource.
         expect(wrongAgent.status).toBe(404);
+
         const fileCancellation = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/transfers/${id}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         // Shared transport ids do not make executions cancellable as filesystem transfers.
         expect(fileCancellation.status).toBe(404);
+
         const canceled = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/agents/${setup.testAgent.id}/exec/${id}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         // Independent control must stop the worker even when the consumer stops reading its infinite output.
         expect(canceled.status).toBe(202);
         const cancellation: CancelExecutionResponse = await canceled.json();
@@ -342,11 +370,14 @@ describe("Remote exec and non-shell streaming API", () => {
         const pid = Number(await fs.readFile(pidFile, "utf8"));
         // Fetch can split NDJSON across reads, so retain the initial bytes when decoding the terminal record.
         let tail = first.value === undefined ? "" : Buffer.from(first.value).toString();
+
         for (;;) {
             const chunk = await reader.read();
+
             if (chunk.done) break;
             tail += Buffer.from(chunk.value).toString();
         }
+
         // The terminal record is an agent acknowledgement, so the child is already reaped when observed.
         expect(events(tail).at(-1)).toEqual({ type: "canceled" });
         expect(gone(pid)).toBe(true);
@@ -362,6 +393,7 @@ describe("Remote exec and non-shell streaming API", () => {
         const abort = new AbortController();
         onTestFinished(() => abort.abort());
         const responses: Response[] = [];
+
         for (let index = 0; index < 32; index++) {
             responses.push(
                 await api(
@@ -375,11 +407,13 @@ describe("Remote exec and non-shell streaming API", () => {
                 ),
             );
         }
+
         const rejected = await exec("--json", setup.testAgent.id, "--", "true");
         // Pre-worker rejection must close the stream rather than hanging forever without an exit event.
         expect(rejected.exitCode, rejected.stderr).toBe(125);
         expect(events(rejected.stdout).at(-1)?.type).toBe("error");
         abort.abort();
+
         for (const response of responses)
             await response.body?.cancel().catch(() => undefined);
         // A real execution proves admission slots were released; transfer history cannot observe execution cleanup.
@@ -403,15 +437,18 @@ describe("Remote exec and non-shell streaming API", () => {
                 timeout_ms: null,
                 ...invalid,
             });
+
             // Malformed process inputs must return an HTTP validation error before command admission.
             expect(response.status).toBe(400);
         }
+
         const response = await api({
             argv: ["sh", "-c", "kill -TERM $$"],
             cwd: null,
             env: {},
             timeout_ms: null,
         });
+
         const records = events(await response.text());
         // A signaled process carries a null code and an explicit signal for scripts.
         expect(records.at(-1)).toEqual({
@@ -419,6 +456,7 @@ describe("Remote exec and non-shell streaming API", () => {
             code: null,
             signal: 15,
         });
+
         const signaled = await exec(
             setup.testAgent.id,
             "--",
@@ -426,6 +464,7 @@ describe("Remote exec and non-shell streaming API", () => {
             "-c",
             "kill -TERM $$",
         );
+
         // Human-mode exit status follows the conventional 128 + signal mapping without status on stdout.
         expect(signaled.exitCode).toBe(143);
         expect(signaled.stdout).toBe("");
@@ -435,30 +474,38 @@ describe("Remote exec and non-shell streaming API", () => {
         const response = await api({
             argv: ["true"], cwd: null, env: {}, timeout_ms: null,
         });
+
         await response.text();
         const id = response.headers.get("X-Redoor-Execution-Id");
+
         const finished = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/agents/${setup.testAgent.id}/exec/${id}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         // Completed output no longer owns an execution resource and must not appear cancellable.
         expect(finished.status).toBe(404);
         const destination = path.join(files.tempDirectory(), "file.txt");
         await setup.testAgent.upload(destination, new File(["content"], "file.txt"));
+
         const transfer = (await setup.apiClient.getTransferProgress()).transfers.find(
             (entry) => entry.path === destination,
         );
+
         if (transfer === undefined) throw new Error("Missing file transfer fixture");
+
         const file = await fetch(
             `${setup.apiClient.baseUrl}/api/v1/agents/${setup.testAgent.id}/exec/${transfer.request_id}`,
             { method: "DELETE", headers: setup.apiClient.getAuthHeaders() },
         );
+
         // Execution cancellation must not accept another resource merely because its numeric id is valid.
         expect(file.status).toBe(404);
     });
 
     it("reports lost transport and stops agent work when its server connection disappears", async () => {
         const pidFile = path.join(files.tempDirectory(), "pid");
+
         const command = exec(
             "--json",
             setup.testAgent.id,
@@ -469,15 +516,18 @@ describe("Remote exec and non-shell streaming API", () => {
             "sh",
             pidFile,
         );
+
         onTestFinished(async () => {
             if (command.output === null) await command.kill("SIGKILL");
         });
+
         const pid = await waitForValue({
             description: "disconnect fixture started",
             predicate: async () =>
                 Number(await fs.readFile(pidFile, "utf8").catch(() => "")) ||
                 undefined,
         });
+
         processes.kill(setup.serverPid);
         const output = await command;
         // Network loss must remain a transport error, while generation teardown kills the remote child.

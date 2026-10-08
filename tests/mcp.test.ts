@@ -40,19 +40,33 @@ import {
 import { registerMcpTransferRegressionTests } from "./mcp-transfer-regressions";
 
 const processManager = new ProcessManager();
+
 const baseUrl = `http://127.0.0.1:${VITEST_SERVER_PORT}`;
+
 const endpoint = `${baseUrl}/mcp`;
+
 const allowedOrigin = "https://allowed-mcp-client.example";
+
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "redoor-mcp-test-"));
+
 const configPath = join(temporaryDirectory, "config.toml");
+
 let activeToken: string;
+
 let deviceToken: string;
+
 let secondDeviceToken: string;
+
 let serverPid: number;
+
 const testDeviceId = "mcp-test-agent";
+
 const secondDeviceId = "mcp-test-agent-two";
+
 const managedDeviceId = "mcp-managed-agent";
+
 const agentRoot = join(temporaryDirectory, "agent-root");
+
 const secondAgentRoot = join(temporaryDirectory, "agent-root-two");
 
 type RawMcpRequest = {
@@ -72,6 +86,7 @@ async function tokenCli(arguments_: string[]): Promise<string> {
             REDOOR_APP_NAME: TEST_APP_NAME,
         },
     })`${SERVER_PATH} server mcp-token ${arguments_}`;
+
     return result.stdout.trim();
 }
 
@@ -83,19 +98,24 @@ async function createToken(options: {
     devices?: string[];
 }): Promise<{ token: string; credentialId: string }> {
     const arguments_ = ["create", "--name", options.name];
+
     if (options.expiresAt !== undefined) {
         arguments_.push("--expires-at", options.expiresAt);
     }
+
     if (options.scopes?.length) {
         arguments_.push("--scopes", options.scopes.join(","));
     }
+
     if (options.devices?.length) {
         arguments_.push("--devices", options.devices.join(","));
     }
+
     const output: {
         token: string;
         credential: { credential_id: string };
     } = JSON.parse(await tokenCli(arguments_));
+
     return {
         token: output.token,
         credentialId: output.credential.credential_id,
@@ -110,12 +130,15 @@ async function rawMcp(options: {
     method?: string;
 }): Promise<Response> {
     const headers = new Headers(options.headers);
+
     if (options.token !== undefined) {
         headers.set("Authorization", `Bearer ${options.token}`);
     }
+
     if (options.body !== undefined) {
         headers.set("Content-Type", "application/json");
     }
+
     return fetch(endpoint, {
         method: options.method ?? "POST",
         headers,
@@ -173,12 +196,15 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
     await waitForPort(VITEST_SERVER_PORT);
     activeToken = (await createToken({ name: "primary test client" })).token;
     const server = processManager.getProcess(serverPid);
+
     if (server === undefined) throw new Error("MCP test server missing");
+
     const registered = waitForLogMessage(
         server,
         new RegExp(`Agent registered:.*agent_name=${testDeviceId}`),
         10_000,
     );
+
     const transferred = waitForAgentTransfer(server, testDeviceId);
     processManager.spawnAgent({
         wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}/ws`,
@@ -187,11 +213,13 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
         home: agentRoot,
     });
     await Promise.all([registered, transferred]);
+
     const secondRegistered = waitForLogMessage(
         server,
         new RegExp(`Agent registered:.*agent_name=${secondDeviceId}`),
         10_000,
     );
+
     const secondTransferred = waitForAgentTransfer(server, secondDeviceId);
     processManager.spawnAgent({
         wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}/ws`,
@@ -200,6 +228,7 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
         home: secondAgentRoot,
     });
     await Promise.all([secondRegistered, secondTransferred]);
+
     const scopes = [
         "devices:read",
         "files:read",
@@ -208,6 +237,7 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
         "commands:execute",
         "agents:manage",
     ];
+
     deviceToken = (
         await createToken({
             name: "device operator",
@@ -333,11 +363,13 @@ describe("stateless authenticated MCP", () => {
                 })
             ).result.structuredContent?.matches,
         ).toEqual([expect.objectContaining({ path: firstPath })]);
+
         const read = await client.callTool("read_file", {
             device_id: testDeviceId,
             path: firstPath,
             encoding: "text",
         });
+
         // Inline reads report exact content and an offset suitable for subsequent chunks.
         expect(read.result.structuredContent).toMatchObject({
             content: "alpha MCP marker",
@@ -362,17 +394,20 @@ describe("stateless authenticated MCP", () => {
             on_existing: "error",
             idempotency_key: "copy-once",
         });
+
         const copyRetry = await client.callTool("copy_path", {
             source: { device_id: testDeviceId, path: firstPath },
             destination: { device_id: testDeviceId, path: copyPath },
             on_existing: "error",
             idempotency_key: "copy-once",
         });
+
         // Retrying the normalized mutation returns the original admission instead of copying twice.
         expect(copyRetry.result.structuredContent?.operation_id).toBe(
             copy.result.structuredContent?.operation_id,
         );
         const copyOperationId = copy.result.structuredContent?.operation_id;
+
         if (copyOperationId === undefined)
             throw new Error("Copy operation missing");
         await client.waitForOperation(copyOperationId);
@@ -386,30 +421,38 @@ describe("stateless authenticated MCP", () => {
             mode: "foreground",
             output_limit: 4096,
         });
+
         const operationId = command.result.structuredContent?.operation_id;
+
         if (operationId === undefined)
             throw new Error("Command operation missing");
+
         const retainedOutput = await client.callTool<
             JsonObject & { content: string }
         >("read_command_output", { operation_id: operationId });
+
         // Only the agent's terminal acknowledgement supplies the real exit status.
         expect(command.result.structuredContent).toMatchObject({
             state: "completed",
             termination: { type: "exit", code: 7 },
         });
+
         // Output pages retain binary-safe event records independently of terminal status.
         const retainedEvents = Buffer.from(
             retainedOutput.result.structuredContent?.content ?? "",
             "base64",
         ).toString();
+
         expect(retainedEvents).toContain('"type":"stdout"');
         expect(retainedEvents).toContain(
             Buffer.from("command-output").toJSON().data.join(","),
         );
+
         const other = createMcpTestClient({
             endpoint,
             token: secondDeviceToken,
         });
+
         // Device permission alone cannot disclose another stable grant's retained output.
         await expect(
             other.callTool("read_command_output", {
@@ -423,15 +466,18 @@ describe("stateless authenticated MCP", () => {
             device_id: testDeviceId,
             path: firstPath,
         });
+
         const streamResponse = await fetch(
             `${baseUrl}${prepared.result.structuredContent?.endpoint}`,
             { headers: { Authorization: `Bearer ${deviceToken}` } },
         );
+
         // Direct bearer streaming moves bytes without embedding the full file in MCP JSON.
         expect(streamResponse.status).toBe(200);
         expect(await streamResponse.text()).toBe("alpha MCP marker");
 
         const uploadedPath = join(agentRoot, "prepared-upload.txt");
+
         const preparedUpload = await client.callTool<
             JsonObject & { endpoint: string }
         >("prepare_file_upload", {
@@ -439,10 +485,12 @@ describe("stateless authenticated MCP", () => {
             path: uploadedPath,
             on_existing: "error",
         });
+
         const uploadResponse = await client.stream(
             `${baseUrl}${preparedUpload.result.structuredContent?.endpoint}`,
             { method: "PUT", body: "streamed upload" },
         );
+
         expect(uploadResponse.status).toBe(200);
         expect(
             (
@@ -454,6 +502,7 @@ describe("stateless authenticated MCP", () => {
             ).result.structuredContent?.content,
         ).toBe("streamed upload");
         const sameDeviceMoved = join(agentRoot, "prepared-upload-moved.txt");
+
         const sameMove = await client.callTool<
             JsonObject & { operation_id: string }
         >("move_path", {
@@ -461,7 +510,9 @@ describe("stateless authenticated MCP", () => {
             destination: { device_id: testDeviceId, path: sameDeviceMoved },
             on_existing: "error",
         });
+
         const sameMoveId = sameMove.result.structuredContent?.operation_id;
+
         if (sameMoveId === undefined)
             throw new Error("Same-device move operation missing");
         expect(
@@ -476,7 +527,9 @@ describe("stateless authenticated MCP", () => {
             destination: { device_id: secondDeviceId, path: movedPath },
             on_existing: "error",
         });
+
         const moveOperationId = move.result.structuredContent?.operation_id;
+
         if (moveOperationId === undefined)
             throw new Error("Move operation missing");
         const completedMove = await client.waitForOperation(moveOperationId);
@@ -496,6 +549,7 @@ describe("stateless authenticated MCP", () => {
             device_id: managedDeviceId,
         });
         let managedConnected = false;
+
         for (
             let attempt = 0;
             attempt < 100 && !managedConnected;
@@ -504,11 +558,14 @@ describe("stateless authenticated MCP", () => {
             const device = await client.callTool<
                 JsonObject & { device: JsonObject & { status: string } }
             >("get_device", { device_id: managedDeviceId });
+
             managedConnected =
                 device.result.structuredContent?.device.status === "connected";
+
             if (!managedConnected)
                 await new Promise<void>((resolve) => setTimeout(resolve, 20));
         }
+
         expect(managedConnected).toBe(true);
         expect(
             (
@@ -543,6 +600,7 @@ describe("stateless authenticated MCP", () => {
 
     it("bounds retained output, cancels background execution, and keeps searches independent", async () => {
         const client = createMcpTestClient({ endpoint, token: deviceToken });
+
         const large = await client.callTool("run_command", {
             device_id: testDeviceId,
             argv: ["sh", "-lc", "head -c 4096 /dev/zero"],
@@ -550,12 +608,14 @@ describe("stateless authenticated MCP", () => {
             mode: "foreground",
             output_limit: 4096,
         });
+
         // The configured per-job quota truncates retention while the process still reaches exit.
         expect(large.result.structuredContent).toMatchObject({
             state: "completed",
             output_size: 512,
             output_truncated: true,
         });
+
         const quotaOperations = await Promise.all(
             Array.from({ length: 10 }, () =>
                 client.callTool<JsonObject & { operation_id: string }>(
@@ -570,6 +630,7 @@ describe("stateless authenticated MCP", () => {
                 ),
             ),
         );
+
         // Parallel admissions cannot collectively retain more than the configured global ceiling.
         expect(
             quotaOperations.some(
@@ -579,20 +640,25 @@ describe("stateless authenticated MCP", () => {
                         true,
             ),
         ).toBe(true);
+
         const expiringOperationId =
             quotaOperations.at(-1)?.result.structuredContent?.operation_id;
+
         if (expiringOperationId === undefined)
             throw new Error("Quota operation missing");
         let expired = false;
+
         for (let attempt = 0; attempt < 200 && !expired; attempt += 1) {
             try {
                 await client.getOperation(expiringOperationId);
             } catch (error) {
                 expired = String(error).includes("(404)");
             }
+
             if (!expired)
                 await new Promise<void>((resolve) => setTimeout(resolve, 20));
         }
+
         // Terminal metadata and its private spool disappear at the configured retention boundary.
         expect(expired).toBe(true);
         const largeDirectory = join(agentRoot, "large-directory");
@@ -607,10 +673,12 @@ describe("stateless authenticated MCP", () => {
             mode: "foreground",
             output_limit: 128,
         });
+
         const listing = await client.callTool("list_directory", {
             device_id: testDeviceId,
             path: largeDirectory,
         });
+
         expect(listing.result.structuredContent).toMatchObject({
             truncated: true,
         });
@@ -624,15 +692,18 @@ describe("stateless authenticated MCP", () => {
             mode: "foreground",
             output_limit: 128,
         });
+
         const prepared = await client.callTool<
             JsonObject & { endpoint: string }
         >("prepare_file_download", {
             device_id: testDeviceId,
             path: largeFile,
         });
+
         const slowResponse = await client.stream(
             `${baseUrl}${prepared.result.structuredContent?.endpoint}`,
         );
+
         expect(slowResponse.status).toBe(200);
         // A deliberately unconsumed large body must not block independent control traffic.
         expect(
@@ -650,7 +721,9 @@ describe("stateless authenticated MCP", () => {
             mode: "background",
             output_limit: 128,
         });
+
         const operationId = background.result.structuredContent?.operation_id;
+
         if (operationId === undefined)
             throw new Error("Background operation missing");
         expect(
@@ -675,6 +748,7 @@ describe("stateless authenticated MCP", () => {
                 }),
             ),
         );
+
         // Each request owns its cancellation token, so concurrent UI/MCP-style scans survive.
         expect(
             searches.every(
@@ -690,19 +764,23 @@ describe("stateless authenticated MCP", () => {
             scopes: ["files:read", "files:write", "files:delete"],
             devices: [testDeviceId],
         });
+
         const destinationOnly = await createToken({
             name: "destination-only transfer",
             scopes: ["files:read", "files:write", "files:delete"],
             devices: [secondDeviceId],
         });
+
         const sourceClient = createMcpTestClient({
             endpoint,
             token: sourceOnly.token,
         });
+
         const destinationClient = createMcpTestClient({
             endpoint,
             token: destinationOnly.token,
         });
+
         const sourcePath = join(agentRoot, "prepared-upload-moved.txt");
         const destinationPath = join(secondAgentRoot, "unauthorized-copy.txt");
         // A source grant cannot infer or write a destination outside its device allowlist.
@@ -734,11 +812,14 @@ describe("stateless authenticated MCP", () => {
             device_id: testDeviceId,
             path: sourcePath,
         });
+
         await tokenCli(["revoke", sourceOnly.credentialId]);
+
         const rejectedStream = await fetch(
             `${baseUrl}${prepared.result.structuredContent?.endpoint}`,
             { headers: { Authorization: `Bearer ${sourceOnly.token}` } },
         );
+
         // Streaming requests authenticate afresh, so a prepared URL survives no revocation.
         expect(rejectedStream.status).toBe(401);
     });
@@ -747,10 +828,12 @@ describe("stateless authenticated MCP", () => {
         const client = createMcpTestClient({ endpoint, token: deviceToken });
         const sourcePath = join(agentRoot, "cleanup-source.bin");
         const retainedOriginal = join(agentRoot, "cleanup-source-original.bin");
+
         const destinationPath = join(
             secondAgentRoot,
             "cleanup-destination.bin",
         );
+
         onTestFinished(() => {
             rmSync(sourcePath, { force: true });
             rmSync(retainedOriginal, { force: true });
@@ -763,6 +846,7 @@ describe("stateless authenticated MCP", () => {
             mode: "foreground",
             output_limit: 128,
         });
+
         const move = await client.callTool<
             JsonObject & { operation_id: string }
         >("move_path", {
@@ -773,7 +857,9 @@ describe("stateless authenticated MCP", () => {
             },
             on_existing: "error",
         });
+
         const operationId = move.result.structuredContent?.operation_id;
+
         if (operationId === undefined)
             throw new Error("Guarded move operation missing");
         renameSync(sourcePath, retainedOriginal);
@@ -808,6 +894,7 @@ describe("stateless authenticated MCP", () => {
 
     it("recovers admitted background work as interrupted after server restart", async () => {
         const client = createMcpTestClient({ endpoint, token: deviceToken });
+
         const started = await client.callTool<
             JsonObject & { operation_id: string }
         >("run_command", {
@@ -817,16 +904,20 @@ describe("stateless authenticated MCP", () => {
             mode: "background",
             output_limit: 128,
         });
+
         const operationId = started.result.structuredContent?.operation_id;
+
         if (operationId === undefined)
             throw new Error("Crash-ambiguity operation missing");
         await processManager.killAndWait(serverPid);
         serverPid = processManager.spawnServer({ config: configPath });
         await waitForPort(VITEST_SERVER_PORT);
+
         const recovered = await createMcpTestClient({
             endpoint,
             token: deviceToken,
         }).getOperation(operationId);
+
         // Restart never claims the unacknowledged remote side effect succeeded or repeats it.
         expect(recovered.result.structuredContent).toMatchObject({
             state: "interrupted",
@@ -834,9 +925,11 @@ describe("stateless authenticated MCP", () => {
                 reason: "server_restarted_before_terminal_acknowledgement",
             },
         });
+
         const cancellation = await client.callTool("cancel_operation", {
             operation_id: operationId,
         });
+
         // Router counters reset on restart; stale work must never send a new cancellation.
         expect(cancellation.result.structuredContent).toMatchObject({
             cancellation_accepted: false,
@@ -858,10 +951,12 @@ describe("stateless authenticated MCP", () => {
 
     it("requires machine bearer credentials despite the non-API public-path exception", async () => {
         const body = requestBody("server/discover");
+
         const headers = {
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
             "Mcp-Method": "server/discover",
         };
+
         const missing = await rawMcp({ body, headers });
         // `/mcp` must not inherit the existing middleware's public non-API exception.
         expect(missing.status).toBe(401);
@@ -875,6 +970,7 @@ describe("stateless authenticated MCP", () => {
             body,
             headers: { ...headers, Cookie: "redoor_session=fake" },
         });
+
         // Browser cookies cannot cross the machine-credential boundary.
         expect(cookieOnly.status).toBe(401);
 
@@ -903,31 +999,37 @@ describe("stateless authenticated MCP", () => {
             "complete",
         );
         let expired = false;
+
         for (let attempt = 0; attempt < 100 && !expired; attempt += 1) {
             try {
                 await client.callTool("hello");
             } catch (error) {
                 expired = String(error).includes("(401)");
             }
+
             if (!expired) {
                 await new Promise<void>((resolve) => setTimeout(resolve, 20));
             }
         }
+
         // Authentication re-reads expiry instead of retaining an accepted in-memory session.
         expect(expired).toBe(true);
     });
 
     it("validates configured browser origins while permitting native clients", async () => {
         const body = requestBody("server/discover");
+
         const common = {
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
             "Mcp-Method": "server/discover",
         };
+
         const rejected = await rawMcp({
             token: activeToken,
             body,
             headers: { ...common, Origin: "https://attacker.example" },
         });
+
         // A present unconfigured Origin is rejected before protocol dispatch.
         expect(rejected.status).toBe(403);
 
@@ -936,6 +1038,7 @@ describe("stateless authenticated MCP", () => {
             body,
             headers: { ...common, Origin: allowedOrigin },
         });
+
         // Explicitly configured browser clients are allowed alongside origin-less native clients.
         expect(allowed.status).toBe(200);
         expect(allowed.headers.get("access-control-allow-origin")).toBe(
@@ -946,6 +1049,7 @@ describe("stateless authenticated MCP", () => {
     it("enforces request metadata and mirrored headers", async () => {
         const missingMetadata = requestBody("tools/list");
         delete missingMetadata.params._meta;
+
         const metadataResponse = await rawMcp({
             token: activeToken,
             body: missingMetadata,
@@ -954,6 +1058,7 @@ describe("stateless authenticated MCP", () => {
                 "Mcp-Method": "tools/list",
             },
         });
+
         // Stateless processing requires capabilities/version on this exact request.
         expect(metadataResponse.status).toBe(400);
         expect((await metadataResponse.json()).error.code).toBe(-32602);
@@ -963,6 +1068,7 @@ describe("stateless authenticated MCP", () => {
             body: requestBody("tools/list"),
             headers: { "Mcp-Method": "tools/list" },
         });
+
         // Missing mirrored metadata uses the reserved HeaderMismatch error.
         expect(missingHeader.status).toBe(400);
         expect((await missingHeader.json()).error.code).toBe(-32020);
@@ -979,11 +1085,13 @@ describe("stateless authenticated MCP", () => {
                 "Mcp-Name": "another-tool",
             },
         });
+
         // The proxy-visible tool name cannot disagree with the operation the server executes.
         expect(mismatchedName.status).toBe(400);
         expect((await mismatchedName.json()).error.code).toBe(-32020);
 
         const unsupportedBody = requestBody("tools/list", {}, "1900-01-01");
+
         const unsupported = await rawMcp({
             token: activeToken,
             body: unsupportedBody,
@@ -992,6 +1100,7 @@ describe("stateless authenticated MCP", () => {
                 "Mcp-Method": "tools/list",
             },
         });
+
         // Modern clients receive supported revisions rather than falling back to initialization.
         expect(unsupported.status).toBe(400);
         expect(await unsupported.json()).toMatchObject({
@@ -1011,6 +1120,7 @@ describe("stateless authenticated MCP", () => {
                 "Mcp-Method": "resources/list",
             },
         });
+
         // A JSON-RPC 404 identifies a modern endpoint with no resources method.
         expect(unknownMethod.status).toBe(404);
         expect((await unknownMethod.json()).error.code).toBe(-32601);
@@ -1024,6 +1134,7 @@ describe("stateless authenticated MCP", () => {
 
     it("keeps independent credentials and requests stateless", async () => {
         const second = await createToken({ name: "second independent client" });
+
         const firstClient = createMcpTestClient({
             endpoint,
             token: activeToken,
@@ -1034,6 +1145,7 @@ describe("stateless authenticated MCP", () => {
                 },
             },
         });
+
         const secondClient = createMcpTestClient({
             endpoint,
             token: second.token,
@@ -1044,10 +1156,12 @@ describe("stateless authenticated MCP", () => {
                 },
             },
         });
+
         const [first, other] = await Promise.all([
             firstClient.callTool("hello", { name: "One" }),
             secondClient.callTool("hello", { name: "Two" }),
         ]);
+
         // Self-reported client identity and connection timing do not cross-contaminate results.
         expect(first.result.structuredContent).toEqual({
             greeting: "Hello, One, from Redoor!",
@@ -1062,6 +1176,7 @@ describe("stateless authenticated MCP", () => {
         // Administrative metadata intentionally contains neither the one-time token nor verifier fields.
         expect(listed).not.toContain(activeToken);
         expect(listed).not.toContain("verifier");
+
         const stored = readFileSync(
             join(
                 TEST_SERVER_HOME,
@@ -1071,6 +1186,7 @@ describe("stateless authenticated MCP", () => {
             ),
             "utf8",
         );
+
         // Durable state contains only a one-way verifier, not the presented bearer value.
         expect(stored).not.toContain(activeToken);
         expect(processManager.getStdout(serverPid)).not.toContain(activeToken);
@@ -1083,6 +1199,7 @@ describe("stateless authenticated MCP", () => {
                 method,
                 headers: { "Mcp-Session-Id": "legacy-session" },
             });
+
             // This revision has neither a standalone event stream nor DELETE session endpoint.
             expect(response.status).toBe(405);
             expect(response.headers.get("mcp-session-id")).toBeNull();

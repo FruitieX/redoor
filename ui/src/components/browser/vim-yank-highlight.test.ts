@@ -10,12 +10,14 @@ const views: EditorView[] = [];
 
 // JSDOM does not measure text ranges, while CodeMirror's cursor layer only needs a stable stub here.
 Range.prototype.getClientRects = () => document.body.getClientRects();
+
 Range.prototype.getBoundingClientRect = () => new DOMRect();
 
 /** Creates the same Vim-before-observer extension order used by CodeEditor. */
 function createVimEditor(documentText: string): EditorView {
     const parent = document.createElement("div");
     document.body.append(parent);
+
     const view = new EditorView({
         parent,
         state: EditorState.create({
@@ -23,16 +25,20 @@ function createVimEditor(documentText: string): EditorView {
             extensions: [vim(), vimYankHighlightExtension],
         }),
     });
+
     views.push(view);
+
     return view;
 }
 
 /** Sends mapped Vim keys through its command dispatcher rather than inferring keyboard input. */
 function runVimKeys(view: EditorView, keys: string): void {
     const cm = getCM(view);
+
     if (cm === null) {
         throw new Error("Vim adapter was not created");
     }
+
     for (const key of keys) {
         cm.operation(() => Vim.handleKey(cm, key, "user"));
     }
@@ -47,12 +53,14 @@ afterEach(() => {
     for (const view of views.splice(0)) {
         view.destroy();
     }
+
     vi.useRealTimers();
     document.body.replaceChildren();
 });
 
 test("renders resolved counted, characterwise, and Visual yank ranges", () => {
     vi.useFakeTimers();
+
     const view = createVimEditor(`one two
 three four
 

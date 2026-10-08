@@ -8,12 +8,15 @@ import { testPorts } from "#test-ports";
 export { encodeFilesystemPath };
 
 const __filename = fileURLToPath(import.meta.url);
+
 const __dirname = path.dirname(__filename);
+
 const BASE_TEST_DIR = path.join(__dirname, "..", "..", ".test");
 
 // The UI is served from the same redoor server as the API, so both
 // the browser and the API client target the same origin.
 export const WEB_BASE_URL = `http://localhost:${testPorts.playwright}`;
+
 export const API_BASE_URL = WEB_BASE_URL;
 
 /** Asserts keyboard ownership through wterm's hidden textarea inside the accessible host. */
@@ -88,11 +91,13 @@ export async function setupTestDir(suffix: string): Promise<TestContext> {
     );
     const agents = await apiClient.listAgents();
     const agent = agents.find((entry) => entry.name === "agent1_src");
+
     if (!agent || agent.status !== "connected" || agent.cwd === null) {
         throw new Error("Connected agent agent1_src not available for testing");
     }
 
     const agent2 = agents.find((entry) => entry.name === "agent2_custom");
+
     if (!agent2 || agent2.status !== "connected" || agent2.cwd === null) {
         throw new Error(
             "Connected agent agent2_custom not available for testing",
@@ -122,12 +127,15 @@ export async function minimizeBottomDrawer(page: Page): Promise<void> {
     const minimize = page.getByRole("button", {
         name: "Minimize bottom drawer",
     });
+
     const expand = page.getByRole("button", { name: "Expand bottom drawer" });
     await expect(minimize.or(expand)).toBeVisible();
+
     if (await minimize.isVisible()) {
         // Enter avoids a hover tooltip that would later collide with other tooltip assertions.
         await minimize.press("Enter");
     }
+
     await expect(expand).toBeVisible();
     const panel = page.getByRole("region", { name: "Application tools" });
     // The close slide still covers the listing until height returns to the compact bar.
@@ -145,6 +153,7 @@ export async function confirmSelectedTransfer(
     const dialog = page.getByRole("dialog", {
         name: new RegExp(`^${operation} selected items?\\?$`),
     });
+
     await expect(dialog).toBeVisible();
     await dialog
         .getByRole("button", {

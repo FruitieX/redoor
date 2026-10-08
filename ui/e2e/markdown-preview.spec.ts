@@ -130,10 +130,12 @@ ${"```"}
         page,
     }) => {
         await page.goto(markdownUrl);
+
         const toggle = page.getByRole("button", {
             name: "Preview",
             exact: true,
         });
+
         await toggle.click();
 
         // False is explicit so reloading an intentional editor view does not reopen preview.
@@ -206,9 +208,11 @@ completions:
         const frontmatterUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(frontmatterPath)}`;
         await page.goto(frontmatterUrl);
         const preview = page.getByRole("region", { name: "Markdown preview" });
+
         const frontmatter = preview.getByRole("region", {
             name: "YAML frontmatter",
         });
+
         const table = frontmatter.getByRole("table", {
             name: "YAML frontmatter",
         });

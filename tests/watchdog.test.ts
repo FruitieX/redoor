@@ -20,14 +20,19 @@ import {
 } from "./test-utils";
 
 const AGENT_NAME = "watchdog-test-agent";
+
 const FAILING_AGENT_NAME = "watchdog-failing-agent";
 
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
 
 let serverPort: number;
+
 let apiClient: ApiClient;
+
 let configPath: string;
+
 let serverLogPath: string;
 
 beforeAll(async () => {
@@ -84,9 +89,11 @@ log = "${agentLogPath}.failing"
         description: `watchdog agent ${AGENT_NAME} inventory registration`,
         predicate: async () => {
             const agents = await apiClient.listAgents();
+
             return agents.find((agent) => agent.name === AGENT_NAME);
         },
     });
+
     // Configuration must create visible inventory without eagerly launching a subprocess.
     expect(configuredAgent.managed).toBe(true);
     expect(configuredAgent.status).toBe("stopped");
@@ -97,6 +104,7 @@ log = "${agentLogPath}.failing"
         description: `watchdog agent ${AGENT_NAME} to connect after explicit start`,
         predicate: async () => {
             const agents = await apiClient.listAgents();
+
             return agents.find(
                 (agent) =>
                     agent.name === AGENT_NAME && agent.status === "connected",
@@ -113,12 +121,15 @@ afterAll(async () => {
 /** Returns the single watchdog-spawned agent, asserting it's present. */
 async function getWatchdogAgent(): Promise<Agent> {
     const agents = await apiClient.listAgents();
+
     const agent = agents.find(
         (entry) => entry.name === AGENT_NAME && entry.status === "connected",
     );
+
     if (!agent) {
         throw new Error(`Watchdog agent ${AGENT_NAME} not found`);
     }
+
     return agent;
 }
 
@@ -126,14 +137,17 @@ describe("Watchdog supervisor", () => {
     it("restarts the subprocess when the agent process is killed", async () => {
         const firstAgent = await getWatchdogAgent();
         const firstConnectionId = firstAgent.connectionId;
+
         if (!firstConnectionId) {
             throw new Error("Watchdog agent has no control connection id");
         }
+
         const firstDetails = await waitForValue({
             timeoutMs: 15000,
             description: "watchdog agent to be responsive after startup",
             predicate: async () => firstAgent.getDetails(),
         });
+
         const firstPid = firstDetails.pid;
         // A positive PID is the cheapest sanity check that the agent
         // actually ran a subprocess and reported it back to the server.
@@ -151,16 +165,20 @@ describe("Watchdog supervisor", () => {
             description: "watchdog agent to be re-registered with a new PID",
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 const a = agents.find(
                     (entry) =>
                         entry.name === AGENT_NAME &&
                         entry.status === "connected" &&
                         entry.connectionId !== firstConnectionId,
                 );
+
                 if (!a) {
                     return undefined;
                 }
+
                 const details = await a.getDetails();
+
                 return details;
             },
         });
@@ -185,14 +203,17 @@ describe("Watchdog supervisor", () => {
         // about a second instead of the production 30s silence budget.
         const firstAgent = await getWatchdogAgent();
         const firstConnectionId = firstAgent.connectionId;
+
         if (!firstConnectionId) {
             throw new Error("Watchdog agent has no control connection id");
         }
+
         const firstDetails = await waitForValue({
             timeoutMs: 15000,
             description: "watchdog agent to be responsive after restart",
             predicate: async () => firstAgent.getDetails(),
         });
+
         const firstPid = firstDetails.pid;
         expect(firstPid).toBeGreaterThan(0);
 
@@ -215,6 +236,7 @@ describe("Watchdog supervisor", () => {
             const currentAgent = (await apiClient.listAgents()).find(
                 (entry) => entry.name === AGENT_NAME,
             );
+
             if (currentAgent?.connectionId === firstConnectionId) {
                 try {
                     process.kill(firstPid, "SIGKILL");
@@ -228,14 +250,17 @@ describe("Watchdog supervisor", () => {
                 description: "watchdog cleanup to leave a responsive agent",
                 predicate: async () => {
                     const agents = await apiClient.listAgents();
+
                     const agent = agents.find(
                         (entry) =>
                             entry.name === AGENT_NAME &&
                             entry.status === "connected" &&
                             entry.connectionId !== firstConnectionId,
                     );
+
                     if (!agent) return undefined;
                     const details = await agent.getDetails();
+
                     return details;
                 },
             });
@@ -247,16 +272,20 @@ describe("Watchdog supervisor", () => {
                 "watchdog agent to be restarted after WebSocket went stale",
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 const a = agents.find(
                     (entry) =>
                         entry.name === AGENT_NAME &&
                         entry.status === "connected" &&
                         entry.connectionId !== firstConnectionId,
                 );
+
                 if (!a) {
                     return undefined;
                 }
+
                 const details = await a.getDetails();
+
                 return details;
             },
         });
@@ -282,12 +311,15 @@ describe("Watchdog supervisor", () => {
 
         // Shutdown acknowledgement guarantees the public inventory has settled stopped.
         expect(response.agent.status).toBe("stopped");
+
         const stopped = (await apiClient.listAgents()).find(
             (entry) => entry.name === AGENT_NAME,
         );
+
         // Intentional shutdown retains the managed row rather than removing it.
         expect(stopped?.status).toBe("stopped");
         expect(stopped?.managed).toBe(true);
+
         if (!stopped) throw new Error("Stopped managed agent disappeared");
         await stopped.start();
         await waitForValue({
@@ -308,15 +340,18 @@ describe("Watchdog supervisor", () => {
     it("atomically retries a managed attempt and replaces its connected child", async () => {
         const agent = await getWatchdogAgent();
         const firstConnectionId = agent.connectionId;
+
         if (!firstConnectionId) {
             throw new Error("Watchdog agent has no control connection id");
         }
+
         const firstDetails = await agent.getDetails();
 
         const response = await agent.retryStart();
         // Acceptance is a cleanup barrier but deliberately does not wait for reconnection.
         expect(response.agent.status).toBe("starting");
         expect(response.agent.connection_issue).toBeNull();
+
         const replacement = await waitForValue({
             timeoutMs: 15000,
             description: "retried managed agent to connect with a fresh generation",
@@ -327,7 +362,9 @@ describe("Watchdog supervisor", () => {
                         entry.status === "connected" &&
                         entry.connectionId !== firstConnectionId,
                 );
+
                 if (!candidate) return undefined;
+
                 return candidate.getDetails();
             },
         });
@@ -345,6 +382,7 @@ describe("Watchdog supervisor", () => {
         const failingAgent = (await apiClient.listAgents()).find(
             (entry) => entry.name === FAILING_AGENT_NAME,
         );
+
         if (!failingAgent)
             throw new Error("Failing configured agent not found");
         onTestFinished(async () => {
@@ -352,6 +390,7 @@ describe("Watchdog supervisor", () => {
         });
 
         await failingAgent.start();
+
         const issue = await waitForValue({
             timeoutMs: 15000,
             description: "failing managed agent connection issue",

@@ -54,6 +54,7 @@ describe("Raw Upload API with toxiproxy", () => {
         const totalBytes = chunkSizeBytes * 2 + 123;
         const uploadContent = Buffer.alloc(totalBytes, "u");
         const uploadedFilePath = tempFiles.tempFile({ suffix: ".bin" });
+
         const { proxy, proxiedAgent } = await createToxiproxyAgent({
             serverPort,
             agent: testAgent,
@@ -85,6 +86,7 @@ describe("Raw Upload API with toxiproxy", () => {
             timeoutMs: 15000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -116,6 +118,7 @@ describe("Raw Upload API with toxiproxy", () => {
             description: "completed slow upload progress row",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -142,6 +145,7 @@ describe("Raw Upload API with toxiproxy", () => {
         const totalBytes = chunkSizeBytes * 3 + 17;
         const uploadContent = Buffer.alloc(totalBytes, "c");
         const uploadedFilePath = tempFiles.tempFile({ suffix: ".bin" });
+
         const { proxy, proxiedAgent } = await createToxiproxyAgent({
             serverPort,
             agent: testAgent,
@@ -174,6 +178,7 @@ describe("Raw Upload API with toxiproxy", () => {
             timeoutMs: 15000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -204,9 +209,11 @@ describe("Raw Upload API with toxiproxy", () => {
         expect(activeTransfer.state).toBe("active");
         // A successful metadata call confirms control commands are no longer queued behind upload chunks.
         expect(detailsResult.ok).toBe(true);
+
         if (!detailsResult.ok) {
             throw new Error(detailsResult.error);
         }
+
         // Returning the same agent name proves the responsive command still reached the intended agent during the upload.
         expect(detailsResult.details.name).toBe(testAgent.name);
 
@@ -221,15 +228,19 @@ describe("Raw Upload API with toxiproxy", () => {
 
     it("cancels a throttled upload over the control path and removes partial output", async () => {
         const totalBytes = 8 * 1024 * 1024;
+
         const destinationRoot = tempFiles.tempDirectory({
             suffix: "-upload-cancel",
         });
+
         const destinationPath = `${destinationRoot}/canceled.bin`;
+
         const { proxy, proxiedAgent } = await createToxiproxyAgent({
             serverPort,
             agent: testAgent,
             proxyNamePrefix: "raw-upload-cancel",
         });
+
         onTestFinished(async () => {
             await proxy.remove().catch(() => undefined);
         });
@@ -250,6 +261,7 @@ describe("Raw Upload API with toxiproxy", () => {
                 () => ({ completed: true as const }),
                 (error: Error) => ({ completed: false as const, error }),
             );
+
         const active = await waitForValue({
             description: "partially uploaded row before explicit cancellation",
             timeoutMs: 15000,
@@ -266,6 +278,7 @@ describe("Raw Upload API with toxiproxy", () => {
         const cancellation = await apiClient.cancelTransfer(active.request_id);
         // Accepted proves cancellation used the public id rather than an internal websocket request id.
         expect(cancellation.status).toBe("accepted");
+
         const canceled = await waitForValue({
             description: "terminal canceled upload row",
             predicate: async () =>
@@ -275,6 +288,7 @@ describe("Raw Upload API with toxiproxy", () => {
                         transfer.state === "canceled",
                 ),
         });
+
         // Partial progress remains visible so cancellation is not misreported as a fresh zero-byte error.
         expect(canceled.transferred_bytes).toBeGreaterThan(0);
         const repeated = await apiClient.cancelTransfer(active.request_id);
@@ -297,6 +311,7 @@ describe("Raw Upload API with toxiproxy", () => {
         const interruptionLimitBytes = chunkSizeBytes * 2;
         const interruptedContent = Buffer.alloc(interruptedTotalBytes, "i");
         const interruptedPath = tempFiles.tempFile({ suffix: ".bin" });
+
         const { proxy, proxiedAgent } = await createToxiproxyAgent({
             serverPort,
             agent: testAgent,
@@ -335,6 +350,7 @@ describe("Raw Upload API with toxiproxy", () => {
             timeoutMs: 15000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -363,9 +379,11 @@ describe("Raw Upload API with toxiproxy", () => {
 
         // The client request should fail once toxiproxy cuts the upstream connection mid-upload.
         expect(interruptedUploadResult.ok).toBe(false);
+
         if (interruptedUploadResult.ok) {
             throw new Error("Interrupted upload unexpectedly succeeded");
         }
+
         // Keeping the fetch error confirms the failure propagated back to the HTTP client as a broken connection.
         expect(interruptedUploadResult.error.message).toMatch(
             /fetch failed|socket|closed/i,
@@ -394,6 +412,7 @@ describe("Raw Upload API with toxiproxy", () => {
             timeoutMs: 15000,
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&

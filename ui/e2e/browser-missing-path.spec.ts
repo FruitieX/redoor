@@ -148,6 +148,7 @@ test.describe.serial("Missing path creation", () => {
         const breadcrumbs = page.getByRole("navigation", {
             name: "Breadcrumbs",
         });
+
         await breadcrumbs.getByText(missingParent, { exact: true }).click();
         await breadcrumbs.getByText(ctx.testDirName, { exact: true }).click();
 

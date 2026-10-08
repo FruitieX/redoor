@@ -24,6 +24,7 @@ export function webSocketDataToString(data: WebSocket.RawData): string {
     if (Array.isArray(data)) {
         return Buffer.concat(data).toString();
     }
+
     return data instanceof ArrayBuffer
         ? Buffer.from(data).toString()
         : data.toString();
@@ -34,8 +35,10 @@ export async function getAvailablePort(): Promise<number> {
         const server = createServer();
         server.listen(0, "127.0.0.1", () => {
             const address = tcpAddressSchema.safeParse(server.address());
+
             if (!address.success) {
                 reject(new Error("Failed to get ephemeral port"));
+
                 return;
             }
 
@@ -56,6 +59,7 @@ export async function createToxiproxyAgent(options: {
 }> {
     const toxiproxy = new Toxiproxy("http://127.0.0.1:8474");
     const proxyPort = await getAvailablePort();
+
     const proxy = await toxiproxy.createProxy({
         name: `${options.proxyNamePrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         listen: `127.0.0.1:${proxyPort}`,
@@ -121,11 +125,14 @@ export class TempFileManager {
                 mkdtempSync(join(tmpdir(), "redoor-test-")),
             );
         }
+
         const suffix = options?.suffix ?? ".tmp";
+
         const filePath = join(
             this.tempDir,
             `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`,
         );
+
         this.files.push(filePath);
 
         if (options?.content !== undefined) {
@@ -155,13 +162,17 @@ export class TempFileManager {
                 mkdtempSync(join(tmpdir(), "redoor-test-")),
             );
         }
+
         const suffix = options?.suffix ?? "";
+
         const directoryPath = join(
             this.tempDir,
             `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`,
         );
+
         mkdirSync(directoryPath, { recursive: true });
         this.dirs.push(directoryPath);
+
         return directoryPath;
     }
 
@@ -176,6 +187,7 @@ export class TempFileManager {
                 // File or directory may not exist, ignore
             }
         }
+
         this.files = [];
 
         if (this.tempDir) {
@@ -184,6 +196,7 @@ export class TempFileManager {
             } catch {
                 // Directory may not exist, ignore
             }
+
             this.tempDir = null;
         }
     }
@@ -204,24 +217,34 @@ export class TempFileManager {
 }
 
 const TESTS_DIRECTORY = dirname(import.meta.filename);
+
 const PROJECT_ROOT = join(TESTS_DIRECTORY, "..");
+
 export const SERVER_PATH =
     process.env.REDOOR_TEST_BINARY ??
     join(TESTS_DIRECTORY, "../target/debug/redoor");
+
 export const AGENT_PATH = SERVER_PATH;
+
 // A per-worktree port lets Vitest run alongside development and other worktrees.
 export const VITEST_SERVER_PORT = testPorts.vitest;
+
 export const TEST_USERNAME = "test-user";
+
 export const TEST_PASSWORD = "test-password";
+
 export const TEST_AGENT_TOKEN = "test-agent-token";
+
 const DEFAULT_TEST_CONFIG = join(
     tmpdir(),
     `redoor-vitest-${VITEST_SERVER_PORT}.toml`,
 );
+
 export const TEST_SERVER_HOME = join(
     tmpdir(),
     `redoor-vitest-home-${VITEST_SERVER_PORT}`,
 );
+
 export const TEST_APP_NAME = `redoor-vitest-${VITEST_SERVER_PORT}`;
 
 export type SpawnAgentArgs = {
@@ -268,11 +291,13 @@ export class ProcessManager {
         });
 
         const pid = proc.pid;
+
         if (pid === undefined) {
             throw new Error("Failed to get process PID");
         }
 
         this.processes.set(pid, proc);
+
         if (proc.stdout) {
             const stdoutBuffer = new OutputBuffer(5000);
             proc.stdout.on("data", (chunk: Buffer) => {
@@ -280,6 +305,7 @@ export class ProcessManager {
             });
             this.stdoutBuffers.set(pid, stdoutBuffer);
         }
+
         return pid;
     }
 
@@ -298,6 +324,7 @@ export class ProcessManager {
         if (args.home !== undefined) {
             cliArgs.push("--home", args.home);
         }
+
         if (args.legacyDir !== undefined) {
             cliArgs.push("--dir", args.legacyDir);
         }
@@ -311,11 +338,13 @@ export class ProcessManager {
                 "log",
                 `${args.name ?? "hostname-agent"}.log`,
             );
+
             rmSync(logPath, { force: true });
             cliArgs.push("--log", logPath);
         }
 
         const appName = `${TEST_APP_NAME}-agent-${this.agentNamespace++}`;
+
         const pid = this.spawn(args.executablePath ?? AGENT_PATH, cliArgs, {
             cwd: args.cwd,
             env: {
@@ -323,13 +352,16 @@ export class ProcessManager {
                 ...args.env,
             },
         });
+
         this.agentAppNames.set(pid, appName);
+
         return pid;
     }
 
     spawnServer(args: SpawnServerArgs): number {
         const cliArgs: string[] = ["server"];
         const configPath = args.config ?? DEFAULT_TEST_CONFIG;
+
         if (args.config === undefined) {
             writeFileSync(
                 configPath,
@@ -341,6 +373,7 @@ password = "${TEST_PASSWORD}"
 `,
             );
         }
+
         cliArgs.push("--config", configPath);
 
         if (args.log !== undefined) {
@@ -349,6 +382,7 @@ password = "${TEST_PASSWORD}"
         }
 
         mkdirSync(TEST_SERVER_HOME, { recursive: true });
+
         return this.spawn(SERVER_PATH, cliArgs, {
             cwd: PROJECT_ROOT,
             env: {
@@ -368,25 +402,30 @@ password = "${TEST_PASSWORD}"
                 throw error;
             }
         }
+
         this.processes.delete(pid);
         this.stdoutBuffers.delete(pid);
         const appName = this.agentAppNames.get(pid);
         const home = process.env.HOME;
+
         if (appName !== undefined && home !== undefined) {
             rmSync(join(home, ".local", "share", appName), {
                 recursive: true,
                 force: true,
             });
         }
+
         this.agentAppNames.delete(pid);
     }
 
     /** Terminates one owned process and waits for its resources to be released. */
     async killAndWait(pid: number): Promise<void> {
         const child = this.processes.get(pid);
+
         if (child === undefined) {
             return;
         }
+
         const exit = this.waitForChildExit(pid, child);
         this.kill(pid);
         await exit;
@@ -395,12 +434,15 @@ password = "${TEST_PASSWORD}"
     /** Reaps every owned process before the next serial test file can reuse its port. */
     async killAll(): Promise<void> {
         const processes = [...this.processes.entries()];
+
         const exits = processes.map(([pid, child]) =>
             this.waitForChildExit(pid, child),
         );
+
         for (const [pid] of processes) {
             this.kill(pid);
         }
+
         await Promise.all(exits);
     }
 
@@ -417,6 +459,7 @@ password = "${TEST_PASSWORD}"
         timeoutMs: number = 10000,
     ): Promise<number | null> {
         const process = this.processes.get(pid);
+
         if (!process) {
             throw new Error(`Process not found: ${pid}`);
         }
@@ -472,6 +515,7 @@ export async function startServerAndAgent(options: {
     await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
 
     const serverProcess = options.processManager.getProcess(serverPid);
+
     if (!serverProcess) {
         throw new Error("Server process not found");
     }
@@ -481,6 +525,7 @@ export async function startServerAndAgent(options: {
         new RegExp(`Agent registered:.*agent_name=${options.agentName}`),
         10000,
     );
+
     const waitForTransferPromise = waitForAgentTransfer(
         serverProcess,
         options.agentName,
@@ -499,6 +544,7 @@ export async function startServerAndAgent(options: {
 
     const agents = await apiClient.listAgents();
     const testAgent = agents.find((agent) => agent.name === options.agentName);
+
     if (!testAgent) {
         throw new Error(`Agent ${options.agentName} was not registered`);
     }
@@ -534,6 +580,7 @@ export async function waitForPort(
             const response = await fetch(
                 `http://127.0.0.1:${port}/api/v1/agents`,
             );
+
             if (response.ok || response.status === 401) {
                 return;
             }
@@ -541,6 +588,7 @@ export async function waitForPort(
             await new Promise((resolve) => setTimeout(resolve, 100));
         }
     }
+
     throw new Error(`Port ${port} not ready after ${maxRetries} retries`);
 }
 
@@ -558,6 +606,7 @@ class OutputBuffer {
 
     add(chunk: string): void {
         this.chunks.push(chunk);
+
         if (this.chunks.length > this.maxSize) {
             this.chunks.shift();
         }
@@ -649,9 +698,11 @@ export async function waitForValue<T>(options: {
     while (Date.now() - start < timeoutMs) {
         try {
             const value = await options.predicate();
+
             if (value !== undefined && value !== false) {
                 return value;
             }
+
             lastError = undefined;
         } catch (error) {
             lastError =

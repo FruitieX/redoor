@@ -31,6 +31,7 @@ async function isPortAvailable(port: number): Promise<boolean> {
 async function getRandomFreePort(excludedPorts: Set<number>): Promise<number> {
     for (let attempt = 0; attempt < 100; attempt++) {
         const port = randomInt(10000, 60000);
+
         if (!excludedPorts.has(port) && (await isPortAvailable(port))) {
             return port;
         }
@@ -43,10 +44,12 @@ async function getRandomFreePort(excludedPorts: Set<number>): Promise<number> {
 async function listenerPids(port: number): Promise<number[]> {
     const result =
         await $`lsof -nP -iTCP:${port} -sTCP:LISTEN -t`.nothrow();
+
     if (result.exitCode !== 0) {
         // lsof exits 1 when the reserved port is already free.
         return [];
     }
+
     return [
         ...new Set(
             result.stdout
@@ -61,17 +64,22 @@ async function listenerPids(port: number): Promise<number[]> {
 async function isWorktreeRedoor(pid: number): Promise<boolean> {
     // ps and lsof work on both Linux and macOS; /proc does not exist on Darwin.
     const args = await $`ps -p ${pid} -o args=`.nothrow();
+
     if (args.exitCode !== 0 || !args.stdout.includes("redoor")) {
         return false;
     }
+
     const cwdListing = await $`lsof -a -p ${pid} -d cwd -Fn`.nothrow();
+
     if (cwdListing.exitCode !== 0) {
         return false;
     }
+
     const cwd = cwdListing.stdout
         .split("\n")
         .find((line) => line.startsWith("n"))
         ?.slice(1);
+
     return cwd === process.cwd();
 }
 
@@ -97,6 +105,7 @@ async function freeReservedPort(port: number): Promise<void> {
         if (await isPortAvailable(port)) {
             return;
         }
+
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
@@ -116,8 +125,10 @@ async function freeReservedPort(port: number): Promise<void> {
         if (await isPortAvailable(port)) {
             return;
         }
+
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
+
     throw new Error(`Test port ${port} remains occupied after cleanup`);
 }
 
@@ -126,6 +137,7 @@ async function freeExistingTestPorts(): Promise<void> {
     const ports = reservedPortsSchema.parse(
         JSON.parse(await readFile(TEST_PORTS_PATH, "utf8")),
     );
+
     await Promise.all([
         freeReservedPort(ports.vitest),
         freeReservedPort(ports.playwright),
@@ -137,6 +149,7 @@ async function ensureTestPorts(): Promise<void> {
     try {
         await access(TEST_PORTS_PATH);
         await freeExistingTestPorts();
+
         return;
     } catch (error) {
         if (!isErrorCode(error, "ENOENT")) {

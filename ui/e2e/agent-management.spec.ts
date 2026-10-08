@@ -7,16 +7,27 @@ import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshA
 import { encodeFilesystemPath, WEB_BASE_URL } from "./helpers";
 
 const VALID_AGENT = "lazy_managed";
+
 const FAILING_AGENT = "failing_managed";
+
 const CREATED_SSH_AGENT = `playwright-ssh-test-${process.pid}`;
+
 const CREATED_SSH_PASSWORD_AGENT = `playwright-ssh-password-${process.pid}`;
+
 const CREATED_SSH_MISSING_PASSWORD_AGENT = `playwright-ssh-missing-password-${process.pid}`;
+
 const CREATED_SSH_MODE_SWITCH_AGENT = `playwright-ssh-mode-switch-${process.pid}`;
+
 const CREATED_SSH_PASSWORD_CHANGE_AGENT = `playwright-ssh-password-change-${process.pid}`;
+
 const CREATED_LOCAL_AGENT = `playwright-local-${process.pid}`;
+
 const EDITED_LOCAL_AGENT = `playwright-local-edit-${process.pid}`;
+
 const EDITED_AGENT = `playwright-edit-${process.pid}`;
+
 const RUNNING_EDIT_AGENT = `playwright-running-edit-${process.pid}`;
+
 const SERVER_LOG = path.resolve("log/playwright-redoor.log");
 
 /** Reads one lifecycle snapshot through the same authenticated API as the UI. */
@@ -28,7 +39,9 @@ async function getAgent(
     expect(response.ok()).toBe(true);
     const body: AgentListResponse = await response.json();
     const agent = body.agents.find((entry) => entry.name === name);
+
     if (!agent) throw new Error(`Agent ${name} missing from inventory`);
+
     return agent;
 }
 
@@ -52,11 +65,14 @@ test.describe.serial("Agent management", () => {
             const response = await request.get(`${WEB_BASE_URL}/api/v1/agents`);
             const body: AgentListResponse = await response.json();
             const agent = body.agents.find((entry) => entry.name === name);
+
             if (!agent) continue;
+
             if (agent.status !== "stopped") {
                 const shutdownResponse = await request.post(
                     `${WEB_BASE_URL}/api/v1/agents/${name}/shutdown`,
                 );
+
                 // Per-test cleanup must leave both managed children stopped for later suites.
                 expect(shutdownResponse.ok()).toBe(true);
                 await expect
@@ -162,15 +178,18 @@ test.describe.serial("Agent management", () => {
             page.getByRole("link", { name: `Edit ${EDITED_LOCAL_AGENT}` }),
         ).toBeVisible();
         await page.getByRole("button", { name: "Remove device" }).click();
+
         const confirmation = page.getByRole("dialog", {
             name: `Remove ${EDITED_LOCAL_AGENT} from Redoor?`,
         });
+
         const localDeleteRequest = page.waitForRequest(
             (request) =>
                 request.url() ===
                     `${WEB_BASE_URL}/api/v1/local-agents/${encodeURIComponent(EDITED_LOCAL_AGENT)}` &&
                 request.method() === "DELETE",
         );
+
         await confirmation
             .getByRole("button", { name: "Remove device" })
             .click();
@@ -208,6 +227,7 @@ test.describe.serial("Agent management", () => {
         page,
     }) => {
         const originalName = `${EDITED_AGENT}-original`;
+
         const createResponse = await page.request.post(
             `${WEB_BASE_URL}/api/v1/agents`,
             {
@@ -223,6 +243,7 @@ test.describe.serial("Agent management", () => {
                 },
             },
         );
+
         expect(createResponse.ok()).toBe(true);
         await page.goto(`${WEB_BASE_URL}/`);
         await page.getByRole("link", { name: `Edit ${originalName}` }).click();
@@ -230,9 +251,11 @@ test.describe.serial("Agent management", () => {
         await expect(
             page.getByRole("heading", { name: "Edit device" }),
         ).toBeVisible();
+
         const configurationTab = page
             .getByLabel("Device view")
             .getByRole("link", { name: "Configuration", exact: true });
+
         // Editable managed agents expose their form in global navigation, including while stopped.
         await expect(configurationTab).toHaveAttribute("aria-current", "page");
         await expect(
@@ -254,15 +277,18 @@ test.describe.serial("Agent management", () => {
             page.getByRole("link", { name: `Edit ${EDITED_AGENT}` }),
         ).toBeVisible();
         await page.getByRole("button", { name: "Remove device" }).click();
+
         const confirmation = page.getByRole("dialog", {
             name: `Remove ${EDITED_AGENT} from Redoor?`,
         });
+
         const sshDeleteRequest = page.waitForRequest(
             (request) =>
                 request.url() ===
                     `${WEB_BASE_URL}/api/v1/agents/${encodeURIComponent(EDITED_AGENT)}` &&
                 request.method() === "DELETE",
         );
+
         await confirmation
             .getByRole("button", { name: "Remove device" })
             .click();
@@ -365,6 +391,7 @@ test.describe.serial("Agent management", () => {
             "redoor-ssh-test SSH fixture is not enabled",
         );
         const originalName = `${RUNNING_EDIT_AGENT}-original`;
+
         const createResponse = await page.request.post(
             `${WEB_BASE_URL}/api/v1/agents`,
             {
@@ -380,6 +407,7 @@ test.describe.serial("Agent management", () => {
                 },
             },
         );
+
         expect(createResponse.ok()).toBe(true);
         await page.goto(`${WEB_BASE_URL}/`);
         await page
@@ -396,9 +424,11 @@ test.describe.serial("Agent management", () => {
         const saveButton = page.getByRole("button", {
             name: "Stop agent and save",
         });
+
         const deleteButton = page.getByRole("button", {
             name: "Remove device",
         });
+
         // The single submit action explains and owns the required shutdown before persistence.
         await expect(saveButton).toBeEnabled();
         // Delete uses the same auto-stop API, so a running agent must remain removable.
@@ -437,9 +467,11 @@ test.describe.serial("Agent management", () => {
             "redoor-ssh-test password fixture is not enabled",
         );
         const password = process.env.REDOOR_SSH_TEST_PASSWORD;
+
         if (password === undefined) {
             throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
         }
+
         await page.goto(`${WEB_BASE_URL}/`);
         await page.getByRole("link", { name: "Add device" }).click();
 
@@ -463,10 +495,12 @@ test.describe.serial("Agent management", () => {
                 name: `${CREATED_SSH_PASSWORD_AGENT}, connected`,
             }),
         ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+
         const connected = await getAgent(
             page.request,
             CREATED_SSH_PASSWORD_AGENT,
         );
+
         expect(connected.managed).toBe(true);
         expect(connected.connection_id).not.toBeNull();
     });
@@ -480,9 +514,11 @@ test.describe.serial("Agent management", () => {
             "redoor-ssh-test password fixture is not enabled",
         );
         const password = process.env.REDOOR_SSH_TEST_PASSWORD;
+
         if (password === undefined) {
             throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
         }
+
         await page.goto(`${WEB_BASE_URL}/`);
         await page.getByRole("link", { name: "Add device" }).click();
         await page.getByLabel("SSH target").fill("redoor-ssh-test");
@@ -518,6 +554,7 @@ test.describe.serial("Agent management", () => {
         ).toBeDisabled();
         await page.getByLabel("SSH username").fill("redoor");
         const updateUrl = `${WEB_BASE_URL}/api/v1/agents/${encodeURIComponent(CREATED_SSH_MODE_SWITCH_AGENT)}`;
+
         const [updateResponse] = await Promise.all([
             page.waitForResponse(
                 (response) =>
@@ -526,6 +563,7 @@ test.describe.serial("Agent management", () => {
             ),
             page.getByRole("button", { name: "Stop agent and save" }).click(),
         ]);
+
         // The same-url navigation cannot serve as a persistence barrier.
         expect(updateResponse.ok()).toBe(true);
         expect(updateResponse.request().postDataJSON()).toMatchObject({
@@ -538,9 +576,12 @@ test.describe.serial("Agent management", () => {
         const configuration = await page.request.get(
             `${WEB_BASE_URL}/api/v1/agents/${CREATED_SSH_MODE_SWITCH_AGENT}/configuration`,
         );
+
         expect(configuration.ok()).toBe(true);
+
         const body: ManagedSshAgentConfigurationResponse =
             await configuration.json();
+
         // Switching to key mode must drop the stored secret without echoing it.
         expect(body.has_password).toBe(false);
         expect(body.password).toBeNull();
@@ -581,9 +622,11 @@ test.describe.serial("Agent management", () => {
             "redoor-ssh-test password fixture is not enabled",
         );
         const password = process.env.REDOOR_SSH_TEST_PASSWORD;
+
         if (password === undefined) {
             throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
         }
+
         const createResponse = await page.request.post(
             `${WEB_BASE_URL}/api/v1/agents`,
             {
@@ -600,6 +643,7 @@ test.describe.serial("Agent management", () => {
                 },
             },
         );
+
         expect(createResponse.ok()).toBe(true);
         await page.goto(`${WEB_BASE_URL}/`);
         await page
@@ -642,6 +686,7 @@ test.describe.serial("Agent management", () => {
             process.env.REDOOR_SSH_TEST !== "1",
             "redoor-ssh-test SSH fixture is not enabled",
         );
+
         const createResponse = await page.request.post(
             `${WEB_BASE_URL}/api/v1/agents`,
             {
@@ -657,6 +702,7 @@ test.describe.serial("Agent management", () => {
                 },
             },
         );
+
         // Creating the password-less entry must succeed because credentials may come from a key.
         expect(createResponse.ok()).toBe(true);
         await page.goto(`${WEB_BASE_URL}/`);
@@ -672,15 +718,18 @@ test.describe.serial("Agent management", () => {
         const lifecycleAlert = page.getByRole("alert").filter({
             hasText: "Configure a password, SSH key, or ssh-agent credential",
         });
+
         // Clicking the tab must surface non-interactive authentication guidance promptly.
         await expect(lifecycleAlert).toBeVisible({ timeout: 15_000 });
         await page
             .getByRole("navigation", { name: "Application" })
             .getByRole("link", { name: "Devices" })
             .click();
+
         const row = page.getByRole("row", {
             name: `Device ${CREATED_SSH_MISSING_PASSWORD_AGENT}`,
         });
+
         // The retained watchdog issue must remain visible outside the lifecycle route.
         await expect(row.getByRole("alert")).toContainText(
             "Configure a password, SSH key, or ssh-agent credential",
@@ -708,9 +757,11 @@ test.describe.serial("Agent management", () => {
         const externalOne = page.getByRole("row", {
             name: "Device agent1_src",
         });
+
         const externalTwo = page.getByRole("row", {
             name: "Device agent2_custom",
         });
+
         // Shell-owned external agents remain visible and connected but observation-only.
         await expect(externalOne).toContainText("Started independently", {
             timeout: 30_000,
@@ -727,9 +778,11 @@ test.describe.serial("Agent management", () => {
         });
 
         const valid = page.getByRole("row", { name: `Device ${VALID_AGENT}` });
+
         const failing = page.getByRole("row", {
             name: `Device ${FAILING_AGENT}`,
         });
+
         // TOML entries are registered as stopped and expose lifecycle controls before processes exist.
         await expect(valid).toContainText("Managed by Redoor");
         await expect(valid).toContainText("stopped");
@@ -802,6 +855,7 @@ test.describe.serial("Agent management", () => {
         const shutdown = await page.request.post(
             `${WEB_BASE_URL}/api/v1/agents/${VALID_AGENT}/shutdown`,
         );
+
         // Losing the connection must restore controls at the same URLs without stale startup progress.
         expect(shutdown.ok()).toBe(true);
         await expect(
@@ -819,13 +873,17 @@ test.describe.serial("Agent management", () => {
         page,
     }) => {
         let releaseStart: (() => void) | undefined;
+
         const gate = new Promise<void>((resolve) => {
             releaseStart = resolve;
         });
+
         let markContinued: (() => void) | undefined;
+
         const continued = new Promise<void>((resolve) => {
             markContinued = resolve;
         });
+
         let startRequests = 0;
         await page.route(
             `**/api/v1/agents/${VALID_AGENT}/start`,
@@ -858,9 +916,11 @@ test.describe.serial("Agent management", () => {
             page.getByRole("heading", { name: `Connecting ${VALID_AGENT}` }),
         ).toBeVisible();
         expect(startRequests).toBe(1);
+
         if (!releaseStart) {
             throw new Error("Start route was not intercepted");
         }
+
         releaseStart();
         await continued;
         await page.unroute(`**/api/v1/agents/${VALID_AGENT}/start`);
@@ -904,9 +964,11 @@ test.describe.serial("Agent management", () => {
             .getByRole("dialog", { name: `${VALID_AGENT} actions` })
             .getByRole("button", { name: "Disconnect" })
             .click();
+
         const dialog = page.getByRole("dialog", {
             name: `Disconnect ${VALID_AGENT}?`,
         });
+
         await dialog
             .getByRole("button", { name: "Disconnect", exact: true })
             .click();
@@ -937,10 +999,12 @@ test.describe.serial("Agent management", () => {
         page,
     }) => {
         await page.goto(`${WEB_BASE_URL}/agents/${FAILING_AGENT}`);
+
         const connectButton = page.getByRole("button", {
             name: "Connect",
             exact: true,
         });
+
         // Opening a dormant managed agent must not express desired-running intent.
         await expect(connectButton).toBeVisible();
         expect((await getAgent(page.request, FAILING_AGENT)).status).toBe(
@@ -993,6 +1057,7 @@ test.describe.serial("Agent management", () => {
             .poll(
                 async () => {
                     const agent = await getAgent(page.request, FAILING_AGENT);
+
                     return Date.now() - retryWindowStartedAt >= 2_000
                         ? agent.status
                         : "observing";

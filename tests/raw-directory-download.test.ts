@@ -15,11 +15,13 @@ import {
 } from "./test-utils";
 
 const execFileAsync = promisify(execFile);
+
 const AGENT_NAME = "raw-directory-download-agent";
 
 /** Lists tar(.gz) member paths with system tar so tests stay free of a Node tar dependency. */
 async function listTarMembers(archivePath: string): Promise<string[]> {
     const { stdout } = await execFileAsync("tar", ["-tzf", archivePath]);
+
     return stdout
         .split("\n")
         .map((entry) => entry.replace(/\/$/, ""))
@@ -78,6 +80,7 @@ describe("Raw Directory Archive Download API", () => {
         const response = await testAgent.download(sourceRoot, {
             download: true,
         });
+
         // Directory GETs are presented as gzipped tar attachments for browser save-as.
         expect(response.status).toBe(200);
         expect(response.headers.get("Content-Type")).toMatch(
@@ -94,6 +97,7 @@ describe("Raw Directory Archive Download API", () => {
                 "directory archive total published while the download is still active",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -104,6 +108,7 @@ describe("Raw Directory Archive Download API", () => {
                 );
             },
         });
+
         // Holding the HTTP body open until this point proves the walk did not
         // wait for the stream to finish and did not invent the total at completion.
         expect(publishedTotal.total_bytes).toBeGreaterThan(0);
@@ -118,6 +123,7 @@ describe("Raw Directory Archive Download API", () => {
         const archivePath = tempFiles.create(archiveBytes, {
             suffix: ".tar.gz",
         });
+
         const members = await listTarMembers(archivePath);
         const directoryName = path.basename(sourceRoot);
         // The downloaded directory is the single archive root so extraction preserves its name.
@@ -135,6 +141,7 @@ describe("Raw Directory Archive Download API", () => {
         const extractRoot = tempFiles.tempDirectory({
             suffix: "-dir-archive-extract",
         });
+
         await execFileAsync("tar", ["-xzf", archivePath, "-C", extractRoot]);
         // Round-tripping through tar.gz proves nested payload bytes stayed intact.
         expect(
@@ -166,6 +173,7 @@ describe("Raw Directory Archive Download API", () => {
             description: "completed directory archive download transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -175,6 +183,7 @@ describe("Raw Directory Archive Download API", () => {
                 );
             },
         });
+
         // Download direction keeps archive pulls on the same progress surface as file downloads.
         expect(completedTransfer.direction).toBe("download");
         // The live walk total must match counted tar bytes on an unchanged tree.
@@ -197,6 +206,7 @@ describe("Raw Directory Archive Download API", () => {
         const response = await testAgent.download(sourceRoot, {
             download: true,
         });
+
         // Empty directories still produce a valid gzipped tar stream rather than a JSON error.
         expect(response.status).toBe(200);
         expect(response.headers.get("Content-Type")).toMatch(
@@ -204,9 +214,11 @@ describe("Raw Directory Archive Download API", () => {
         );
 
         const archiveBytes = Buffer.from(await response.arrayBuffer());
+
         const archivePath = tempFiles.create(archiveBytes, {
             suffix: ".tar.gz",
         });
+
         const members = await listTarMembers(archivePath);
         // Empty downloads still contain their root so extraction creates the requested directory.
         expect(members).toEqual([path.basename(sourceRoot)]);
@@ -226,6 +238,7 @@ describe("Raw Directory Archive Download API", () => {
                 },
             },
         );
+
         // Range is unsupported because tar length is unknown before streaming finishes.
         expect(response.status).toBe(400);
         const body: unknown = await response.json();

@@ -10,25 +10,32 @@ test.describe("Application navigation", () => {
         const applicationNavigation = page.getByRole("navigation", {
             name: "Application",
         });
+
         await expect(applicationNavigation).toBeVisible();
+
         const agentNavigation = page.getByRole("navigation", {
             name: "Devices",
         });
+
         // Agent selection persists on the opposite side of the central route content.
         await expect(agentNavigation).toBeVisible();
         const applicationBox = await applicationNavigation.boundingBox();
         const agentBox = await agentNavigation.boundingBox();
         // Physical placement matches each menu's application and agent responsibilities.
         expect(applicationBox?.x ?? 1).toBeLessThan(agentBox?.x ?? 0);
+
         const sidebarModeBox = await applicationNavigation
             .getByRole("button", { name: "Sidebar mode: Auto" })
             .boundingBox();
+
         const restartBox = await applicationNavigation
             .getByRole("button", { name: "Restart server" })
             .boundingBox();
+
         const logoutBox = await applicationNavigation
             .getByRole("button", { name: "Log out" })
             .boundingBox();
+
         // Layout preference sits with the other chrome actions, above process restart.
         expect(sidebarModeBox?.y ?? 1).toBeLessThan(restartBox?.y ?? 0);
         // Process restart sits just above logout so account actions remain last.
@@ -54,6 +61,7 @@ test.describe("Application navigation", () => {
         const themeButton = page.getByRole("button", {
             name: /Color theme:/,
         });
+
         await themeButton.hover();
         // Mouse hover must not show a tooltip before the shared 500ms delay elapses.
         await expect(page.getByRole("tooltip")).toHaveCount(0, {
@@ -72,6 +80,7 @@ test.describe("Application navigation", () => {
             .getByRole("region", { name: "Device names" })
             .getByRole("link")
             .first();
+
         await agentLink.hover();
         await expect(page.getByRole("tooltip")).toBeVisible();
         await agentLink.click();
@@ -87,6 +96,7 @@ test.describe("Application navigation", () => {
         const themeButton = page.getByRole("button", {
             name: /Color theme:/,
         });
+
         await themeButton.focus();
 
         // The hover delay must not make keyboard users wait for a focused control's description.
@@ -102,6 +112,7 @@ test.describe("Application navigation", () => {
         const openMenuButton = page.getByRole("button", {
             name: "Open application menu",
         });
+
         // Mobile navigation starts closed so content retains the viewport width.
         await expect(
             page.getByRole("navigation", { name: "Application" }),
@@ -114,6 +125,7 @@ test.describe("Application navigation", () => {
         const menuDialog = page.getByRole("dialog", {
             name: "Application menu",
         });
+
         // Opening the burger exposes the same application destinations in a modal drawer.
         await expect(menuDialog).toBeVisible();
         await expect(
@@ -158,6 +170,7 @@ test.describe("Application navigation", () => {
         const autoButton = page.getByRole("button", {
             name: "Sidebar mode: Auto",
         });
+
         await autoButton.hover();
         // The tooltip names the next layout, not the mode already applied.
         await expect(page.getByRole("tooltip")).toHaveText(
@@ -200,9 +213,11 @@ test.describe("Application navigation", () => {
         await page
             .getByRole("button", { name: "Open application menu" })
             .click();
+
         const hideButton = page.getByRole("button", {
             name: "Sidebar mode: Hide",
         });
+
         await expect(hideButton).toBeVisible();
         await hideButton.hover();
         await expect(page.getByRole("tooltip")).toHaveText(
@@ -227,9 +242,11 @@ test.describe("Application navigation", () => {
     }) => {
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(`${WEB_BASE_URL}/`);
+
         const applicationTrigger = page.getByRole("button", {
             name: "Open application menu",
         });
+
         const agentTrigger = page.getByRole("button", {
             name: "Open device menu",
         });
@@ -277,6 +294,7 @@ test.describe("Application navigation", () => {
 
                 dispatchTouch("touchstart", 200, 200);
                 dispatchTouch("touchmove", 100, 215);
+
                 const hiddenAfterHorizontalGesture =
                     document.documentElement.hasAttribute(
                         "data-touch-scrolling",
@@ -284,6 +302,7 @@ test.describe("Application navigation", () => {
 
                 dispatchTouch("touchstart", 200, 200);
                 dispatchTouch("touchmove", 200, 150);
+
                 const hiddenAtVerticalThreshold =
                     document.documentElement.hasAttribute(
                         "data-touch-scrolling",
@@ -291,6 +310,7 @@ test.describe("Application navigation", () => {
 
                 dispatchTouch("touchstart", 200, 200);
                 dispatchTouch("touchmove", 200, 149);
+
                 const hiddenAfterVerticalGesture =
                     document.documentElement.hasAttribute(
                         "data-touch-scrolling",
@@ -343,6 +363,7 @@ test.describe("Application navigation", () => {
         await expect
             .poll(async () => {
                 const box = await panel.boundingBox();
+
                 // Fully clipped counts as hidden; a partial slide would still report a y below the viewport.
                 return box === null || box.y >= 800;
             })

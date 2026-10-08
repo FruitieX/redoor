@@ -23,6 +23,7 @@ import {
 } from "./test-utils";
 
 const AGENT_NAME = "created-ssh-agent";
+
 const LOCAL_AGENT_NAME = "local-fixture-agent";
 
 /** Builds a complete create payload so tests only override the field under assertion. */
@@ -60,9 +61,13 @@ function sshUpdateRequest(
         ...overrides,
     };
 }
+
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
+
 let apiClient: ApiClient;
+
 let configPath: string;
 
 beforeAll(async () => {
@@ -150,12 +155,14 @@ describe("SSH agent configuration API", () => {
         expect(editedConfig).toContain('password = "ssh-secret"');
 
         await apiClient.restartServer();
+
         const afterRestart = await waitForValue({
             timeoutMs: 15_000,
             description: "created SSH agent after server restart",
             predicate: async () => {
                 try {
                     const agents = await apiClient.listAgents();
+
                     return agents.some((agent) => agent.name === AGENT_NAME)
                         ? agents
                         : undefined;
@@ -164,6 +171,7 @@ describe("SSH agent configuration API", () => {
                 }
             },
         });
+
         // Persistence must reconstruct the same dormant agent after a full config reload.
         expect(
             afterRestart.find((agent) => agent.name === AGENT_NAME)?.status,
@@ -208,6 +216,7 @@ describe("SSH agent configuration API", () => {
     it("reads, updates, renames, and deletes a stopped SSH entry", async () => {
         const configuration =
             await apiClient.getSshAgentConfiguration(AGENT_NAME);
+
         // The edit view must learn that a secret exists without receiving the secret itself.
         expect(configuration).toMatchObject({
             target: "example-host",
@@ -219,11 +228,14 @@ describe("SSH agent configuration API", () => {
         });
 
         const renamed = "updated-ssh-agent";
+
         const configuredAgent = (await apiClient.listAgents()).find(
             (agent) => agent.id === AGENT_NAME,
         );
+
         if (!configuredAgent) throw new Error("Created SSH agent missing");
         await configuredAgent.start();
+
         const updateRequest: UpdateSshAgentRequest = {
             target: "updated-host",
             username: "operator",
@@ -235,10 +247,12 @@ describe("SSH agent configuration API", () => {
             password: "updated-secret",
             clear_password: false,
         };
+
         const update = await apiClient.updateSshAgent(
             AGENT_NAME,
             updateRequest,
         );
+
         // Save must settle a delayed restart before replacing the identity, rather than racing it.
         expect(update.agent).toMatchObject({
             id: renamed,
@@ -310,9 +324,11 @@ describe("SSH agent configuration API", () => {
         await expect(
             apiClient.deleteManagedAgent(LOCAL_AGENT_NAME, "ssh"),
         ).rejects.toMatchObject({ status: 404 } satisfies Partial<ApiError>);
+
         const local = (await apiClient.listAgents()).find(
             (agent) => agent.id === LOCAL_AGENT_NAME,
         );
+
         // A rejected SSH mutation must not convert or remove the local fixture.
         expect(local?.managed).toBe(true);
         expect(local?.configurationEditable).toBe(true);
@@ -343,9 +359,11 @@ describe("SSH agent configuration API", () => {
                 }
             }
         });
+
         const original = (await apiClient.listAgents()).find(
             (agent) => agent.id === originalName,
         );
+
         if (!original) throw new Error("Rename source agent missing");
         await original.start();
         // Start is accepted immediately so uniqueness can be checked while desired-running is true.
@@ -365,6 +383,7 @@ describe("SSH agent configuration API", () => {
         const afterConflict = (await apiClient.listAgents()).find(
             (agent) => agent.id === originalName,
         );
+
         // A 409 must not leave the original stopped after a uniqueness failure.
         expect(afterConflict?.status).not.toBe("stopped");
         expect(
@@ -395,6 +414,7 @@ describe("SSH agent configuration API", () => {
             name,
             sshUpdateRequest({ target: "secret-host-2", name }),
         );
+
         // Identity stays the same so only the password-preservation path is under test.
         expect(updated.agent.id).toBe(name);
         const kept = await apiClient.getSshAgentConfiguration(name);
@@ -457,9 +477,11 @@ describe("SSH agent configuration API", () => {
         expect(cleared.has_password).toBe(false);
         expect(cleared.password).toBeNull();
         const afterClear = readFileSync(configPath, "utf8");
+
         const clearedTable = afterClear
             .split("[[agents]]")
             .find((table) => table.includes(`name = "${name}"`));
+
         // Persistence must drop the TOML key rather than leave an empty password string.
         expect(clearedTable).toBeDefined();
         expect(clearedTable).not.toMatch(/^\s*password\s*=/m);
@@ -478,9 +500,11 @@ describe("SSH agent configuration API", () => {
                 // Cleanup must tolerate a successful delete leaving nothing behind.
             }
         });
+
         const created = (await apiClient.listAgents()).find(
             (agent) => agent.id === name,
         );
+
         if (!created) throw new Error("Delete-running agent missing");
         await created.start();
         // The API must accept delete while desired-running instead of asking the client to stop first.
@@ -512,9 +536,11 @@ describe("SSH agent configuration API", () => {
                 // Cleanup must tolerate an already-removed leftover from a failed assertion.
             }
         });
+
         const created = (await apiClient.listAgents()).find(
             (agent) => agent.id === name,
         );
+
         if (!created) throw new Error("Unreachable SSH agent missing");
         await created.start();
 
@@ -525,6 +551,7 @@ describe("SSH agent configuration API", () => {
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.id === name,
                 );
+
                 return agent?.provisioningStatus.some((step) =>
                     step.message.includes("Sniffing the SSH target"),
                 )
@@ -532,6 +559,7 @@ describe("SSH agent configuration API", () => {
                     : undefined;
             },
         });
+
         // Progress must appear on inventory before the TCP connect times out.
         expect(
             sniffing.provisioningStatus.map((step) => step.message),
@@ -544,12 +572,15 @@ describe("SSH agent configuration API", () => {
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.id === name,
                 );
+
                 const hasSniff = agent?.provisioningStatus.some((step) =>
                     step.message.includes("Sniffing the SSH target"),
                 );
+
                 return agent?.connectionIssue && hasSniff ? agent : undefined;
             },
         });
+
         // Failures stay on connection_issue rather than replacing the progress list.
         expect(failed.connectionIssue).toBeTruthy();
     }, 40_000);

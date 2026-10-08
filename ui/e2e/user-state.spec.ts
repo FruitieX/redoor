@@ -60,12 +60,14 @@ test.describe.serial("User state", () => {
             name: hiddenFileName,
             exact: true,
         });
+
         // Default preference shows dotfiles so operators can see them immediately.
         await expect(hiddenFile).toBeVisible();
 
         const hideButton = page.getByRole("button", {
             name: "Hide hidden files",
         });
+
         await expect(hideButton).toHaveAttribute("aria-pressed", "true");
         await hideButton.click();
 
@@ -91,8 +93,10 @@ test.describe.serial("User state", () => {
         await page.route("**/api/v1/user/state", async (route) => {
             if (route.request().method() !== "PUT") {
                 await route.continue();
+
                 return;
             }
+
             await route.fulfill({
                 status: 500,
                 contentType: "application/json",
@@ -123,15 +127,19 @@ test.describe.serial("User state", () => {
         await page.getByRole("button", { name: "Search device" }).click();
 
         const dialog = page.getByRole("dialog", { name: "Search device" });
+
         const timeoutInput = dialog.getByRole("spinbutton", {
             name: "Search timeout in seconds",
         });
+
         const hiddenToggle = dialog.getByRole("button", {
             name: "Include hidden files and directories",
         });
+
         const gitignoreToggle = dialog.getByRole("button", {
             name: "Respect .gitignore files",
         });
+
         await timeoutInput.fill("23");
         await hiddenToggle.click();
         await gitignoreToggle.click();
@@ -166,13 +174,17 @@ test.describe.serial("User state", () => {
             "data-theme",
             "dark",
         );
+
         const themeButton = page.getByRole("button", {
             name: "Color theme: System",
         });
+
         const triggerBox = await themeButton.boundingBox();
+
         const agentMenuBox = await page
             .getByRole("navigation", { name: "Devices" })
             .boundingBox();
+
         // The compact control remains at the right edge of central chrome, immediately before the agent menu.
         expect(
             (triggerBox?.x ?? 0) + (triggerBox?.width ?? 0),
@@ -199,9 +211,11 @@ test.describe.serial("User state", () => {
             "Click to dark theme",
         );
         await themeButton.click();
+
         const darkThemeButton = page.getByRole("button", {
             name: "Color theme: Dark",
         });
+
         await darkThemeButton.hover();
         // Each state advertises the next step in the cycle.
         await expect(page.getByRole("tooltip")).toHaveText(
@@ -217,12 +231,14 @@ test.describe.serial("User state", () => {
         );
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
+
         const activeFilesTab = page
             .getByLabel("Directory view")
             .getByRole("link", {
                 name: "Files",
                 exact: true,
             });
+
         // The raised active tab keeps high-contrast neutral text in the light theme.
         await expect(activeFilesTab).toHaveCSS("color", "rgb(15, 23, 42)");
         // Its icon retains the blue current-view accent used by the earlier tab treatment.
@@ -267,8 +283,10 @@ test.describe.serial("User state", () => {
         await page.route("**/api/v1/user/state", async (route) => {
             if (route.request().method() !== "PUT") {
                 await route.continue();
+
                 return;
             }
+
             await route.fulfill({
                 status: 500,
                 contentType: "application/json",
@@ -276,9 +294,11 @@ test.describe.serial("User state", () => {
             });
         });
         await page.goto(`${WEB_BASE_URL}/`);
+
         const pinnedFiles = page
             .getByRole("navigation", { name: "Application" })
             .getByRole("list", { name: "Pinned files" });
+
         await dragReorderRow(
             page,
             pinnedFiles.getByRole("listitem", {

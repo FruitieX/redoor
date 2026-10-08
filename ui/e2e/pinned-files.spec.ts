@@ -62,6 +62,7 @@ test.describe.serial("Pinned files", () => {
         const secondName = "file2.txt";
         const firstPath = path.join(ctx.testDirPath, firstName);
         const secondPath = path.join(ctx.testDirPath, secondName);
+
         const applicationNavigation = page.getByRole("navigation", {
             name: "Application",
         });
@@ -71,10 +72,12 @@ test.describe.serial("Pinned files", () => {
         );
 
         const saveButton = page.getByRole("button", { name: "Save file" });
+
         const pinButton = page.getByRole("button", {
             name: "Pin file",
             exact: true,
         });
+
         const saveBox = await saveButton.boundingBox();
         const pinBox = await pinButton.boundingBox();
         // The pin control must sit immediately after save, not among later editor tools.
@@ -84,19 +87,24 @@ test.describe.serial("Pinned files", () => {
         const pinnedFiles = applicationNavigation.getByRole("list", {
             name: "Pinned files",
         });
+
         const firstItem = pinnedFiles.getByRole("listitem").filter({
             hasText: firstName,
         });
+
         // The left menu must show the pin below Transfers, not in the device sidebar.
         await expect(
             firstItem.getByRole("link", { name: firstName, exact: true }),
         ).toBeVisible();
+
         const transfersBox = await applicationNavigation
             .getByRole("link", { name: "Transfers" })
             .boundingBox();
+
         const firstLinkBox = await firstItem
             .getByRole("link", { name: firstName, exact: true })
             .boundingBox();
+
         expect(firstLinkBox?.y ?? 0).toBeGreaterThan(transfersBox?.y ?? 1);
 
         const deviceLabel = firstItem.getByText(ctx.agentName, { exact: true });
@@ -104,14 +112,17 @@ test.describe.serial("Pinned files", () => {
         await expect(deviceLabel).toBeVisible();
         const deviceBox = await deviceLabel.boundingBox();
         expect(deviceBox?.y ?? 0).toBeGreaterThan(firstLinkBox?.y ?? 1);
+
         const deviceFontSize = await deviceLabel.evaluate((element) =>
             Number.parseFloat(getComputedStyle(element).fontSize),
         );
+
         const fileFontSize = await firstItem
             .getByText(firstName, { exact: true })
             .evaluate((element) =>
                 Number.parseFloat(getComputedStyle(element).fontSize),
             );
+
         expect(deviceFontSize).toBeLessThan(fileFontSize);
 
         await page.goto(
@@ -124,9 +135,11 @@ test.describe.serial("Pinned files", () => {
         const secondItem = pinnedFiles.getByRole("listitem").filter({
             hasText: secondName,
         });
+
         const secondLinkBox = await secondItem
             .getByRole("link", { name: secondName, exact: true })
             .boundingBox();
+
         // A newly pinned file must append, not jump above files pinned earlier.
         expect(secondLinkBox?.y ?? 0).toBeGreaterThan(
             (
@@ -213,28 +226,35 @@ test.describe.serial("Pinned files", () => {
             .click();
 
         const panel = page.getByRole("article", { name: "Editing panel" });
+
         const pins = panel.getByRole("navigation", {
             name: "Editor pinned files",
         });
+
         const firstLink = pins.getByRole("link", {
             name: "file1.txt",
             exact: true,
         });
+
         const secondLink = pins.getByRole("link", {
             name: "file2.txt",
             exact: true,
         });
+
         // Both destinations must be visible on a single row above the editing actions.
         await expect(firstLink).toBeVisible();
         await expect(secondLink).toBeVisible();
         const firstBox = await firstLink.boundingBox();
         const secondBox = await secondLink.boundingBox();
+
         const saveBox = await panel
             .getByRole("button", { name: "Save file" })
             .boundingBox();
+
         if (!firstBox || !secondBox || !saveBox) {
             throw new Error("Expected pinned row and toolbar measurements");
         }
+
         expect(firstBox.y).toBe(secondBox.y);
         expect(secondBox.x).toBeGreaterThan(firstBox.x);
         expect(firstBox.y + firstBox.height).toBeLessThanOrEqual(saveBox.y);
@@ -281,9 +301,11 @@ test.describe.serial("Pinned files", () => {
             .click();
 
         const panel = page.getByRole("article", { name: "Editing panel" });
+
         const pins = panel.getByRole("navigation", {
             name: "Editor pinned files",
         });
+
         const backgroundTabPromise = page.context().waitForEvent("page");
         await pins
             .getByRole("link", { name: "file1.txt", exact: true })
@@ -339,9 +361,11 @@ test.describe.serial("Pinned files", () => {
     }) => {
         const fileName = "file1.txt";
         const filePath = path.join(ctx.testDirPath, fileName);
+
         const applicationNavigation = page.getByRole("navigation", {
             name: "Application",
         });
+
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
@@ -349,6 +373,7 @@ test.describe.serial("Pinned files", () => {
         const pinnedFiles = applicationNavigation.getByRole("list", {
             name: "Pinned files",
         });
+
         // Opening the editor must not pin a file that has not been changed.
         await expect(pinnedFiles).toHaveCount(0);
 
@@ -356,6 +381,7 @@ test.describe.serial("Pinned files", () => {
             name: "Pin file",
             exact: true,
         });
+
         await pinButton.hover();
         // The tooltip must explain auto-pin without replacing the button's accessible name.
         await expect(page.getByRole("tooltip")).toHaveText(
@@ -396,19 +422,25 @@ test.describe.serial("Pinned files", () => {
             },
         });
         await page.goto(`${WEB_BASE_URL}/`);
+
         const pinnedFiles = page
             .getByRole("navigation", { name: "Application" })
             .getByRole("list", { name: "Pinned files" });
+
         const links = pinnedFiles.getByRole("link");
+
         const linkNames = () =>
             links.evaluateAll((elements) =>
                 elements.map((element) => element.getAttribute("aria-label")),
             );
+
         // Three entries prove insertion shifts the middle item instead of swapping two.
         await expect.poll(linkNames).toEqual(names);
+
         const lastHandle = pinnedFiles.getByRole("listitem", {
             name: `Pinned file file3.txt on ${ctx.agentName}`,
         });
+
         await lastHandle.focus();
         // The row itself is the keyboard sorting surface, with no separate grip button.
         await expect(lastHandle).toHaveAttribute(
@@ -448,9 +480,11 @@ test.describe.serial("Pinned files", () => {
         await page
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
+
         const editorPins = page
             .getByRole("article", { name: "Editing panel" })
             .getByRole("navigation", { name: "Editor pinned files" });
+
         // The editor strip reads the same account order as the sidebar.
         await expect(editorPins.getByRole("link")).toHaveText([
             "file3.txt",
@@ -507,9 +541,11 @@ test.describe.serial("Pinned files", () => {
         await page
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
+
         const pins = panel.getByRole("navigation", {
             name: "Editor pinned files",
         });
+
         await dragReorderRow(
             page,
             pins.getByRole("listitem", {
@@ -581,12 +617,15 @@ test.describe.serial("Pinned files", () => {
             },
         });
         await page.goto(`${WEB_BASE_URL}/`);
+
         const pinnedFiles = page
             .getByRole("navigation", { name: "Application" })
             .getByRole("list", { name: "Pinned files" });
+
         const handle = pinnedFiles.getByRole("listitem", {
             name: `Pinned file file3.txt on ${ctx.agentName}`,
         });
+
         let puts = 0;
         page.on("request", (request) => {
             if (
@@ -606,6 +645,7 @@ test.describe.serial("Pinned files", () => {
         await page.keyboard.press("Escape");
         await expect(handle).toHaveAttribute("data-dragging", "false");
         await expect(handle).toBeFocused();
+
         const linkNames = () =>
             pinnedFiles
                 .getByRole("link")
@@ -614,6 +654,7 @@ test.describe.serial("Pinned files", () => {
                         element.getAttribute("aria-label"),
                     ),
                 );
+
         await expect.poll(linkNames).toEqual(names);
         expect(puts).toBe(0);
 

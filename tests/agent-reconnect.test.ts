@@ -12,6 +12,7 @@ import {
 } from "./test-utils";
 
 const processManager = new ProcessManager();
+
 const tcpAddressSchema = z.object({ port: z.number().int().positive() });
 
 afterAll(async () => {
@@ -26,6 +27,7 @@ async function createDownstreamBlackholeProxy(upstreamPort: number): Promise<{
 }> {
     let blocked = false;
     const sockets = new Set<Socket>();
+
     const server = createServer((client) => {
         const upstream = connect(upstreamPort, "127.0.0.1");
         sockets.add(client);
@@ -47,6 +49,7 @@ async function createDownstreamBlackholeProxy(upstreamPort: number): Promise<{
         client.on("error", () => client.destroy());
         upstream.on("error", () => upstream.destroy());
     });
+
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
         server.listen(0, "127.0.0.1", resolve);
@@ -62,6 +65,7 @@ async function createDownstreamBlackholeProxy(upstreamPort: number): Promise<{
             for (const socket of sockets) {
                 socket.destroy();
             }
+
             await new Promise<void>((resolve, reject) => {
                 server.close((error) => {
                     if (error) {
@@ -84,6 +88,7 @@ describe("Agent connection recovery", () => {
         const apiClient = new ApiClient(
             `http://127.0.0.1:${VITEST_SERVER_PORT}`,
         );
+
         await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
 
         const proxy = await createDownstreamBlackholeProxy(VITEST_SERVER_PORT);
@@ -92,12 +97,14 @@ describe("Agent connection recovery", () => {
         });
 
         const agentName = "blackhole-reconnect-agent";
+
         const agentPid = processManager.spawnAgent({
             wsAddress: `ws://127.0.0.1:${proxy.port}/ws`,
             name: agentName,
             cwd: process.cwd(),
             home: process.cwd(),
         });
+
         const initialAgent = await waitForValue({
             description: "initial proxied agent connection",
             predicate: async () =>
@@ -152,6 +159,7 @@ describe("Agent connection recovery", () => {
                         agent.connectionId !== initialAgent.connectionId,
                 ),
         });
+
         // A new connection identity proves recovery used a replacement WebSocket generation.
         expect(reconnectedAgent.connectionId).not.toBe(
             initialAgent.connectionId,

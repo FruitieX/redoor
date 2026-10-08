@@ -14,9 +14,11 @@ test.describe("MCP token settings", () => {
         ).toBeVisible();
 
         await page.getByRole("button", { name: "Create token" }).click();
+
         const createDialog = page.getByRole("dialog", {
             name: "Create MCP token",
         });
+
         await expect(
             createDialog.getByRole("checkbox", { name: /Device inventory/ }),
         ).toBeChecked();
@@ -27,9 +29,11 @@ test.describe("MCP token settings", () => {
         await expect(
             createDialog.getByRole("checkbox", { name: /Run shell commands/ }),
         ).not.toBeChecked();
+
         const deviceCheckboxes = createDialog
             .getByRole("group", { name: "Allowed devices" })
             .getByRole("checkbox");
+
         await expect(deviceCheckboxes.first()).not.toBeChecked();
         await createDialog.getByLabel("Token name").fill(tokenName);
         await deviceCheckboxes.first().click();
@@ -40,9 +44,11 @@ test.describe("MCP token settings", () => {
         const secretDialog = page.getByRole("dialog", {
             name: "Token created",
         });
+
         const originalToken = await secretDialog
             .getByLabel("Bearer token contents")
             .textContent();
+
         expect(originalToken).toMatch(/^redoor_mcp_/);
         await secretDialog
             .getByRole("button", { name: "Copy MCP bearer token" })
@@ -60,6 +66,7 @@ test.describe("MCP token settings", () => {
         const card = page.getByRole("article").filter({
             has: page.getByRole("heading", { name: tokenName, exact: true }),
         });
+
         await expect(card.getByText("Active")).toBeVisible();
         await card.getByRole("button", { name: "Edit" }).click();
         const editDialog = page.getByRole("dialog", { name: "Edit MCP token" });
@@ -105,9 +112,11 @@ test.describe("MCP token settings", () => {
         await editDialog.getByRole("button", { name: "Save changes" }).click();
         await expect(editDialog).not.toBeVisible();
         await page.reload();
+
         const editedCard = page.getByRole("article").filter({
             has: page.getByRole("heading", { name: tokenName, exact: true }),
         });
+
         // Reload confirms that the edited policy is persisted without exposing a new secret.
         await expect(editedCard).toContainText("devices:read, files:write");
         await expect(editedCard).toContainText("Devices: None");
@@ -117,12 +126,15 @@ test.describe("MCP token settings", () => {
             .getByRole("dialog", { name: "Rotate MCP token?" })
             .getByRole("button", { name: "Rotate token" })
             .click();
+
         const rotatedDialog = page.getByRole("dialog", {
             name: "Token rotated",
         });
+
         const rotatedToken = await rotatedDialog
             .getByLabel("Bearer token contents")
             .textContent();
+
         // A rotation must reveal different material only in its immediate workflow.
         expect(rotatedToken).toMatch(/^redoor_mcp_/);
         expect(rotatedToken).not.toBe(originalToken);
@@ -139,12 +151,14 @@ test.describe("MCP token settings", () => {
                 }),
             })
             .filter({ hasText: "Active" });
+
         await activeCard.getByRole("button", { name: "Revoke" }).click();
         await page
             .getByRole("dialog", { name: "Revoke MCP token?" })
             .getByRole("button", { name: "Revoke token" })
             .click();
         await expect(page.getByRole("status")).toContainText("Token revoked");
+
         const revokedCards = page
             .getByRole("article")
             .filter({
@@ -154,6 +168,7 @@ test.describe("MCP token settings", () => {
                 }),
             })
             .filter({ hasText: "Revoked" });
+
         // Rotation history retains the invalidated predecessor beside the revoked replacement.
         await expect(revokedCards).toHaveCount(2);
 

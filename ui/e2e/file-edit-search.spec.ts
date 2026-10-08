@@ -30,9 +30,11 @@ test.describe.serial("File editor search and replace", () => {
         await expect(page.getByLabel("File editor")).toBeVisible();
         // Search stays out of the editor until its dedicated action is used.
         await expect(page.getByLabel("Find in file")).toBeHidden();
+
         const toggle = page.getByRole("button", {
             name: "Toggle search and replace",
         });
+
         await toggle.click();
         await expect(page.getByLabel("Find in file")).toBeVisible();
         await expect(
@@ -58,10 +60,12 @@ test.describe.serial("File editor search and replace", () => {
         await expect(
             page.getByRole("button", { name: "Match whole word", exact: true }),
         ).toBeHidden();
+
         const advanced = page.getByRole("button", {
             name: "Advanced",
             exact: true,
         });
+
         await advanced.click();
         // Advanced mode reveals both replacement tools and optional search constraints.
         await expect(advanced).toHaveAttribute("aria-pressed", "true");
@@ -146,10 +150,12 @@ test.describe.serial("File editor search and replace", () => {
         await page.keyboard.press("Shift+ArrowRight");
         await page.keyboard.press("Shift+ArrowRight");
         await page.keyboard.press("Shift+ArrowRight");
+
         const findNext = page.getByRole("button", {
             name: "Find next",
             exact: true,
         });
+
         // Selecting text makes Find next usable even though the query field is empty.
         await expect(findNext).toBeEnabled();
         await findNext.click();
@@ -213,9 +219,11 @@ test.describe.serial("File editor search and replace", () => {
         );
 
         await expect(page.getByLabel("File editor")).toBeVisible();
+
         const searchToggle = page.getByRole("button", {
             name: "Toggle search and replace",
         });
+
         await searchToggle.hover();
         // The action tooltip advertises the keyboard path to the same panel.
         await expect(page.getByRole("tooltip")).toHaveText(

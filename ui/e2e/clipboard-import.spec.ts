@@ -93,6 +93,7 @@ test.describe("Clipboard imports", () => {
         const dialog = page.getByRole("dialog", {
             name: "Save pasted text",
         });
+
         const fileNameInput = dialog.getByRole("textbox", { name: "Filename" });
         await dialog.getByRole("button", { name: "Upload text" }).click();
 
@@ -147,6 +148,7 @@ test.describe("Clipboard imports", () => {
         const dialog = page.getByRole("dialog", {
             name: "Save pasted image",
         });
+
         const fileNameInput = dialog.getByRole("textbox", { name: "Filename" });
         await dialog.getByRole("button", { name: "Upload image" }).click();
 

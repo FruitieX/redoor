@@ -24,6 +24,7 @@ import {
 } from "./test-utils";
 
 const AGENT_NAME = "created-local-agent";
+
 const SSH_FIXTURE_NAME = "ssh-fixture-agent";
 
 /** Builds a complete local payload so tests only override the field under assertion. */
@@ -69,8 +70,11 @@ function sshRequest(
 }
 
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
+
 let apiClient: ApiClient;
+
 let configPath: string;
 
 beforeAll(async () => {
@@ -149,12 +153,14 @@ describe("Local agent configuration API", () => {
         expect(editedConfig).toContain('log = "/tmp/created-local-agent.log"');
 
         await apiClient.restartServer();
+
         const afterRestart = await waitForValue({
             timeoutMs: 15_000,
             description: "created local agent after server restart",
             predicate: async () => {
                 try {
                     const agents = await apiClient.listAgents();
+
                     return agents.some((agent) => agent.name === AGENT_NAME)
                         ? agents
                         : undefined;
@@ -163,6 +169,7 @@ describe("Local agent configuration API", () => {
                 }
             },
         });
+
         // Persistence must reconstruct the same dormant agent after a full config reload.
         expect(
             afterRestart.find((agent) => agent.name === AGENT_NAME)?.status,
@@ -190,6 +197,7 @@ describe("Local agent configuration API", () => {
     it("reads, updates, renames, and deletes a stopped local entry", async () => {
         const configuration =
             await apiClient.getLocalAgentConfiguration(AGENT_NAME);
+
         // The edit view must receive the persisted optional fields for a local agent.
         expect(configuration).toMatchObject({
             name: AGENT_NAME,
@@ -198,20 +206,25 @@ describe("Local agent configuration API", () => {
         });
 
         const renamed = "updated-local-agent";
+
         const configuredAgent = (await apiClient.listAgents()).find(
             (agent) => agent.id === AGENT_NAME,
         );
+
         if (!configuredAgent) throw new Error("Created local agent missing");
         await configuredAgent.start();
+
         const updateRequest: UpdateLocalAgentRequest = {
             name: renamed,
             home: "/srv/updated-local",
             log: null,
         };
+
         const update = await apiClient.updateLocalAgent(
             AGENT_NAME,
             updateRequest,
         );
+
         // Save must settle a delayed restart before replacing the identity, rather than racing it.
         expect(update.agent).toMatchObject({
             id: renamed,
@@ -281,9 +294,11 @@ describe("Local agent configuration API", () => {
         await expect(
             apiClient.deleteManagedAgent(SSH_FIXTURE_NAME, "local"),
         ).rejects.toMatchObject({ status: 404 } satisfies Partial<ApiError>);
+
         const ssh = (await apiClient.listAgents()).find(
             (agent) => agent.id === SSH_FIXTURE_NAME,
         );
+
         // A rejected local mutation must not convert or remove the SSH fixture.
         expect(ssh?.managed).toBe(true);
         expect(ssh?.sshTarget).toBe("fixture-host");
@@ -309,15 +324,18 @@ describe("Local agent configuration API", () => {
             } catch {
                 // Cleanup must tolerate an already-removed leftover from a failed assertion.
             }
+
             try {
                 await apiClient.deleteManagedAgent(takenName, "ssh");
             } catch {
                 // Cleanup must tolerate an already-removed leftover from a failed assertion.
             }
         });
+
         const original = (await apiClient.listAgents()).find(
             (agent) => agent.id === originalName,
         );
+
         if (!original) throw new Error("Rename source agent missing");
         await original.start();
         // Start is accepted immediately so uniqueness can be checked while desired-running is true.
@@ -337,6 +355,7 @@ describe("Local agent configuration API", () => {
         const afterConflict = (await apiClient.listAgents()).find(
             (agent) => agent.id === originalName,
         );
+
         // A 409 must not leave the original stopped after a uniqueness failure.
         expect(afterConflict?.status).not.toBe("stopped");
         expect(
@@ -356,9 +375,11 @@ describe("Local agent configuration API", () => {
                 // Cleanup must tolerate a successful delete leaving nothing behind.
             }
         });
+
         const created = (await apiClient.listAgents()).find(
             (agent) => agent.id === name,
         );
+
         if (!created) throw new Error("Delete-running local agent missing");
         await created.start();
         // The API must accept delete while desired-running instead of asking the client to stop first.
@@ -388,12 +409,15 @@ describe("Local agent configuration API", () => {
                 // Cleanup must tolerate a successful delete leaving nothing behind.
             }
         });
+
         const created = (await apiClient.listAgents()).find(
             (agent) => agent.id === name,
         );
+
         if (!created)
             throw new Error("Local silent-provisioning agent missing");
         await created.start();
+
         const connected = await waitForValue({
             timeoutMs: 15_000,
             description: "local managed agent to connect without SSH steps",
@@ -401,17 +425,21 @@ describe("Local agent configuration API", () => {
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.id === name,
                 );
+
                 const extra = agent?.provisioningStatus.filter(
                     (step) => step.message !== "Connected",
                 );
+
                 if (extra && extra.length > 0) {
                     throw new Error(
                         `local agent published SSH provisioning status: ${JSON.stringify(extra)}`,
                     );
                 }
+
                 return agent?.status === "connected" ? agent : undefined;
             },
         });
+
         // Local spawn has no sniff/download/upload; Connected is the only lifecycle line.
         expect(
             connected.provisioningStatus.every(

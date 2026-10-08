@@ -22,15 +22,19 @@ export async function dragReorderRow(
     await target.scrollIntoViewIfNeeded();
     const start = await handle.boundingBox();
     const end = await target.boundingBox();
+
     const destination = await target.evaluate((element) => {
         const row = element.closest("[data-sortable-item]");
+
         return row?.parentElement
             ? Array.from(row.parentElement.children).indexOf(row) + 1
             : 0;
     });
+
     if (!start || !end) {
         throw new Error("Reorder drag needs a visible handle and target");
     }
+
     const startX = start.x + start.width / 2;
     const startY = start.y + start.height / 2;
     const endX = end.x + end.width / 2;
@@ -41,12 +45,14 @@ export async function dragReorderRow(
     // The drag listeners attach after activation, so wait before the real move.
     await expect(handle).toHaveAttribute("data-dragging", "true");
     const steps = 24;
+
     for (let step = 1; step <= steps; step += 1) {
         await page.mouse.move(
             startX + ((endX - startX) * step) / steps,
             startY + ((endY - startY) * step) / steps,
         );
     }
+
     // Confirm collision feedback has reached the target before releasing the pointer.
     await expect(
         page
@@ -68,26 +74,32 @@ export async function keyboardReorder(
 ) {
     let position = await handle.evaluate((element) => {
         const row = element.closest("[data-sortable-item]");
+
         return row?.parentElement
             ? Array.from(row.parentElement.children).indexOf(row) + 1
             : 0;
     });
+
     await handle.focus();
     await page.keyboard.press("Space");
     await expect(handle).toHaveAttribute("data-dragging", "true");
+
     // Wait for pickup feedback before sending keys to the asynchronously attached sensor.
     const announcement = page
         .getByLabel(/reorder announcement$/)
         .filter({ hasText: /Picked up|position/ })
         .first();
+
     await expect(announcement).toBeAttached();
     await waitForKeyboardSensor(page);
+
     for (let step = 0; step < move.times; step += 1) {
         position += move.key === "ArrowUp" || move.key === "ArrowLeft" ? -1 : 1;
         await page.keyboard.press(move.key);
         // Wait for the destination preview so dropping cannot race its collision update.
         await expect(announcement).toContainText(`position ${position} of`);
     }
+
     await page.keyboard.press("Space");
     await expect(handle).toHaveAttribute("data-dragging", "false");
     // Query subscribers repaint after the drag state resets; the next gesture needs the committed order.
@@ -95,6 +107,7 @@ export async function keyboardReorder(
         .poll(() =>
             handle.evaluate((element) => {
                 const row = element.closest("[data-sortable-item]");
+
                 return row?.parentElement
                     ? Array.from(row.parentElement.children).indexOf(row) + 1
                     : 0;

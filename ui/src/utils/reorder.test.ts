@@ -62,6 +62,7 @@ test("returns the same array for empty, single, missing, and identical moves", (
 test("reuses item objects and preserves metadata", () => {
     const first = { id: "a", name: "Alpha" };
     const second = { id: "b", name: "Beta" };
+
     const moved = moveKeyedItems([first, second], keyOf, {
         activeId: "b",
         overId: "a",
@@ -79,6 +80,7 @@ test("moves one interleaved scope without disturbing the other", () => {
         { id: "b2", scope: "b" },
         { id: "a3", scope: "a" },
     ];
+
     const moved = moveKeyedSubsequence(
         items,
         {

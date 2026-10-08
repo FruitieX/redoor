@@ -18,8 +18,11 @@ const projectRoot = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "../..",
 );
+
 const agentLogPath = path.join(projectRoot, "log/playwright-agent1_src.log");
+
 const serverLogPath = path.join(projectRoot, "log/playwright-redoor.log");
+
 let context: TestContext;
 
 /** Identifies only browser-owned agent log sockets so UI refresh traffic is ignored. */
@@ -32,6 +35,7 @@ function isAgentLogSocket(socket: PlaywrightWebSocket): boolean {
 /** Returns the newest lifecycle identifier after Strict Mode transient streams settle. */
 async function latestStartedStreamId(): Promise<string | undefined> {
     const contents = await fs.readFile(agentLogPath, "utf8");
+
     return Array.from(
         contents.matchAll(
             /Agent log stream started: log_stream_id=([0-9a-f-]+)/g,
@@ -73,6 +77,7 @@ test.describe.serial("Agent logs", () => {
         const logRegion = page.getByRole("log", {
             name: `${context.agentName} log entries`,
         });
+
         // Agent startup records must replay from process memory rather than parsed file history.
         await expect(logRegion).toContainText("Starting agent");
         // File-only fixtures from before startup must not appear in process-local replay.
@@ -107,9 +112,11 @@ test.describe.serial("Agent logs", () => {
         await logRegion.evaluate((element) => {
             element.scrollTop = 0;
         });
+
         const topBefore = await logRegion.evaluate(
             (element) => element.scrollTop,
         );
+
         // Explicit top positioning establishes the value live rendering must preserve.
         expect(topBefore).toBeLessThanOrEqual(1);
         await expect(logRegion).toContainText("Agent log stream started:");
@@ -136,9 +143,11 @@ test.describe.serial("Agent logs", () => {
             .poll(() => sockets.filter((socket) => !socket.isClosed()).length)
             // Strict Mode may create transient sockets, but only one mounted stream may remain.
             .toBe(1);
+
         const loggingLevel = page.getByRole("combobox", {
             name: "agent1_src logging level",
         });
+
         await loggingLevel.selectOption("trace");
         // The agent control must expose the threshold confirmed over its authoritative socket.
         await expect(loggingLevel).toHaveValue("trace");
@@ -152,8 +161,10 @@ test.describe.serial("Agent logs", () => {
                     contentType: "application/json",
                     body: JSON.stringify({ error: "Agent is disconnected" }),
                 });
+
                 return;
             }
+
             await route.continue();
         });
         await loggingLevel.selectOption("debug");
@@ -168,22 +179,27 @@ test.describe.serial("Agent logs", () => {
         const activeSocket = sockets.find((socket) => !socket.isClosed());
         // The preceding poll guarantees one route-owned socket to observe during teardown.
         expect(activeSocket).toBeDefined();
+
         if (!activeSocket) {
             throw new Error(
                 "active agent log socket disappeared before navigation",
             );
         }
+
         const streamId = await expect
             .poll(latestStartedStreamId, {
                 message: "expected an active agent log lifecycle identifier",
             })
             .not.toBeUndefined()
             .then(() => latestStartedStreamId());
+
         // Cleanup assertions need a non-secret identifier shared by both lifecycle markers.
         expect(streamId).toBeDefined();
+
         if (!streamId) {
             throw new Error("agent log stream identifier was unavailable");
         }
+
         const closed = activeSocket.waitForEvent("close");
 
         await page
