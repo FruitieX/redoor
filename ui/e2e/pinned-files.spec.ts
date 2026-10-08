@@ -158,17 +158,27 @@ test.describe.serial("Pinned files", () => {
                 ],
             });
 
+        const backgroundTabPromise = page.context().waitForEvent("page");
         await firstItem
             .getByRole("link", { name: firstName, exact: true })
             .click({ button: "middle" });
-        // A draggable sidebar pin must support tab-style middle-click removal without navigation.
+        const backgroundTab = await backgroundTabPromise;
+        // Middle-click must open the pinned destination while preserving both pins and the current page.
+        await expect(backgroundTab).toHaveURL(
+            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(firstPath)}`,
+        );
+        await backgroundTab.close();
         await expect(
             pinnedFiles.getByRole("link", { name: firstName, exact: true }),
-        ).toHaveCount(0);
-        await expect(
-            secondItem.getByRole("link", { name: secondName, exact: true }),
         ).toBeVisible();
-        expect(page.context().pages()).toHaveLength(1);
+        await expect(page).toHaveURL(
+            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(secondPath)}`,
+        );
+        await expect
+            .poll(async () => (await api.getUserState()).state)
+            .toMatchObject({
+                pinnedFiles: [{ path: firstPath }, { path: secondPath }],
+            });
 
         await secondItem
             .getByRole("link", { name: secondName, exact: true })
@@ -253,7 +263,7 @@ test.describe.serial("Pinned files", () => {
         await expect(pins).toHaveCount(0);
     });
 
-    test("closes full-window pins with the close button and middle click", async ({
+    test("opens full-window pins in background tabs and closes them with the close button", async ({
         page,
     }) => {
         const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
@@ -274,16 +284,29 @@ test.describe.serial("Pinned files", () => {
         const pins = panel.getByRole("navigation", {
             name: "Editor pinned files",
         });
+        const backgroundTabPromise = page.context().waitForEvent("page");
         await pins
             .getByRole("link", { name: "file1.txt", exact: true })
             .click({ button: "middle" });
-        // Middle-click must unpin the destination without navigating or opening another browser tab.
+        const backgroundTab = await backgroundTabPromise;
+        // Native navigation must leave the pins and the expanded editor on the original page intact.
+        await expect(backgroundTab).toHaveURL(firstUrl);
+        await backgroundTab.close();
+        await expect(
+            pins.getByRole("link", { name: "file1.txt", exact: true }),
+        ).toBeVisible();
+        await expect(page).toHaveURL(secondUrl);
+        await expect(panel).toHaveCSS("position", "fixed");
+        await pins
+            .getByRole("button", {
+                name: "Close pinned file file1.txt",
+                exact: true,
+            })
+            .click();
+        // The explicit close button remains the way to remove an inactive pin.
         await expect(
             pins.getByRole("link", { name: "file1.txt", exact: true }),
         ).toHaveCount(0);
-        await expect(page).toHaveURL(secondUrl);
-        expect(page.context().pages()).toHaveLength(1);
-        await expect(panel).toHaveCSS("position", "fixed");
 
         const editor = panel.getByLabel("File editor");
         await editor.click();
@@ -305,7 +328,7 @@ test.describe.serial("Pinned files", () => {
         ).toBeVisible();
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
-        // Both closing gestures must persist removal in the shared user state.
+        // Both close buttons must persist removal in the shared user state.
         await expect
             .poll(async () => (await api.getUserState()).state)
             .toMatchObject({ pinnedFiles: [] });

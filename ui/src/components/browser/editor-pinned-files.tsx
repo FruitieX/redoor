@@ -92,10 +92,7 @@ function EditorPin(props: {
     onClose: () => void;
 }) {
     return (
-        <SortableItem
-            id={getPinnedFileKey(props.file)}
-            onRemove={props.onClose}
-        >
+        <SortableItem id={getPinnedFileKey(props.file)}>
             {(item) => (
                 <li
                     {...item.dragProps}

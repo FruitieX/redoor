@@ -186,10 +186,7 @@ function TerminalTabControl(props: {
 }) {
     const status = getTerminalStatus(props.tab.state);
     return (
-        <SortableItem
-            id={String(props.tab.id)}
-            onRemove={() => props.onClose(props.tab.id)}
-        >
+        <SortableItem id={String(props.tab.id)}>
             {(item) => (
                 <div
                     {...item.dragProps}

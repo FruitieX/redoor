@@ -525,7 +525,6 @@ export function SortableList(props: {
  */
 export function SortableItem(props: {
     id: string;
-    onRemove?: () => void;
     children: (item: SortableItemState) => React.ReactNode;
 }) {
     const list = React.useContext(SortableListContext);
@@ -549,14 +548,6 @@ export function SortableItem(props: {
             "data-sortable-item": true,
             onMouseDown: (event) => {
                 sortable.listeners?.onMouseDown?.(event);
-            },
-            onAuxClick: (event) => {
-                if (event.button !== 1 || !props.onRemove) {
-                    return;
-                }
-                // A removable link must not open a browser tab as it leaves the collection.
-                event.preventDefault();
-                props.onRemove();
             },
             onTouchStart: (event) => {
                 sortable.listeners?.onTouchStart?.(event);

@@ -420,15 +420,20 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await page
             .getByRole("tab", { name: "agent1_src 2" })
             .click({ button: "middle" });
-        await secondSocketClosed;
-        // Middle-clicking an inactive draggable tab closes it without opening a browser tab.
+        // Middle-click must leave the inactive terminal and the active selection intact.
+        await expect(
+            page.getByRole("tab", { name: "agent1_src 2" }),
+        ).toBeVisible();
         await expect(
             page.getByRole("tab", { name: "agent1_src 3" }),
         ).toHaveAttribute("aria-selected", "true");
+        expect(page.context().pages()).toHaveLength(1);
+        await page.getByRole("button", { name: "Close agent1_src 2" }).click();
+        await secondSocketClosed;
+        // The explicit close button must still end the inactive terminal session.
         await expect(
             page.getByRole("tab", { name: "agent1_src 2" }),
         ).toHaveCount(0);
-        expect(page.context().pages()).toHaveLength(1);
 
         const thirdSocket = terminalSockets[2];
         if (!thirdSocket) {

@@ -290,7 +290,7 @@ function PinnedFileRow(props: {
     const isActive = props.pathname === href;
     const itemId = getPinnedFileKey(props.file);
     return (
-        <SortableItem id={itemId} onRemove={() => props.onRemove(props.file)}>
+        <SortableItem id={itemId}>
             {(item) => (
                 <li
                     {...item.dragProps}
