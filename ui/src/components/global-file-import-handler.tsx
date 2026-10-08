@@ -67,8 +67,10 @@ function getClipboardFileName(type: string, index: number) {
         ["image/webp", "webp"],
         ["application/pdf", "pdf"],
     ]);
+
     const extension = extensionByType.get(type) ?? "bin";
     const suffix = index === 0 ? "" : `-${index + 1}`;
+
     return `pasted-file${suffix}.${extension}`;
 }
 
@@ -78,6 +80,7 @@ async function readClipboardFiles(items: ClipboardItem[]) {
 
     for (const item of items) {
         const binaryType = item.types.find((type) => !type.startsWith("text/"));
+
         if (!binaryType) {
             continue;
         }
@@ -98,9 +101,11 @@ function getFileNameError(fileName: string) {
     if (!fileName.trim()) {
         return "Filename is required";
     }
+
     if (fileName === "." || fileName === "..") {
         return "Filename must identify a file";
     }
+
     if (fileName.includes("/") || fileName.includes("\\")) {
         return "Filename cannot contain path separators";
     }
@@ -112,13 +117,16 @@ function getFileNameError(fileName: string) {
 async function readDirectoryEntries(entry: FileSystemDirectoryEntry) {
     const reader = entry.createReader();
     const entries: FileSystemEntry[] = [];
+
     while (true) {
         const chunk = await new Promise<FileSystemEntry[]>((resolve, reject) =>
             reader.readEntries(resolve, reject),
         );
+
         if (chunk.length === 0) {
             return entries;
         }
+
         entries.push(...chunk);
     }
 }
@@ -151,19 +159,24 @@ async function traverseDroppedEntry(
     const relativePath = parentPath
         ? `${parentPath}/${entry.name}`
         : entry.name;
+
     if (isDroppedFileEntry(entry)) {
         const file = await new Promise<File>((resolve, reject) =>
             entry.file(resolve, reject),
         );
+
         manifest.files.push({ file, relativePath });
+
         return;
     }
+
     if (!isDroppedDirectoryEntry(entry)) {
         return;
     }
 
     manifest.directories.push(relativePath);
     const children = await readDirectoryEntries(entry);
+
     for (const child of children) {
         await traverseDroppedEntry(child, relativePath, manifest);
     }
@@ -174,6 +187,7 @@ async function readDroppedFiles(dataTransfer: DataTransfer) {
     const entries = Array.from(dataTransfer.items)
         .map((item) => item.webkitGetAsEntry())
         .filter((entry): entry is FileSystemEntry => entry !== null);
+
     if (entries.length === 0) {
         return {
             files: Array.from(dataTransfer.files, (file) => ({
@@ -185,15 +199,18 @@ async function readDroppedFiles(dataTransfer: DataTransfer) {
     }
 
     const manifest: DroppedManifest = { files: [], directories: [] };
+
     for (const entry of entries) {
         await traverseDroppedEntry(entry, "", manifest);
     }
+
     return manifest;
 }
 
 /** Enqueues source manifests for the active destination. */
 function useFileUploader(props: { destination: DirectoryDestination | null }) {
     const enqueue = useSetAtom(enqueueUploadBatchAtom);
+
     const [importState, setImportState] = React.useState<ImportState>({
         type: "idle",
     });
@@ -211,25 +228,31 @@ function useFileUploader(props: { destination: DirectoryDestination | null }) {
             if (files.length === 0 && directories.length === 0) {
                 return;
             }
+
             if (!props.destination) {
                 showMissingDirectoryError();
+
                 return;
             }
 
             const destination = props.destination;
+
             const result = enqueue({
                 agentId: destination.agent.id,
                 destinationPath: destination.path,
                 files,
                 directories,
             });
+
             if (!result.ok) {
                 setImportState({
                     type: "error",
                     message: result.message,
                 });
+
                 return;
             }
+
             setImportState({
                 type: "success",
                 message: `Queued ${result.fileCount} ${result.fileCount === 1 ? "file" : "files"}.`,
@@ -259,14 +282,19 @@ function usePastedContentImport(props: {
     showMissingDirectoryError: () => void;
 }) {
     const queryClient = useQueryClient();
+
     const [pastedContents, setPastedContents] = React.useState<PastedContent[]>(
         [],
     );
+
     const [fileName, setFileName] = React.useState("");
+
     const [fileNameError, setFileNameError] = React.useState<string | null>(
         null,
     );
+
     const pastedContent = pastedContents[0] ?? null;
+
     const uploadMutation = useMutation({
         mutationFn: async (request: {
             content: PastedContent;
@@ -276,11 +304,13 @@ function usePastedContentImport(props: {
             const file = new File([request.content.blob], request.fileName, {
                 type: request.content.blob.type,
             });
+
             await request.destination.agent.upload(
                 joinBrowserPath(request.destination.path, request.fileName),
                 file,
                 { on_existing: "error" },
             );
+
             return request.destination;
         },
         onSuccess: (destination) => {
@@ -293,11 +323,14 @@ function usePastedContentImport(props: {
     const openPastedContentDialog = React.useCallback(
         (contents: PastedContent[]) => {
             const firstContent = contents[0];
+
             if (!firstContent) {
                 return;
             }
+
             if (!props.destination) {
                 props.showMissingDirectoryError();
+
                 return;
             }
 
@@ -318,15 +351,20 @@ function usePastedContentImport(props: {
             event.preventDefault();
             const trimmedFileName = fileName.trim();
             const validationError = getFileNameError(trimmedFileName);
+
             if (validationError) {
                 setFileNameError(validationError);
+
                 return;
             }
+
             if (!pastedContent) {
                 return;
             }
+
             if (!props.destination) {
                 props.showMissingDirectoryError();
+
                 return;
             }
 
@@ -412,6 +450,7 @@ function useClipboardImporter(props: {
     return React.useCallback(async () => {
         if (!props.destination) {
             props.showMissingDirectoryError();
+
             return;
         }
 
@@ -421,16 +460,20 @@ function useClipboardImporter(props: {
                     "Clipboard access is not available in this browser.",
                 );
             }
+
             if (navigator.clipboard.read) {
                 const items = await navigator.clipboard.read();
                 const files = await readClipboardFiles(items);
+
                 if (files.length > 0) {
                     const images = files.filter((file) =>
                         file.type.startsWith("image/"),
                     );
+
                     const otherFiles = files.filter(
                         (file) => !file.type.startsWith("image/"),
                     );
+
                     if (otherFiles.length > 0) {
                         await props.uploadFiles(
                             otherFiles.map((file) => ({
@@ -439,16 +482,20 @@ function useClipboardImporter(props: {
                             })),
                         );
                     }
+
                     if (images.length > 0) {
                         props.openImageFileDialog(images);
                     }
+
                     return;
                 }
             }
 
             const text = await navigator.clipboard.readText();
+
             if (text) {
                 props.openTextFileDialog(text);
+
                 return;
             }
 
@@ -499,6 +546,7 @@ function useGlobalImportEvents(props: {
 
             event.preventDefault();
             dragDepthRef.current += 1;
+
             if (props.destination) {
                 setIsDraggingFiles(true);
             }
@@ -511,6 +559,7 @@ function useGlobalImportEvents(props: {
             }
 
             event.preventDefault();
+
             if (event.dataTransfer) {
                 event.dataTransfer.dropEffect = props.destination
                     ? "copy"
@@ -525,6 +574,7 @@ function useGlobalImportEvents(props: {
             }
 
             dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+
             if (dragDepthRef.current === 0) {
                 setIsDraggingFiles(false);
             }
@@ -539,14 +589,19 @@ function useGlobalImportEvents(props: {
             event.preventDefault();
             dragDepthRef.current = 0;
             setIsDraggingFiles(false);
+
             if (!props.destination) {
                 props.showMissingDirectoryError();
+
                 return;
             }
+
             const dataTransfer = event.dataTransfer;
+
             if (!dataTransfer) {
                 return;
             }
+
             void readDroppedFiles(dataTransfer)
                 .then((manifest) =>
                     props.uploadFiles(manifest.files, manifest.directories),
@@ -562,22 +617,28 @@ function useGlobalImportEvents(props: {
 
             const files = Array.from(event.clipboardData?.files ?? []);
             const text = event.clipboardData?.getData("text/plain") ?? "";
+
             if (files.length === 0 && !text) {
                 return;
             }
 
             event.preventDefault();
+
             if (!props.destination) {
                 props.showMissingDirectoryError();
+
                 return;
             }
+
             if (files.length > 0) {
                 const images = files.filter((file) =>
                     file.type.startsWith("image/"),
                 );
+
                 const otherFiles = files.filter(
                     (file) => !file.type.startsWith("image/"),
                 );
+
                 if (otherFiles.length > 0) {
                     void props.uploadFiles(
                         otherFiles.map((file) => ({
@@ -586,9 +647,11 @@ function useGlobalImportEvents(props: {
                         })),
                     );
                 }
+
                 if (images.length > 0) {
                     props.openImageFileDialog(images);
                 }
+
                 return;
             }
 
@@ -609,6 +672,7 @@ function useGlobalImportEvents(props: {
             REQUEST_CLIPBOARD_PASTE_EVENT,
             handleClipboardRequest,
         );
+
         return () => {
             window.removeEventListener("dragenter", handleDragEnter);
             window.removeEventListener("dragover", handleDragOver);
@@ -764,11 +828,13 @@ export function GlobalFileImportHandler(props: {
     destination: DirectoryDestination | null;
 }) {
     const uploader = useFileUploader({ destination: props.destination });
+
     const pastedContentImport = usePastedContentImport({
         destination: props.destination,
         setImportState: uploader.setImportState,
         showMissingDirectoryError: uploader.showMissingDirectoryError,
     });
+
     const importFromClipboard = useClipboardImporter({
         destination: props.destination,
         openImageFileDialog: pastedContentImport.openImageFileDialog,
@@ -777,6 +843,7 @@ export function GlobalFileImportHandler(props: {
         showMissingDirectoryError: uploader.showMissingDirectoryError,
         uploadFiles: uploader.uploadFiles,
     });
+
     const isDraggingFiles = useGlobalImportEvents({
         destination: props.destination,
         importFromClipboard,

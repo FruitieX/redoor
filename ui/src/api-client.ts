@@ -107,6 +107,7 @@ import type { LsResponse } from "#ui/ls-response";
 const { appendFilesystemPath, encodeFilesystemPath, getBrowserUrl } = apiPaths;
 
 export { ApiError } from "#ui/api-transport";
+
 export { encodeFilesystemPath, getBrowserUrl };
 
 export type {
@@ -230,6 +231,7 @@ export class Agent {
     /** Returns authentication headers for lower-level streaming tests and integrations. */
     getAuthHeaders(): Record<string, string> {
         const sessionCookie = this.requestContext.getSessionCookie?.();
+
         return sessionCookie ? { Cookie: sessionCookie } : {};
     }
 
@@ -245,6 +247,7 @@ export class Agent {
     /** Changes logging admission without reconnecting this agent or its live viewer. */
     async updateLoggingLevel(level: Level): Promise<LoggingLevelResponse> {
         const request: LoggingLevelRequest = { level };
+
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.id)}/logging-level`,
             {
@@ -390,6 +393,7 @@ export class Agent {
             source: "published_release",
             target_version: targetVersion,
         };
+
         return apiRequest(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/upgrade`,
             {
@@ -406,6 +410,7 @@ export class Agent {
     /** Force-installs the exact running server executable on a matching architecture. */
     async forceInstallRunningBinary(): Promise<UpgradeAgentResponse> {
         const request: UpgradeAgentRequest = { source: "running_server" };
+
         return apiRequest(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/upgrade`,
             {
@@ -468,6 +473,7 @@ export class Agent {
         mode: GitDiffMode,
     ): Promise<GitDiffResponse> {
         const request: GitDiffRequest = { files, mode };
+
         return apiRequest<GitDiffResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/git/diff`,
             {
@@ -498,6 +504,7 @@ export class Agent {
             respect_gitignore: options.respectGitignore,
             case_sensitivity: options.caseSensitivity ?? "smart",
         };
+
         return apiRequest<FileSearchResponse>(
             this.filesystemUrl("find", path),
             {
@@ -535,6 +542,7 @@ export class Agent {
             before_context: options.beforeContext ?? 0,
             after_context: options.afterContext ?? 0,
         };
+
         return apiRequest<ContentGrepResponse>(
             this.filesystemUrl("grep", path),
             {
@@ -552,6 +560,7 @@ export class Agent {
         random_sleep: boolean = false,
     ): Promise<EchoResponse> {
         const request: EchoRequest = { message, random_sleep };
+
         return apiRequest(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/echo`,
             {
@@ -567,6 +576,7 @@ export class Agent {
 
     async raw(path: string): Promise<ArrayBuffer> {
         const response = await this.download(path);
+
         return response.arrayBuffer();
     }
 
@@ -597,6 +607,7 @@ export class Agent {
             new URL(this.filesystemUrl("chown", path)),
             request,
         );
+
         return apiRequest<ChownPathResponse>(
             url.toString(),
             { method: "POST" },
@@ -633,9 +644,11 @@ export class Agent {
 
     getRawUrl(path: string, options?: { download?: boolean }): string {
         let url = this.filesystemUrl("raw", path);
+
         if (options?.download) {
             url += "?download=1";
         }
+
         return url;
     }
 
@@ -650,7 +663,9 @@ export class Agent {
             `/api/v1/agents/${encodeURIComponent(this.info.id)}/logs/ws`,
             this.baseUrl,
         );
+
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+
         return url.toString();
     }
 
@@ -659,14 +674,17 @@ export class Agent {
         if (!cwd.startsWith("/")) {
             throw new Error("Filesystem path must be absolute");
         }
+
         const url = new URL(
             `/api/v1/agents/${encodeURIComponent(this.info.id)}/terminal/ws`,
             this.baseUrl,
         );
+
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
         url.searchParams.set("rows", String(size.rows));
         url.searchParams.set("cols", String(size.cols));
         url.searchParams.set("cwd", cwd);
+
         return url.toString();
     }
 
@@ -681,9 +699,11 @@ export class Agent {
             new URL(this.getRawUrl(path), this.baseUrl),
             options,
         );
+
         if (options?.on_existing != null) {
             url.searchParams.set("on_existing", options.on_existing);
         }
+
         return apiRequest<RawUploadResponse>(
             url.toString(),
             {
@@ -711,14 +731,18 @@ export class Agent {
         options?: { trash?: boolean },
     ): Promise<RawDeleteResponse> {
         const url = new URL(this.getRawUrl(path), this.baseUrl);
+
         if (options?.trash !== undefined) {
             url.searchParams.set("trash", String(options.trash));
         }
+
         const response = await fetch(
             url,
             withAuthentication({ method: "DELETE" }, this.requestContext),
         );
+
         await requireSuccessfulResponse(response, this.requestContext);
+
         return response.json();
     }
 
@@ -758,6 +782,7 @@ export class Agent {
             new URL(this.filesystemUrl("mkdir", path)),
             ownership,
         );
+
         const response = await fetch(
             url,
             withAuthentication(
@@ -767,7 +792,9 @@ export class Agent {
                 this.requestContext,
             ),
         );
+
         await requireSuccessfulResponse(response, this.requestContext);
+
         return response.json();
     }
 
@@ -778,6 +805,7 @@ export class Agent {
         newName: string,
     ): Promise<RenamePathResponse> {
         encodeFilesystemPath(dir);
+
         return this.postJson(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/rename`,
             { dir, old: oldName, new: newName } satisfies RenamePathRequest,
@@ -793,6 +821,7 @@ export class Agent {
     ): Promise<CopyFileResponse> {
         encodeFilesystemPath(sourcePath);
         encodeFilesystemPath(destination.path);
+
         const request: CopyFileRequest = {
             source: {
                 agent: this.info.id,
@@ -823,11 +852,13 @@ export class Agent {
     ): Promise<MoveFileResponse> {
         encodeFilesystemPath(sourcePath);
         encodeFilesystemPath(destination.path);
+
         const request: MoveFileRequest = {
             source: { agent: this.info.id, path: sourcePath },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
         };
+
         return apiRequest<MoveFileResponse>(
             `${this.baseUrl}/api/v1/move`,
             {
@@ -851,8 +882,10 @@ export class Agent {
         });
 
         const fetchOptions: RequestInit = {};
+
         if (options?.range) {
             const [start, end] = options.range;
+
             if (start === null && end !== null) {
                 // Suffix range: bytes=-N
                 fetchOptions.headers = { Range: `bytes=-${end}` };
@@ -909,6 +942,7 @@ export class ApiClient {
     /** Establishes a browser cookie and captures it explicitly when running under Node fetch. */
     async login(username: string, password: string): Promise<LoginResponse> {
         const request: LoginRequest = { username, password };
+
         const response = await fetch(
             `${this.baseUrl}/api/v1/login`,
             withAuthentication(
@@ -920,11 +954,14 @@ export class ApiClient {
                 { getSessionCookie: () => this.sessionCookie },
             ),
         );
+
         await requireSuccessfulResponse(response, {});
         const setCookie = response.headers.get("set-cookie");
+
         if (setCookie) {
             this.sessionCookie = setCookie.split(";", 1)[0] ?? null;
         }
+
         return response.json();
     }
 
@@ -935,7 +972,9 @@ export class ApiClient {
             { method: "POST" },
             this.requestContext(),
         );
+
         this.sessionCookie = null;
+
         return response;
     }
 
@@ -951,6 +990,7 @@ export class ApiClient {
     getUiWebSocketUrl(): string {
         const url = new URL("/api/v1/ui/ws", this.baseUrl);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+
         return url.toString();
     }
 
@@ -958,6 +998,7 @@ export class ApiClient {
     getServerLogsWebSocketUrl(): string {
         const url = new URL("/api/v1/server/logs/ws", this.baseUrl);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+
         return url.toString();
     }
 
@@ -975,6 +1016,7 @@ export class ApiClient {
         level: Level,
     ): Promise<LoggingLevelResponse> {
         const request: LoggingLevelRequest = { level };
+
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/server/logging-level`,
             {
@@ -992,6 +1034,7 @@ export class ApiClient {
             undefined,
             this.requestContext(),
         );
+
         return response.agents.map(
             (info) => new Agent(this.baseUrl, info, this.requestContext()),
         );
@@ -1087,6 +1130,7 @@ export class ApiClient {
         kind: "ssh" | "local",
     ): Promise<DeleteManagedAgentResponse> {
         const collection = kind === "local" ? "local-agents" : "agents";
+
         return apiRequest<DeleteManagedAgentResponse>(
             `${this.baseUrl}/api/v1/${collection}/${encodeURIComponent(agentId)}`,
             { method: "DELETE" },
@@ -1118,6 +1162,7 @@ export class ApiClient {
         encodeFilesystemPath(left.path);
         encodeFilesystemPath(right.path);
         const request: DiffFilesRequest = { left, right };
+
         return apiRequest<DiffFilesResponse>(
             `${this.baseUrl}/api/v1/diff`,
             {
@@ -1222,14 +1267,18 @@ export class ApiClient {
 
     async waitForAgentNames(names: string[], timeoutMs = 5000): Promise<void> {
         const startTime = Date.now();
+
         while (Date.now() - startTime < timeoutMs) {
             const agents = await this.listAgents();
             const currentNames = agents.map((agent) => agent.name);
+
             if (names.every((name) => currentNames.includes(name))) {
                 return;
             }
+
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
+
         throw new Error(`Timed out waiting for agents: ${names.join(", ")}`);
     }
 
@@ -1239,15 +1288,19 @@ export class ApiClient {
         timeoutMs: number = 5000,
     ): Promise<void> {
         const startTime = Date.now();
+
         while (Date.now() - startTime < timeoutMs) {
             const connectedNames = (await this.listAgents())
                 .filter((agent) => agent.status === "connected")
                 .map((agent) => agent.name);
+
             if (names.every((name) => connectedNames.includes(name))) {
                 return;
             }
+
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
+
         throw new Error(
             `Timed out waiting for connected agents: ${names.join(", ")}`,
         );

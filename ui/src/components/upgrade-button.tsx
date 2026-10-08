@@ -37,9 +37,11 @@ function upgradeUnavailableReason(props: {
     if (!props.supportsSelfExec) {
         return "This agent does not support safe self-exec upgrades. Install a current Redoor agent manually, reconnect it, and try again.";
     }
+
     if (props.exePath === "unknown" || !props.exePath.startsWith("/")) {
         return `The agent reported an unusable executable path (${props.exePath}), so Redoor cannot safely replace its binary.`;
     }
+
     return null;
 }
 
@@ -59,30 +61,38 @@ function UpgradeConfirmationDescription(props: { targetDescription: string }) {
 /** Presents upgrade identity and availability before confirming the disruptive action. */
 export function UpgradeButton(props: UpgradeButtonProps) {
     const [action, setAction] = React.useState<UpgradeAction | null>(null);
+
     const [targetVersion, setTargetVersion] = React.useState(
         props.serverInfo.version,
     );
+
     const normalizedTargetVersion = targetVersion.trim();
     const disabledDescriptionId = `upgrade-disabled-${props.target.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
+
     const unavailableReason = upgradeUnavailableReason({
         supportsSelfExec: props.supportsSelfExec,
         exePath: props.agentExePath,
     });
+
     const runningBinaryUnavailableReason =
         props.agentArch === props.serverInfo.arch
             ? unavailableReason
             : `The running server binary is ${props.serverInfo.arch}, but this agent is ${props.agentArch}.`;
+
     const targetDescription =
         action === "running_server"
             ? `Force install the exact Redoor ${props.serverInfo.version} executable currently running this server.`
             : `Download and install Redoor ${normalizedTargetVersion} for ${props.agentOs}/${props.agentArch}.`;
+
     const upgradeMutation = useMutation({
         mutationFn: async (selectedAction: UpgradeAction) => {
             if (selectedAction === "running_server") {
                 await props.forceInstallRunningBinary();
                 await props.waitUntilReady(props.serverInfo.version, true);
+
                 return;
             }
+
             await props.upgrade(normalizedTargetVersion);
             await props.waitUntilReady(normalizedTargetVersion, false);
         },

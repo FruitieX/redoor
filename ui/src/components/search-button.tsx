@@ -9,6 +9,7 @@ const agentRoute = getRouteApi("/agents/$agentId");
 export function SearchButton(props: { className?: string }) {
     const navigate = agentRoute.useNavigate();
     const location = useLocation();
+
     return (
         <IconButton
             type="button"

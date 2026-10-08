@@ -21,6 +21,7 @@ function safeRedirectPath(value: string | undefined): string {
     if (!value || !value.startsWith("/") || value.startsWith("//")) {
         return "/";
     }
+
     return value;
 }
 
@@ -29,11 +30,14 @@ function messageFromLocationHash(): string | null {
     const raw = window.location.hash.startsWith("#")
         ? window.location.hash.slice(1)
         : window.location.hash;
+
     if (!raw) {
         return null;
     }
+
     const params = new URLSearchParams(raw);
     const message = params.get("message")?.trim();
+
     return message ? message : null;
 }
 
@@ -43,9 +47,11 @@ function LoginPage() {
     const search = Route.useSearch();
     const [username, setUsername] = React.useState("");
     const [password, setPassword] = React.useState("");
+
     const [firstRunMessage, setFirstRunMessage] = React.useState<string | null>(
         null,
     );
+
     const loginMutation = useMutation({
         mutationFn: (credentials: { username: string; password: string }) =>
             api.login(credentials.username, credentials.password),
@@ -72,6 +78,7 @@ function LoginPage() {
             ? loginMutation.error.message
             : "Login failed"
         : null;
+
     const isSubmitting = loginMutation.isPending;
 
     return (

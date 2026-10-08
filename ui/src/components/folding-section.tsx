@@ -16,6 +16,7 @@ export function FoldingSection(props: {
     contentClassName?: string;
 }) {
     const panelId = React.useId();
+
     const toggle = (
         <button
             type="button"

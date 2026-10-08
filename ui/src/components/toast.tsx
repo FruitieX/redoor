@@ -25,18 +25,22 @@ export function Toast(props: {
 }) {
     const toastRef = React.useRef<HTMLDivElement>(null);
     const dismissedRef = React.useRef(false);
+
     const dismiss = React.useEffectEvent(() => {
         if (dismissedRef.current) {
             return;
         }
+
         dismissedRef.current = true;
         props.onDismiss();
     });
 
     React.useEffect(() => {
         const timeout = window.setTimeout(dismiss, 15_000);
+
         const handlePointerDown = (event: PointerEvent) => {
             const toast = toastRef.current;
+
             if (
                 toast !== null &&
                 event.target instanceof Node &&
@@ -45,7 +49,9 @@ export function Toast(props: {
                 dismiss();
             }
         };
+
         document.addEventListener("pointerdown", handlePointerDown);
+
         return () => {
             window.clearTimeout(timeout);
             document.removeEventListener("pointerdown", handlePointerDown);

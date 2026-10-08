@@ -66,17 +66,20 @@ function useFileListShortcuts(props: {
                 if (props.filter !== "") {
                     props.setFilter("");
                 }
+
                 return;
             }
 
             if (event.key === "f") {
                 event.preventDefault();
                 props.filterInputRef.current?.focus();
+
                 return;
             }
         };
 
         window.addEventListener("keydown", handleShortcut);
+
         return () => window.removeEventListener("keydown", handleShortcut);
     }, [props.filterInputRef, props.filter, props.setFilter]);
 }
@@ -97,24 +100,30 @@ export function FileList(props: {
     const [filterFocusPath, setFilterFocusPath] = useAtom(filterFocusPathAtom);
     const filterInputRef = React.useRef<HTMLInputElement>(null);
     const [filter, setFilter] = React.useState("");
+
     const [sort, setSort] = React.useState<{
         column: FileSortColumn;
         direction: FileSortDirection;
     } | null>(null);
+
     const normalizedFilter = filter.toLowerCase();
     // A leading dot is a hidden-name query, so include those entries without flipping the toggle.
     const includeHiddenFiles = props.showHiddenFiles || filter.startsWith(".");
+
     const visibleFiles = includeHiddenFiles
         ? props.files
         : props.files.filter((entry) => !entry.name.startsWith("."));
+
     const filteredFiles = visibleFiles.filter((entry) =>
         entry.name.toLowerCase().includes(normalizedFilter),
     );
+
     const displayedFiles = sort
         ? [...filteredFiles].sort((left, right) => {
               return compareFileEntries(left, right, sort);
           })
         : filteredFiles;
+
     useFileListShortcuts({
         filterInputRef,
         filter,
@@ -150,6 +159,7 @@ export function FileList(props: {
         const destinationPath = filteredFiles[0]
             ? joinBrowserPath(props.directoryPath, filteredFiles[0].name)
             : undefined;
+
         if (!destinationPath) {
             return;
         }
@@ -199,10 +209,12 @@ function FilesystemFooter(props: { mountPoint: MountPoint | null }) {
     const mountPoint = props.mountPoint;
     const availableBytes = mountPoint?.available_bytes ?? null;
     const totalBytes = mountPoint?.total_bytes ?? null;
+
     const usedBytes =
         totalBytes !== null && availableBytes !== null
             ? Math.max(0, totalBytes - availableBytes)
             : null;
+
     const usage =
         usedBytes === null || availableBytes === null
             ? "Unavailable"
@@ -237,6 +249,7 @@ function FileTable(props: {
     onSort: (column: FileSortColumn) => void;
 }) {
     const tableRef = React.useRef<HTMLTableElement>(null);
+
     const getEntries = React.useEffectEvent(() =>
         Array.from(
             tableRef.current?.querySelectorAll<HTMLElement>(
@@ -244,6 +257,7 @@ function FileTable(props: {
             ) ?? [],
         ),
     );
+
     useArrayKeyboardFocus(getEntries);
 
     return (
@@ -322,8 +336,10 @@ function SortableFileColumnHeader(props: {
 }) {
     const direction =
         props.sort?.column === props.column ? props.sort.direction : null;
+
     const nextDirection =
         direction === "ascending" ? "descending" : "ascending";
+
     const SortIcon =
         direction === "ascending"
             ? ChevronUp
@@ -358,6 +374,7 @@ function UnarchiveDialog(props: {
 }) {
     const [destination, setDestination] =
         React.useState<UnarchiveDestination>("current");
+
     const [customDirectory, setCustomDirectory] = React.useState("");
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
     const requestTerminalCreation = useSetAtom(requestTerminalCreationAtom);
@@ -366,22 +383,29 @@ function UnarchiveDialog(props: {
     /** Validates before queuing so invalid shell input remains visible and actionable. */
     const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+
         if (destination === "custom") {
             const error = getCustomArchiveDirectoryError(customDirectory);
+
             if (error) {
                 setErrorMessage(error);
+
                 return;
             }
         }
+
         const command = buildUnarchiveCommand(
             props.entryName,
             destination,
             customDirectory,
         );
+
         if (!command) {
             setErrorMessage("Unable to create a safe extraction command");
+
             return;
         }
+
         props.onClose();
         requestTerminalCreation({
             agent: props.agent,
@@ -486,17 +510,23 @@ function FileEntryActions(props: {
     const router = useRouter();
     const unselectFile = useSetAtom(unselectFileAtom);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
+
     const [isDownloadDialogOpen, setIsDownloadDialogOpen] =
         React.useState(false);
+
     const [isUnarchiveDialogOpen, setIsUnarchiveDialogOpen] =
         React.useState(false);
+
     const entryType = props.isDirectory ? "directory" : "file";
+
     const downloadUrl = props.agent.getRawUrl(props.fullPath, {
         download: true,
     });
+
     const downloadName = props.isDirectory
         ? `${props.entryName}.tar.gz`
         : props.entryName;
+
     const archive = props.isDirectory ? null : getArchiveInfo(props.entryName);
 
     return (

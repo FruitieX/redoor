@@ -21,6 +21,7 @@ let routeInvalidationHoldCount = 0;
  */
 export function holdRouteInvalidation(): () => void {
     routeInvalidationHoldCount += 1;
+
     return () => {
         routeInvalidationHoldCount = Math.max(
             0,
@@ -54,10 +55,12 @@ export class RefreshListener {
     /** Stops reconnects and releases the current UI event connection. */
     stop() {
         this.started = false;
+
         if (this.reconnectTimer !== null) {
             window.clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
+
         this.websocket?.close();
         this.websocket = null;
         this.unsubscribeFromResolved?.();
@@ -69,28 +72,37 @@ export class RefreshListener {
     /** Serializes route reloads so server events do not interrupt navigation. */
     private runInvalidate() {
         if (!this.started) return;
+
         if (routeInvalidationHoldCount > 0) {
             this.invalidateQueued = true;
+
             return;
         }
+
         if (this.invalidateInFlight) {
             this.invalidateQueued = true;
+
             return;
         }
+
         if (this.router.state.status === "pending") {
             this.invalidateQueued = true;
+
             if (!this.unsubscribeFromResolved) {
                 const unsubscribe = this.router.subscribe("onResolved", () => {
                     unsubscribe();
                     this.unsubscribeFromResolved = null;
+
                     if (this.invalidateQueued && this.started) {
                         // Let navigation commit before refreshing its destination loaders.
                         this.invalidateQueued = false;
                         this.runInvalidate();
                     }
                 });
+
                 this.unsubscribeFromResolved = unsubscribe;
             }
+
             return;
         }
 
@@ -102,6 +114,7 @@ export class RefreshListener {
             )
             .finally(() => {
                 this.invalidateInFlight = null;
+
                 if (this.invalidateQueued && this.started) {
                     // Drain one follow-up pass for events received during the reload.
                     this.invalidateQueued = false;
@@ -116,9 +129,11 @@ export class RefreshListener {
         this.websocket = new WebSocket(this.api.getUiWebSocketUrl());
         this.websocket.addEventListener("message", (event) => {
             const frame = z.string().safeParse(event.data);
+
             if (!frame.success) return;
 
             let message: UiEvent;
+
             try {
                 message = uiEventSchema.parse(JSON.parse(frame.data));
             } catch {
@@ -129,12 +144,16 @@ export class RefreshListener {
                 void this.queryClient.invalidateQueries({
                     queryKey: queryKeys.transfers(),
                 });
+
                 return;
             }
+
             if (message.type === "routes_changed") {
                 this.runInvalidate();
+
                 return;
             }
+
             void this.queryClient
                 .invalidateQueries({
                     queryKey: queryKeys.agents(),
@@ -147,6 +166,7 @@ export class RefreshListener {
         });
         this.websocket.addEventListener("close", () => {
             this.websocket = null;
+
             if (this.started) {
                 this.reconnectTimer = window.setTimeout(() => {
                     this.reconnectTimer = null;

@@ -20,9 +20,11 @@ export function EditorPinnedFiles(props: {
 }) {
     const [userState, setUserState] = useUserState();
     const listRef = React.useRef<HTMLElement>(null);
+
     if (userState.pinnedFiles.length === 0) {
         return null;
     }
+
     return (
         <SortableList
             itemIds={userState.pinnedFiles.map((file) =>
@@ -42,9 +44,11 @@ export function EditorPinnedFiles(props: {
                         current.pinnedFiles,
                         move,
                     );
+
                     if (pinnedFiles === current.pinnedFiles) {
                         return current;
                     }
+
                     return { ...current, pinnedFiles };
                 });
             }}

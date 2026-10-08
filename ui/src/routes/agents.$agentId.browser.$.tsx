@@ -99,7 +99,9 @@ function lineFromLocationSearch(searchStr: string): number | undefined {
     const params = new URLSearchParams(
         searchStr.startsWith("?") ? searchStr.slice(1) : searchStr,
     );
+
     const value = params.get("line");
+
     return value === null ? undefined : browserLineSchema.parse(value);
 }
 
@@ -120,11 +122,13 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
     loader: async ({ context, deps, params, parentMatchPromise, location }) => {
         const agentMatch = await parentMatchPromise;
         const agentLoaderData = agentMatch.loaderData;
+
         if (!agentLoaderData) {
             throw new Error("Device details unavailable");
         }
 
         const agent = agentLoaderData.agent;
+
         if (agentLoaderData.kind !== "connected" || agent.cwd === null) {
             // Retain the full URL until connection events can reload the requested path.
             return {
@@ -151,6 +155,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                 ? location.searchStr.slice(1)
                 : location.searchStr,
         );
+
         if (rawSearch.has("diff")) {
             throw redirect({
                 to: "/agents/$agentId/browser/$",
@@ -169,6 +174,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
             ...gitContextQueryOptions(agent, path),
             staleTime: 0,
         });
+
         const listingPromise = fetchQueryUncancelled(context.queryClient, {
             ...browserListingQueryOptions(agent, path),
             // Route invalidation is an explicit refresh even if the mounted listing is retained.
@@ -181,6 +187,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                 Awaited<ReturnType<Agent["gitContext"]>>,
                 LsResponse,
             ] = await Promise.all([gitContextPromise, listingPromise]);
+
             if (
                 deps.view === "git" &&
                 gitContext.status === "outside_worktree"
@@ -192,17 +199,21 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                     replace: true,
                 });
             }
+
             // Canonicalize the cache identity so aliases refresh the listing the route actually displays.
             context.queryClient.setQueryData(
                 queryKeys.browserListing(agent.id, lsResult.path),
                 lsResult,
             );
+
             const downloadUrl = isLsFileResponse(lsResult)
                 ? agent.getRawUrl(lsResult.path)
                 : undefined;
+
             const metadata = isLsFileResponse(lsResult)
                 ? await agent.metadata(lsResult.path)
                 : null;
+
             if (isLsFileResponse(lsResult)) {
                 replaceUnsupportedOrLegacyFileView(params, deps.view, metadata);
                 replaceLegacyEditFileView(
@@ -221,6 +232,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                     ),
                     currentSearch: location.search,
                 });
+
                 if (
                     wantsFileContentView(deps.view) &&
                     metadata?.editable === true
@@ -231,12 +243,14 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                     );
                 }
             }
+
             if (deps.view === "details" && agent.isRoot) {
                 await fetchQueryUncancelled(
                     context.queryClient,
                     agentAccountsQueryOptions(agent),
                 );
             }
+
             if (
                 deps.view === "git" &&
                 gitContext.status === "inside_worktree"
@@ -270,10 +284,13 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
             };
         } catch (error) {
             const pathError = getPathLoadError(error);
+
             if (!pathError) {
                 throw error;
             }
+
             const gitContext = await gitContextPromise;
+
             if (
                 deps.view === "git" &&
                 gitContext.status === "inside_worktree" &&
@@ -284,6 +301,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                     ...gitDiffQueryOptions(agent, [path], "full"),
                     staleTime: 0,
                 });
+
                 return {
                     kind: "connected" as const,
                     agent,
@@ -299,6 +317,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                     gitContext,
                 };
             }
+
             if (
                 deps.view === "git" &&
                 gitContext.status === "outside_worktree"
@@ -310,6 +329,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                     replace: true,
                 });
             }
+
             return {
                 kind: "connected" as const,
                 agent,
@@ -382,9 +402,11 @@ function BrowserRouteShell(props: {
 /** Shows connection controls at the bookmarked URL until filesystem commands are available. */
 function FileBrowser() {
     const data = Route.useLoaderData();
+
     if (data.kind === "lifecycle") {
         return <AgentLifecycle agent={data.agent} preserveDestination />;
     }
+
     return <ConnectedFileBrowser data={data} />;
 }
 
@@ -403,6 +425,7 @@ function ConnectedFileBrowser(props: {
             if (!states[data.agentId]) return states;
             const next = { ...states };
             delete next[data.agentId];
+
             return next;
         });
     }, [data.agentId, setStartStates]);
@@ -495,6 +518,7 @@ function ConnectedFileBrowser(props: {
     if (isLsFileResponse(lsResult)) {
         const fileName = path.split("/").pop() || lsResult.path;
         const downloadUrl = data.downloadUrl;
+
         if (!downloadUrl) {
             return <RouteError error={new Error("Download URL unavailable")} />;
         }
@@ -510,7 +534,9 @@ function ConnectedFileBrowser(props: {
                   : search.view === "details"
                     ? "details"
                     : "view";
+
         const isEditView = activeView === "view" && editable;
+
         const content =
             activeView === "git" ? (
                 <GitFileView
@@ -610,20 +636,26 @@ function DirectoryBrowserPage(props: {
     gitAvailable: boolean;
 }) {
     const [userState, setUserState] = useUserState();
+
     const listingQuery = useQuery(
         browserListingQueryOptions(props.agent, props.lsResult.path),
     );
+
     const lsResult =
         listingQuery.data && isLsDirectoryResponse(listingQuery.data)
             ? listingQuery.data
             : props.lsResult;
+
     const showHiddenFiles = userState.showHiddenFiles;
+
     const directories = sortFileEntries(
         lsResult.files.filter((file) => file.type === "directory"),
     );
+
     const regularFiles = sortFileEntries(
         lsResult.files.filter((file) => file.type === "file"),
     );
+
     const activeView =
         props.view === "git"
             ? "git"
@@ -724,6 +756,7 @@ function replaceUnsupportedOrLegacyFileView(
 ) {
     const canShowContent =
         metadata?.editable === true || metadata?.viewable_image === true;
+
     if (wantsFileContentView(view) && !canShowContent) {
         throw redirect({
             to: "/agents/$agentId/browser/$",
@@ -743,6 +776,7 @@ function replaceLegacyEditFileView(
     if (view !== "edit") {
         return;
     }
+
     throw redirect({
         to: "/agents/$agentId/browser/$",
         params,
@@ -770,6 +804,7 @@ function replaceDefaultMarkdownPreview(options: {
     ) {
         return;
     }
+
     throw redirect({
         to: "/agents/$agentId/browser/$",
         params: options.params,

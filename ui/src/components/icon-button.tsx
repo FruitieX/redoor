@@ -22,11 +22,14 @@ type IconButtonOwnProps = {
 export function IconButton(props: IconButtonProps) {
     const buttonProps: React.ComponentPropsWithRef<"button"> &
         Partial<IconButtonOwnProps> = { ...props };
+
     delete buttonProps.label;
     delete buttonProps.tooltip;
     delete buttonProps.tooltipClassName;
+
     const nativeButtonProps: React.ComponentPropsWithRef<"button"> =
         buttonProps;
+
     const button = (
         <button
             {...nativeButtonProps}

@@ -91,14 +91,17 @@ function FileEditActions(props: {
 }) {
     const navigate = agentRoute.useNavigate();
     const location = useLocation();
+
     const copyMutation = useMutation({
         mutationFn: async () => {
             if (props.selection === null) {
                 throw new Error("Select text in the editor before copying");
             }
+
             const reference = `\`\`\`${props.bookmark.path}#L${props.selection.startLine}
 ${props.selection.text}
 \`\`\``;
+
             await navigator.clipboard.writeText(reference);
         },
     });
@@ -178,6 +181,7 @@ ${props.selection.text}
                         if (props.selection === null) {
                             return;
                         }
+
                         const params = new URLSearchParams(location.searchStr);
                         params.set("q", props.selection.text);
                         params.set("mode", "content");
@@ -373,11 +377,14 @@ function FileEditorSecondaryActions(props: {
     onDelete: () => void;
 }) {
     const requestTerminalOpen = useSetAtom(terminalOpenRequestedAtom);
+
     const [isDrawerCollapsed, setDrawerCollapsed] = useAtom(
         bottomDrawerCollapsedAtom,
     );
+
     const activeDrawerTab = useAtomValue(bottomDrawerActiveTabAtom);
     const isTerminalOpen = !isDrawerCollapsed && activeDrawerTab === "terminal";
+
     return (
         <div className="flex shrink-0 items-center gap-1">
             <IconButton
@@ -435,11 +442,13 @@ function useFileSaveShortcut(onSave: () => void) {
             ) {
                 return;
             }
+
             event.preventDefault();
             onSave();
         };
 
         window.addEventListener("keydown", handleSaveShortcut);
+
         return () => window.removeEventListener("keydown", handleSaveShortcut);
     }, [onSave]);
 }
@@ -469,6 +478,7 @@ function FileEditorSurface(props: {
     if (props.isPending) {
         return <p className="p-4 text-sm text-slate-400">Loading file...</p>;
     }
+
     if (props.error !== undefined) {
         return (
             <p className="p-4 text-sm text-red-300">
@@ -476,6 +486,7 @@ function FileEditorSurface(props: {
             </p>
         );
     }
+
     return (
         <>
             <div
@@ -530,14 +541,19 @@ function getFileEditorStatus(props: {
     isDirty: boolean;
 }): string | null {
     if (props.isLoading) return "Loading file...";
+
     if (props.loadError) {
         return getErrorMessage(props.loadError, "Failed to load file");
     }
+
     if (props.isSaving) return "Saving...";
+
     if (props.isSaved) return "Saved";
+
     if (props.saveError) {
         return getErrorMessage(props.saveError, "Failed to save file");
     }
+
     return props.isDirty ? "Unsaved changes" : null;
 }
 
@@ -554,6 +570,7 @@ function EditorDeleteConfirmation(props: {
     const navigate = agentRoute.useNavigate();
     const [, setUserState] = useUserState();
     const unselectFile = useSetAtom(unselectFileAtom);
+
     return (
         <DeletePathsDialog
             isOpen={props.isOpen}
@@ -572,6 +589,7 @@ function EditorDeleteConfirmation(props: {
                     agentId: props.agent.id,
                     path: props.filePath,
                 };
+
                 // Removed files must disappear from navigation and pending selection actions.
                 unselectFile(target);
                 setUserState((current) => ({
@@ -580,6 +598,7 @@ function EditorDeleteConfirmation(props: {
                 }));
                 props.onDeleted();
                 const parentPath = getImmediateParentPath(props.filePath);
+
                 if (parentPath !== null) {
                     await navigate({
                         to: props.agent.getBrowserUrl(parentPath),
@@ -725,21 +744,27 @@ function FileEditHeader(props: {
  */
 export function FileEditView(props: FileEditViewProps) {
     const queryClient = useQueryClient();
+
     const [deleteConfirmationOpen, setDeleteConfirmationOpen] =
         React.useState(false);
+
     const isDeletedRef = React.useRef(false);
     const [userState] = useUserState();
     const fileQuery = fileContentQueryOptions(props.agent, props.filePath);
     const contentQuery = useQuery(fileQuery);
     const [draft, setDraft] = React.useState<string | null>(null);
+
     const [selection, setSelection] = React.useState<EditorSelection | null>(
         null,
     );
+
     const [reloadConfirmationOpen, setReloadConfirmationOpen] =
         React.useState(false);
+
     const [isSearchOpen, setIsSearchOpen] = React.useState(false);
     const searchHandleRef = React.useRef<EditorSearchHandle | null>(null);
     const reloadPromiseRef = React.useRef<Promise<unknown> | null>(null);
+
     const saveMutation = useMutation({
         mutationFn: (nextContent: string) =>
             props.agent.editFile(
@@ -756,9 +781,11 @@ export function FileEditView(props: FileEditViewProps) {
             );
         },
     });
+
     const savedContent = contentQuery.data ?? "";
     const content = draft ?? savedContent;
     const isDirty = draft !== null && draft !== savedContent;
+
     // Opening a file must not pin it; only the first change away from the saved text does.
     const pinOnFirstEdit = usePinOnFirstEdit({
         file: {
@@ -768,8 +795,10 @@ export function FileEditView(props: FileEditViewProps) {
             agentName: props.agent.name,
         },
     });
+
     // Saving must not flip CodeMirror read-only, or Mod-s and :w steal editor focus.
     const canEdit = contentQuery.isSuccess;
+
     const isMarkdown =
         syntaxLanguageFromFileName(props.fileName) === "markdown";
 
@@ -778,6 +807,7 @@ export function FileEditView(props: FileEditViewProps) {
         path: props.filePath,
         isDirty,
     });
+
     const navigationBlocker = useUnsavedEditorNavigationGuard(
         isDirty,
         isDeletedRef,
@@ -787,21 +817,26 @@ export function FileEditView(props: FileEditViewProps) {
         if (!canEdit || saveMutation.isPending || reloadPromiseRef.current) {
             return;
         }
+
         setDraft(null);
         saveMutation.reset();
+
         const reloadPromise = contentQuery
             .refetch({ cancelRefetch: false })
             .finally(() => {
                 reloadPromiseRef.current = null;
             });
+
         reloadPromiseRef.current = reloadPromise;
     }, [canEdit, contentQuery, saveMutation]);
 
     const handleReload = () => {
         if (isDirty) {
             setReloadConfirmationOpen(true);
+
             return;
         }
+
         reloadFile();
     };
 
@@ -809,6 +844,7 @@ export function FileEditView(props: FileEditViewProps) {
         if (!canEdit || saveMutation.isPending || !isDirty) {
             return;
         }
+
         saveMutation.mutate(content);
     }, [canEdit, content, isDirty, saveMutation]);
 
@@ -889,8 +925,11 @@ export function FileEditView(props: FileEditViewProps) {
                         onChange={(nextContent) => {
                             const startingEdit =
                                 !isDirty && nextContent !== savedContent;
+
                             setDraft(nextContent);
+
                             if (saveMutation.isSuccess) saveMutation.reset();
+
                             if (startingEdit) {
                                 pinOnFirstEdit();
                             }
@@ -951,6 +990,7 @@ function useUnsavedEditorNavigationGuard(
             !isPreviewOnlyNavigation(args.current, args.next),
         [isDeletedRef],
     );
+
     const enableBeforeUnload = React.useCallback(
         () => isDirtyRef.current && !isDeletedRef.current,
         [isDeletedRef],
@@ -971,15 +1011,19 @@ function isPreviewOnlyNavigation(
     if (current.pathname !== next.pathname) {
         return false;
     }
+
     const currentSearch = JSON.stringify(current.search);
     const nextSearch = JSON.stringify(next.search);
+
     const currentWithoutPreview = JSON.stringify(
         current.search,
         (key, value) => (key === "preview" ? undefined : value),
     );
+
     const nextWithoutPreview = JSON.stringify(next.search, (key, value) =>
         key === "preview" ? undefined : value,
     );
+
     return (
         currentSearch !== nextSearch &&
         currentWithoutPreview === nextWithoutPreview

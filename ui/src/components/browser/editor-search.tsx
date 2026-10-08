@@ -49,6 +49,7 @@ export function EditorSearch(props: {
     const [caseSensitive, setCaseSensitive] = React.useState(false);
     const [regexp, setRegexp] = React.useState(false);
     const [wholeWord, setWholeWord] = React.useState(false);
+
     const query = React.useMemo(
         () =>
             new SearchQuery({
@@ -60,16 +61,21 @@ export function EditorSearch(props: {
             }),
         [search, replace, advanced, caseSensitive, regexp, wholeWord],
     );
+
     const canSearch = query.valid;
     const selection = props.view?.state.selection.main;
+
     const selectedText =
         selection === undefined
             ? ""
             : (props.view?.state.sliceDoc(selection.from, selection.to) ?? "");
+
     const canFindNext =
         canSearch ||
         (search === "" && selectedText !== "" && !selectedText.includes("\n"));
+
     const canReplace = props.editable && advanced && canSearch;
+
     const matchCount = React.useMemo(
         () => currentMatchStatus(props.view, query, open),
         [open, props.documentRevision, props.view, query],
@@ -84,15 +90,18 @@ export function EditorSearch(props: {
 
     const openSearch = React.useCallback(() => {
         const view = props.view;
+
         if (view !== null) {
             const selected = view.state.sliceDoc(
                 view.state.selection.main.from,
                 view.state.selection.main.to,
             );
+
             if (selected !== "" && !selected.includes("\n")) {
                 setSearch(selected);
             }
         }
+
         setOpen(true);
         setFocusNonce((nonce) => nonce + 1);
     }, [props.view]);
@@ -101,24 +110,31 @@ export function EditorSearch(props: {
         if (!open) {
             return false;
         }
+
         setOpen(false);
         setAdvanced(false);
         props.view?.focus();
+
         return true;
     }, [open, props.view]);
 
     const findNextMatch = React.useCallback(() => {
         const view = props.view;
+
         if (view === null) {
             return false;
         }
+
         let nextQuery = query;
+
         if (search === "") {
             const selection = view.state.selection.main;
             const selected = view.state.sliceDoc(selection.from, selection.to);
+
             if (selected === "" || selected.includes("\n")) {
                 return false;
             }
+
             nextQuery = new SearchQuery({
                 search: selected,
                 replace: query.replace,
@@ -128,10 +144,13 @@ export function EditorSearch(props: {
             });
             setSearch(selected);
         }
+
         if (!nextQuery.valid) {
             return false;
         }
+
         applyQuery(nextQuery);
+
         return findNext(view);
     }, [applyQuery, props.view, query, search]);
 
@@ -139,21 +158,26 @@ export function EditorSearch(props: {
         if (props.view === null || !query.valid) {
             return false;
         }
+
         applyQuery(query);
+
         return findPrevious(props.view);
     }, [applyQuery, props.view, query]);
 
     React.useEffect(() => {
         if (!open) {
             applySearchQuery(props.view, new SearchQuery({ search: "" }));
+
             return;
         }
+
         applySearchQuery(props.view, query);
     }, [open, props.view, query]);
 
     /** The toolbar tooltip names close vs open, so unmount and Escape must clear that state. */
     React.useEffect(() => {
         props.onOpenChange(open);
+
         return () => {
             if (open) {
                 props.onOpenChange(false);
@@ -165,10 +189,13 @@ export function EditorSearch(props: {
         if (!open || focusNonce === 0) {
             return;
         }
+
         const input = searchInputRef.current;
+
         if (input === null) {
             return;
         }
+
         input.focus();
         input.select();
     }, [focusNonce, open]);
@@ -218,6 +245,7 @@ export function EditorSearch(props: {
                             if (props.view === null || !canReplace) {
                                 return;
                             }
+
                             applyQuery(query);
                             replaceNext(props.view);
                         }}
@@ -225,6 +253,7 @@ export function EditorSearch(props: {
                             if (props.view === null || !canReplace) {
                                 return;
                             }
+
                             applyQuery(query);
                             replaceAll(props.view);
                         }}
@@ -272,36 +301,46 @@ function useEditorSearchWindowShortcuts(props: {
             }
 
             const commands = propsRef.current;
+
             if (
                 (event.ctrlKey || event.metaKey) &&
                 event.key.toLowerCase() === "f"
             ) {
                 event.preventDefault();
                 commands.openSearch();
+
                 return;
             }
+
             if (
                 ((event.ctrlKey || event.metaKey) &&
                     event.key.toLowerCase() === "g") ||
                 event.key === "F3"
             ) {
                 event.preventDefault();
+
                 if (event.shiftKey) {
                     commands.findPreviousMatch();
+
                     return;
                 }
+
                 commands.findNextMatch();
+
                 return;
             }
+
             if (event.key === "Escape") {
                 if (!commands.closeSearch()) {
                     return;
                 }
+
                 event.preventDefault();
             }
         };
 
         window.addEventListener("keydown", handleKeyDown);
+
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, []);
 }
@@ -345,11 +384,15 @@ function SearchReplaceFields(props: {
                             if (event.key !== "Enter") {
                                 return;
                             }
+
                             event.preventDefault();
+
                             if (event.shiftKey) {
                                 props.onFindPrevious();
+
                                 return;
                             }
+
                             props.onFindNext();
                         }}
                         className="h-9 w-full bg-slate-900 px-3 py-0 text-sm placeholder:text-slate-500 focus:ring-1 focus:ring-blue-500"
@@ -410,6 +453,7 @@ function SearchReplaceFields(props: {
                                 if (event.key !== "Enter") {
                                     return;
                                 }
+
                                 event.preventDefault();
                                 props.onReplaceNext();
                             }}
@@ -544,6 +588,7 @@ function applySearchQuery(view: EditorView | null, query: SearchQuery) {
     if (view === null) {
         return;
     }
+
     view.dispatch({ effects: setSearchQuery.of(query) });
 }
 
@@ -558,17 +603,23 @@ function currentMatchStatus(
     if (!open || view === null || !query.valid) {
         return "No matches";
     }
+
     const matches = collectSearchMatches(view, query);
+
     if (matches.length === 0) {
         return "No matches";
     }
+
     const selection = view.state.selection.main;
+
     const currentIndex = matches.findIndex(
         (match) => match.from === selection.from && match.to === selection.to,
     );
+
     if (currentIndex === -1) {
         return `${matches.length} matches`;
     }
+
     return `${currentIndex + 1} of ${matches.length}`;
 }
 
@@ -578,12 +629,16 @@ function currentMatchStatus(
 function collectSearchMatches(view: EditorView, query: SearchQuery) {
     const matches: Array<{ from: number; to: number }> = [];
     const cursor = query.getCursor(view.state);
+
     while (true) {
         const step = cursor.next();
+
         if (step.done === true) {
             break;
         }
+
         matches.push(step.value);
     }
+
     return matches;
 }

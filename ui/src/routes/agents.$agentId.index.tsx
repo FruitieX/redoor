@@ -84,9 +84,11 @@ function matchesServerIdentity(
 /** Renders retained lifecycle state without issuing connected-only commands prematurely. */
 function AgentBoundary() {
     const data = AgentRoute.useLoaderData();
+
     if (data.kind === "connected") {
         return <AgentDetails agent={data.agent} details={data.details} />;
     }
+
     return <AgentLifecycle agent={data.agent} />;
 }
 
@@ -98,6 +100,7 @@ function LastProvisioningCard(props: {
     if (props.messages.length === 0) {
         return null;
     }
+
     return (
         <div className="md:col-span-2">
             <DetailCard
@@ -124,19 +127,23 @@ function AgentDetails(props: { agent: Agent; details: AgentDetailsResponse }) {
     const startState = startStates[props.agent.id];
     const configPath = props.details.config_path || "No config file loaded";
     const storedProvisioning = storedProvisioningByName[props.agent.name] ?? [];
+
     const provisioningNowMs =
         props.agent.connectedAt !== null ? props.agent.connectedAt * 1000 : now;
 
     React.useEffect(() => {
         if (!startState?.autoRedirect || props.agent.cwd === null) return;
+
         const target = getAgentTabLocation(
             locations,
             props.agent.id,
             props.agent.getBrowserUrl(props.agent.cwd),
         );
+
         setStartStates((states) => {
             const next = { ...states };
             delete next[props.agent.id];
+
             return next;
         });
         void router.navigate({ to: target });
@@ -281,6 +288,7 @@ function AgentUpgradeControls(props: {
     const queryClient = useQueryClient();
     const { api } = Route.useRouteContext();
     const { serverInfo } = RootRoute.useLoaderData();
+
     return (
         <div className="md:col-span-2">
             <UpgradeButton
@@ -309,9 +317,11 @@ function AgentUpgradeControls(props: {
                                     props.agent.connectionId &&
                                 agent.binary?.version === targetVersion,
                         );
+
                         if (!upgradedAgent?.binary) {
                             throw new Error("Agent is still upgrading");
                         }
+
                         if (
                             requireServerIdentity &&
                             !matchesServerIdentity(
@@ -323,6 +333,7 @@ function AgentUpgradeControls(props: {
                                 "Agent has not loaded the running server binary",
                             );
                         }
+
                         await router.invalidate();
                     }, "Agent did not come back after upgrade")
                 }
@@ -420,6 +431,7 @@ function formatUsedCapacity(
     availableBytes: number | null,
 ): string {
     if (totalBytes === null || availableBytes === null) return "Unavailable";
+
     return formatSize(Math.max(0, totalBytes - availableBytes));
 }
 
@@ -461,11 +473,13 @@ function AgentDetailsHeader(props: {
                                         agent.connectionId !==
                                             props.agent.connectionId,
                                 );
+
                                 if (!restartedAgent) {
                                     throw new Error(
                                         "Agent is still restarting",
                                     );
                                 }
+
                                 await router.invalidate();
                             }, "Agent did not come back after restart")
                         }
@@ -557,7 +571,10 @@ function formatUptime(seconds: number): string {
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
+
     if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+
     if (hours > 0) return `${hours}h ${minutes}m`;
+
     return `${minutes}m`;
 }

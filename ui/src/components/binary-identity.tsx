@@ -20,6 +20,7 @@ export function gitCommitUrl(gitRev: string): string | null {
     if (!/^[0-9a-f]{7,40}$/i.test(gitRev)) {
         return null;
     }
+
     return `https://github.com/esamattis/redoor/commit/${gitRev}`;
 }
 
@@ -64,6 +65,7 @@ export function VersionValue(props: {
     title?: string;
 }) {
     const tone = props.tone ?? "neutral";
+
     return (
         <span className="inline-flex flex-wrap items-center gap-2 font-mono text-sm">
             <span className={matchToneClass(tone)} title={props.title}>

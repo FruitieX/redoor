@@ -18,6 +18,7 @@ export function useTouchChromeVisibility() {
         const topChrome = topChromeRef.current;
         const bottomChrome = bottomChromeRef.current;
         const scrollArea = scrollAreaRef.current;
+
         if (!topChrome || !bottomChrome || !scrollArea) {
             return;
         }
@@ -26,6 +27,7 @@ export function useTouchChromeVisibility() {
         const bottomPanel = bottomChrome.querySelector<HTMLElement>(
             "[data-overlay-bottom-panel]",
         );
+
         // Keep endpoint space synchronized with overlay chrome as panels and responsive content resize.
         const updateScrollInsets = () => {
             const topHeight = topChrome.offsetHeight;
@@ -50,14 +52,18 @@ export function useTouchChromeVisibility() {
                 viewportHeight - topHeight - bottomHeight <
                     viewportHeight * 0.5;
         };
+
         const resizeObserver = new ResizeObserver(updateScrollInsets);
         resizeObserver.observe(topChrome);
         resizeObserver.observe(bottomChrome);
         resizeObserver.observe(scrollArea);
+
         if (bottomPanel) {
             resizeObserver.observe(bottomPanel);
         }
+
         updateScrollInsets();
+
         return () => resizeObserver.disconnect();
     }, []);
 
@@ -66,6 +72,7 @@ export function useTouchChromeVisibility() {
         if (!canHideChromeOnScrollRef.current) {
             return;
         }
+
         document.documentElement.setAttribute("data-touch-scrolling", "true");
     };
 
@@ -74,6 +81,7 @@ export function useTouchChromeVisibility() {
         if (restoreTimerRef.current !== null) {
             window.clearTimeout(restoreTimerRef.current);
         }
+
         restoreTimerRef.current = window.setTimeout(() => {
             document.documentElement.removeAttribute("data-touch-scrolling");
             touchStartScrollTopRef.current = null;
@@ -86,9 +94,11 @@ export function useTouchChromeVisibility() {
         if (scrollStopTimerRef.current !== null) {
             window.clearTimeout(scrollStopTimerRef.current);
         }
+
         scrollStopTimerRef.current = window.setTimeout(() => {
             isScrollingRef.current = false;
             scrollStopTimerRef.current = null;
+
             if (!isTouchActiveRef.current) {
                 scheduleRestore();
             }
@@ -101,10 +111,12 @@ export function useTouchChromeVisibility() {
             window.clearTimeout(restoreTimerRef.current);
             restoreTimerRef.current = null;
         }
+
         if (scrollStopTimerRef.current !== null) {
             window.clearTimeout(scrollStopTimerRef.current);
             scrollStopTimerRef.current = null;
         }
+
         isScrollingRef.current = false;
         isTouchActiveRef.current = true;
         touchStartXRef.current = event.touches[0]?.clientX ?? null;
@@ -118,6 +130,7 @@ export function useTouchChromeVisibility() {
         const startY = touchStartYRef.current;
         const currentX = event.touches[0]?.clientX;
         const currentY = event.touches[0]?.clientY;
+
         if (
             startX !== null &&
             startY !== null &&
@@ -133,13 +146,16 @@ export function useTouchChromeVisibility() {
     /** Uses actual displacement so fast swipes still hide chrome during momentum scrolling. */
     const handleScroll = (event: React.UIEvent<HTMLElement>) => {
         isScrollingRef.current = true;
+
         if (restoreTimerRef.current !== null) {
             window.clearTimeout(restoreTimerRef.current);
             restoreTimerRef.current = null;
         }
+
         scheduleScrollStop();
 
         const startScrollTop = touchStartScrollTopRef.current;
+
         if (
             startScrollTop === null ||
             Math.abs(event.currentTarget.scrollTop - startScrollTop) <= 50
@@ -155,6 +171,7 @@ export function useTouchChromeVisibility() {
         isTouchActiveRef.current = false;
         touchStartXRef.current = null;
         touchStartYRef.current = null;
+
         if (!isScrollingRef.current) {
             scheduleRestore();
         }
@@ -165,9 +182,11 @@ export function useTouchChromeVisibility() {
             if (restoreTimerRef.current !== null) {
                 window.clearTimeout(restoreTimerRef.current);
             }
+
             if (scrollStopTimerRef.current !== null) {
                 window.clearTimeout(scrollStopTimerRef.current);
             }
+
             document.documentElement.removeAttribute("data-touch-scrolling");
         };
     }, []);

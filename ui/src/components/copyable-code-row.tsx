@@ -8,6 +8,7 @@ import { Check, Copy } from "lucide-react";
 async function writeClipboardText(value: string): Promise<void> {
     if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(value);
+
         return;
     }
 
@@ -20,6 +21,7 @@ async function writeClipboardText(value: string): Promise<void> {
     textarea.select();
     const copied = document.execCommand("copy");
     document.body.removeChild(textarea);
+
     if (!copied) {
         throw new Error("clipboard copy failed");
     }
@@ -45,9 +47,11 @@ export function useCopyFeedback(value: string) {
             setIsCopied(true);
             // Restart the CSS flash without remounting this component.
             setFlashKey((key) => key + 1);
+
             if (resetTimerRef.current !== null) {
                 window.clearTimeout(resetTimerRef.current);
             }
+
             resetTimerRef.current = window.setTimeout(() => {
                 setIsCopied(false);
                 resetTimerRef.current = null;

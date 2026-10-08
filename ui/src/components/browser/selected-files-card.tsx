@@ -80,13 +80,16 @@ async function waitForPendingTransfers(props: {
             // Read the public list directly so a transfers_changed invalidation
             // cannot abort this wait as a TanStack Query CancelledError.
             const progress = await props.api.getTransferProgress();
+
             if (props.signal.aborted) {
                 return false;
             }
 
             for (const transfer of progress.transfers) {
                 const file = props.pendingTransfers.get(transfer.request_id);
+
                 if (!file) continue;
+
                 if (transfer.state === "completed") {
                     props.completedFiles.push(file);
                     props.pendingTransfers.delete(transfer.request_id);
@@ -133,6 +136,7 @@ function canTransferSelectedFiles(props: {
             file.agentId === props.destinationAgentId &&
             file.path === joinBrowserPath(props.directoryPath, file.fileName),
     );
+
     if (allLandOnThemselves) {
         return false;
     }
@@ -163,16 +167,20 @@ function TransferSelectedFilesAction(props: {
 }) {
     const selectedFiles = useAtomValue(selectedFilesAtom);
     const unselectFile = useSetAtom(unselectFileAtom);
+
     const isRoutePending = useRouterState({
         select: (state) => state.status === "pending",
     });
+
     const [transferState, setTransferState] =
         React.useState<TransferSelectedFilesState>({
             type: "idle",
         });
+
     const activeTransferRef = React.useRef<AbortController | null>(null);
     const isCopy = props.operation === "copy";
     const labels = isCopy ? transferActionCopy : transferActionMove;
+
     const transferStartsMutation = useMutation({
         mutationFn: (request: {
             filesToTransfer: SelectedPath[];
@@ -181,6 +189,7 @@ function TransferSelectedFilesAction(props: {
             const agentsById = new Map(
                 props.agents.map((agent) => [agent.id, agent]),
             );
+
             return Promise.allSettled(
                 request.filesToTransfer.map(async (file) => {
                     const sourceAgent = agentsById.get(file.agentId);
@@ -198,6 +207,7 @@ function TransferSelectedFilesAction(props: {
                             file.fileName,
                         ),
                     };
+
                     const options = { on_existing: request.existingMode };
 
                     if (isCopy) {
@@ -206,6 +216,7 @@ function TransferSelectedFilesAction(props: {
                             file.path,
                             options,
                         );
+
                         return response.copy_request_id;
                     }
 
@@ -214,6 +225,7 @@ function TransferSelectedFilesAction(props: {
                         file.path,
                         options,
                     );
+
                     return response.move_request_id;
                 }),
             );
@@ -230,7 +242,9 @@ function TransferSelectedFilesAction(props: {
             : transferState.type === "idle"
               ? null
               : transferState.message;
+
     const isTransferring = transferState.type === "transferring";
+
     const canTransfer = canTransferSelectedFiles({
         selectedFiles,
         destinationAgentId: props.destinationAgent.id,
@@ -262,17 +276,22 @@ function TransferSelectedFilesAction(props: {
                 filesToTransfer,
                 existingMode: mode,
             });
+
             if (controller.signal.aborted) return;
 
             const completedFiles: SelectedPath[] = [];
             const failures: unknown[] = [];
+
             const pendingTransfers = new Map(
                 results.flatMap((result, index) => {
                     const file = filesToTransfer[index];
+
                     if (result.status === "rejected") {
                         failures.push(result.reason);
+
                         return [];
                     }
+
                     return file ? [[result.value, file] as const] : [];
                 }),
             );
@@ -285,6 +304,7 @@ function TransferSelectedFilesAction(props: {
                 failedLabel: labels.failed,
                 signal: controller.signal,
             });
+
             if (!stillActive) return;
             activeTransferRef.current = null;
 
@@ -308,6 +328,7 @@ function TransferSelectedFilesAction(props: {
                             ? `${isCopy ? "Copied" : "Moved"} ${completedFiles.length} of ${filesToTransfer.length} items. ${failureMessage}`
                             : failureMessage,
                 });
+
                 return;
             }
 
@@ -506,22 +527,28 @@ export function SelectedFilesCard(props: {
     const clearSelectedFiles = useSetAtom(clearSelectedFilesAtom);
     const activateBottomDrawerTab = useSetAtom(activateBottomDrawerTabAtom);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
+
     // One lock so Copy cannot start while Move is still reading or deleting sources.
     const [busyTransferOperation, setBusyTransferOperation] =
         React.useState<SelectedFilesTransferOperation | null>(null);
+
     const fileCount = selectedFiles.filter(
         (file) => file.entryType === "file",
     ).length;
+
     const directoryCount = selectedFiles.length - fileCount;
     const isMobile = useIsBelowBreakpoint("sm");
     const hasSelection = selectedFiles.length > 0;
     const canDelete = hasSelection;
     const selectionSummary = `${fileCount} ${fileCount === 1 ? "file" : "files"}, ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} selected`;
+
     /** Opens confirm from both the desktop Delete button and the mobile Actions menu. */
     const openDeleteDialog = () => {
         setIsDeleteDialogOpen(true);
     };
+
     const agentsById = new Map(props.agents.map((agent) => [agent.id, agent]));
+
     const deleteTargets: DeletePathTarget[] = selectedFiles.map((file) => ({
         agent: agentsById.get(file.agentId) ?? null,
         path: file.path,
@@ -642,6 +669,7 @@ export function SelectedFilesCard(props: {
                                 file.path === target.path &&
                                 file.agentId === target.agent?.id,
                         );
+
                         if (selected) {
                             unselectFile({
                                 agentId: selected.agentId,

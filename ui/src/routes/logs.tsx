@@ -17,6 +17,7 @@ export const Route = createFileRoute("/logs")({
 function ServerLogsPage() {
     const { api } = RootRoute.useRouteContext();
     const { agents } = RootRoute.useLoaderData();
+
     const connectedAgents = agents
         .filter((agent) => agent.status === "connected")
         .sort((left, right) => left.name.localeCompare(right.name));

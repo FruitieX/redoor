@@ -21,24 +21,29 @@ export function useArrayKeyboardFocus(
             }
 
             const elements = getElements();
+
             if (elements.length === 0) {
                 return;
             }
 
             event.preventDefault();
+
             const focusedIndex = elements.findIndex(
                 (element) => element === document.activeElement,
             );
+
             const nextIndex =
                 event.key === "j"
                     ? Math.min(focusedIndex + 1, elements.length - 1)
                     : focusedIndex === -1
                       ? elements.length - 1
                       : Math.max(focusedIndex - 1, 0);
+
             elements[nextIndex]?.focus();
         };
 
         window.addEventListener("keydown", handleKeyDown);
+
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [enabled, getElements]);
 }

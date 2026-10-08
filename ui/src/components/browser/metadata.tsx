@@ -79,6 +79,7 @@ function PermissionsGrid(props: {
         { label: "Group", bits: [0o040, 0o020, 0o010] },
         { label: "Others", bits: [0o004, 0o002, 0o001] },
     ];
+
     const columns = ["Read", "Write", "Execute"];
 
     return (
@@ -111,13 +112,16 @@ function PermissionsGrid(props: {
                             </th>
                             {row.bits.map((bit, index) => {
                                 const column = columns[index];
+
                                 if (!column) return null;
 
                                 const isAllowed = Boolean(
                                     props.permissions & bit,
                                 );
+
                                 if (props.interactive) {
                                     const label = `${row.label} ${column}`;
+
                                     return (
                                         <td
                                             key={bit}
@@ -150,6 +154,7 @@ function PermissionsGrid(props: {
                                         </td>
                                     );
                                 }
+
                                 return (
                                     <td
                                         key={bit}
@@ -211,9 +216,11 @@ function withCurrentAccount<T extends { name: string }>(props: {
     fallback: T;
 }): T[] {
     const currentName = props.currentName ?? props.fallback.name;
+
     if (props.accounts.some((account) => account.name === currentName)) {
         return props.accounts;
     }
+
     return [props.fallback, ...props.accounts];
 }
 
@@ -236,6 +243,7 @@ function PermissionsSection(props: {
 }) {
     const symbolicPermissions = formatSymbolicPermissions(props.permissions);
     const octalPermissions = `0${props.permissions.toString(8).padStart(3, "0")}`;
+
     return (
         <section aria-labelledby={props.headingId}>
             <div className="mb-4 flex items-end justify-between gap-4">
@@ -308,17 +316,22 @@ function useDetailsOwnershipState(props: {
     const serverGroupRef = React.useRef(props.metadata.group);
     const chmodInFlightRef = React.useRef(false);
     const chownInFlightRef = React.useRef(false);
+
     const [displayedPermissions, setDisplayedPermissions] = React.useState(
         props.metadata.permissions,
     );
+
     const [displayedOwner, setDisplayedOwner] = React.useState(
         props.metadata.owner,
     );
+
     const [displayedGroup, setDisplayedGroup] = React.useState(
         props.metadata.group,
     );
+
     const [displayedUid, setDisplayedUid] = React.useState(props.metadata.uid);
     const [displayedGid, setDisplayedGid] = React.useState(props.metadata.gid);
+
     const [feedback, setFeedback] = React.useState<{
         tone: "success" | "error";
         message: string;
@@ -328,6 +341,7 @@ function useDetailsOwnershipState(props: {
         ...agentAccountsQueryOptions(props.agent),
         enabled: props.agent.isRoot,
     });
+
     const displayedMetadata: FilesystemMetadata = {
         owner: displayedOwner,
         group: displayedGroup,
@@ -376,6 +390,7 @@ function useDetailsOwnershipState(props: {
             chownInFlightRef.current = false;
         },
     });
+
     const chmodMutation = useMutation({
         mutationFn: (permissions: number) =>
             props.agent.chmod(props.path, permissions),
@@ -429,9 +444,11 @@ function useDetailsOwnershipState(props: {
             if (chmodInFlightRef.current) {
                 return;
             }
+
             const nextPermissions = enabled
                 ? displayedPermissions | bit
                 : displayedPermissions & ~bit;
+
             chmodInFlightRef.current = true;
             setDisplayedPermissions(nextPermissions);
             chmodMutation.mutate(nextPermissions);
@@ -440,6 +457,7 @@ function useDetailsOwnershipState(props: {
             if (chownInFlightRef.current) {
                 return;
             }
+
             chownInFlightRef.current = true;
             setDisplayedOwner(owner);
             chownMutation.mutate({ owner });
@@ -448,6 +466,7 @@ function useDetailsOwnershipState(props: {
             if (chownInFlightRef.current) {
                 return;
             }
+
             chownInFlightRef.current = true;
             setDisplayedGroup(group);
             chownMutation.mutate({ group });
@@ -471,6 +490,7 @@ function FilesystemMetadataSections(props: {
         path: props.path,
         metadata: props.metadata,
     });
+
     const headingIdPrefix = props.headingPrefix.toLowerCase();
 
     return (
@@ -663,8 +683,10 @@ export function DirectoryDetailView(props: {
     lsResult: LsDirectoryResponse;
 }) {
     const archiveName = `${props.directoryName === "/" ? "archive" : props.directoryName}.tar.gz`;
+
     const [sizeWarningDismissed, setSizeWarningDismissed] =
         React.useState(false);
+
     const directorySizeMutation = useMutation({
         mutationFn: () =>
             props.agent.calculateDirectorySize(props.lsResult.path),
@@ -760,9 +782,11 @@ export function FileDetailView(props: {
     const [copiedCommand, setCopiedCommand] = React.useState<string | null>(
         null,
     );
+
     const [oneTimeTokens, setOneTimeTokens] = React.useState(
         props.initialOneTimeTokens,
     );
+
     const createShareableLinkMutation = useMutation({
         mutationFn: () => props.agent.createOneTimeToken(props.lsResult.path),
         onSuccess: (response) => {

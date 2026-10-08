@@ -63,15 +63,19 @@ function getServerDisconnectMessage(
     if (message.type === "error") {
         return message.message;
     }
+
     if (message.type === "exit") {
         if (message.code !== null) {
             return `Shell exited with code ${message.code}`;
         }
+
         if (message.signal !== null) {
             return `Shell exited from signal ${message.signal}`;
         }
+
         return "Shell exited";
     }
+
     return null;
 }
 
@@ -83,6 +87,7 @@ function waitForTerminalSizing(): Promise<void> {
 /** Returns only native browser selection whose endpoints both belong to this terminal. */
 function getTerminalSelection(host: HTMLElement): string {
     const selection = window.getSelection();
+
     if (
         !selection ||
         selection.isCollapsed ||
@@ -93,12 +98,14 @@ function getTerminalSelection(host: HTMLElement): string {
     ) {
         return "";
     }
+
     return selection.toString();
 }
 
 /** Removes control escapes and adds shell paste guards only when the PTY requested them. */
 function formatTerminalPaste(terminal: WTerm, text: string): string {
     const safeText = text.replaceAll("\x1b", "");
+
     return terminal.bridge?.bracketedPaste() === true
         ? `\x1b[200~${safeText}\x1b[201~`
         : safeText;
@@ -116,9 +123,11 @@ function findOpenTerminalForAgent(
             tab.cwd === target.cwd &&
             tab.state.type !== "disconnected",
     );
+
     if (matchingTabs.length === 0) {
         return undefined;
     }
+
     return (
         matchingTabs.find((tab) => tab.id === activeTabId) ??
         matchingTabs[matchingTabs.length - 1]
@@ -143,6 +152,7 @@ function useListingRefreshScheduler() {
             for (const timer of timersRef.current) {
                 window.clearTimeout(timer);
             }
+
             timersRef.current.clear();
         };
     }, []);
@@ -161,6 +171,7 @@ function useListingRefreshScheduler() {
                     refetchType: "active",
                 });
             }, 1000);
+
             timersRef.current.add(timer);
         },
         [queryClient],
@@ -177,6 +188,7 @@ function useTerminalCreationRequests(
         if (requests.length === 0) {
             return;
         }
+
         for (const request of consumeRequests()) {
             onCreate(request);
         }
@@ -188,6 +200,7 @@ function useTerminalOpenRequest(onOpen: () => void) {
     const [openRequested, setOpenRequested] = useAtom(
         terminalOpenRequestedAtom,
     );
+
     React.useEffect(() => {
         if (openRequested) {
             setOpenRequested(false);
@@ -215,12 +228,15 @@ export function TerminalPanel(props: {
     const pendingTerminalFocusRef = React.useRef(false);
     const nextTabIdRef = React.useRef(1);
     const nextAgentTerminalNumberRef = React.useRef(new Map<string, number>());
+
     /** Captures the selected agent and directory without changing older tabs. */
     const createTerminal = (target: TerminalCreationTarget) => {
         const id = nextTabIdRef.current;
         nextTabIdRef.current += 1;
+
         const agentTerminalNumber =
             nextAgentTerminalNumberRef.current.get(target.agent.id) ?? 1;
+
         nextAgentTerminalNumberRef.current.set(
             target.agent.id,
             agentTerminalNumber + 1,
@@ -260,15 +276,18 @@ export function TerminalPanel(props: {
     /** Removes one session and chooses its nearest surviving neighbor. */
     const closeTerminal = (tabId: number) => {
         const tabIndex = tabs.findIndex((tab) => tab.id === tabId);
+
         if (tabIndex === -1) {
             return;
         }
 
         const remainingTabs = tabs.filter((tab) => tab.id !== tabId);
         setTabs(remainingTabs);
+
         if (activeTabId === tabId) {
             const replacement =
                 remainingTabs[tabIndex] ?? remainingTabs[tabIndex - 1] ?? null;
+
             setActiveTabId(replacement?.id ?? null);
         }
     };
@@ -300,12 +319,15 @@ export function TerminalPanel(props: {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
             return;
         }
+
         const offset = event.key === "ArrowRight" ? 1 : -1;
         const nextIndex = (tabIndex + offset + tabs.length) % tabs.length;
         const nextTab = tabs[nextIndex];
+
         if (!nextTab) {
             return;
         }
+
         setActiveTabId(nextTab.id);
         document.getElementById(`terminal-tab-${nextTab.id}`)?.focus();
         event.preventDefault();
@@ -318,19 +340,23 @@ export function TerminalPanel(props: {
                 activateBottomDrawerTab("terminal");
                 setIsPickerOpen(true);
             }
+
             return;
         }
+
         const existingTab = findOpenTerminalForAgent(
             tabs,
             activeTabId,
             props.activeTarget,
         );
+
         if (existingTab) {
             setActiveTabId(existingTab.id);
             activateBottomDrawerTab("terminal");
         } else {
             createTerminal(props.activeTarget);
         }
+
         pendingTerminalFocusRef.current = true;
         setFocusRequestId((current) => current + 1);
     };
@@ -343,14 +369,18 @@ export function TerminalPanel(props: {
             if (isUnmodifiedAltKey(event, "e")) {
                 // Alt+e already returned to the editor; a later connected state must not steal it.
                 pendingTerminalFocusRef.current = false;
+
                 return;
             }
+
             const isEditorAltT =
                 isUnmodifiedAltKey(event, "t") &&
                 isEditorInputTarget(event.target);
+
             const isGlobalT =
                 event.key === "t" &&
                 !shouldIgnoreKeyboardShortcut(event, { shift: true });
+
             if (!isEditorAltT && !isGlobalT) {
                 return;
             }
@@ -365,6 +395,7 @@ export function TerminalPanel(props: {
 
         // Capture so Alt+t reaches the terminal action before Vim consumes t.
         window.addEventListener("keydown", handleShortcut, true);
+
         return () =>
             window.removeEventListener("keydown", handleShortcut, true);
     }, [isPickerOpen, props.activeTarget, openActiveTerminal]);
@@ -451,6 +482,7 @@ function connectTerminal(props: {
             props.cwd,
         ),
     );
+
     socket.binaryType = "arraybuffer";
     props.resources.socketRef.current = socket;
     props.isReadyRef.current = false;
@@ -460,26 +492,35 @@ function connectTerminal(props: {
         if (props.generationRef.current !== props.generation) {
             return;
         }
+
         const terminal = props.resources.terminalRef.current;
+
         if (event.data instanceof ArrayBuffer) {
             terminal?.write(new Uint8Array(event.data));
+
             return;
         }
+
         const textFrame = z.string().safeParse(event.data);
+
         if (!textFrame.success) {
             socket.close(1002, "Unsupported terminal frame");
+
             return;
         }
 
         let message: TerminalServerMessage;
+
         try {
             message = terminalServerMessageSchema.parse(
                 JSON.parse(textFrame.data),
             );
         } catch {
             socket.close(1002, "Invalid terminal control message");
+
             return;
         }
+
         if (message.type === "ready") {
             props.isReadyRef.current = true;
             props.resources.startupCommand?.reserve(
@@ -489,14 +530,18 @@ function connectTerminal(props: {
                     props.resources.socketRef.current === socket,
             );
             props.updateTerminalState({ type: "connected" });
+
             return;
         }
 
         const disconnectMessage = getServerDisconnectMessage(message);
+
         if (!disconnectMessage) {
             socket.close(1002, "Invalid terminal control message");
+
             return;
         }
+
         props.showDisconnected(props.generation, disconnectMessage);
         socket.close();
     };
@@ -504,12 +549,14 @@ function connectTerminal(props: {
     /** Distinguishes setup loss from an established shell disconnect. */
     const handleClose = () => {
         props.resources.startupCommand?.cancelPending();
+
         if (
             props.generationRef.current !== props.generation ||
             props.stateRef.current.type === "disconnected"
         ) {
             return;
         }
+
         props.showDisconnected(
             props.generation,
             props.isReadyRef.current
@@ -541,6 +588,7 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
     const hostRef = React.useRef<HTMLDivElement | null>(null);
     const stateRef = React.useRef<TerminalState>(props.tab.state);
     const startupCommandRef = React.useRef<OneShotTerminalCommand | null>(null);
+
     if (
         startupCommandRef.current === null &&
         props.tab.startupCommand !== null &&
@@ -552,6 +600,7 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
             () => props.onStartupCommandSent(refreshTarget),
         );
     }
+
     const resources: TerminalResources = {
         terminalRef: React.useRef<WTerm | null>(null),
         coreRef: React.useRef<GhosttyCore | null>(null),
@@ -559,6 +608,7 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
         removeSocketListenersRef: React.useRef<(() => void) | null>(null),
         startupCommand: startupCommandRef.current,
     };
+
     const generationRef = React.useRef(0);
     const restartGenerationRef = React.useRef(props.tab.restartGeneration);
     const isActiveRef = React.useRef(props.isActive);
@@ -589,6 +639,7 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
         if (generationRef.current !== generation) {
             return;
         }
+
         generationRef.current += 1;
         disposeResources();
         updateTerminalState({ type: "disconnected", message });
@@ -599,16 +650,22 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
         if (stateRef.current.type !== "not_started") {
             return;
         }
+
         const generation = generationRef.current + 1;
         generationRef.current = generation;
         updateTerminalState({ type: "initializing" });
+
         try {
             const host = hostRef.current;
+
             if (!host) {
                 failSetup(generation, "Terminal host is unavailable");
+
                 return;
             }
+
             applyTerminalTheme(host, themeRef.current);
+
             const session = await createWTerm({
                 host,
                 onData: (data) =>
@@ -627,18 +684,23 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
                         rows,
                     }),
             });
+
             if (generationRef.current !== generation) {
                 session.terminal.destroy();
                 session.core.dispose();
+
                 return;
             }
+
             resources.terminalRef.current = session.terminal;
             resources.coreRef.current = session.core;
             host.setAttribute("data-terminal-initialized", "true");
             await waitForTerminalSizing();
+
             if (generationRef.current !== generation) {
                 return;
             }
+
             updateTerminalState({ type: "connecting" });
             connectTerminal({
                 agent: props.agent,
@@ -668,11 +730,14 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
             disposeResources();
             stateRef.current = { type: "not_started" };
         }
+
         if (props.isActive && !props.isPanelCollapsed) {
             if (stateRef.current.type === "not_started") {
                 void startTerminal();
+
                 return;
             }
+
             if (stateRef.current.type === "connected") {
                 sendTerminalResize({
                     resources,
@@ -692,6 +757,7 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
 
     React.useEffect(() => {
         const host = hostRef.current;
+
         if (host) {
             applyTerminalTheme(host, resolvedTheme);
         }
@@ -707,15 +773,19 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
         ) {
             return;
         }
+
         if (props.pendingTerminalFocusRef.current) {
             resources.terminalRef.current?.focus();
             props.pendingTerminalFocusRef.current = false;
+
             return;
         }
+
         // A late ready/connected must not keep the shell if Alt+e already restored the editor.
         const editor = document.querySelector<HTMLElement>(
             '[role="textbox"][data-file-editor]',
         );
+
         if (
             editor &&
             document.activeElement?.closest("[data-terminal-input]")
@@ -753,17 +823,20 @@ function useTerminalLifecycle(props: TerminalSessionProps) {
 /** Owns one tab's browser resources so sibling sessions cannot affect it. */
 function TerminalSession(props: TerminalSessionProps) {
     const { hostRef, terminalRef, sendInput } = useTerminalLifecycle(props);
+
     const [contextMenu, setContextMenu] = React.useState<{
         x: number;
         y: number;
         canCopy: boolean;
     } | null>(null);
+
     const [clipboardError, setClipboardError] = React.useState<string | null>(
         null,
     );
 
     React.useEffect(() => {
         const host = hostRef.current;
+
         if (!host) {
             return;
         }
@@ -780,6 +853,7 @@ function TerminalSession(props: TerminalSessionProps) {
         };
 
         host.addEventListener("contextmenu", handleContextMenu, true);
+
         return () =>
             host.removeEventListener("contextmenu", handleContextMenu, true);
     }, [hostRef, terminalRef]);
@@ -787,6 +861,7 @@ function TerminalSession(props: TerminalSessionProps) {
     /** Returns keyboard focus to the shell after the overlay closes. */
     const closeContextMenu = () => {
         setContextMenu(null);
+
         if (props.isActive && !props.isPanelCollapsed) {
             terminalRef.current?.focus();
         }
@@ -796,9 +871,11 @@ function TerminalSession(props: TerminalSessionProps) {
     const copySelection = async () => {
         const host = hostRef.current;
         const text = host ? getTerminalSelection(host) : "";
+
         if (!text) {
             return;
         }
+
         try {
             await navigator.clipboard.writeText(text);
         } catch {
@@ -809,11 +886,14 @@ function TerminalSession(props: TerminalSessionProps) {
     /** Sends sanitized clipboard text with the shell's requested paste framing. */
     const pasteClipboard = async () => {
         const terminal = terminalRef.current;
+
         if (!terminal) {
             return;
         }
+
         try {
             const text = await navigator.clipboard.readText();
+
             if (text) {
                 sendInput(formatTerminalPaste(terminal, text));
             }

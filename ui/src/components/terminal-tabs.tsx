@@ -51,9 +51,11 @@ function getTerminalStatus(state: TerminalState) {
     if (state.type === "connected") {
         return { label: "Connected", color: "text-emerald-400" };
     }
+
     if (state.type === "disconnected") {
         return { label: "Disconnected", color: "text-amber-400" };
     }
+
     return { label: "Connecting", color: "text-slate-400" };
 }
 
@@ -76,9 +78,11 @@ export function TerminalTabActions(props: {
     ) => void;
 }) {
     const listRef = React.useRef<HTMLDivElement>(null);
+
     const availableAgents = props.agents.filter(
         (agent) => agent.status === "connected" && agent.cwd !== null,
     );
+
     return (
         <div className="flex min-w-max max-w-none items-center gap-1">
             <SortableList
@@ -151,6 +155,7 @@ export function TerminalTabActions(props: {
                                     if (agent.cwd === null) {
                                         return;
                                     }
+
                                     props.onCreate({ agent, cwd: agent.cwd });
                                     close();
                                 }}
@@ -185,6 +190,7 @@ function TerminalTabControl(props: {
     ) => void;
 }) {
     const status = getTerminalStatus(props.tab.state);
+
     return (
         <SortableItem id={String(props.tab.id)}>
             {(item) => (

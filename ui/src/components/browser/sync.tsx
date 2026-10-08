@@ -93,6 +93,7 @@ export function AgentPathFields(props: {
                             ) {
                                 return;
                             }
+
                             event.preventDefault();
                             props.onView();
                         }}
@@ -106,6 +107,7 @@ export function AgentPathFields(props: {
 }
 
 type TransferOperation = "copy" | "move";
+
 type SyncDirection = "current-to-selected" | "selected-to-current";
 
 type SyncEndpoint = {
@@ -118,9 +120,11 @@ function resolveSyncPath(agent: Agent, path: string): string {
     if (agent.cwd === null || (path !== "~" && !path.startsWith("~/"))) {
         return path;
     }
+
     if (path === "~") {
         return agent.cwd;
     }
+
     return agent.cwd === "/"
         ? `/${path.slice(2)}`
         : `${agent.cwd.replace(/\/+$/, "")}/${path.slice(2)}`;
@@ -131,17 +135,22 @@ function shortenSyncPath(agent: Agent, path: string): string {
     if (agent.cwd === null || path === "~" || path.startsWith("~/")) {
         return path;
     }
+
     const home = agent.cwd.replace(/\/+$/, "");
+
     // A root home would make every absolute path look portable and copy under a peer's real home.
     if (home === "" || home === "/") {
         return path;
     }
+
     if (path === home || path === `${home}/`) {
         return "~";
     }
+
     if (path.startsWith(`${home}/`)) {
         return `~${path.slice(home.length)}`;
     }
+
     return path;
 }
 
@@ -149,12 +158,15 @@ function shortenSyncPath(agent: Agent, path: string): string {
 async function destinationExists(agent: Agent, path: string): Promise<boolean> {
     try {
         await agent.ls(path);
+
         return true;
     } catch (error) {
         const pathError = getPathLoadError(error);
+
         if (pathError?.type === "missing") {
             return false;
         }
+
         throw error;
     }
 }
@@ -168,35 +180,44 @@ function useSyncEndpointSelection(props: {
     const availableAgents = props.agents.filter(
         (agent) => agent.status === "connected",
     );
+
     const defaultAgent =
         availableAgents.find((agent) => agent.id !== props.sourceAgent.id) ??
         availableAgents[0];
+
     const [selectedAgentId, setSelectedAgentId] = React.useState(
         defaultAgent?.id ?? "",
     );
+
     const [selectedPath, setSelectedPath] = React.useState(() =>
         shortenSyncPath(props.sourceAgent, props.sourcePath),
     );
+
     const [direction, setDirection] = React.useState<SyncDirection>(
         "current-to-selected",
     );
+
     const selectedAgent = availableAgents.find(
         (agent) => agent.id === selectedAgentId,
     );
+
     const currentEndpoint: SyncEndpoint = {
         agent: props.sourceAgent,
         path: props.sourcePath,
     };
+
     const selectedEndpoint: SyncEndpoint | null = selectedAgent
         ? {
               agent: selectedAgent,
               path: resolveSyncPath(selectedAgent, selectedPath),
           }
         : null;
+
     const sourceEndpoint =
         direction === "current-to-selected"
             ? currentEndpoint
             : selectedEndpoint;
+
     const destinationEndpoint =
         direction === "current-to-selected"
             ? selectedEndpoint
@@ -229,6 +250,7 @@ function useSyncTransferProgress(api: ApiClient, requestId: number | null) {
             const transfer = query.state.data?.transfers.find(
                 (entry) => entry.request_id === requestId,
             );
+
             return transfer?.state === "completed" ||
                 transfer?.state === "errored"
                 ? false
@@ -247,6 +269,7 @@ function useSyncWorkspace(props: {
 }) {
     const navigate = useNavigate();
     const endpoints = useSyncEndpointSelection(props);
+
     const {
         availableAgents,
         selectedAgentId,
@@ -260,8 +283,10 @@ function useSyncWorkspace(props: {
         sourceEndpoint,
         destinationEndpoint,
     } = endpoints;
+
     const [pendingOperation, setPendingOperation] =
         React.useState<TransferOperation | null>(null);
+
     const [confirmationOperation, setConfirmationOperation] =
         React.useState<TransferOperation | null>(null);
 
@@ -273,41 +298,49 @@ function useSyncWorkspace(props: {
             if (sourceEndpoint === null || destinationEndpoint === null) {
                 throw new Error("Selected device is unavailable");
             }
+
             const destination = {
                 agent: destinationEndpoint.agent.id,
                 path: destinationEndpoint.path,
             };
+
             if (request.operation === "copy") {
                 const response = await sourceEndpoint.agent.copyTo(
                     destination,
                     sourceEndpoint.path,
                     { on_existing: request.mode },
                 );
+
                 return {
                     requestId: response.copy_request_id,
                     operation: request.operation,
                 };
             }
+
             const response = await sourceEndpoint.agent.moveTo(
                 destination,
                 sourceEndpoint.path,
                 { on_existing: request.mode },
             );
+
             return {
                 requestId: response.move_request_id,
                 operation: request.operation,
             };
         },
     });
+
     const prepareTransferMutation = useMutation({
         mutationFn: async (operation: TransferOperation) => {
             if (destinationEndpoint === null) {
                 throw new Error("Selected device is unavailable");
             }
+
             const exists = await destinationExists(
                 destinationEndpoint.agent,
                 destinationEndpoint.path,
             );
+
             return { operation, exists };
         },
         onSuccess: (result) => {
@@ -316,16 +349,20 @@ function useSyncWorkspace(props: {
                     operation: result.operation,
                     mode: "error",
                 });
+
                 return;
             }
+
             setPendingOperation(result.operation);
         },
     });
+
     const diffMutation = useMutation({
         mutationFn: () => {
             if (sourceEndpoint === null || destinationEndpoint === null) {
                 throw new Error("Selected device is unavailable");
             }
+
             return props.api.diffFiles(
                 { agent: sourceEndpoint.agent.id, path: sourceEndpoint.path },
                 {
@@ -339,16 +376,19 @@ function useSyncWorkspace(props: {
     const activeRequestId = transferMutation.data?.requestId ?? null;
     const transferQuery = useSyncTransferProgress(props.api, activeRequestId);
     const transfer = transferQuery.data;
+
     const transferOperation =
         transferMutation.data?.operation ??
         transferMutation.variables?.operation ??
         prepareTransferMutation.variables ??
         pendingOperation;
+
     const isActive =
         transferMutation.isSuccess &&
         transfer?.state !== "completed" &&
         transfer?.state !== "errored" &&
         !transferQuery.isError;
+
     const preparingOperation = prepareTransferMutation.isPending
         ? prepareTransferMutation.variables
         : null;
@@ -358,6 +398,7 @@ function useSyncWorkspace(props: {
         if (sourceEndpoint === null || destinationEndpoint === null) {
             return;
         }
+
         prepareTransferMutation.reset();
         transferMutation.reset();
         prepareTransferMutation.mutate(operation);
@@ -373,6 +414,7 @@ function useSyncWorkspace(props: {
         if (selectedHref === null) {
             return;
         }
+
         void navigate({
             to: selectedHref,
             search: {},
@@ -472,6 +514,7 @@ function EndpointPath(props: {
     if (props.endpoint === null) {
         return props.fallback;
     }
+
     return (
         <AgentPath
             agentName={props.endpoint.agent.name}
@@ -509,14 +552,17 @@ function SyncDirectionFields(props: {
     currentPath: string;
 }) {
     const workspace = props.workspace;
+
     const currentPath = {
         agentName: props.currentAgent.name,
         path: props.currentPath,
     };
+
     const selectedPath = {
         agentName: workspace.selectedAgent?.name ?? "Unavailable device",
         path: workspace.selectedEndpoint?.path ?? workspace.selectedPath,
     };
+
     return (
         <RadioCardGroup
             legend="Sync direction"
@@ -568,6 +614,7 @@ function conflictDialogLabels(operation: TransferOperation | null) {
             radioGroupName: "move-on-existing",
         };
     }
+
     return {
         closeAriaLabel: "Close copy conflict dialog",
         confirmLabel: "Continue copying",
@@ -578,18 +625,21 @@ function conflictDialogLabels(operation: TransferOperation | null) {
 /** Keeps transfer and comparison actions in one toolbar without bloating the page. */
 function SyncActionBar(props: { workspace: SyncWorkspace }) {
     const workspace = props.workspace;
+
     const sourcePath = (
         <EndpointPath
             endpoint={workspace.sourceEndpoint}
             fallback="the unavailable selected endpoint"
         />
     );
+
     const destinationPath = (
         <EndpointPath
             endpoint={workspace.destinationEndpoint}
             fallback="the unavailable selected endpoint"
         />
     );
+
     return (
         <div className="flex flex-wrap items-center gap-3">
             <Tooltip
@@ -677,6 +727,7 @@ function SyncActionBar(props: { workspace: SyncWorkspace }) {
                             if (!workspace.selectedAgentId) {
                                 return;
                             }
+
                             workspace.diffMutation.mutate();
                         }}
                         className="rounded-md text-sm font-semibold"
@@ -705,6 +756,7 @@ function SyncActionBar(props: { workspace: SyncWorkspace }) {
 /** Reports transfer completion separately so a later Diff result can stay on screen. */
 function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
     const workspace = props.workspace;
+
     if (workspace.transfer?.state === "completed") {
         const sourcePath = (
             <EndpointPath
@@ -712,12 +764,14 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
                 fallback="unknown source"
             />
         );
+
         const destinationPath = (
             <EndpointPath
                 endpoint={workspace.destinationEndpoint}
                 fallback="unknown destination"
             />
         );
+
         return (
             <p
                 role="status"
@@ -729,6 +783,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
             </p>
         );
     }
+
     if (
         workspace.prepareTransferMutation.isError ||
         workspace.transferMutation.isError ||
@@ -757,12 +812,14 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
             </p>
         );
     }
+
     return null;
 }
 
 /** Keeps the rendered hunks under the form so Copy/Move chrome stays interactive. */
 function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     const workspace = props.workspace;
+
     if (workspace.diffMutation.isError) {
         return (
             <p
@@ -776,9 +833,11 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
             </p>
         );
     }
+
     if (!workspace.diffMutation.isSuccess) {
         return null;
     }
+
     return (
         <section
             aria-label="File diff"
@@ -802,14 +861,17 @@ export function SyncView(props: {
     const workspace = useSyncWorkspace(props);
     const entryLabel = props.entryType === "file" ? "file" : "directory";
     const conflictLabels = conflictDialogLabels(workspace.pendingOperation);
+
     const confirmationLabel =
         workspace.confirmationOperation === "move" ? "Move" : "Copy";
+
     const sourcePath = (
         <EndpointPath
             endpoint={workspace.sourceEndpoint}
             fallback="the unavailable selected endpoint"
         />
     );
+
     const destinationPath = (
         <EndpointPath
             endpoint={workspace.destinationEndpoint}
@@ -880,6 +942,7 @@ export function SyncView(props: {
                     if (workspace.confirmationOperation === null) {
                         return;
                     }
+
                     const operation = workspace.confirmationOperation;
                     workspace.setConfirmationOperation(null);
                     workspace.startTransfer(operation);
@@ -898,6 +961,7 @@ export function SyncView(props: {
                     if (workspace.pendingOperation === null) {
                         return;
                     }
+
                     const operation = workspace.pendingOperation;
                     workspace.setPendingOperation(null);
                     workspace.transferMutation.mutate({ operation, mode });

@@ -73,6 +73,7 @@ function ApplicationMenu(props: {
     const [userState, setUserState] = useUserState();
     const agentsQuery = useQuery(agentsQueryOptions(props.api));
     const agents = agentsQuery.data ?? [];
+
     const menuItems = [
         { to: "/", label: "Home", ariaLabel: "Server home", icon: Home },
         {
@@ -101,7 +102,9 @@ function ApplicationMenu(props: {
                     item.to === "/transfers"
                         ? props.pathname.startsWith(item.to)
                         : props.pathname === item.to;
+
                 const Icon = item.icon;
+
                 return (
                     <Link
                         key={item.to}
@@ -145,9 +148,11 @@ function ApplicationMenu(props: {
                                 current.pinnedFiles,
                                 move,
                             );
+
                             if (pinnedFiles === current.pinnedFiles) {
                                 return current;
                             }
+
                             return { ...current, pinnedFiles };
                         });
                     }}
@@ -169,6 +174,7 @@ function ApplicationMenu(props: {
                     restart={() => props.api.restartServer()}
                     waitUntilReady={() => {
                         let oldServerClosed = false;
+
                         return waitForRestart(async () => {
                             try {
                                 await queryClient.fetchQuery({
@@ -179,11 +185,13 @@ function ApplicationMenu(props: {
                                 oldServerClosed = true;
                                 throw error;
                             }
+
                             if (!oldServerClosed) {
                                 throw new Error(
                                     "Old server is still shutting down",
                                 );
                             }
+
                             await router.invalidate();
                         }, "Server did not come back after restart");
                     }}
@@ -224,6 +232,7 @@ function PinnedFiles(props: {
     onMove: (move: { activeId: string; overId: string }) => void;
 }) {
     const listRef = React.useRef<HTMLUListElement>(null);
+
     return (
         <div className="mt-2 flex min-h-0 flex-1 flex-col">
             <div className="flex items-center justify-between gap-2 px-3 py-1">
@@ -289,6 +298,7 @@ function PinnedFileRow(props: {
     const href = getBrowserUrl(props.file.agentId, props.file.path);
     const isActive = props.pathname === href;
     const itemId = getPinnedFileKey(props.file);
+
     return (
         <SortableItem id={itemId}>
             {(item) => (

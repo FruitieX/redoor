@@ -79,6 +79,7 @@ export function ViewToggle(props: {
     gitAvailable: boolean;
 }) {
     const pathTarget = getBrowserPathHref(props.agent, props.path);
+
     if (props.entryType === "directory") {
         return (
             <ViewSwitch label="Directory view" variant="page">
@@ -118,6 +119,7 @@ export function ViewToggle(props: {
     }
 
     const contentLabel = props.editable === true ? "Edit" : "View";
+
     const contentIcon =
         props.editable === true ? (
             <Pencil className="h-4 w-4" aria-hidden="true" />
@@ -192,6 +194,7 @@ export function ViewSwitch(props: {
         props.variant === "page"
             ? "top-tab-strip flex w-full min-w-0 items-stretch gap-0 overflow-x-auto overscroll-x-contain"
             : "top-tab-strip flex w-full min-w-0 items-end gap-1 overflow-x-auto overscroll-x-contain";
+
     return (
         <div aria-label={props.label} className={stripClass}>
             {props.children}
@@ -203,6 +206,7 @@ export function ViewSwitch(props: {
 export function getViewSwitchItemClass(isActive: boolean) {
     const baseClass =
         "inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-t-lg border border-b-0 px-4 py-2 text-sm font-medium transition-colors";
+
     return isActive
         ? `${baseClass} border-slate-700 bg-[#161a23] text-slate-100 shadow-[0_-2px_0_0_rgb(59,130,246)_inset] [&_svg]:text-blue-400`
         : `${baseClass} border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-100`;
@@ -212,6 +216,7 @@ export function getViewSwitchItemClass(isActive: boolean) {
 function getPageViewTabClass(isActive: boolean) {
     const baseClass =
         "inline-flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-3 py-1.5 text-sm font-medium transition-colors";
+
     return isActive
         ? `${baseClass} border-blue-500 text-slate-100 [&_svg]:text-blue-400`
         : `${baseClass} border-transparent text-slate-400 hover:border-slate-600 hover:text-slate-100`;
@@ -254,8 +259,10 @@ export function BrowserHeader(props: {
                     to: props.agent.getBrowserUrl(props.path),
                     search: {},
                 });
+
                 return;
             }
+
             if (props.parentPath === null) {
                 return;
             }
@@ -265,6 +272,7 @@ export function BrowserHeader(props: {
         };
 
         window.addEventListener("keydown", handleBackspace);
+
         return () => window.removeEventListener("keydown", handleBackspace);
     }, [navigate, pathUnavailable, props]);
 
@@ -324,6 +332,7 @@ export function UnavailablePathState(props: {
         props.error.type === "missing"
             ? "File or directory not found"
             : "Could not read file or directory";
+
     return (
         <section
             role="status"
@@ -383,9 +392,11 @@ function Breadcrumbs(props: {
 }) {
     const navigate = useNavigate();
     const pathInputRef = React.useRef<HTMLInputElement>(null);
+
     const [isEditing, setIsEditing] = React.useState(
         props.startEditing === true,
     );
+
     const [editedPath, setEditedPath] = React.useState(props.path);
     const { isCopied, copy } = useCopyFeedback(props.path);
 
@@ -396,6 +407,7 @@ function Breadcrumbs(props: {
     // Keep the editor aligned with route changes, including missing-path landings.
     React.useEffect(() => {
         setEditedPath(props.path);
+
         if (props.startEditing) {
             setIsEditing(true);
         } else {
@@ -408,6 +420,7 @@ function Breadcrumbs(props: {
         if (!isEditing) {
             return;
         }
+
         pathInputRef.current?.focus();
         pathInputRef.current?.select();
     }, [isEditing, props.path]);
@@ -423,6 +436,7 @@ function Breadcrumbs(props: {
         event: React.FormEvent<HTMLFormElement>,
     ) => {
         event.preventDefault();
+
         const targetPath =
             editedPath === ""
                 ? "/"
@@ -435,9 +449,11 @@ function Breadcrumbs(props: {
                       : `/${editedPath}`;
 
         setIsEditing(false);
+
         if (targetPath === props.path) {
             return;
         }
+
         // Destination route decides whether the editor stays open (missing path).
         await navigate({
             to: props.agent.getBrowserUrl(targetPath),

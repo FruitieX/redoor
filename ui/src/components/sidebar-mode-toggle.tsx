@@ -34,15 +34,19 @@ const sidebarModeOptions = [
 /** Cycles the persistent-sidebar preference from the application menu. */
 export function SidebarModeToggle() {
     const [storedMode, setSidebarMode] = useAtom(sidebarModeAtom);
+
     const selectedIndex = Math.max(
         0,
         sidebarModeOptions.findIndex((option) => option.value === storedMode),
     );
+
     const selectedOption =
         sidebarModeOptions[selectedIndex] ?? sidebarModeOptions[0];
+
     const nextOption =
         sidebarModeOptions[(selectedIndex + 1) % sidebarModeOptions.length] ??
         sidebarModeOptions[0];
+
     const SelectedIcon = selectedOption.icon;
 
     /** Advances through Auto, Show, and Hide in the order advertised by the tooltip. */

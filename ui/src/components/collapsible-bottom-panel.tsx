@@ -30,13 +30,16 @@ export function TabbedBottomDrawer(props: {
         isCollapsed: props.isCollapsed,
         defaultExpandedHeight: 400,
     });
+
     const isContentVisible = useDrawerSlideContentVisibility({
         isCollapsed: props.isCollapsed,
         panelRef: resize.panelRef,
     });
+
     const toggleLabel = props.isCollapsed
         ? "Expand bottom drawer"
         : "Minimize bottom drawer";
+
     const panelHeight = props.isCollapsed
         ? COLLAPSED_DRAWER_HEIGHT
         : (resize.expandedHeight ?? 400);
@@ -55,13 +58,18 @@ export function TabbedBottomDrawer(props: {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
             return;
         }
+
         const offset = event.key === "ArrowRight" ? 1 : -1;
+
         const nextIndex =
             (tabIndex + offset + props.tabs.length) % props.tabs.length;
+
         const nextTab = props.tabs[nextIndex];
+
         if (!nextTab) {
             return;
         }
+
         activateTab(nextTab.id);
         document.getElementById(`bottom-drawer-tab-${nextTab.id}`)?.focus();
         event.preventDefault();
@@ -158,6 +166,7 @@ export function TabbedBottomDrawer(props: {
                     >
                         {props.tabs.map((tab) => {
                             const isActive = tab.id === props.activeTab;
+
                             return (
                                 <div
                                     key={tab.id}
@@ -187,26 +196,33 @@ function useDrawerSlideContentVisibility(props: {
     const [isContentVisible, setIsContentVisible] = React.useState(
         !props.isCollapsed,
     );
+
     const wasCollapsedRef = React.useRef(props.isCollapsed);
 
     React.useEffect(() => {
         const wasCollapsed = wasCollapsedRef.current;
         wasCollapsedRef.current = props.isCollapsed;
+
         if (!props.isCollapsed) {
             setIsContentVisible(true);
+
             return;
         }
+
         if (wasCollapsed) {
             setIsContentVisible(false);
+
             return;
         }
 
         const panel = props.panelRef.current;
+
         if (
             !panel ||
             window.matchMedia("(prefers-reduced-motion: reduce)").matches
         ) {
             setIsContentVisible(false);
+
             return;
         }
 
@@ -214,14 +230,18 @@ function useDrawerSlideContentVisibility(props: {
         const hideContent = () => {
             setIsContentVisible(false);
         };
+
         const handleTransitionEnd = (event: TransitionEvent) => {
             if (event.target !== panel || event.propertyName !== "height") {
                 return;
             }
+
             hideContent();
         };
+
         panel.addEventListener("transitionend", handleTransitionEnd);
         const fallback = window.setTimeout(hideContent, 200);
+
         return () => {
             panel.removeEventListener("transitionend", handleTransitionEnd);
             window.clearTimeout(fallback);
@@ -245,6 +265,7 @@ function BottomDrawerTabButton(props: {
     onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
 }) {
     const isBelowSm = useIsBelowBreakpoint("sm");
+
     const button = (
         <button
             id={`bottom-drawer-tab-${props.tab.id}`}
@@ -290,9 +311,11 @@ function useBottomPanelResize(props: {
     const [expandedHeight, setExpandedHeight] = React.useState<number | null>(
         props.defaultExpandedHeight ?? null,
     );
+
     const [isResizing, setIsResizing] = React.useState(false);
     const panelRef = React.useRef<HTMLElement | null>(null);
     const headerRef = React.useRef<HTMLDivElement | null>(null);
+
     const resizeRef = React.useRef<{
         pointerId: number;
         startY: number;
@@ -305,11 +328,13 @@ function useBottomPanelResize(props: {
     const getHeightBounds = () => {
         const panel = panelRef.current;
         const header = headerRef.current;
+
         if (!panel || !header) {
             return null;
         }
 
         const panelRect = panel.getBoundingClientRect();
+
         return {
             currentHeight: panelRect.height,
             minHeight: header.getBoundingClientRect().height + 48,
@@ -322,7 +347,9 @@ function useBottomPanelResize(props: {
         if (props.isCollapsed || event.button !== 0) {
             return;
         }
+
         const bounds = getHeightBounds();
+
         if (!bounds) {
             return;
         }
@@ -342,6 +369,7 @@ function useBottomPanelResize(props: {
     /** Applies a drag while keeping the panel within its measured layout bounds. */
     const handleResizeMove = (event: React.PointerEvent<HTMLDivElement>) => {
         const activeResize = resizeRef.current;
+
         if (!activeResize || activeResize.pointerId !== event.pointerId) {
             return;
         }
@@ -367,6 +395,7 @@ function useBottomPanelResize(props: {
 
         resizeRef.current = null;
         setIsResizing(false);
+
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
         }
@@ -382,7 +411,9 @@ function useBottomPanelResize(props: {
         ) {
             return;
         }
+
         const bounds = getHeightBounds();
+
         if (!bounds) {
             return;
         }

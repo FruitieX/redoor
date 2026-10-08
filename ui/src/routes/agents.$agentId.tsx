@@ -76,10 +76,13 @@ export const Route = createFileRoute("/agents/$agentId")({
         const rootMatch = await parentMatchPromise;
         const agents = rootMatch.loaderData?.agents ?? [];
         const agent = agents.find((entry) => entry.id === params.agentId);
+
         if (!agent) throw new Error(`Agent not found: ${params.agentId}`);
+
         if (agent.status !== "connected") {
             return { kind: "lifecycle" as const, agent, agents };
         }
+
         return {
             kind: "connected" as const,
             agent,
@@ -94,13 +97,16 @@ export const Route = createFileRoute("/agents/$agentId")({
 /** Shares one agent-details command across status and filesystem child routes. */
 function AgentRouteLayout() {
     const data = Route.useLoaderData();
+
     const rememberProvisioningStatus = useSetAtom(
         rememberProvisioningStatusAtom,
     );
+
     React.useEffect(() => {
         if (data.agent.provisioningStatus.length === 0) {
             return;
         }
+
         rememberProvisioningStatus({
             agentName: data.agent.name,
             messages: data.agent.provisioningStatus,
@@ -110,6 +116,7 @@ function AgentRouteLayout() {
         data.agent.provisioningStatus,
         rememberProvisioningStatus,
     ]);
+
     return (
         <>
             <Outlet />

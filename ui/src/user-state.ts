@@ -72,6 +72,7 @@ export function isPathBookmarked(
     target: Pick<Bookmark, "agentId" | "path">,
 ) {
     const targetKey = getBookmarkKey(target);
+
     return bookmarks.some((bookmark) => getBookmarkKey(bookmark) === targetKey);
 }
 
@@ -86,6 +87,7 @@ export function isFilePinned(
     target: Pick<PinnedFile, "agentId" | "path">,
 ) {
     const targetKey = getPinnedFileKey(target);
+
     return pinnedFiles.some((file) => getPinnedFileKey(file) === targetKey);
 }
 
@@ -97,6 +99,7 @@ export function pinFile(pinnedFiles: PinnedFile[], file: PinnedFile) {
     if (isFilePinned(pinnedFiles, file)) {
         return pinnedFiles;
     }
+
     return [...pinnedFiles, file];
 }
 
@@ -106,6 +109,7 @@ export function unpinFile(
     target: Pick<PinnedFile, "agentId" | "path">,
 ) {
     const targetKey = getPinnedFileKey(target);
+
     return pinnedFiles.filter((file) => getPinnedFileKey(file) !== targetKey);
 }
 
@@ -137,13 +141,16 @@ export function reorderBookmarks(
 function dedupeIds(ids: string[]) {
     const seen = new Set<string>();
     const ordered: string[] = [];
+
     for (const id of ids) {
         if (seen.has(id)) {
             continue;
         }
+
         seen.add(id);
         ordered.push(id);
     }
+
     return ordered;
 }
 
@@ -154,19 +161,24 @@ function dedupeIds(ids: string[]) {
 export function resolveDeviceOrder(savedIds: string[], inventoryIds: string[]) {
     const seen = new Set<string>();
     const ordered: string[] = [];
+
     for (const id of dedupeIds(savedIds)) {
         seen.add(id);
+
         if (inventoryIds.includes(id)) {
             ordered.push(id);
         }
     }
+
     for (const id of inventoryIds) {
         if (seen.has(id)) {
             continue;
         }
+
         seen.add(id);
         ordered.push(id);
     }
+
     return ordered;
 }
 
@@ -185,13 +197,17 @@ export function commitDeviceOrder(
     ) {
         return savedIds;
     }
+
     const complete = dedupeIds(savedIds);
+
     for (const id of inventoryIds) {
         if (!complete.includes(id)) {
             complete.push(id);
         }
     }
+
     const inventory = new Set(inventoryIds);
+
     const next = moveKeyedSubsequence(
         complete,
         {
@@ -200,9 +216,11 @@ export function commitDeviceOrder(
         },
         move,
     );
+
     if (next === complete) {
         return savedIds;
     }
+
     return next;
 }
 
@@ -210,16 +228,21 @@ export function commitDeviceOrder(
 export function toggleBookmark(bookmarks: Bookmark[], bookmark: Bookmark) {
     if (isPathBookmarked(bookmarks, bookmark)) {
         const targetKey = getBookmarkKey(bookmark);
+
         return bookmarks.filter((entry) => getBookmarkKey(entry) !== targetKey);
     }
+
     return [...bookmarks, bookmark];
 }
 
 type UserStateUpdater = (prev: UserState) => UserState;
 
 let persistPending = 0;
+
 let persistChain: Promise<void> = Promise.resolve();
+
 let persistError: string | null = null;
+
 const persistErrorListeners = new Set<() => void>();
 
 /** Lets window-focus refetch wait until an in-flight write has reached disk. */
@@ -229,6 +252,7 @@ export function isUserStatePersistPending() {
 
 function subscribePersistError(onStoreChange: () => void) {
     persistErrorListeners.add(onStoreChange);
+
     return () => {
         persistErrorListeners.delete(onStoreChange);
     };
@@ -240,6 +264,7 @@ function getPersistError() {
 
 function setPersistError(message: string | null) {
     persistError = message;
+
     for (const listener of persistErrorListeners) {
         listener();
     }
@@ -251,6 +276,7 @@ export function useUserStatePersistError(): [string | null, () => void] {
         subscribePersistError,
         getPersistError,
     );
+
     return [message, () => setPersistError(null)];
 }
 
@@ -258,6 +284,7 @@ function persistErrorMessage(cause: unknown) {
     if (cause instanceof Error && cause.message.length > 0) {
         return cause.message;
     }
+
     return "Could not save settings";
 }
 
@@ -267,10 +294,12 @@ function persistLatestUserState(
     queryClient: ReturnType<typeof useQueryClient>,
 ) {
     persistPending += 1;
+
     const run = persistChain.then(async () => {
         const state =
             queryClient.getQueryData<UserState>(queryKeys.userState()) ??
             defaultUserState;
+
         try {
             await api.updateUserState({ state });
             setPersistError(null);
@@ -278,6 +307,7 @@ function persistLatestUserState(
             setPersistError(persistErrorMessage(cause));
         }
     });
+
     persistChain = run.catch(() => undefined);
     void run.finally(() => {
         persistPending -= 1;
@@ -291,9 +321,11 @@ export function userStateQueryOptions(api: ApiClient) {
         queryFn: async () => {
             const response = await api.getUserState();
             const parsed = userStateSchema.safeParse(response.state);
+
             if (!parsed.success) {
                 return defaultUserState;
             }
+
             return parsed.data;
         },
         staleTime: Number.POSITIVE_INFINITY,
@@ -309,6 +341,7 @@ function nextUserState(
     if (update instanceof Function) {
         return update(current);
     }
+
     return update;
 }
 
@@ -329,10 +362,13 @@ export function useUserState(): [
             const current =
                 queryClient.getQueryData<UserState>(queryKeys.userState()) ??
                 defaultUserState;
+
             const next = nextUserState(current, update);
+
             if (next === current) {
                 return;
             }
+
             queryClient.setQueryData(queryKeys.userState(), next);
             persistLatestUserState(api, queryClient);
         },

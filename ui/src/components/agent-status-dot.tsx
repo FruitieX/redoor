@@ -19,8 +19,10 @@ function statusDotClass(
     if (agent.connectionIssue) {
         return "bg-red-500";
     }
+
     if (agent.status === "connected") {
         return "bg-emerald-500";
     }
+
     return "bg-amber-400";
 }

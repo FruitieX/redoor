@@ -51,6 +51,7 @@ export async function refreshBrowserPath(options: {
                   agentId: editorRefreshState.agentId,
                   path: editorRefreshState.path,
               });
+
     const isEditorDirty =
         options.isEditorDirty ?? editorRefreshState?.isDirty === true;
 
@@ -70,6 +71,7 @@ export async function refreshBrowserPath(options: {
             },
         );
     }
+
     // Git state can change outside redoor without changing the directory listing.
     await options.queryClient.invalidateQueries(
         {
@@ -93,6 +95,7 @@ export function useRefreshBrowserPath() {
         if (refreshPromiseRef.current) {
             return refreshPromiseRef.current;
         }
+
         const refreshPromise = refreshBrowserPath({
             router,
             queryClient,
@@ -101,7 +104,9 @@ export function useRefreshBrowserPath() {
                 refreshPromiseRef.current = null;
             }
         });
+
         refreshPromiseRef.current = refreshPromise;
+
         return refreshPromise;
     }, [queryClient, router]);
 }
@@ -115,27 +120,37 @@ export function useBrowserRefreshTriggers() {
             if (document.visibilityState === "hidden") {
                 return;
             }
+
             void refreshBrowser();
         };
+
         /** Ignores focus movement inside the terminal while catching exits to adjacent controls. */
         const refreshAfterTerminalBlur = (event: FocusEvent) => {
             const target = event.target;
+
             if (!(target instanceof Element)) {
                 return;
             }
+
             const terminal = target.closest("[data-terminal-input]");
+
             if (!terminal) {
                 return;
             }
+
             const nextTarget = event.relatedTarget;
+
             if (nextTarget instanceof Node && terminal.contains(nextTarget)) {
                 return;
             }
+
             refresh();
         };
+
         window.addEventListener("focus", refresh);
         window.addEventListener("visibilitychange", refresh);
         document.addEventListener("focusout", refreshAfterTerminalBlur);
+
         return () => {
             window.removeEventListener("focus", refresh);
             window.removeEventListener("visibilitychange", refresh);

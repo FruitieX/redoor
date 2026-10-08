@@ -6,12 +6,14 @@ export function encodeFilesystemPath(path: string): string {
     if (!path.startsWith("/")) {
         throw new Error("Filesystem path must be absolute");
     }
+
     return path.slice(1).split("/").map(encodeURIComponent).join("/");
 }
 
 /** Appends a filesystem path without leaving a trailing slash for the implicit root. */
 export function appendFilesystemPath(route: string, path: string): string {
     const encodedPath = encodeFilesystemPath(path);
+
     return encodedPath ? `${route}/${encodedPath}` : route;
 }
 
@@ -26,12 +28,15 @@ export function appendOwnershipOptions(
     ownership?: Partial<CreationOwnershipOptions>,
 ): URL {
     appendOwnerAndGroup(url, ownership ?? {});
+
     if (ownership?.inherit_owner != null) {
         url.searchParams.set("inherit_owner", String(ownership.inherit_owner));
     }
+
     if (ownership?.inherit_group != null) {
         url.searchParams.set("inherit_group", String(ownership.inherit_group));
     }
+
     return url;
 }
 
@@ -43,8 +48,10 @@ export function appendOwnerAndGroup(
     if (ownership.owner != null) {
         url.searchParams.set("owner", ownership.owner);
     }
+
     if (ownership.group != null) {
         url.searchParams.set("group", ownership.group);
     }
+
     return url;
 }

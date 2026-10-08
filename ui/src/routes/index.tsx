@@ -74,9 +74,11 @@ function agentOriginTooltip(agent: Agent): string {
     if (!agent.managed) {
         return "Agent started independently";
     }
+
     if (agent.sshTarget) {
         return `Managed by Redoor, SSH ${agent.sshTarget}`;
     }
+
     return "Managed by Redoor, local agent";
 }
 
@@ -121,6 +123,7 @@ function AgentNameGrid(props: { agents: Agent[] }) {
 function OpenAgentSidebarButton() {
     const canToggleSidebar = !usePersistentSideMenus();
     const [openMenu, setOpenMenu] = useAtom(openSideMenuAtom);
+
     if (!canToggleSidebar) {
         return null;
     }
@@ -147,9 +150,12 @@ function OpenAgentSidebarButton() {
 /** Shows a compact agent name grid first, then server identity and runtime details. */
 function Index() {
     const { agents, serverInfo } = RootRoute.useLoaderData();
+
     const serverProtocol =
         window.location.protocol === "https:" ? "https:" : "http:";
+
     const serverAddress = `${serverProtocol}//${window.location.host}`;
+
     const agentConfig = `agent_token = ${JSON.stringify(serverInfo.agent_token)}
 
 [agent]

@@ -25,6 +25,7 @@ export function ContextMenu(props: {
         const firstEnabled = itemsRef.current?.querySelector<HTMLButtonElement>(
             "button:not([disabled])",
         );
+
         firstEnabled?.focus();
     }, [props.isOpen]);
 

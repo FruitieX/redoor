@@ -55,6 +55,7 @@ function initialForm(configuration?: ManagedAgentFormConfiguration): FormState {
             password: "",
         };
     }
+
     return {
         target: configuration?.value.target ?? "",
         username: configuration?.value.username ?? "",
@@ -79,6 +80,7 @@ function initialAuthMode(
     ) {
         return "password";
     }
+
     return "key";
 }
 
@@ -92,6 +94,7 @@ function initialKind(
 /** Builds the local POST/PUT body from trimmed optional inputs. */
 function localSubmitRequest(form: FormState): ManagedAgentSubmitRequest {
     const optional = (value: string) => value.trim() || null;
+
     return {
         kind: "local",
         request: {
@@ -114,19 +117,24 @@ function sshSubmitRequest(
 ): SshSubmitResult {
     const optional = (value: string) => value.trim() || null;
     const target = form.target.trim();
+
     if (!target) {
         return { ok: false, error: "SSH target is required" };
     }
+
     const sshPort = form.sshPort ? Number(form.sshPort) : null;
+
     if (
         sshPort !== null &&
         (!Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65_535)
     ) {
         return { ok: false, error: "SSH port must be between 1 and 65535" };
     }
+
     if (authMode === "password" && !form.password && !hasStoredPassword) {
         return { ok: false, error: "SSH password is required" };
     }
+
     return {
         ok: true,
         request: {
@@ -166,15 +174,19 @@ export function ManagedAgentForm(props: {
     const [form, setForm] = React.useState<FormState>(() =>
         initialForm(props.configuration),
     );
+
     const [kind, setKind] = React.useState<ManagedAgentKind>(() =>
         initialKind(props.configuration),
     );
+
     const [authMode, setAuthMode] = React.useState<SshAuthMode>(() =>
         initialAuthMode(props.mode, props.configuration),
     );
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const hasStoredPassword =
         props.configuration?.kind === "ssh" &&
         props.configuration.value.has_password === true;
@@ -196,9 +208,11 @@ export function ManagedAgentForm(props: {
     /** Switching to key mode drops the typed secret so a later password-mode save cannot reuse it. */
     const updateAuthMode = (mode: SshAuthMode) => {
         setAuthMode(mode);
+
         if (mode === "key") {
             setForm((current) => ({ ...current, password: "" }));
         }
+
         setValidationError(null);
         props.onChange();
     };
@@ -206,15 +220,21 @@ export function ManagedAgentForm(props: {
     /** Converts blank optional inputs to null so TOML only receives explicit settings. */
     const submit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+
         if (kind === "local") {
             props.onSubmit(localSubmitRequest(form));
+
             return;
         }
+
         const result = sshSubmitRequest(form, authMode, hasStoredPassword);
+
         if (!result.ok) {
             setValidationError(result.error);
+
             return;
         }
+
         props.onSubmit(result.request);
     };
 
@@ -320,6 +340,7 @@ function FormActions(props: {
     submitTooltip?: string;
 }) {
     const isEdit = props.mode === "edit";
+
     const defaultSubmitTooltip = props.isDisabled
         ? "Wait for the current save or delete to finish"
         : props.kind === "local"
@@ -329,6 +350,7 @@ function FormActions(props: {
           : isEdit
             ? "Save the managed SSH configuration"
             : "Add this device to the server configuration using SSH";
+
     return (
         <div className="flex flex-col gap-4 border-t border-slate-800 pt-6 sm:flex-row sm:items-end sm:justify-between">
             <p className="min-w-0 text-xs text-slate-500">
@@ -462,8 +484,10 @@ function ConnectionFields(props: {
     onAuthModeChange: (mode: SshAuthMode) => void;
 }) {
     const passwordMode = props.authMode === "password";
+
     const keepExistingPassword =
         props.mode === "edit" && props.hasStoredPassword && passwordMode;
+
     return (
         <section>
             <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-300">

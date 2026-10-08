@@ -5,6 +5,7 @@ import type { Agent } from "#ui/api-client";
 import { getErrorMessage, joinBrowserPath } from "#ui/components/browser/utils";
 
 export const MAX_QUEUED_UPLOADS = 100;
+
 export const MAX_CONCURRENT_UPLOADS = 5;
 
 export type UploadSourceFile = {
@@ -54,6 +55,7 @@ export const uploadQueueAtom = atom<UploadQueue>({
 function normalizeRelativePath(path: string) {
     const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
     const components = normalized.split("/");
+
     if (
         normalized.length === 0 ||
         normalized.startsWith("/") ||
@@ -66,6 +68,7 @@ function normalizeRelativePath(path: string) {
     ) {
         throw new Error(`Invalid upload path: ${path || "(empty)"}`);
     }
+
     return normalized;
 }
 
@@ -81,11 +84,14 @@ export const enqueueUploadBatchAtom = atom(
         }
 
         const queue = get(uploadQueueAtom);
+
         const hasPendingUploads = queue.items.some(
             (item) => item.status !== "done",
         );
+
         const retainedItems = hasPendingUploads ? queue.items : [];
         const retainedDirectories = hasPendingUploads ? queue.directories : [];
+
         if (retainedItems.length + batch.files.length > MAX_QUEUED_UPLOADS) {
             return {
                 ok: false,
@@ -103,9 +109,11 @@ export const enqueueUploadBatchAtom = atom(
                 status: "waiting" as const,
                 error: null,
             }));
+
             const uniqueDirectories = new Set(
                 (batch.directories ?? []).map(normalizeRelativePath),
             );
+
             const directories = Array.from(
                 uniqueDirectories,
                 (relativePath) => ({
@@ -121,6 +129,7 @@ export const enqueueUploadBatchAtom = atom(
                 items: [...retainedItems, ...items],
                 directories: [...retainedDirectories, ...directories],
             });
+
             return { ok: true, fileCount: items.length };
         } catch (error) {
             return {
@@ -137,15 +146,18 @@ export const enqueueUploadBatchAtom = atom(
 /** Atomically reserves available upload slots before asynchronous work starts. */
 const claimWaitingUploadsAtom = atom(null, (get, set) => {
     const queue = get(uploadQueueAtom);
+
     const activeCount = queue.items.filter(
         (item) => item.status === "uploading",
     ).length;
+
     const claimedIds = new Set(
         queue.items
             .filter((item) => item.status === "waiting")
             .slice(0, Math.max(0, MAX_CONCURRENT_UPLOADS - activeCount))
             .map((item) => item.id),
     );
+
     if (claimedIds.size === 0) {
         return [];
     }
@@ -159,18 +171,22 @@ const claimWaitingUploadsAtom = atom(null, (get, set) => {
                 : item,
         ),
     });
+
     return claimedItems;
 });
 
 /** Reserves empty-directory work separately because it does not consume upload slots. */
 const claimWaitingDirectoriesAtom = atom(null, (get, set) => {
     const queue = get(uploadQueueAtom);
+
     const claimed = queue.directories.filter(
         (directory) => directory.status === "waiting",
     );
+
     if (claimed.length === 0) {
         return [];
     }
+
     const claimedIds = new Set(claimed.map((directory) => directory.id));
     set(uploadQueueAtom, {
         ...queue,
@@ -180,6 +196,7 @@ const claimWaitingDirectoriesAtom = atom(null, (get, set) => {
                 : directory,
         ),
     });
+
     return claimed;
 });
 
@@ -219,6 +236,7 @@ const finishDirectoryAtom = atom(null, (get, set, id: number) => {
 /** Returns a safe parent path for creating directories before a nested file upload. */
 function getUploadParentPath(item: UploadQueueItem) {
     const separator = item.relativePath.lastIndexOf("/");
+
     return separator === -1
         ? item.destinationPath
         : joinBrowserPath(
@@ -240,6 +258,7 @@ export function UploadQueueManager(props: {
     const agentsRef = React.useRef(props.agents);
     const preparedDirectories = React.useRef(new Map<string, Promise<void>>());
     const hadActiveUploads = React.useRef(false);
+
     const uploadMutation = useMutation({
         mutationFn: async (
             operation:
@@ -253,8 +272,10 @@ export function UploadQueueManager(props: {
         ) => {
             if (operation.type === "directory") {
                 await operation.agent.createDirectory(operation.path);
+
                 return;
             }
+
             await operation.agent.upload(operation.path, operation.file);
         },
     });
@@ -265,29 +286,37 @@ export function UploadQueueManager(props: {
         const prepareDirectory = (agent: Agent, path: string) => {
             const key = `${agent.id}\0${path}`;
             const existing = preparedDirectories.current.get(key);
+
             if (existing) {
                 return existing;
             }
+
             const request = uploadMutation.mutateAsync({
                 type: "directory",
                 agent,
                 path,
             });
+
             preparedDirectories.current.set(key, request);
+
             return request;
         };
+
         const claimedDirectories = claimWaitingDirectories();
         claimedDirectories.forEach((directory) => {
             const agent = agentsRef.current.find(
                 (candidate) => candidate.id === directory.agentId,
             );
+
             const path = joinBrowserPath(
                 directory.destinationPath,
                 directory.relativePath,
             );
+
             const operation = agent
                 ? prepareDirectory(agent, path)
                 : Promise.reject(new Error("Upload agent is unavailable."));
+
             void operation
                 .catch(() => undefined)
                 .finally(() => finishDirectory(directory.id));
@@ -298,6 +327,7 @@ export function UploadQueueManager(props: {
             const agent = agentsRef.current.find(
                 (candidate) => candidate.id === item.agentId,
             );
+
             const operation = agent
                 ? prepareDirectory(agent, getUploadParentPath(item)).then(() =>
                       uploadMutation.mutateAsync({
@@ -334,9 +364,11 @@ export function UploadQueueManager(props: {
         const hasActiveUploads = queue.items.some(
             (item) => item.status !== "done",
         );
+
         if (hadActiveUploads.current && !hasActiveUploads) {
             void props.onUploadsChanged();
         }
+
         hadActiveUploads.current = hasActiveUploads;
     }, [props, queue.items]);
 
@@ -344,12 +376,15 @@ export function UploadQueueManager(props: {
         if (!queue.items.some((item) => item.status !== "done")) {
             return;
         }
+
         /** Lets the browser present its standard warning when active File objects would be lost. */
         const preventUnload = (event: BeforeUnloadEvent) => {
             event.preventDefault();
             event.returnValue = "";
         };
+
         window.addEventListener("beforeunload", preventUnload);
+
         return () => window.removeEventListener("beforeunload", preventUnload);
     }, [queue.items]);
 

@@ -8,6 +8,7 @@ export function UploadQueue(props: {
     destinationPath: string;
 }) {
     const queue = useAtomValue(uploadQueueAtom);
+
     const items = queue.items.filter(
         (item) =>
             item.agentId === props.agentId &&

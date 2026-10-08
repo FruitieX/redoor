@@ -30,6 +30,7 @@ function AgentManagement() {
     const setStartStates = useSetAtom(agentStartStatesAtom);
     const { api } = RootRoute.useRouteContext();
     const { agents, serverInfo } = RootRoute.useLoaderData();
+
     const serverBinary = React.useMemo(
         () => ({
             version: serverInfo.version,
@@ -37,6 +38,7 @@ function AgentManagement() {
         }),
         [serverInfo.git_rev, serverInfo.version],
     );
+
     const sortedAgents = React.useMemo(
         () =>
             [...agents].sort(
@@ -46,14 +48,18 @@ function AgentManagement() {
             ),
         [agents],
     );
+
     const now = useNow();
     const [mutations, setMutations] = React.useState<MutationState>({});
+
     const [shutdownAgent, setShutdownAgent] = React.useState<Agent | null>(
         null,
     );
+
     const [mutationErrors, setMutationErrors] = React.useState<
         Record<string, string | undefined>
     >({});
+
     const startMutation = useMutation({
         mutationFn: (agent: Agent) => agent.start(),
         onMutate: (agent) => {
@@ -77,6 +83,7 @@ function AgentManagement() {
             setMutations((state) => ({ ...state, [agent.id]: undefined }));
         },
     });
+
     const shutdownMutation = useMutation({
         mutationFn: (agent: Agent) => agent.shutdown(),
         onMutate: (agent) => {
@@ -91,6 +98,7 @@ function AgentManagement() {
             setStartStates((states) => {
                 const next = { ...states };
                 delete next[agent.id];
+
                 return next;
             });
             await router.invalidate();
@@ -328,11 +336,13 @@ function AgentActionsMenu(props: {
                                                 entry.connectionId !==
                                                     props.agent.connectionId,
                                         );
+
                                         if (!restartedAgent) {
                                             throw new Error(
                                                 "Agent is still restarting",
                                             );
                                         }
+
                                         await props.router.invalidate();
                                     }, "Agent did not come back after restart")
                                 }
@@ -388,7 +398,9 @@ function AgentVersionCell(props: {
     if (props.binary === null) {
         return <span className="text-slate-500">—</span>;
     }
+
     const tone = fieldMatchTone(props.binary.version, props.serverVersion);
+
     return (
         <VersionValue
             version={props.binary.version}
@@ -411,7 +423,9 @@ function AgentRevCell(props: {
     if (props.binary === null) {
         return <span className="text-slate-500">—</span>;
     }
+
     const tone = fieldMatchTone(props.binary.git_rev, props.serverGitRev);
+
     return (
         <RevValue
             gitRev={props.binary.git_rev}

@@ -13,7 +13,9 @@ export const Route = createFileRoute("/transfers/")({
 function TransfersPage() {
     const { agents, transferProgress: initialTransferProgress } =
         RootRoute.useLoaderData();
+
     const { api } = RootRoute.useRouteContext();
+
     const { data: transferProgress } = useQuery({
         ...transfersQueryOptions(api),
         initialData: initialTransferProgress,

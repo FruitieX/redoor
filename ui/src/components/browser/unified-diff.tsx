@@ -17,13 +17,16 @@ function firstFileLine(file: ReturnType<typeof parseDiff>[number]): string {
         for (const line of block.lines) {
             const isFirstNewLine =
                 line.type !== LineType.DELETE && line.newNumber === 1;
+
             const isFirstOldLine =
                 line.type !== LineType.INSERT && line.oldNumber === 1;
+
             if (isFirstNewLine || isFirstOldLine) {
                 return line.content.slice(1);
             }
         }
     }
+
     return "";
 }
 
@@ -42,9 +45,11 @@ function isUnmodifiedPrimaryClick(event: MouseEvent): boolean {
 /** Reads the new-file line from a diff2html gutter without wrapping the row in a link. */
 function newFileLineNumber(row: Element): number | undefined {
     const lineText = row.querySelector(".line-num2")?.textContent?.trim() ?? "";
+
     if (!/^[1-9][0-9]*$/.test(lineText)) {
         return undefined;
     }
+
     return Number(lineText);
 }
 
@@ -54,13 +59,16 @@ function linkDiffFileNames(root: HTMLElement, editorHref: string) {
         if (name.closest("a") !== null || name.querySelector("a") !== null) {
             continue;
         }
+
         const link = document.createElement("a");
         link.href = editorHref;
         link.dataset.editorFile = "";
         link.className = "d2h-file-name-link";
+
         while (name.firstChild !== null) {
             link.append(name.firstChild);
         }
+
         name.append(link);
     }
 }
@@ -74,9 +82,11 @@ function appendEditorLineLinks(root: HTMLElement, editorHref: string) {
         const line = newFileLineNumber(row);
         const codeLine = row.querySelector(".d2h-code-line");
         const codeCell = codeLine?.parentElement;
+
         if (line === undefined || codeCell === null || codeCell === undefined) {
             continue;
         }
+
         codeCell.classList.add("d2h-editor-line-cell");
         const link = document.createElement("a");
         link.href = `${editorHref}?line=${String(line)}`;
@@ -101,18 +111,22 @@ export function UnifiedDiff(props: {
 
     React.useEffect(() => {
         const target = targetRef.current;
+
         if (target === null || props.unifiedDiff === "") {
             return;
         }
 
         const files = parseDiff(props.unifiedDiff);
+
         for (const file of files) {
             const fileName =
                 file.newName === "/dev/null" ? file.oldName : file.newName;
+
             const language = syntaxLanguageFromFileName(
                 fileName,
                 firstFileLine(file),
             );
+
             file.language =
                 language === undefined
                     ? "plaintext"
@@ -140,12 +154,15 @@ export function UnifiedDiff(props: {
             },
             syntaxHighlighter,
         );
+
         diffUi.draw();
 
         const editorHref = props.editorHref;
+
         if (editorHref === undefined) {
             return;
         }
+
         linkDiffFileNames(target, editorHref);
         appendEditorLineLinks(target, editorHref);
 
@@ -153,34 +170,46 @@ export function UnifiedDiff(props: {
             if (!isUnmodifiedPrimaryClick(event)) {
                 return;
             }
+
             const eventTarget = event.target;
+
             if (!(eventTarget instanceof Element)) {
                 return;
             }
+
             const lineLink = eventTarget.closest("a[data-editor-line]");
+
             if (lineLink instanceof HTMLAnchorElement) {
                 const line = Number(lineLink.dataset.editorLine);
+
                 if (!Number.isInteger(line) || line < 1) {
                     return;
                 }
+
                 event.preventDefault();
                 void navigate({
                     to: editorHref,
                     search: { line },
                 });
+
                 return;
             }
+
             const fileLink = eventTarget.closest("a[data-editor-file]");
+
             if (!(fileLink instanceof HTMLAnchorElement)) {
                 return;
             }
+
             event.preventDefault();
             void navigate({
                 to: editorHref,
                 search: {},
             });
         };
+
         target.addEventListener("click", handleEditorLinkClick);
+
         return () => {
             target.removeEventListener("click", handleEditorLinkClick);
         };

@@ -20,14 +20,18 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
     const router = useRouter();
     const initialName = props.path.split("/").filter(Boolean).pop() ?? "";
     const [fileName, setFileName] = React.useState(initialName);
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const parentPath = getImmediateParentPath(props.path) ?? "/";
     const trimmedFileName = fileName.trim();
+
     const createdPath = trimmedFileName
         ? joinBrowserPath(parentPath, trimmedFileName)
         : null;
+
     const createMutation = useMutation({
         mutationFn: async (entry: { type: EntryType; path: string }) => {
             if (entry.type === "directory") {
@@ -38,6 +42,7 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
             await props.agent.createDirectory(
                 getImmediateParentPath(entry.path) ?? "/",
             );
+
             return props.agent.upload(
                 entry.path,
                 new globalThis.File([""], trimmedFileName, {
@@ -48,6 +53,7 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
         onSuccess: async (_, entry) => {
             if (entry.path === props.path) {
                 await router.invalidate();
+
                 return;
             }
 
@@ -62,10 +68,13 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
     const createEntry = (type: EntryType) => {
         if (!createdPath) {
             setValidationError("File name is required");
+
             return;
         }
+
         if (trimmedFileName.includes("/")) {
             setValidationError("File name cannot contain a slash");
+
             return;
         }
 

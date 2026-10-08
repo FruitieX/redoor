@@ -17,7 +17,9 @@ import { Select } from "#ui/components/select";
 import { Toast } from "#ui/components/toast";
 
 type ConnectionState = "connecting" | "connected" | "reconnecting";
+
 type ViewerEntry = { id: number; record: LogEntry };
+
 type LoggingLevelControlConfig = {
     queryKey: readonly unknown[];
     load: () => Promise<LoggingLevelResponse>;
@@ -25,6 +27,7 @@ type LoggingLevelControlConfig = {
 };
 
 const MAX_LOG_ENTRIES = 1000;
+
 const LOGGING_LEVELS: { value: Level; label: string }[] = [
     { value: "trace", label: "Trace" },
     { value: "debug", label: "Debug" },
@@ -39,14 +42,17 @@ function LoggingLevelControl(props: {
     config: LoggingLevelControlConfig;
 }) {
     const queryClient = useQueryClient();
+
     const levelQuery = useQuery({
         queryKey: props.config.queryKey,
         queryFn: props.config.load,
     });
+
     const [feedback, setFeedback] = React.useState<{
         tone: "success" | "error";
         message: string;
     } | null>(null);
+
     const mutation = useMutation({
         mutationFn: props.config.update,
         onSuccess: (response) => {
@@ -80,6 +86,7 @@ function LoggingLevelControl(props: {
                             (candidate) =>
                                 candidate.value === event.target.value,
                         );
+
                         if (level) {
                             mutation.mutate(level.value);
                         }
@@ -167,6 +174,7 @@ function connectionStateLabel(state: ConnectionState): string {
     if (state === "connected") {
         return "Live";
     }
+
     return state === "reconnecting" ? "Reconnecting…" : "Connecting…";
 }
 
@@ -176,6 +184,7 @@ function Severity(props: { level: Level }) {
         props.level === "warning"
             ? "Warning"
             : `${props.level.charAt(0).toUpperCase()}${props.level.slice(1)}`;
+
     const tone =
         props.level === "error"
             ? "text-red-300"
@@ -184,6 +193,7 @@ function Severity(props: { level: Level }) {
               : props.level === "debug" || props.level === "trace"
                 ? "text-slate-500"
                 : "text-blue-300";
+
     return (
         <span
             className={`font-semibold ${tone}`}
@@ -282,6 +292,7 @@ function LogRecordRow(props: {
             </span>
         </>
     );
+
     if (props.entry.record.level === "error" && props.entry.record.error) {
         return (
             <Button
@@ -298,6 +309,7 @@ function LogRecordRow(props: {
             </Button>
         );
     }
+
     return (
         <div
             className={`flex flex-col gap-x-3 gap-y-0 px-2 py-1 sm:flex-row ${props.entry.record.level === "warning" ? "text-amber-100" : ""}`}
@@ -311,6 +323,7 @@ function LogRecordRow(props: {
 function useErrorDetailsSelection() {
     const [selected, setSelected] = React.useState<LogEntry | null>(null);
     const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+
     const open = React.useCallback(
         (entry: LogEntry, trigger: HTMLButtonElement) => {
             triggerRef.current = trigger;
@@ -318,10 +331,12 @@ function useErrorDetailsSelection() {
         },
         [],
     );
+
     const close = React.useCallback(() => {
         setSelected(null);
         window.requestAnimationFrame(() => triggerRef.current?.focus());
     }, []);
+
     return { selected, open, close };
 }
 
@@ -337,14 +352,18 @@ export function LogViewer(props: {
     const errorDetails = useErrorDetailsSelection();
     const [autoScroll, setAutoScroll] = React.useState(true);
     const [wrapLines, setWrapLines] = React.useState(true);
+
     const [fileLoggingEnabled, setFileLoggingEnabled] = React.useState<
         boolean | null
     >(null);
+
     const [connectionState, setConnectionState] =
         React.useState<ConnectionState>("connecting");
+
     const [statusMessage, setStatusMessage] = React.useState<string | null>(
         null,
     );
+
     const nextEntryId = React.useRef(0);
     const logContainerRef = React.useRef<HTMLDivElement>(null);
 
@@ -358,6 +377,7 @@ export function LogViewer(props: {
         const createEntry = (record: LogEntry): ViewerEntry => {
             const entry = { id: nextEntryId.current, record };
             nextEntryId.current += 1;
+
             return entry;
         };
 
@@ -366,6 +386,7 @@ export function LogViewer(props: {
             if (!active || reconnectTimer !== null) {
                 return;
             }
+
             setConnectionState("reconnecting");
             reconnectTimer = window.setTimeout(() => {
                 reconnectTimer = null;
@@ -378,6 +399,7 @@ export function LogViewer(props: {
             if (!active) {
                 return;
             }
+
             setConnectionState(hasConnected ? "reconnecting" : "connecting");
             const nextSocket = new WebSocket(props.websocketUrl);
             socket = nextSocket;
@@ -386,9 +408,11 @@ export function LogViewer(props: {
                 if (!active || socket !== nextSocket) {
                     return;
                 }
+
                 try {
                     const frame = z.string().parse(event.data);
                     const message = parseLogEvent(frame);
+
                     switch (message.type) {
                         case "snapshot":
                             setEntries(
@@ -430,6 +454,7 @@ export function LogViewer(props: {
                 if (!active || socket !== nextSocket) {
                     return;
                 }
+
                 setStatusMessage("Log connection failed; reconnecting…");
                 nextSocket.close();
             });
@@ -437,18 +462,22 @@ export function LogViewer(props: {
                 if (socket !== nextSocket) {
                     return;
                 }
+
                 socket = null;
                 scheduleReconnect();
             });
         };
 
         connect();
+
         return () => {
             active = false;
+
             if (reconnectTimer !== null) {
                 window.clearTimeout(reconnectTimer);
                 reconnectTimer = null;
             }
+
             const activeSocket = socket;
             socket = null;
             activeSocket?.close();
@@ -459,10 +488,13 @@ export function LogViewer(props: {
         if (!autoScroll) {
             return;
         }
+
         const container = logContainerRef.current;
+
         if (!container) {
             return;
         }
+
         container.scrollTop = container.scrollHeight;
     }, [autoScroll, entries]);
 

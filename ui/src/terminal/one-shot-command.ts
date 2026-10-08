@@ -24,19 +24,24 @@ export class OneShotTerminalCommand {
         if (this.consumed) {
             return false;
         }
+
         this.consumed = true;
         this.pendingTimer = setTimeout(() => {
             this.pendingTimer = null;
+
             if (!isCurrent() || socket.readyState !== 1) {
                 return;
             }
+
             try {
                 socket.send(this.payload);
             } catch {
                 return;
             }
+
             this.onSent();
         }, 200);
+
         return true;
     }
 
@@ -45,6 +50,7 @@ export class OneShotTerminalCommand {
         if (this.pendingTimer === null) {
             return;
         }
+
         clearTimeout(this.pendingTimer);
         this.pendingTimer = null;
     }

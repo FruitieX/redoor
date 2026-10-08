@@ -16,7 +16,9 @@ export function getTransferSpeedBytesPerSecond(
         transfer.ended_at === null || transfer.ended_at === undefined
             ? measuredAtMilliseconds / 1000
             : transfer.ended_at;
+
     const measuredElapsedSeconds = endTime - transfer.started_at;
+
     const elapsedSeconds =
         transfer.ended_at !== null &&
         transfer.ended_at !== undefined &&
@@ -57,11 +59,13 @@ export function getAnimatedTransferProgress(
         transfer,
         refreshedAtMilliseconds,
     );
+
     const projectedBytes =
         transfer.state === "active" && speed !== null
             ? transfer.transferred_bytes +
               speed * Math.max(0, elapsedSinceRefreshSeconds)
             : transfer.transferred_bytes;
+
     const transferredBytes = Math.min(
         Math.max(0, projectedBytes),
         transfer.total_bytes * 0.99,
@@ -92,9 +96,11 @@ export function getLastEstimatedTransferProgress(
             elapsedSinceRefreshSeconds,
             refreshedAtMilliseconds,
         );
+
         if (progress.remainingSeconds === null) {
             continue;
         }
+
         if (
             lastProgress === null ||
             lastProgress.remainingSeconds === null ||
@@ -126,6 +132,7 @@ export function getTransferRemainingSeconds(
     }
 
     const remainingBytes = transfer.total_bytes - transferredBytes;
+
     if (remainingBytes <= 0) {
         return 0;
     }

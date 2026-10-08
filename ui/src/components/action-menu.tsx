@@ -28,10 +28,12 @@ export function ActionMenu(props: {
     const triggerRef = React.useRef<HTMLButtonElement>(null);
     const [internalIsOpen, setInternalIsOpen] = React.useState(false);
     const isOpen = props.isOpen ?? internalIsOpen;
+
     const setIsOpen = (nextIsOpen: boolean) => {
         setInternalIsOpen(nextIsOpen);
         props.onOpenChange?.(nextIsOpen);
     };
+
     const close = () => setIsOpen(false);
     const isIcon = props.variant === "icon";
     const hideLabel = props.hideLabel ?? isIcon;

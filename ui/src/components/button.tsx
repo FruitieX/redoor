@@ -2,6 +2,7 @@ import React from "react";
 import { twMerge } from "tailwind-merge";
 
 type ButtonVariant = "primary" | "secondary" | "danger" | "warning" | "subtle";
+
 type ButtonSize = "sm" | "md" | "lg";
 
 type ButtonProps = {

@@ -57,6 +57,7 @@ function useTransferAnimation(
         };
 
         frameRequest = window.requestAnimationFrame(updateAnimation);
+
         return () => window.cancelAnimationFrame(frameRequest);
     }, [transfer]);
 
@@ -83,6 +84,7 @@ export function useLastEstimatedTransferPercentage(
 
     React.useEffect(() => {
         const refreshedAtMilliseconds = Date.now();
+
         if (
             getLastEstimatedTransferProgress(
                 transfers,
@@ -92,6 +94,7 @@ export function useLastEstimatedTransferPercentage(
         ) {
             return;
         }
+
         let frameRequest: number;
 
         const updateAnimation = () => {
@@ -104,6 +107,7 @@ export function useLastEstimatedTransferPercentage(
         };
 
         frameRequest = window.requestAnimationFrame(updateAnimation);
+
         return () => window.cancelAnimationFrame(frameRequest);
     }, [transfers]);
 
@@ -115,36 +119,45 @@ export function useLastEstimatedTransferPercentage(
                   refreshedAtMilliseconds: Date.now(),
                   elapsedSeconds: 0,
               };
+
     const progress = getLastEstimatedTransferProgress(
         transfers,
         currentFrame.elapsedSeconds,
         currentFrame.refreshedAtMilliseconds,
     );
+
     return progress === null ? null : Math.round(progress.percentage);
 }
 
 /** Shows projected bytes and a pie whose full state only comes from the API. */
 function TransferProgressCell(props: { transfer: TransferProgressEntry }) {
     const animationFrame = useTransferAnimation(props.transfer);
+
     const progress = getAnimatedTransferProgress(
         props.transfer,
         animationFrame.elapsedSeconds,
         animationFrame.refreshedAtMilliseconds,
     );
+
     const speed = getTransferSpeedBytesPerSecond(
         props.transfer,
         animationFrame.refreshedAtMilliseconds,
     );
+
     const displayedBytes = Math.floor(progress.transferredBytes);
     const sizeUnknown = props.transfer.total_bytes <= 0;
+
     const measuringArchive =
         sizeUnknown && props.transfer.direction === "download";
+
     const pieDegrees = sizeUnknown ? 0 : progress.percentage * 3.6;
     const remainingTime = formatRemainingTime(progress.remainingSeconds);
     const percentageLabel = `${Math.round(progress.percentage)}%`;
     const speedLabel = props.transfer.atomic ? null : formatSpeed(speed);
+
     const remainingLabel =
         remainingTime === null ? null : `${remainingTime} remaining`;
+
     const progressLabel = [
         sizeUnknown ? null : percentageLabel,
         speedLabel,
@@ -319,12 +332,14 @@ function TransferCancellationToast(props: {
 /** Gives every transfer semantic its own stable label and visual treatment. */
 function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
     const direction = props.transfer.direction;
+
     const color =
         direction === "upload"
             ? "bg-blue-500/15 text-blue-300"
             : direction === "edit"
               ? "bg-amber-500/15 text-amber-300"
               : "bg-emerald-500/15 text-emerald-300";
+
     const icon =
         direction === "upload" ? (
             <ArrowUpFromLine className="h-3.5 w-3.5" />
@@ -337,6 +352,7 @@ function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
         ) : (
             <Copy className="h-3.5 w-3.5" />
         );
+
     const label =
         direction === "upload"
             ? "Upload"
@@ -349,6 +365,7 @@ function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
                   : direction === "move"
                     ? "Move"
                     : "Copy";
+
     return (
         <span
             className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${color}`}
@@ -365,9 +382,12 @@ export function TransferList(props: {
     transfers: TransferProgressEntry[];
 }) {
     const queryClient = useQueryClient();
+
     const [selectedTransfer, setSelectedTransfer] =
         React.useState<TransferProgressEntry | null>(null);
+
     const [toastMessage, setToastMessage] = React.useState<string | null>(null);
+
     const cancelMutation = useMutation({
         mutationFn: (transferId: number) =>
             props.api.cancelTransfer(transferId),
@@ -393,15 +413,18 @@ export function TransferList(props: {
                         const hasEndpoints =
                             transfer.direction === "copy" ||
                             transfer.direction === "move";
+
                         const agent = props.agents.find(
                             (entry) => entry.id === transfer.agent_id,
                         );
+
                         const sourceAgent = transfer.source
                             ? props.agents.find(
                                   (entry) =>
                                       entry.id === transfer.source?.agent,
                               )
                             : undefined;
+
                         const destAgent = transfer.dest
                             ? props.agents.find(
                                   (entry) => entry.id === transfer.dest?.agent,

@@ -20,6 +20,7 @@ export function RestartButton(props: {
     ariaLabel?: string;
 }) {
     const [isOpen, setIsOpen] = React.useState(false);
+
     const restartMutation = useMutation({
         mutationFn: async () => {
             await props.restart();
@@ -80,14 +81,18 @@ export async function waitForRestart(
     timeoutMessage: string,
 ): Promise<void> {
     const startedAt = Date.now();
+
     while (Date.now() - startedAt < 30_000) {
         try {
             await probe();
+
             return;
         } catch {
             // The target is still shutting down or starting up.
         }
+
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
+
     throw new Error(timeoutMessage);
 }

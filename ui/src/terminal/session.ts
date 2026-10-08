@@ -21,9 +21,11 @@ export function sendTerminalInput(props: {
     data: string;
 }): void {
     const socket = props.resources.socketRef.current;
+
     if (!props.isReady() || !socket || socket.readyState !== WebSocket.OPEN) {
         return;
     }
+
     socket.send(new TextEncoder().encode(props.data));
 }
 
@@ -36,6 +38,7 @@ export function sendTerminalResize(props: {
     rows: number;
 }): void {
     const socket = props.resources.socketRef.current;
+
     if (
         !props.isReady() ||
         !props.canResize() ||
@@ -44,10 +47,12 @@ export function sendTerminalResize(props: {
     ) {
         return;
     }
+
     const message: TerminalClientMessage = {
         type: "resize",
         size: { rows: props.rows, cols: props.cols },
     };
+
     socket.send(JSON.stringify(message));
 }
 
@@ -62,9 +67,11 @@ export function disposeTerminalResources(props: {
     props.resources.socketRef.current = null;
     props.resources.removeSocketListenersRef.current?.();
     props.resources.removeSocketListenersRef.current = null;
+
     if (socket && socket.readyState < WebSocket.CLOSING) {
         socket.close();
     }
+
     props.isReadyRef.current = false;
 
     const terminal = props.resources.terminalRef.current;

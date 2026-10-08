@@ -21,6 +21,7 @@ export const rememberAgentTabLocationAtom = atom(
         },
     ) => {
         const locations = get(agentTabLocationsAtom);
+
         if (locations[location.agentId] === location.pathname) {
             return;
         }
@@ -43,6 +44,7 @@ export function getAgentTabLocation(
 ): string {
     const rememberedLocation = locations[agentId];
     const agentPrefix = `/agents/${encodeURIComponent(agentId)}`;
+
     if (
         rememberedLocation === agentPrefix ||
         rememberedLocation?.startsWith(`${agentPrefix}/`)

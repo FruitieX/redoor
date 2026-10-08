@@ -5,8 +5,10 @@ export function focusAndSelectFileNameStem(input: HTMLInputElement | null) {
     }
 
     const firstDotIndex = input.value.indexOf(".", 1);
+
     const selectionEnd =
         firstDotIndex === -1 ? input.value.length : firstDotIndex;
+
     input.focus();
     input.setSelectionRange(0, selectionEnd);
 }

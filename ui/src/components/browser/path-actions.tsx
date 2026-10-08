@@ -41,15 +41,19 @@ const rootRouteApi = getRouteApi("__root__");
 async function waitForCopyTransfer(api: ApiClient, requestId: number) {
     while (true) {
         const progress = await api.getTransferProgress();
+
         const transfer = progress.transfers.find(
             (entry) => entry.request_id === requestId,
         );
+
         if (transfer?.state === "completed") {
             return;
         }
+
         if (transfer?.state === "errored") {
             throw new Error(transfer.error ?? "Duplicate failed");
         }
+
         await new Promise((resolve) => window.setTimeout(resolve, 500));
     }
 }
@@ -68,15 +72,19 @@ function RenamePathDialog(props: {
     const navigate = useNavigate();
     const router = useRouter();
     const [name, setName] = React.useState(props.currentName);
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const renameMutation = useMutation({
         mutationFn: (newName: string) => {
             const parentPath = getImmediateParentPath(props.path);
+
             if (parentPath === null) {
                 throw new Error("The filesystem root cannot be renamed");
             }
+
             return props.agent.renamePath(
                 parentPath,
                 props.currentName,
@@ -85,14 +93,19 @@ function RenamePathDialog(props: {
         },
         onSuccess: async (_, newName) => {
             const parentPath = getImmediateParentPath(props.path);
+
             if (parentPath === null) {
                 return;
             }
+
             props.onClose();
+
             if (!props.navigateAfterRename) {
                 await router.invalidate();
+
                 return;
             }
+
             await navigate({
                 to: props.agent.getBrowserUrl(
                     joinBrowserPath(parentPath, newName),
@@ -106,9 +119,11 @@ function RenamePathDialog(props: {
             });
         },
     });
+
     const parentPath = getImmediateParentPath(props.path);
     const trimmedName = name.trim();
     const isRenaming = renameMutation.isPending;
+
     const canRename =
         parentPath !== null &&
         trimmedName.length > 0 &&
@@ -128,22 +143,28 @@ function RenamePathDialog(props: {
 
         if (parentPath === null) {
             setValidationError("The filesystem root cannot be renamed");
+
             return;
         }
+
         if (!trimmedName) {
             setValidationError(
                 `${props.entryType === "file" ? "File" : "Directory"} name is required`,
             );
+
             return;
         }
+
         if (
             trimmedName.includes("/") ||
             trimmedName === "." ||
             trimmedName === ".."
         ) {
             setValidationError("Name must be a single path component");
+
             return;
         }
+
         if (trimmedName === props.currentName) {
             return;
         }
@@ -261,15 +282,19 @@ function DuplicatePathDialog(props: {
     const { api } = rootRouteApi.useRouteContext();
     const router = useRouter();
     const [name, setName] = React.useState(props.currentName);
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const duplicateMutation = useMutation({
         mutationFn: async (newName: string) => {
             const parentPath = getImmediateParentPath(props.path);
+
             if (parentPath === null) {
                 throw new Error("The filesystem root cannot be duplicated");
             }
+
             const response = await props.agent.copyTo(
                 {
                     agent: props.agent.id,
@@ -277,6 +302,7 @@ function DuplicatePathDialog(props: {
                 },
                 props.path,
             );
+
             await waitForCopyTransfer(api, response.copy_request_id);
         },
         onSuccess: async () => {
@@ -284,9 +310,11 @@ function DuplicatePathDialog(props: {
             await router.invalidate();
         },
     });
+
     const parentPath = getImmediateParentPath(props.path);
     const trimmedName = name.trim();
     const isDuplicating = duplicateMutation.isPending;
+
     const canDuplicate =
         parentPath !== null &&
         trimmedName.length > 0 &&
@@ -306,22 +334,28 @@ function DuplicatePathDialog(props: {
 
         if (parentPath === null) {
             setValidationError("The filesystem root cannot be duplicated");
+
             return;
         }
+
         if (!trimmedName) {
             setValidationError(
                 `${props.entryType === "file" ? "File" : "Directory"} name is required`,
             );
+
             return;
         }
+
         if (
             trimmedName.includes("/") ||
             trimmedName === "." ||
             trimmedName === ".."
         ) {
             setValidationError("Name must be a single path component");
+
             return;
         }
+
         if (trimmedName === props.currentName) {
             return;
         }
@@ -738,6 +772,7 @@ export function SelectPathMenuButton(props: {
                     fileName: props.fileName,
                     entryType: props.entryType,
                 });
+
                 if (!isSelected) {
                     // Menu selection has no listing checkbox, so show the chosen path immediately.
                     activateBottomDrawerTab("selected");
@@ -767,6 +802,7 @@ export function PersistentPathActions(props: {
     const navigate = useNavigate();
     const parentPath = getImmediateParentPath(props.path);
     const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = React.useState(false);
+
     const downloadLink = (
         <a
             href={props.downloadUrl}

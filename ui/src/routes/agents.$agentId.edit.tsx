@@ -19,13 +19,16 @@ export const Route = createFileRoute("/agents/$agentId/edit")({
     loader: async ({ context, params, parentMatchPromise }) => {
         const parentMatch = await parentMatchPromise;
         const agent = parentMatch.loaderData?.agent;
+
         // Missing parent data is a transient rename gap, not a reason to leave /edit.
         if (!agent) {
             throw new Error(`Agent not found: ${params.agentId}`);
         }
+
         if (!agent.configurationEditable) {
             throw redirect({ to: "/agents" });
         }
+
         const configuration: ManagedAgentFormConfiguration =
             agent.sshTarget === null
                 ? {
@@ -40,6 +43,7 @@ export const Route = createFileRoute("/agents/$agentId/edit")({
                           params.agentId,
                       ),
                   };
+
         return { configuration };
     },
     component: EditManagedAgentPage,
@@ -55,9 +59,11 @@ function EditManagedAgentPage() {
     const router = useRouter();
     const [isDeleteOpen, setIsDeleteOpen] = React.useState(false);
     const isRunning = agent?.status !== "stopped";
+
     const updateMutation = useMutation({
         mutationFn: async (submission: ManagedAgentSubmitRequest) => {
             const release = holdRouteInvalidation();
+
             try {
                 const response =
                     submission.kind === "local"
@@ -66,12 +72,14 @@ function EditManagedAgentPage() {
                               submission.request,
                           )
                         : await api.updateSshAgent(agentId, submission.request);
+
                 await queryClient.invalidateQueries(agentsQueryOptions(api));
                 // Move off the old identity before any route reload can 404 it.
                 await router.navigate({
                     to: "/agents/$agentId/edit",
                     params: { agentId: response.agent.id },
                 });
+
                 return response;
             } finally {
                 release();
@@ -81,6 +89,7 @@ function EditManagedAgentPage() {
             await router.invalidate();
         },
     });
+
     const deleteMutation = useMutation({
         mutationFn: () => api.deleteManagedAgent(agentId, configuration.kind),
         onSuccess: async () => {
@@ -89,13 +98,16 @@ function EditManagedAgentPage() {
             await router.navigate({ to: "/agents" });
         },
     });
+
     const mutationError = updateMutation.isError
         ? updateMutation.error instanceof Error
             ? updateMutation.error.message
             : "Failed to update device"
         : null;
+
     const isBusy = updateMutation.isPending || deleteMutation.isPending;
     const kindLabel = configuration.kind === "local" ? "local" : "SSH";
+
     return (
         <>
             <ManagedAgentForm

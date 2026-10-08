@@ -11,6 +11,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
     (props, ref) => {
         const selectProps: SelectProps = { ...props };
         delete selectProps.containerClassName;
+
         return (
             <span
                 className={twMerge(

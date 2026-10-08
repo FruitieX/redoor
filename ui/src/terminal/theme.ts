@@ -57,6 +57,7 @@ export function applyTerminalTheme(
     mode: "dark" | "light",
 ): void {
     const theme = mode === "light" ? lightTerminalTheme : darkTerminalTheme;
+
     for (const [property, value] of Object.entries(theme)) {
         host.style.setProperty(property, value);
     }

@@ -17,6 +17,7 @@ import { RouteError } from "#ui/components/route-error";
 // `/ws` to the redoor server. Either way, using the page's origin
 // keeps the client configuration trivial.
 export const api = new ApiClient(window.location.origin);
+
 export const queryClient = new QueryClient();
 
 // Create a new router instance
@@ -38,6 +39,7 @@ api.setUnauthorizedHandler(() => {
     if (window.location.pathname === "/login") {
         return;
     }
+
     const returnPath = `${window.location.pathname}${window.location.search}`;
     const search = new URLSearchParams({ redirect: returnPath });
     window.location.replace(`/login?${search.toString()}`);
@@ -52,6 +54,7 @@ declare module "@tanstack/react-router" {
 
 // Render the app
 const rootElement = document.getElementById("app");
+
 if (rootElement && !rootElement.innerHTML) {
     const root = ReactDOM.createRoot(rootElement);
     root.render(

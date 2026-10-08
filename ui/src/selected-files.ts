@@ -26,6 +26,7 @@ export const selectedFilesAtom = atomWithLocalStorage<SelectedPath[]>(
  */
 export const selectedFileKeysAtom = atom((get) => {
     const selectedFiles = get(selectedFilesAtom);
+
     return new Set(selectedFiles.map((file) => getSelectedFileKey(file)));
 });
 
@@ -45,6 +46,7 @@ export const isFileSelectedAtom = atom(
 export const selectFileAtom = atom(null, (get, set, file: SelectedPath) => {
     const selectedFiles = get(selectedFilesAtom);
     const fileKey = getSelectedFileKey(file);
+
     const alreadySelected = selectedFiles.some(
         (entry) => getSelectedFileKey(entry) === fileKey,
     );
@@ -82,6 +84,7 @@ export const toggleSelectedFileAtom = atom(
     (get, set, file: SelectedPath) => {
         const fileKey = getSelectedFileKey(file);
         const selectedFiles = get(selectedFilesAtom);
+
         const isSelected = selectedFiles.some(
             (entry) => getSelectedFileKey(entry) === fileKey,
         );
@@ -93,6 +96,7 @@ export const toggleSelectedFileAtom = atom(
                     (entry) => getSelectedFileKey(entry) !== fileKey,
                 ),
             );
+
             return;
         }
 

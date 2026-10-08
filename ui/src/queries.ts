@@ -179,6 +179,7 @@ export function fileContentQueryOptions(agent: Agent, path: string) {
         queryKey: queryKeys.fileContent(agent.id, path),
         queryFn: async () => {
             const response = await agent.download(path);
+
             return response.text();
         },
         staleTime: Number.POSITIVE_INFINITY,

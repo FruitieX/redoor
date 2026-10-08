@@ -10,7 +10,9 @@ function isNetworkError(cause: unknown): boolean {
     if (!(cause instanceof Error)) {
         return false;
     }
+
     const message = cause.message.toLowerCase();
+
     return (
         cause.name === "TypeError" ||
         message.includes("failed to fetch") ||
@@ -40,35 +42,44 @@ function titleForError(cause: unknown): string {
                 if (cause.status >= 500) {
                     return "Server error";
                 }
+
                 if (cause.status >= 400) {
                     return "Request failed";
                 }
         }
     }
+
     if (isNetworkError(cause)) {
         return "Connection failed";
     }
+
     if (cause instanceof Error) {
         const message = cause.message.toLowerCase();
+
         if (message.includes("agent not found")) {
             return "Device not found";
         }
+
         if (
             message.includes("no such file or directory") ||
             message.includes("directory not found")
         ) {
             return "Path not found";
         }
+
         if (message.includes("not a directory")) {
             return "Not a directory";
         }
+
         if (message.includes("permission denied")) {
             return "Permission denied";
         }
+
         if (message.includes("not editable")) {
             return "File is not editable";
         }
     }
+
     return "Something went wrong";
 }
 
@@ -88,9 +99,11 @@ function hintForError(cause: unknown): string | null {
                 return null;
         }
     }
+
     if (isNetworkError(cause)) {
         return "The browser could not reach the API. Check that the server is running and that your network connection is up.";
     }
+
     return null;
 }
 
@@ -99,10 +112,13 @@ function messageForError(cause: unknown): string {
     if (cause instanceof Error) {
         return cause.message || cause.name;
     }
+
     const stringCause = z.string().safeParse(cause);
+
     if (stringCause.success) {
         return stringCause.data;
     }
+
     try {
         return JSON.stringify(cause, null, 2);
     } catch {
@@ -121,14 +137,19 @@ export function RouteError(
     const hint = hintForError(props.error);
     const message = messageForError(props.error);
     const status = props.error instanceof ApiError ? props.error.status : null;
+
     const responseBody =
         props.error instanceof ApiError ? props.error.body : null;
+
     const errorName = props.error instanceof Error ? props.error.name : "Error";
+
     const stack =
         props.error instanceof Error && props.error.stack
             ? props.error.stack
             : null;
+
     const componentStack = props.info?.componentStack?.trim() || null;
+
     const hasTechnicalDetails = Boolean(
         stack || componentStack || responseBody,
     );
@@ -137,8 +158,10 @@ export function RouteError(
     const retry = () => {
         if (props.reset) {
             props.reset();
+
             return;
         }
+
         void router.invalidate();
     };
 

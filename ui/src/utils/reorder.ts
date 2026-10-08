@@ -22,15 +22,20 @@ export function moveKeyedItems<T>(
 ): T[] {
     const from = items.findIndex((item) => keyOf(item) === move.activeId);
     const to = items.findIndex((item) => keyOf(item) === move.overId);
+
     if (from < 0 || to < 0 || from === to) {
         return items;
     }
+
     const next = items.slice();
     const moved = next.splice(from, 1)[0];
+
     if (moved === undefined) {
         return items;
     }
+
     next.splice(to, 0, moved);
+
     return next;
 }
 
@@ -45,16 +50,21 @@ export function moveKeyedSubsequence<T>(
 ): T[] {
     const selected = items.filter((item) => scope.inScope(item));
     const moved = moveKeyedItems(selected, scope.keyOf, move);
+
     if (moved === selected) {
         return items;
     }
+
     let index = 0;
+
     return items.map((item) => {
         if (!scope.inScope(item)) {
             return item;
         }
+
         const replacement = moved[index];
         index += 1;
+
         return replacement ?? item;
     });
 }

@@ -1,10 +1,13 @@
 export function getParentPath(path: string): string | null {
     if (!path.startsWith("/")) return null;
     const normalizedPath = path.replace(/\/+$/, "");
+
     if (normalizedPath === "") return null;
 
     const lastSlashIndex = normalizedPath.lastIndexOf("/");
+
     if (lastSlashIndex === -1) return null;
+
     if (lastSlashIndex === 0) return "/";
 
     return normalizedPath.slice(0, lastSlashIndex);
@@ -23,6 +26,7 @@ export function formatSize(bytes: number): string {
     if (unitIndex === 0) {
         return `${value} ${units[unitIndex]}`;
     }
+
     return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 

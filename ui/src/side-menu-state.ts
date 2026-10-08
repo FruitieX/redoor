@@ -21,11 +21,14 @@ export const sidebarModeAtom = atomWithSessionStorage<SidebarMode>(
 export function usePersistentSideMenus(): boolean {
     const mode = useAtomValue(sidebarModeAtom);
     const isBelowLg = useIsBelowBreakpoint("lg");
+
     if (mode === "show") {
         return true;
     }
+
     if (mode === "hide") {
         return false;
     }
+
     return !isBelowLg;
 }

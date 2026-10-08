@@ -71,19 +71,25 @@ function McpTokenSettingsPage() {
     const queryClient = useQueryClient();
     const tokensQuery = useQuery(mcpTokensQueryOptions(api));
     const [createOpen, setCreateOpen] = React.useState(false);
+
     const [editing, setEditing] =
         React.useState<McpTokenMetadataResponse | null>(null);
+
     const [secret, setSecret] = React.useState<{
         value: string;
         action: "created" | "rotated";
     } | null>(null);
+
     const [selected, setSelected] = React.useState<{
         token: McpTokenMetadataResponse;
         action: "rotate" | "revoke";
     } | null>(null);
+
     const [notice, setNotice] = React.useState<string | null>(null);
+
     const refresh = async () =>
         queryClient.invalidateQueries({ queryKey: queryKeys.mcpTokens() });
+
     const rotate = useMutation({
         mutationFn: (id: string) => api.rotateMcpToken(id),
         onSuccess: async (result) => {
@@ -92,6 +98,7 @@ function McpTokenSettingsPage() {
             await refresh();
         },
     });
+
     const revoke = useMutation({
         mutationFn: (id: string) => api.revokeMcpToken(id),
         onSuccess: async () => {
@@ -102,6 +109,7 @@ function McpTokenSettingsPage() {
             await refresh();
         },
     });
+
     const tokens = tokensQuery.data?.tokens ?? [];
 
     return (
@@ -248,18 +256,22 @@ function TokenCard(props: {
     onRevoke: () => void;
 }) {
     const now = Date.now();
+
     const expired =
         props.token.expires_at !== null &&
         Date.parse(props.token.expires_at) <= now;
+
     const status =
         props.token.revoked_at !== null
             ? "Revoked"
             : expired
               ? "Expired"
               : "Active";
+
     const deviceNames = props.token.device_ids.map(
         (id) => props.agents.find((agent) => agent.id === id)?.name ?? id,
     );
+
     return (
         <article className="rounded-lg border border-slate-800 bg-slate-900/40 p-5">
             <div className="flex flex-wrap justify-between gap-4">
@@ -368,15 +380,19 @@ function TokenDialog(
     const { api } = RootRoute.useRouteContext();
     const [name, setName] = React.useState(props.token?.name ?? "");
     const [expiry, setExpiry] = React.useState("30");
+
     const [scopes, setScopes] = React.useState<McpTokenScope[]>(
         props.token?.scopes ?? ["devices:read", "files:read"],
     );
+
     const [devices, setDevices] = React.useState<string[]>(
         props.token?.device_ids ?? [],
     );
+
     const mutation = useMutation({
         mutationFn: async () => {
             const policy = { name, scopes, device_ids: devices };
+
             if (props.token) {
                 await api.updateMcpToken(props.token.credential_id, policy);
                 await props.onUpdated();
@@ -390,14 +406,17 @@ function TokenDialog(
                                   Date.now() + Number(expiry) * 86_400_000,
                               ).toISOString(),
                 });
+
                 await props.onCreated(result.token);
             }
         },
     });
+
     /** Keeps the dialog open during saving so failures remain visible beside the draft. */
     const close = () => {
         if (!mutation.isPending) props.onClose();
     };
+
     return (
         <Dialog
             isOpen
@@ -549,6 +568,7 @@ function SecretDialog(props: {
     onClose: () => void;
 }) {
     if (!props.secret) return null;
+
     return (
         <Dialog
             isOpen

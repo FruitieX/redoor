@@ -5,6 +5,7 @@ import { useUserStatePersistError } from "#ui/user-state";
 /** Announces a failed preference write without blocking the optimistic UI update. */
 export function UserStatePersistToast() {
     const [message, dismiss] = useUserStatePersistError();
+
     if (!message) {
         return null;
     }

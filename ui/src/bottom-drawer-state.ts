@@ -60,5 +60,6 @@ export const requestTerminalCreationAtom = atom(
 export const consumeTerminalCreationRequestsAtom = atom(null, (get, set) => {
     const requests = get(terminalCreationRequestsAtom);
     set(terminalCreationRequestsAtom, []);
+
     return requests;
 });

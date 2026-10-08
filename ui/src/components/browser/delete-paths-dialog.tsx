@@ -20,12 +20,15 @@ function isTrashPayloadPath(
     queryClient: ReturnType<typeof useQueryClient>,
 ): boolean {
     if (!target.agent) return false;
+
     const trash = queryClient.getQueryData<TrashListResponse>(
         queryKeys.trash(target.agent.id),
     );
+
     return (
         trash?.locations.some((location) => {
             const root = `${location.path.replace(/\/+$/, "")}/files`;
+
             return target.path === root || target.path.startsWith(`${root}/`);
         }) ?? false
     );
@@ -45,13 +48,16 @@ export function DeletePathsDialog(props: {
     onDeleted: (targets: DeletePathTarget[]) => void | Promise<void>;
 }) {
     const queryClient = useQueryClient();
+
     const canTrash = props.targets.every(
         (target) =>
             target.agent?.supportsMoveToTrash === true &&
             !isTrashPayloadPath(target, queryClient),
     );
+
     const [deletePermanently, setDeletePermanently] = React.useState(!canTrash);
     const [confirmationText, setConfirmationText] = React.useState("");
+
     const mutation = useMutation({
         mutationFn: async (targets: DeletePathTarget[]) => {
             const results = await Promise.allSettled(
@@ -61,14 +67,17 @@ export function DeletePathsDialog(props: {
                             new Error("Device unavailable for selected item"),
                         );
                     }
+
                     return target.agent.deleteFile(target.path, {
                         trash: !deletePermanently,
                     });
                 }),
             );
+
             const successfulTargets = targets.filter(
                 (_target, index) => results[index]?.status === "fulfilled",
             );
+
             const failures = results.filter(
                 (result): result is PromiseRejectedResult =>
                     result.status === "rejected",
@@ -77,11 +86,14 @@ export function DeletePathsDialog(props: {
             if (successfulTargets.length > 0) {
                 await props.onDeleted(successfulTargets);
             }
+
             if (failures.length > 0) {
                 const operation = deletePermanently ? "Deleted" : "Trashed";
+
                 const fallback = deletePermanently
                     ? "Delete failed"
                     : "Move to trash failed";
+
                 const message = getErrorMessage(failures[0]?.reason, fallback);
                 throw new Error(
                     successfulTargets.length > 0
@@ -106,6 +118,7 @@ export function DeletePathsDialog(props: {
     };
 
     const operationLabel = deletePermanently ? "Deleting" : "Moving to trash";
+
     return (
         <ConfirmationDialog
             isOpen={props.isOpen}

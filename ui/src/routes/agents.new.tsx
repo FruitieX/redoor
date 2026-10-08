@@ -17,11 +17,13 @@ function NewManagedAgentPage() {
     const { api, queryClient } = Route.useRouteContext();
     const { serverInfo } = RootRoute.useLoaderData();
     const router = useRouter();
+
     const createMutation = useMutation({
         mutationFn: async (submission: ManagedAgentSubmitRequest) => {
             if (submission.kind === "local") {
                 return api.createLocalAgent(submission.request);
             }
+
             return api.createSshAgent(submission.request);
         },
         onSuccess: async (response) => {
@@ -33,6 +35,7 @@ function NewManagedAgentPage() {
             });
         },
     });
+
     const mutationError = createMutation.isError
         ? createMutation.error instanceof Error
             ? createMutation.error.message

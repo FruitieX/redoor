@@ -13,6 +13,7 @@ type TooltipProps = {
 };
 
 type TooltipHide = () => void;
+
 type HoverTimerRef = React.RefObject<number | null>;
 
 let activeTooltipHide: TooltipHide | null = null;
@@ -30,6 +31,7 @@ function claimActiveTooltip(hide: TooltipHide) {
     if (activeTooltipHide !== null && activeTooltipHide !== hide) {
         activeTooltipHide();
     }
+
     activeTooltipHide = hide;
 }
 
@@ -62,6 +64,7 @@ export function Tooltip(props: TooltipProps) {
     const [isFocused, setIsFocused] = React.useState(false);
     const [isTouchOpen, setIsTouchOpen] = React.useState(false);
     const isOpen = isHovered || isFocused || isTouchOpen;
+
     const hideAll = React.useCallback(() => {
         clearHoverTimer(hoverTimerRef);
         setIsHovered(false);
@@ -75,6 +78,7 @@ export function Tooltip(props: TooltipProps) {
         },
         [],
     );
+
     const [position, setPosition] = React.useState<{
         top: number;
         left: number;
@@ -91,6 +95,7 @@ export function Tooltip(props: TooltipProps) {
         const updatePosition = () => {
             const trigger = triggerRef.current;
             const tooltip = tooltipRef.current;
+
             if (!trigger || !tooltip) {
                 return;
             }
@@ -100,34 +105,43 @@ export function Tooltip(props: TooltipProps) {
             const gap = 8;
             const viewportPadding = 8;
             const spaceAbove = triggerRect.top - gap - viewportPadding;
+
             const spaceBelow =
                 window.innerHeight - triggerRect.bottom - gap - viewportPadding;
+
             const placement =
                 tooltipRect.height <= spaceAbove || spaceAbove >= spaceBelow
                     ? "above"
                     : "below";
+
             const desiredTop =
                 placement === "above"
                     ? triggerRect.top - gap - tooltipRect.height
                     : triggerRect.bottom + gap;
+
             const maximumTop = Math.max(
                 viewportPadding,
                 window.innerHeight - tooltipRect.height - viewportPadding,
             );
+
             const top = Math.min(
                 Math.max(desiredTop, viewportPadding),
                 maximumTop,
             );
+
             const triggerCenter = triggerRect.left + triggerRect.width / 2;
             const desiredLeft = triggerCenter - tooltipRect.width / 2;
+
             const maximumLeft = Math.max(
                 viewportPadding,
                 window.innerWidth - tooltipRect.width - viewportPadding,
             );
+
             const left = Math.min(
                 Math.max(desiredLeft, viewportPadding),
                 maximumLeft,
             );
+
             const arrowLeft = Math.max(
                 8,
                 Math.min(triggerCenter - left, tooltipRect.width - 8),
@@ -138,12 +152,15 @@ export function Tooltip(props: TooltipProps) {
 
         updatePosition();
         const resizeObserver = new ResizeObserver(updatePosition);
+
         if (triggerRef.current) {
             resizeObserver.observe(triggerRef.current);
         }
+
         if (tooltipRef.current) {
             resizeObserver.observe(tooltipRef.current);
         }
+
         window.addEventListener("resize", updatePosition);
         window.addEventListener("scroll", updatePosition, true);
 
@@ -157,10 +174,12 @@ export function Tooltip(props: TooltipProps) {
     React.useEffect(() => {
         if (!isOpen) {
             releaseActiveTooltip(hideAll);
+
             return;
         }
 
         claimActiveTooltip(hideAll);
+
         return () => {
             releaseActiveTooltip(hideAll);
         };
@@ -189,14 +208,18 @@ export function Tooltip(props: TooltipProps) {
             />
         </span>
     ) : null;
+
     const childProps = props.children.props;
+
     const describedBy = [childProps["aria-describedby"], isOpen && tooltipId]
         .filter(Boolean)
         .join(" ");
+
     const tooltipChildProps: TooltipChildProps = {
         "aria-describedby": describedBy || undefined,
         tabIndex: childProps.tabIndex ?? 0,
     };
+
     const child = React.cloneElement(props.children, tooltipChildProps);
 
     /** Prevents a click-induced focus from pinning the tooltip after mouseleave. */
@@ -216,8 +239,10 @@ export function Tooltip(props: TooltipProps) {
     const handleFocus = () => {
         if (ignoreFocusFromPointerRef.current) {
             ignoreFocusFromPointerRef.current = false;
+
             return;
         }
+
         setIsFocused(true);
     };
 
@@ -229,6 +254,7 @@ export function Tooltip(props: TooltipProps) {
                 if (ignoreHoverFromTouchRef.current) {
                     return;
                 }
+
                 clearHoverTimer(hoverTimerRef);
                 hoverTimerRef.current = window.setTimeout(() => {
                     hoverTimerRef.current = null;

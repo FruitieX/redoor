@@ -24,6 +24,7 @@ export function ThemeManager() {
                         ? "dark"
                         : "light"
                     : userState.theme;
+
             const root = document.documentElement;
             root.classList.toggle("dark", resolvedTheme === "dark");
             root.classList.toggle("light", resolvedTheme === "light");
@@ -38,6 +39,7 @@ export function ThemeManager() {
 
         applyTheme();
         mediaQuery.addEventListener("change", applyTheme);
+
         return () => mediaQuery.removeEventListener("change", applyTheme);
     }, [userState.theme]);
 
@@ -47,14 +49,18 @@ export function ThemeManager() {
 /** Cycles theme preferences from one compact control at the edge of the app chrome. */
 export function ThemeToggle() {
     const [userState, setUserState] = useUserState();
+
     const selectedIndex = Math.max(
         0,
         themeOptions.findIndex((option) => option.value === userState.theme),
     );
+
     const selectedOption = themeOptions[selectedIndex] ?? themeOptions[0];
+
     const nextOption =
         themeOptions[(selectedIndex + 1) % themeOptions.length] ??
         themeOptions[0];
+
     const SelectedIcon = selectedOption.icon;
 
     /** Advances and persists the preference in the order shown to the user. */

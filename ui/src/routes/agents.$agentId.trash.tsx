@@ -26,20 +26,25 @@ export const Route = createFileRoute("/agents/$agentId/trash")({
     loader: async ({ context, params, parentMatchPromise }) => {
         const agentMatch = await parentMatchPromise;
         const loaderData = agentMatch.loaderData;
+
         if (!loaderData || loaderData.kind !== "connected") {
             throw redirect({
                 to: "/agents/$agentId",
                 params: { agentId: params.agentId },
             });
         }
+
         const agent = loaderData.agent;
+
         if (!agent.supportsTrash) {
             return { agent, os: loaderData.details.os, trash: null };
         }
+
         const trash = await fetchQueryUncancelled(
             context.queryClient,
             trashQueryOptions(agent),
         );
+
         return { agent, os: loaderData.details.os, trash };
     },
     component: TrashPage,
@@ -62,6 +67,7 @@ function RestoreTrashDialog(props: {
 }) {
     const queryClient = useQueryClient();
     const [destinationPath, setDestinationPath] = React.useState("");
+
     const mutation = useMutation({
         mutationFn: (item: TrashRow) =>
             props.agent.restoreTrashItem({
@@ -86,6 +92,7 @@ function RestoreTrashDialog(props: {
     /** Submits through the form so keyboard and button activation share validation. */
     const restore = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+
         if (props.item && destinationPath.trim()) mutation.mutate(props.item);
     };
 
@@ -156,6 +163,7 @@ function EmptyTrashDialog(props: {
     onClose: () => void;
 }) {
     const queryClient = useQueryClient();
+
     const mutation = useMutation({
         mutationFn: () => props.agent.emptyTrash(),
         onSuccess: async () => {
@@ -194,6 +202,7 @@ function EmptyTrashDialog(props: {
 /** Lists all provider locations as one globally newest-first restore queue. */
 function TrashPage() {
     const { agent, os, trash: initialTrash } = Route.useLoaderData();
+
     if (!initialTrash) {
         return (
             <main className="flex h-full items-center justify-center p-6">
@@ -214,6 +223,7 @@ function TrashPage() {
             </main>
         );
     }
+
     return <TrashInventoryPage agent={agent} initialTrash={initialTrash} />;
 }
 
@@ -226,8 +236,10 @@ function TrashInventoryPage(props: {
         ...trashQueryOptions(props.agent),
         initialData: props.initialTrash,
     });
+
     const [restoreItem, setRestoreItem] = React.useState<TrashRow | null>(null);
     const [isEmptyDialogOpen, setIsEmptyDialogOpen] = React.useState(false);
+
     const items = trash.locations
         .flatMap((location) =>
             location.items.map((item) => ({

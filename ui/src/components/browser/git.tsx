@@ -31,9 +31,11 @@ export function groupGitStatusEntries(entries: GitStatusEntry[]) {
     const ordinaryEntries = entries.filter(
         (entry) => entry.conflict_state === null,
     );
+
     const conflicts: GitStatusItem[] = entries
         .filter((entry) => entry.conflict_state !== null)
         .map((entry) => ({ entry, state: "conflicted" }));
+
     const untracked: GitStatusItem[] = ordinaryEntries
         .filter(
             (entry) =>
@@ -41,9 +43,11 @@ export function groupGitStatusEntries(entries: GitStatusEntry[]) {
                 entry.worktree_state === "added",
         )
         .map((entry) => ({ entry, state: "untracked" }));
+
     const staged: GitStatusItem[] = ordinaryEntries
         .filter((entry) => entry.index_state !== "unmodified")
         .map((entry) => ({ entry, state: entry.index_state }));
+
     const unstaged: GitStatusItem[] = ordinaryEntries
         .filter(
             (entry) =>
@@ -51,16 +55,21 @@ export function groupGitStatusEntries(entries: GitStatusEntry[]) {
                 !untracked.some((item) => item.entry.path === entry.path),
         )
         .map((entry) => ({ entry, state: entry.worktree_state }));
+
     const seenPaths = new Set<string>();
+
     const diffEntries = [...conflicts, ...staged, ...unstaged, ...untracked]
         .map((item) => item.entry)
         .filter((entry) => {
             if (seenPaths.has(entry.path)) {
                 return false;
             }
+
             seenPaths.add(entry.path);
+
             return true;
         });
+
     return { conflicts, staged, unstaged, untracked, diffEntries };
 }
 
@@ -118,6 +127,7 @@ function GitStatusSection(props: {
     if (props.entries.length === 0) {
         return null;
     }
+
     return (
         <section
             aria-labelledby={`git-${props.title.toLowerCase().replace(" ", "-")}`}
@@ -177,13 +187,16 @@ function useGitDiffActivation(props: {
     const [activatedDirectory, setActivatedDirectory] = React.useState<
         string | null
     >(null);
+
     const loadButtonRef = React.useRef<HTMLDivElement>(null);
     const active = activatedDirectory === props.directoryKey;
+
     const shouldAutoLoad =
         props.changedFileCount > 0 && props.changedFileCount < 50;
 
     React.useEffect(() => {
         const loadButton = loadButtonRef.current;
+
         if (
             active ||
             !shouldAutoLoad ||
@@ -198,12 +211,15 @@ function useGitDiffActivation(props: {
                 if (!entries.some((entry) => entry.isIntersecting)) {
                     return;
                 }
+
                 setActivatedDirectory(props.directoryKey);
                 observer.disconnect();
             },
             { root: null, rootMargin: "0px", threshold: 0 },
         );
+
         observer.observe(loadButton);
+
         return () => observer.disconnect();
     }, [active, props.directoryKey, shouldAutoLoad]);
 
@@ -217,14 +233,18 @@ function useGitDiffActivation(props: {
 /** Groups directory status into the same concepts users see in a normal Git workflow. */
 export function GitDirectoryView(props: { agent: Agent; path: string }) {
     const directoryKey = `${props.agent.id}:${props.path}`;
+
     const statusQuery = useQuery(
         gitStatusQueryOptions(props.agent, props.path),
     );
+
     const groups = groupGitStatusEntries(statusQuery.data?.entries ?? []);
+
     const diffActivation = useGitDiffActivation({
         directoryKey,
         changedFileCount: groups.diffEntries.length,
     });
+
     const diffQuery = useQuery({
         ...gitDiffQueryOptions(
             props.agent,
@@ -233,6 +253,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
         ),
         enabled: diffActivation.active && groups.diffEntries.length > 0,
     });
+
     if (statusQuery.isPending) {
         return (
             <p role="status" className="text-sm text-slate-400">
@@ -240,6 +261,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
             </p>
         );
     }
+
     if (statusQuery.isError) {
         return (
             <p role="alert" className="text-sm text-red-300">
@@ -253,6 +275,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 
     const status = statusQuery.data;
     const { conflicts, staged, unstaged, untracked, diffEntries } = groups;
+
     const diffAnchorByPath = diffActivation.active
         ? new Map(
               diffEntries.map((entry, index) => [
@@ -261,11 +284,13 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
               ]),
           )
         : null;
+
     const reference = status.branch_name
         ? `Branch ${status.branch_name}`
         : status.detached_head_id
           ? `Detached at ${status.detached_head_id.slice(0, 12)}`
           : "Unborn HEAD";
+
     const tracking = [
         status.upstream ? `Tracking ${status.upstream}` : null,
         status.ahead === null ? null : `${status.ahead} ahead`,
@@ -364,7 +389,9 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                                 const pathLabel =
                                     diffEntries[index]
                                         ?.repository_relative_path ?? diff.path;
+
                                 const isTextDiff = diff.result.type === "text";
+
                                 return (
                                     <section
                                         key={`${diff.path}:${index}`}
@@ -417,6 +444,7 @@ function GitDiffResultView(props: {
             />
         );
     }
+
     const messages = {
         no_changes: "No changes in this comparison.",
         untracked:
@@ -427,6 +455,7 @@ function GitDiffResultView(props: {
             "This file or its generated patch is too large to display safely.",
         unsupported_entry: "This Git entry cannot be displayed as a text diff.",
     } satisfies Record<Exclude<GitDiffResult["type"], "text">, string>;
+
     return (
         <p role="status" className="text-sm text-slate-300">
             {messages[props.result.type]}
@@ -441,13 +470,16 @@ export function GitFileView(props: {
     context: GitContextResponse;
 }) {
     const [mode, setMode] = React.useState<GitDiffMode>("full");
+
     const diffQuery = useQuery(
         gitDiffQueryOptions(props.agent, [props.path], mode),
     );
+
     const repositoryRoot =
         props.context.status === "inside_worktree"
             ? props.context.repository_root
             : null;
+
     return (
         <BrowserViewCard>
             <header className="flex items-start justify-between gap-3 border-b border-slate-800 p-4 sm:p-5">

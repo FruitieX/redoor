@@ -77,19 +77,24 @@ function useSearchScope(agent: Agent): {
             const browserMatch = matches.find(
                 (match) => match.routeId === "/agents/$agentId/browser/$",
             );
+
             const lsResult = browserMatch?.loaderData?.lsResult;
+
             const gitRoot = gitRootFromContext(
                 browserMatch?.loaderData?.gitContext,
             );
+
             if (lsResult && isLsDirectoryResponse(lsResult)) {
                 return { directory: lsResult.path, gitRoot };
             }
+
             if (lsResult && isLsFileResponse(lsResult)) {
                 return {
                     directory: getImmediateParentPath(lsResult.path) ?? "/",
                     gitRoot,
                 };
             }
+
             return {
                 directory: agent.status === "connected" ? agent.cwd : null,
                 gitRoot: null,
@@ -112,6 +117,7 @@ function useSearchQuery(urlQuery: string | undefined) {
 
     React.useEffect(() => {
         const timer = window.setTimeout(() => setDebouncedQuery(query), 200);
+
         return () => window.clearTimeout(timer);
     }, [query]);
 
@@ -135,6 +141,7 @@ function useOpenSearchShortcut(args: {
                 !event.altKey &&
                 !event.shiftKey &&
                 (event.metaKey || event.ctrlKey);
+
             const isUnmodifiedS =
                 event.key === "s" && !shouldIgnoreKeyboardShortcut(event);
 
@@ -151,7 +158,9 @@ function useOpenSearchShortcut(args: {
                 replace: true,
             });
         };
+
         window.addEventListener("keydown", openSearch);
+
         return () => window.removeEventListener("keydown", openSearch);
     }, [
         args.isOpen,
@@ -177,6 +186,7 @@ function handleSearchResultClick(
     ) {
         return;
     }
+
     event.preventDefault();
     openSelectedResult(href);
 }
@@ -191,12 +201,16 @@ export function SearchDialog(props: { agent: Agent }) {
     const isOpen = search.q !== undefined;
     const isContentSearch = search.mode === "content";
     const { query, setQuery, debouncedQuery } = useSearchQuery(search.q);
+
     const timeoutSeconds =
         search.timeout ?? userState.recursiveSearchTimeoutSeconds;
+
     const includeHidden =
         search.hidden ?? userState.recursiveSearchIncludeHidden;
+
     const respectGitignore =
         search.gitignore ?? userState.recursiveSearchRespectGitignore;
+
     const regex = search.regex ?? false;
     const contextSize = search.context ?? 2;
     const caseSensitivity = search.case ?? "smart";
@@ -210,6 +224,7 @@ export function SearchDialog(props: { agent: Agent }) {
         props.agent.status === "connected" &&
         searchDirectory !== null &&
         debouncedQuery.trim() !== "";
+
     const pathSearch = useQuery({
         ...fileSearchQueryOptions(props.agent, searchDirectory ?? "", {
             query: canSearch && !isContentSearch ? debouncedQuery : "",
@@ -220,6 +235,7 @@ export function SearchDialog(props: { agent: Agent }) {
         }),
         enabled: canSearch && !isContentSearch,
     });
+
     const contentSearch = useQuery({
         ...contentGrepQueryOptions(props.agent, searchDirectory ?? "", {
             query: canSearch && isContentSearch ? debouncedQuery : "",
@@ -232,6 +248,7 @@ export function SearchDialog(props: { agent: Agent }) {
         }),
         enabled: canSearch && isContentSearch,
     });
+
     const getResults = React.useCallback(
         () =>
             resultsRef.current
@@ -239,16 +256,20 @@ export function SearchDialog(props: { agent: Agent }) {
                 : [],
         [],
     );
+
     useArrayKeyboardFocus(getResults, isOpen);
 
     /** Changes only dialog-owned URL state so child-view parameters survive. */
     const updateSearch = (changes: SearchChanges, replace = true) => {
         const params = new URLSearchParams(location.searchStr);
+
         for (const [key, value] of Object.entries(changes)) {
             if (value === undefined) params.delete(key);
             else params.set(key, String(value));
         }
+
         const searchString = params.toString();
+
         return navigate({
             to: `${location.pathname}${searchString ? `?${searchString}` : ""}${location.hash}`,
             replace,
@@ -260,6 +281,7 @@ export function SearchDialog(props: { agent: Agent }) {
         if (query !== (search.q ?? "")) {
             await updateSearch({ q: query });
         }
+
         await navigate({ to: href });
     };
 
@@ -387,6 +409,7 @@ function SearchControls(props: {
     const queryLabel = props.isContentSearch
         ? "Text to find"
         : "File or folder name";
+
     const caseSensitivityIcon = {
         smart: <SmartCaseIcon className="h-4 w-4" />,
         sensitive: <CaseSensitive className="h-4 w-4" />,
@@ -589,6 +612,7 @@ function SearchNumberInputs(props: {
                     value={props.timeoutSeconds}
                     onChange={(event) => {
                         const value = event.target.valueAsNumber;
+
                         if (Number.isInteger(value)) {
                             const timeout = Math.min(60, Math.max(1, value));
                             props.onUpdateOption(
@@ -611,6 +635,7 @@ function SearchNumberInputs(props: {
                         value={props.contextSize}
                         onChange={(event) => {
                             const value = event.target.valueAsNumber;
+
                             if (Number.isInteger(value)) {
                                 void props.onUpdate({
                                     context: Math.min(20, Math.max(0, value)),
@@ -632,6 +657,7 @@ function PathResult(props: {
     onOpen: (href: string) => void;
 }) {
     const ResultIcon = props.result.type === "directory" ? Folder : File;
+
     return (
         <Link
             to={props.href}
@@ -726,6 +752,7 @@ function SearchStatus(props: {
     const activeSearch = props.isContentSearch
         ? props.contentSearch
         : props.pathSearch;
+
     if (props.query.trim() === "") {
         return (
             <p role="status" className="text-sm text-slate-400">
@@ -735,6 +762,7 @@ function SearchStatus(props: {
             </p>
         );
     }
+
     if (props.query !== props.debouncedQuery || activeSearch.isFetching) {
         return (
             <p role="status" className="text-sm text-slate-400">
@@ -742,6 +770,7 @@ function SearchStatus(props: {
             </p>
         );
     }
+
     if (activeSearch.isError) {
         return (
             <p role="alert" className="text-sm text-red-300">
@@ -751,9 +780,12 @@ function SearchStatus(props: {
             </p>
         );
     }
+
     if (props.isContentSearch) {
         const data = props.contentSearch.data;
+
         if (!data) return null;
+
         const notices = [
             data.timed_out ? "Search timed out." : null,
             data.cancelled ? "Search was cancelled." : null,
@@ -762,14 +794,18 @@ function SearchStatus(props: {
                 ? `${data.omitted_long_lines} long lines omitted.`
                 : null,
         ].filter((notice): notice is string => notice !== null);
+
         return (
             <p role="status" className="text-sm text-slate-400">
                 {data.results.length} results. {notices.join(" ")}
             </p>
         );
     }
+
     const data = props.pathSearch.data;
+
     if (!data) return null;
+
     return (
         <p role="status" className="text-sm text-slate-400">
             Found{" "}

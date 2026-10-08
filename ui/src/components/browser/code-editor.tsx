@@ -34,6 +34,7 @@ function useFocusEditorShortcut(view: EditorView | null) {
         if (view === null) {
             return;
         }
+
         let focusCorrectionTimer: number | undefined;
 
         /** Returns from a focused shell without typing e into the session. */
@@ -42,12 +43,14 @@ function useFocusEditorShortcut(view: EditorView | null) {
                 // A newer shell activation must win over the delayed Alt-e focus correction.
                 window.clearTimeout(focusCorrectionTimer);
             }
+
             if (
                 !isUnmodifiedAltKey(event, "e") ||
                 !isTerminalInputTarget(event.target)
             ) {
                 return;
             }
+
             event.preventDefault();
             view.focus();
             window.clearTimeout(focusCorrectionTimer);
@@ -60,6 +63,7 @@ function useFocusEditorShortcut(view: EditorView | null) {
         };
 
         window.addEventListener("keydown", handleFocusEditorShortcut, true);
+
         return () => {
             window.clearTimeout(focusCorrectionTimer);
             window.removeEventListener(
@@ -74,10 +78,12 @@ function useFocusEditorShortcut(view: EditorView | null) {
 /** Selects the inbound ?line= target and centers it so the opened location is obvious in a tall buffer. */
 function moveCaretToLine(view: EditorView, line: number) {
     const lineCount = view.state.doc.lines;
+
     // Empty documents have no real line to reveal; clamping would still dispatch a no-op caret.
     if (view.state.doc.length === 0 || lineCount < 1) {
         return;
     }
+
     const clamped = Math.min(Math.max(line, 1), lineCount);
     const docLine = view.state.doc.line(clamped);
     view.dispatch({
@@ -89,9 +95,11 @@ function moveCaretToLine(view: EditorView, line: number) {
 /** Reads the current range so chrome and tests can follow the editor selection. */
 function editorSelectionFromState(state: EditorState): EditorSelection | null {
     const selection = state.selection.main;
+
     if (selection.empty) {
         return null;
     }
+
     return {
         text: state.sliceDoc(selection.from, selection.to),
         startLine: state.doc.lineAt(selection.from).number,
@@ -109,8 +117,10 @@ function editorSearchKeyBindings(
         if (!captureFindKeysRef.current) {
             return false;
         }
+
         return command() ?? false;
     };
+
     return [
         {
             key: "Mod-f",
@@ -118,7 +128,9 @@ function editorSearchKeyBindings(
                 if (!captureFindKeysRef.current) {
                     return false;
                 }
+
                 searchHandleRef.current?.open();
+
                 return true;
             },
         },
@@ -154,6 +166,7 @@ function useInboundScrollToLine(
         if (view === null || scrollToLine === undefined) {
             return;
         }
+
         moveCaretToLine(view, scrollToLine);
     }, [view, scrollToLine]);
 }
@@ -181,11 +194,13 @@ export function CodeEditor(props: {
     const resolvedTheme = useResolvedTheme();
     const onSaveRef = React.useRef(props.onSave);
     onSaveRef.current = props.onSave;
+
     /** Saves without leaving CodeMirror so Mod-s and :w cannot dump the user into chrome. */
     const saveFromEditor = () => {
         onSaveRef.current();
         editorRef.current?.view?.focus();
     };
+
     vimWriteRef.current = saveFromEditor;
     const editorRef = React.useRef<ReactCodeMirrorRef>(null);
     const captureFindKeysRef = React.useRef(props.captureFindKeys);
@@ -198,11 +213,14 @@ export function CodeEditor(props: {
     const [caretLine, setCaretLine] = React.useState<number | null>(null);
     const [selectedText, setSelectedText] = React.useState<string | null>(null);
     const firstLineEnd = props.value.indexOf("\n");
+
     const firstLine = props.value.slice(
         0,
         firstLineEnd === -1 ? props.value.length : firstLineEnd,
     );
+
     const baseName = props.fileName.split("/").pop() ?? props.fileName;
+
     const languageContent =
         baseName.lastIndexOf(".") <= 0 && firstLine.startsWith("#!")
             ? firstLine
@@ -210,6 +228,7 @@ export function CodeEditor(props: {
 
     const extensions = React.useMemo(() => {
         const language = languageFromFileName(props.fileName, languageContent);
+
         return [
             // Vim must precede both its observer and other keymaps so its adapter exists and normal-mode keys win.
             ...(props.vimMode
@@ -257,6 +276,7 @@ export function CodeEditor(props: {
                         run: () => {
                             onSaveRef.current();
                             editorRef.current?.view?.focus();
+
                             return true;
                         },
                     },
@@ -333,9 +353,11 @@ export function CodeEditor(props: {
                                     update.state.selection.main.head,
                                 ).number,
                             );
+
                             const nextSelection = editorSelectionFromState(
                                 update.state,
                             );
+
                             setSelectedText(nextSelection?.text ?? null);
                             props.onSelectionChange(nextSelection);
                         }

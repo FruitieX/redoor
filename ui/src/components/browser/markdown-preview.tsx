@@ -9,6 +9,7 @@ import { syntaxHighlighter } from "#ui/utils/syntax-highlighting";
 
 /** Opening `---` must be the first line so thematic breaks later in the file stay markdown. */
 const YAML_FRONTMATTER_OPENING = /^---[ \t]*\r?\n/;
+
 /** The next fence-only line ends the YAML document the same way GitHub and Jekyll do. */
 const YAML_FRONTMATTER_CLOSING = /(?:^|\r?\n)---[ \t]*(?:\r?\n|$)/;
 
@@ -17,6 +18,7 @@ function formatYamlFrontmatterCell(value: Node | null): string {
     if (value === null) {
         return "";
     }
+
     return stringify(value, { lineWidth: 0 }).trimEnd();
 }
 
@@ -30,28 +32,36 @@ function parseMarkdownYamlFrontmatter(content: string): {
     body: string;
 } | null {
     const opening = YAML_FRONTMATTER_OPENING.exec(content);
+
     if (opening === null) {
         return null;
     }
+
     const fromYaml = content.slice(opening[0].length);
     const closing = YAML_FRONTMATTER_CLOSING.exec(fromYaml);
+
     if (closing === null) {
         return null;
     }
+
     const body = fromYaml.slice(closing.index + closing[0].length);
     const document = parseDocument(fromYaml.slice(0, closing.index));
+
     if (document.errors.length > 0) {
         return null;
     }
+
     if (document.contents === null) {
         return { headers: [], values: [], body };
     }
+
     if (!isMap(document.contents)) {
         return null;
     }
 
     const headers: string[] = [];
     const values: string[] = [];
+
     for (const item of document.contents.items) {
         headers.push(
             formatYamlFrontmatterCell(isNode(item.key) ? item.key : null),
@@ -60,6 +70,7 @@ function parseMarkdownYamlFrontmatter(content: string): {
             formatYamlFrontmatterCell(isNode(item.value) ? item.value : null),
         );
     }
+
     return { headers, values, body };
 }
 
@@ -69,6 +80,7 @@ function parseMarkdownYamlFrontmatter(content: string): {
  */
 function YamlFrontmatterTable(props: { headers: string[]; values: string[] }) {
     const [open, setOpen] = useState(true);
+
     return (
         <FoldingSection
             title="YAML frontmatter"
@@ -127,6 +139,7 @@ function MarkdownCode(props: ComponentProps<"code"> & ExtraProps) {
         .map((child) => (child.type === "text" ? child.value : ""))
         .join("")
         .replace(/\n$/, "");
+
     const highlighted = syntaxHighlighter.highlight(source, {
         language,
         ignoreIllegals: true,
@@ -143,14 +156,18 @@ function MarkdownCode(props: ComponentProps<"code"> & ExtraProps) {
 /** Normalizes a remote POSIX path without allowing parent segments above filesystem root. */
 function normalizeFilesystemPath(path: string): string {
     const parts: string[] = [];
+
     for (const part of path.split("/")) {
         if (part === "" || part === ".") continue;
+
         if (part === "..") {
             parts.pop();
             continue;
         }
+
         parts.push(part);
     }
+
     return `/${parts.join("/")}`;
 }
 
@@ -171,14 +188,18 @@ export function resolveMarkdownFileLink(options: {
     repositoryRoot: string | null;
 }): string {
     const suffixIndex = options.href.search(/[?#]/);
+
     const hrefPath =
         suffixIndex === -1 ? options.href : options.href.slice(0, suffixIndex);
+
     const suffix = suffixIndex === -1 ? "" : options.href.slice(suffixIndex);
     const decodedPath = decodeMarkdownPath(hrefPath);
+
     const fileDirectory = options.filePath.slice(
         0,
         options.filePath.lastIndexOf("/") + 1,
     );
+
     const destination = decodedPath.startsWith("/")
         ? `${options.repositoryRoot ?? ""}/${decodedPath.slice(1)}`
         : `${fileDirectory}/${decodedPath}`;
@@ -199,6 +220,7 @@ function MarkdownLink(
         },
 ) {
     const href = props.href ?? "";
+
     if (href.startsWith("#") || /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href)) {
         return (
             <a href={href} title={props.title} className={props.className}>

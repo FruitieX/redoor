@@ -4,6 +4,7 @@ import { twMerge } from "tailwind-merge";
 import { Tooltip } from "#ui/components/tooltip";
 
 type ToggleButtonVariant = "outline" | "subtle";
+
 type ToggleButtonSize = "icon" | "sm";
 
 type ToggleButtonProps = Omit<
@@ -36,6 +37,7 @@ const sizeClasses = {
 export function ToggleButton(props: ToggleButtonProps) {
     const buttonProps: React.ComponentPropsWithRef<"button"> &
         Partial<ToggleButtonProps> = { ...props };
+
     delete buttonProps.pressed;
     delete buttonProps.label;
     delete buttonProps.tooltip;

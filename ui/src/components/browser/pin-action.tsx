@@ -19,9 +19,11 @@ export function usePinOnFirstEdit(props: { file: PinnedFile }) {
     return React.useCallback(() => {
         setUserState((current) => {
             const pinnedFiles = pinFile(current.pinnedFiles, file);
+
             if (pinnedFiles === current.pinnedFiles) {
                 return current;
             }
+
             return { ...current, pinnedFiles };
         });
     }, [file, setUserState]);

@@ -25,8 +25,10 @@ export function SideMenu(props: {
         }
 
         const drawer = drawerRef.current;
+
         const focusable =
             drawer?.querySelectorAll<HTMLElement>(focusableSelector);
+
         focusable?.item(0).focus();
 
         /** Keeps keyboard interaction inside the modal drawer and supports conventional dismissal. */
@@ -36,10 +38,13 @@ export function SideMenu(props: {
                 if (event.defaultPrevented || isSortableDragActive()) {
                     return;
                 }
+
                 event.preventDefault();
                 props.onClose();
+
                 return;
             }
+
             if (event.key !== "Tab" || !drawer) {
                 return;
             }
@@ -47,13 +52,17 @@ export function SideMenu(props: {
             const entries = [
                 ...drawer.querySelectorAll<HTMLElement>(focusableSelector),
             ];
+
             const first = entries[0];
             const last = entries.at(-1);
+
             if (!first || !last) {
                 event.preventDefault();
                 drawer.focus();
+
                 return;
             }
+
             if (event.shiftKey && document.activeElement === first) {
                 event.preventDefault();
                 last.focus();
@@ -64,6 +73,7 @@ export function SideMenu(props: {
         };
 
         document.addEventListener("keydown", handleDrawerKeyDown);
+
         return () => {
             document.removeEventListener("keydown", handleDrawerKeyDown);
             props.triggerRef.current?.focus();

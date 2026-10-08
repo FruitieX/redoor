@@ -130,6 +130,7 @@ export const Route = createRootRouteWithContext<AppRouterContext>()({
 /** Keeps the login form outside the authenticated application chrome. */
 function RootRouteLayout() {
     const location = useLocation();
+
     return location.pathname === "/login" ? <Outlet /> : <RootLayout />;
 }
 
@@ -144,10 +145,13 @@ function useAgentViewContext(
             const browserMatch = matches.find(
                 (match) => match.routeId === "/agents/$agentId/browser/$",
             );
+
             const browserData = browserMatch?.loaderData;
+
             if (!browserData?.lsResult) {
                 return null;
             }
+
             if (isLsDirectoryResponse(browserData.lsResult)) {
                 return {
                     kind: "directory" as const,
@@ -155,6 +159,7 @@ function useAgentViewContext(
                     path: browserData.path,
                 };
             }
+
             if (isLsFileResponse(browserData.lsResult)) {
                 return {
                     kind: "file" as const,
@@ -162,6 +167,7 @@ function useAgentViewContext(
                     path: browserData.path,
                 };
             }
+
             return null;
         },
     });
@@ -170,6 +176,7 @@ function useAgentViewContext(
         const browserAgent = agents.find(
             (agent) => agent.id === browserViewLocation.agentId,
         );
+
         if (browserAgent) {
             return {
                 kind: browserViewLocation.kind,
@@ -178,8 +185,10 @@ function useAgentViewContext(
             } satisfies AgentViewContext;
         }
     }
+
     if (activeAgent) {
         const agentPath = `/agents/${encodeURIComponent(activeAgent.id)}`;
+
         if (
             pathname === `${agentPath}/edit` &&
             activeAgent.configurationEditable
@@ -189,21 +198,25 @@ function useAgentViewContext(
                 agent: activeAgent,
             } satisfies AgentViewContext;
         }
+
         if (pathname === agentPath) {
             return {
                 kind: "agent",
                 agent: activeAgent,
             } satisfies AgentViewContext;
         }
+
         if (activeAgent.status !== "connected" || activeAgent.cwd === null) {
             return null;
         }
+
         if (pathname === `${agentPath}/logs`) {
             return {
                 kind: "logs",
                 agent: activeAgent,
             } satisfies AgentViewContext;
         }
+
         if (pathname === `${agentPath}/trash`) {
             return {
                 kind: "trash",
@@ -211,6 +224,7 @@ function useAgentViewContext(
             } satisfies AgentViewContext;
         }
     }
+
     return null;
 }
 
@@ -227,7 +241,9 @@ function useManagedAgentRefresh(
         ) {
             return;
         }
+
         let invalidating = false;
+
         const timer = window.setInterval(() => {
             if (invalidating) return;
             invalidating = true;
@@ -235,6 +251,7 @@ function useManagedAgentRefresh(
                 invalidating = false;
             });
         }, 1000);
+
         return () => window.clearInterval(timer);
     }, [agents, router]);
 }
@@ -246,12 +263,15 @@ function useTerminalCwd() {
             const browserMatch = matches.find(
                 (match) => match.routeId === "/agents/$agentId/browser/$",
             );
+
             if (browserMatch?.loaderData) {
                 const lsResult = browserMatch.loaderData.lsResult;
+
                 // Missing paths still expose a cwd so the terminal can open near the attempted location.
                 if (!lsResult) {
                     return browserMatch.loaderData.path;
                 }
+
                 return isLsFileResponse(lsResult)
                     ? getParentPath(browserMatch.loaderData.path)
                     : browserMatch.loaderData.path;
@@ -260,6 +280,7 @@ function useTerminalCwd() {
             const detailsMatch = matches.find(
                 (match) => match.routeId === "/agents/$agentId",
             );
+
             return detailsMatch?.loaderData?.kind === "connected"
                 ? detailsMatch.loaderData.agent.cwd
                 : null;
@@ -270,27 +291,35 @@ function useTerminalCwd() {
 function RootLayout() {
     const { agents, transferProgress: initialTransferProgress } =
         Route.useLoaderData();
+
     const location = useLocation();
     const router = useRouter();
     const { api, queryClient } = Route.useRouteContext();
     const [openMenu, setOpenMenu] = useAtom(openSideMenuAtom);
+
     const [isTerminalFullWindow, setIsTerminalFullWindow] =
         React.useState(false);
+
     const isPersistentSideMenus = usePersistentSideMenus();
     const applicationMenuTriggerRef = React.useRef<HTMLButtonElement>(null);
     const agentMenuTriggerRef = React.useRef<HTMLButtonElement>(null);
+
     const { data: transferProgress } = useQuery({
         ...transfersQueryOptions(api),
         initialData: initialTransferProgress,
     });
+
     const rememberAgentTabLocation = useSetAtom(rememberAgentTabLocationAtom);
+
     const importLocation = useMatches({
         select: (matches) => {
             const browserMatch = matches.find(
                 (match) => match.routeId === "/agents/$agentId/browser/$",
             );
+
             const browserData = browserMatch?.loaderData;
             const lsResult = browserData?.lsResult;
+
             if (browserData && lsResult && isLsDirectoryResponse(lsResult)) {
                 return {
                     agentId: browserData.agentId,
@@ -301,28 +330,35 @@ function RootLayout() {
             return null;
         },
     });
+
     const importAgent = importLocation
         ? agents.find((agent) => agent.id === importLocation.agentId)
         : undefined;
+
     const importDestination =
         importLocation &&
         importAgent?.status === "connected" &&
         importAgent.cwd !== null
             ? { agent: importAgent, path: importLocation.path }
             : null;
+
     const terminalCwd = useTerminalCwd();
+
     const sortedAgents = React.useMemo(() => {
         return [...agents].sort((left, right) =>
             left.name.localeCompare(right.name),
         );
     }, [agents]);
+
     const activeAgent = agents.find((agent) => {
         const routePrefix = `/agents/${encodeURIComponent(agent.id)}`;
+
         return (
             location.pathname === routePrefix ||
             location.pathname.startsWith(`${routePrefix}/`)
         );
     });
+
     const activeTerminalTarget =
         activeAgent?.status === "connected" && activeAgent.cwd !== null
             ? {
@@ -330,11 +366,13 @@ function RootLayout() {
                   cwd: terminalCwd ?? activeAgent.cwd,
               }
             : null;
+
     const agentViewContext = useAgentViewContext(
         agents,
         activeAgent,
         location.pathname,
     );
+
     const logoutMutation = useMutation({
         mutationFn: () => api.logout(),
         onSuccess: () => {
@@ -345,6 +383,7 @@ function RootLayout() {
     React.useEffect(() => {
         const refreshListener = new RefreshListener(api, router, queryClient);
         refreshListener.start();
+
         return () => refreshListener.stop();
     }, [api, queryClient, router]);
 
@@ -375,6 +414,7 @@ function RootLayout() {
         /** Lets Escape leave ordinary text controls without stealing keys from the shell. */
         const handleGlobalFocusKeys = (event: KeyboardEvent) => {
             const activeElement = document.activeElement;
+
             if (
                 event.key === "Escape" &&
                 (isTextEntryElement(activeElement) ||
@@ -390,6 +430,7 @@ function RootLayout() {
         };
 
         window.addEventListener("keydown", handleGlobalFocusKeys);
+
         return () =>
             window.removeEventListener("keydown", handleGlobalFocusKeys);
     }, []);
@@ -476,19 +517,23 @@ function ApplicationBottomDrawer(props: {
     const [activeTab, setActiveTab] = useAtom(bottomDrawerActiveTabAtom);
     const [isCollapsed, setIsCollapsed] = useAtom(bottomDrawerCollapsedAtom);
     const lastActivationRef = React.useRef(0);
+
     const activeTransfers = props.transfers.filter(
         (transfer) =>
             transfer.state === "active" || transfer.state === "canceling",
     );
+
     const lastTransferPercentage = useLastEstimatedTransferPercentage(
         props.transfers,
     );
+
     const transferSummary = getTransferSummary(props.transfers);
 
     React.useEffect(() => {
         if (drawerActivation.sequence <= lastActivationRef.current) {
             return;
         }
+
         lastActivationRef.current = drawerActivation.sequence;
         setActiveTab(drawerActivation.tab);
         setIsCollapsed(false);
@@ -549,11 +594,13 @@ function RouteLoadingIndicator() {
     const isLoading = useRouterState({
         select: (state) => state.status === "pending",
     });
+
     const [isVisible, setIsVisible] = React.useState(false);
 
     React.useEffect(() => {
         if (!isLoading) {
             setIsVisible(false);
+
             return;
         }
 
@@ -744,9 +791,11 @@ function SelectedFilesPane(props: { agents: RootLoaderData["agents"] }) {
     const sortedSelectedFiles = [...selectedFiles].sort((a, b) => {
         const aIsDot = a.fileName.startsWith(".");
         const bIsDot = b.fileName.startsWith(".");
+
         if (aIsDot !== bIsDot) {
             return aIsDot ? -1 : 1;
         }
+
         return a.fileName.localeCompare(b.fileName, undefined, {
             sensitivity: "base",
         });
@@ -783,6 +832,7 @@ function getTransferSummary(transfers: TransferProgressEntry[]) {
     const activeTransfers = transfers.filter(
         (transfer) => transfer.state === "active",
     );
+
     return [
         [
             activeTransfers.filter(
@@ -837,6 +887,7 @@ function TransferProgressPane(props: {
     transfers: TransferProgressEntry[];
 }) {
     const { api } = Route.useRouteContext();
+
     return (
         <div className="min-h-0 flex-1 overflow-auto rounded-md border border-slate-800">
             {props.transfers.length === 0 ? (

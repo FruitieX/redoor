@@ -31,6 +31,7 @@ function loadWTermModules(): Promise<WTermModules> {
         WTerm: dom.WTerm,
         GhosttyCore: ghostty.GhosttyCore,
     }));
+
     return moduleLoad;
 }
 
@@ -39,10 +40,12 @@ export async function createWTerm(
     options: CreateWTermOptions,
 ): Promise<WTermSession> {
     const modules = await loadWTermModules();
+
     const core = await modules.GhosttyCore.load({
         imageStorageLimit: 0,
         scrollbackLimit: 5000,
     });
+
     const terminal = new modules.WTerm(options.host, {
         autoResize: true,
         cols: 80,
@@ -52,8 +55,10 @@ export async function createWTerm(
         onData: options.onData,
         onResize: options.onResize,
     });
+
     try {
         await terminal.init();
+
         return { terminal, core };
     } catch (error) {
         terminal.destroy();

@@ -63,9 +63,11 @@ function visibleBounds(element: HTMLElement) {
     let bottom = Math.min(rect.bottom, window.innerHeight);
     let right = Math.min(rect.right, window.innerWidth);
     let parent = element.parentElement;
+
     while (parent) {
         const style = getComputedStyle(parent);
         const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`;
+
         if (/(auto|scroll|hidden|clip)/.test(overflow)) {
             const parentRect = parent.getBoundingClientRect();
             top = Math.max(top, parentRect.top);
@@ -73,12 +75,15 @@ function visibleBounds(element: HTMLElement) {
             bottom = Math.min(bottom, parentRect.bottom);
             right = Math.min(right, parentRect.right);
         }
+
         // A full-window fixed surface escapes the document's normal scroll clipping.
         if (style.position === "fixed") {
             break;
         }
+
         parent = parent.parentElement;
     }
+
     return { top, left, bottom, right };
 }
 
@@ -88,12 +93,15 @@ function boundedCollision(
 ): CollisionDetection {
     return (args) => {
         const list = listRef.current;
+
         if (args.pointerCoordinates) {
             if (!list) {
                 return [];
             }
+
             const bounds = visibleBounds(list);
             const pointer = args.pointerCoordinates;
+
             if (
                 pointer.x < bounds.left ||
                 pointer.x > bounds.right ||
@@ -102,6 +110,7 @@ function boundedCollision(
             ) {
                 return [];
             }
+
             // The moving source can overlap the destination, especially on wide editor pins.
             return pointerWithin({
                 ...args,
@@ -110,6 +119,7 @@ function boundedCollision(
                 ),
             });
         }
+
         return closestCenter(args);
     };
 }
@@ -121,14 +131,18 @@ function axisCoordinates(orientation: SortableOrientation) {
         args: Parameters<typeof sortableKeyboardCoordinates>[1],
     ) => {
         const vertical = event.code === "ArrowUp" || event.code === "ArrowDown";
+
         const horizontal =
             event.code === "ArrowLeft" || event.code === "ArrowRight";
+
         if (orientation === "vertical" && !vertical) {
             return undefined;
         }
+
         if (orientation === "horizontal" && !horizontal) {
             return undefined;
         }
+
         return sortableKeyboardCoordinates(event, args);
     };
 }
@@ -167,15 +181,19 @@ function usePrefersReducedMotion() {
     const [reduced, setReduced] = React.useState(false);
     React.useEffect(() => {
         const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+
         const update = () => {
             setReduced(media.matches);
         };
+
         update();
         media.addEventListener("change", update);
+
         return () => {
             media.removeEventListener("change", update);
         };
     }, []);
+
     return reduced;
 }
 
@@ -193,20 +211,26 @@ function collectionAnnouncements(
             if (!over) {
                 return `${labelFor(active.id)} is no longer over a drop target.`;
             }
+
             const position = positionOf(over.id);
+
             if (!position) {
                 return undefined;
             }
+
             return `${labelFor(active.id)} is now in position ${position}.`;
         },
         onDragEnd({ active, over }) {
             if (!over || textId(over.id) === textId(active.id)) {
                 return `Cancelled reordering ${labelFor(active.id)}.`;
             }
+
             const position = positionOf(over.id);
+
             if (!position) {
                 return `Cancelled reordering ${labelFor(active.id)}.`;
             }
+
             return `Dropped ${labelFor(active.id)} in position ${position}.`;
         },
         onDragCancel({ active }) {
@@ -219,21 +243,26 @@ function collectionAnnouncements(
 function useDragSession() {
     const draggingRef = React.useRef(false);
     const suppressClickRef = React.useRef(false);
+
     const markActive = React.useCallback(() => {
         if (draggingRef.current) {
             return;
         }
+
         draggingRef.current = true;
         suppressClickRef.current = true;
         activeSortableDrags += 1;
     }, []);
+
     const markInactive = React.useCallback(() => {
         if (!draggingRef.current) {
             return;
         }
+
         draggingRef.current = false;
         activeSortableDrags -= 1;
     }, []);
+
     React.useEffect(() => markInactive, [markInactive]);
     React.useEffect(() => {
         // Register before sensors: dnd-kit stops click propagation but does not cancel native links.
@@ -243,15 +272,18 @@ function useDragSession() {
                 suppressClickRef.current = false;
             }
         };
+
         const resetForNextInteraction = () => {
             if (!draggingRef.current) {
                 suppressClickRef.current = false;
             }
         };
+
         document.addEventListener("click", suppressDragClick, true);
         document.addEventListener("mousedown", resetForNextInteraction, true);
         document.addEventListener("touchstart", resetForNextInteraction, true);
         document.addEventListener("keydown", resetForNextInteraction, true);
+
         return () => {
             document.removeEventListener("click", suppressDragClick, true);
             document.removeEventListener(
@@ -271,6 +303,7 @@ function useDragSession() {
             );
         };
     }, []);
+
     return { markActive, markInactive };
 }
 
@@ -280,17 +313,22 @@ function useSortableKeys(activeId: string | null) {
         if (!activeId) {
             return;
         }
+
         // Capture runs before the drawer's bubble listener, which is registered earlier.
         const consumeKeys = (event: KeyboardEvent) => {
             if (event.key === "Escape") {
                 event.preventDefault();
+
                 return;
             }
+
             if (shouldIgnoreKeyboardShortcut(event)) {
                 event.stopPropagation();
             }
         };
+
         document.addEventListener("keydown", consumeKeys, true);
+
         return () => {
             document.removeEventListener("keydown", consumeKeys, true);
         };
@@ -302,6 +340,7 @@ function useDragScope(itemIds: string[]) {
     const dragIdsRef = React.useRef<string[] | null>(null);
     React.useEffect(() => {
         const initialIds = dragIdsRef.current;
+
         if (
             initialIds &&
             (initialIds.length !== itemIds.length ||
@@ -311,6 +350,7 @@ function useDragScope(itemIds: string[]) {
             dragIdsRef.current = null;
         }
     }, [itemIds]);
+
     return dragIdsRef;
 }
 
@@ -330,8 +370,10 @@ export function SortableList(props: {
     const contextId = React.useId();
     const [activeId, setActiveId] = React.useState<string | null>(null);
     const [announcement, setAnnouncement] = React.useState("");
+
     const [libraryContainer, setLibraryContainer] =
         React.useState<HTMLElement | null>(null);
+
     const handles = React.useRef(new Map<string, HTMLElement>());
     const pendingFocusId = React.useRef<string | null>(null);
     const itemIdsRef = React.useRef(props.itemIds);
@@ -343,10 +385,12 @@ export function SortableList(props: {
     itemIdsRef.current = props.itemIds;
     onMoveRef.current = props.onMove;
     labelRef.current = props.getItemLabel;
+
     const coordinateGetter = React.useMemo(
         () => axisCoordinates(props.orientation),
         [props.orientation],
     );
+
     const sensors = useSensors(
         useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
         useSensor(TouchSensor, {
@@ -354,10 +398,12 @@ export function SortableList(props: {
         }),
         useSensor(KeyboardSensor, { coordinateGetter }),
     );
+
     const collisionDetection = React.useMemo(
         () => boundedCollision(props.listRef),
         [props.listRef],
     );
+
     const announcements = React.useMemo(
         () =>
             collectionAnnouncements(
@@ -365,9 +411,11 @@ export function SortableList(props: {
                 (id) => labelRef.current(textId(id)),
                 (id) => {
                     const index = itemIdsRef.current.indexOf(textId(id));
+
                     if (index < 0) {
                         return null;
                     }
+
                     return `${index + 1} of ${itemIdsRef.current.length}`;
                 },
             ),
@@ -378,9 +426,11 @@ export function SortableList(props: {
 
     React.useEffect(() => {
         const focusId = pendingFocusId.current;
+
         if (!focusId) {
             return;
         }
+
         pendingFocusId.current = null;
         handles.current.get(focusId)?.focus();
     });
@@ -390,16 +440,20 @@ export function SortableList(props: {
         setActiveId(null);
         pendingFocusId.current = focusId;
     };
+
     const handleDragEnd = (event: DragEndEvent) => {
         const active = textId(event.active.id);
         const over = event.over ? textId(event.over.id) : null;
         finishDrag(active);
+
         if (!over || active === over) {
             return;
         }
+
         const ids = itemIdsRef.current;
         const initialIds = dragIdsRef.current;
         dragIdsRef.current = null;
+
         if (
             !initialIds ||
             initialIds.length !== ids.length ||
@@ -409,18 +463,23 @@ export function SortableList(props: {
         ) {
             return;
         }
+
         onMoveRef.current({ activeId: active, overId: over });
     };
+
     const registerHandle = React.useCallback(
         (itemIdToRegister: string, element: HTMLElement | null) => {
             if (element) {
                 handles.current.set(itemIdToRegister, element);
+
                 return;
             }
+
             handles.current.delete(itemIdToRegister);
         },
         [],
     );
+
     const listContext = React.useMemo(
         () => ({
             orientation: props.orientation,
@@ -462,12 +521,15 @@ export function SortableList(props: {
                 }}
                 onDragOver={(event) => {
                     const overId = event.over ? textId(event.over.id) : null;
+
                     // Initial collision with the source must not immediately replace pickup guidance.
                     if (overId === lastOverIdRef.current) {
                         return;
                     }
+
                     lastOverIdRef.current = overId;
                     const message = announcements.onDragOver(event);
+
                     if (message) {
                         setAnnouncement(message);
                     }
@@ -479,6 +541,7 @@ export function SortableList(props: {
                             over: event.over,
                         }) ?? "",
                     );
+
                     if (activeId) {
                         finishDrag(activeId);
                     }
@@ -529,11 +592,13 @@ export function SortableItem(props: {
 }) {
     const list = React.useContext(SortableListContext);
     const reducedMotion = usePrefersReducedMotion();
+
     const sortable = useSortable({
         id: props.id,
         disabled: !list?.canReorder,
         transition: reducedMotion ? null : undefined,
     });
+
     const item: SortableItemState = {
         setNodeRef: (element) => {
             sortable.setNodeRef(element);
@@ -560,6 +625,7 @@ export function SortableItem(props: {
                 ) {
                     return;
                 }
+
                 sortable.listeners?.onKeyDown?.(event);
             },
         },
@@ -579,5 +645,6 @@ export function SortableItem(props: {
         isDragging: sortable.isDragging,
         isOver: sortable.isOver,
     };
+
     return props.children(item);
 }

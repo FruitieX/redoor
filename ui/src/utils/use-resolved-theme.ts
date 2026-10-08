@@ -9,6 +9,7 @@ export function useResolvedTheme(): "dark" | "light" {
                 attributes: true,
                 attributeFilter: ["class", "data-theme"],
             });
+
             return () => observer.disconnect();
         },
         () =>

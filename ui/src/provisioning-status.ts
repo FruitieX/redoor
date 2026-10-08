@@ -35,9 +35,11 @@ export function parseProvisioningStatusStore(
 export function readProvisioningStatusStore(): ProvisioningStatusStore {
     try {
         const raw = globalThis.localStorage.getItem(STORAGE_KEY);
+
         if (raw === null) {
             return {};
         }
+
         return parseProvisioningStatusStore(raw);
     } catch {
         return {};
@@ -70,10 +72,12 @@ export const rememberProvisioningStatusAtom = atom(
         if (update.messages.length === 0) {
             return;
         }
+
         const next = {
             ...get(provisioningStatusStoreAtom),
             [update.agentName]: update.messages,
         };
+
         set(provisioningStatusStoreAtom, next);
         writeProvisioningStatusStore(next);
     },

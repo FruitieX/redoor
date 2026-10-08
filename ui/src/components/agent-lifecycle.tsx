@@ -32,6 +32,7 @@ export function AgentLifecycle(props: {
     const state = startStates[props.agent.id];
     const now = useNow(100);
     const [isShutdownOpen, setIsShutdownOpen] = React.useState(false);
+
     const shouldAppearStarting =
         props.agent.status === "starting" || state?.starting === true;
 
@@ -59,6 +60,7 @@ export function AgentLifecycle(props: {
             }));
         },
     });
+
     const retryMutation = useMutation({
         mutationFn: () => props.agent.retryStart(),
         onMutate: () => {
@@ -87,6 +89,7 @@ export function AgentLifecycle(props: {
             }));
         },
     });
+
     const shutdownMutation = useMutation({
         mutationFn: () => props.agent.shutdown(),
         onSuccess: async () => {
@@ -94,11 +97,13 @@ export function AgentLifecycle(props: {
             setStartStates((states) => {
                 const next = { ...states };
                 delete next[props.agent.id];
+
                 return next;
             });
             await router.invalidate();
         },
     });
+
     const shutdownError = shutdownMutation.isError
         ? shutdownMutation.error instanceof Error
             ? shutdownMutation.error.message
@@ -225,6 +230,7 @@ export function ProvisioningStatusList(props: {
                         nowMs: props.nowMs,
                     }),
                 );
+
                 const sincePrevious = formatElapsedSecsMs(
                     provisioningStepElapsedMs({
                         messages: props.messages,
@@ -232,6 +238,7 @@ export function ProvisioningStatusList(props: {
                         nowMs: props.nowMs,
                     }),
                 );
+
                 return (
                     <li
                         key={`${step.at}-${index}`}

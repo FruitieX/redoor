@@ -41,9 +41,11 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
         event: React.ChangeEvent<HTMLInputElement>,
     ) => {
         const selectedFiles = Array.from(event.target.files ?? []);
+
         if (selectedFiles.length === 0) {
             return;
         }
+
         const result = enqueue({
             agentId: props.agent.id,
             destinationPath: props.directoryPath,
@@ -52,11 +54,15 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
                 relativePath: file.webkitRelativePath || file.name,
             })),
         });
+
         event.target.value = "";
+
         if (!result.ok) {
             setErrorMessage(result.message);
+
             return;
         }
+
         setErrorMessage(null);
     };
 
@@ -142,9 +148,11 @@ function CreateDirectoryAction(props: {
 }) {
     const navigate = useNavigate();
     const [directoryName, setDirectoryName] = React.useState("");
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const createDirectoryMutation = useMutation({
         mutationFn: (path: string) => props.agent.createDirectory(path),
         onSuccess: async (_, path) => {
@@ -156,9 +164,11 @@ function CreateDirectoryAction(props: {
     });
 
     const trimmedDirectoryName = directoryName.trim();
+
     const createDirectoryPath = trimmedDirectoryName
         ? joinBrowserPath(props.directoryPath, trimmedDirectoryName)
         : null;
+
     const isCreating = createDirectoryMutation.isPending;
 
     const resetDialog = () => {
@@ -181,6 +191,7 @@ function CreateDirectoryAction(props: {
 
         if (!createDirectoryPath) {
             setValidationError("Directory name is required");
+
             return;
         }
 
@@ -261,9 +272,11 @@ function CreateFileAction(props: {
 }) {
     const navigate = useNavigate();
     const [fileName, setFileName] = React.useState("");
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const createFileMutation = useMutation({
         mutationFn: (file: { path: string; name: string }) =>
             props.agent.upload(
@@ -281,9 +294,11 @@ function CreateFileAction(props: {
     });
 
     const trimmedFileName = fileName.trim();
+
     const createFilePath = trimmedFileName
         ? joinBrowserPath(props.directoryPath, trimmedFileName)
         : null;
+
     const isCreating = createFileMutation.isPending;
 
     const resetDialog = () => {
@@ -304,10 +319,13 @@ function CreateFileAction(props: {
 
         if (!createFilePath) {
             setValidationError("File name is required");
+
             return;
         }
+
         if (trimmedFileName.includes("/")) {
             setValidationError("File name cannot contain a slash");
+
             return;
         }
 
@@ -396,6 +414,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
             if (event.key === "n") {
                 event.preventDefault();
                 setDialogType("file");
+
                 return;
             }
 
@@ -406,6 +425,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
         };
 
         window.addEventListener("keydown", handleShortcut);
+
         return () => window.removeEventListener("keydown", handleShortcut);
     }, [dialogType]);
 
@@ -474,8 +494,10 @@ export function DirectoryFilesActions(props: {
 }) {
     const refreshBrowser = useRefreshBrowserPath();
     const [isReloading, setIsReloading] = React.useState(false);
+
     const directoryName =
         props.directoryPath.split("/").filter(Boolean).pop() ?? "/";
+
     const archiveName = `${directoryName === "/" ? "archive" : directoryName}.tar.gz`;
 
     /** Shares the same ls reload as returning to the tab. */
@@ -483,7 +505,9 @@ export function DirectoryFilesActions(props: {
         if (isReloading) {
             return;
         }
+
         setIsReloading(true);
+
         try {
             await refreshBrowser();
         } finally {

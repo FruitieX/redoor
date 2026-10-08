@@ -42,6 +42,7 @@ export function Dialog(props: DialogProps) {
     const dialogRef = React.useRef<HTMLDialogElement>(null);
     const panelRef = React.useRef<HTMLDivElement>(null);
     const isAnchored = props.anchorRef != null || props.anchorPoint != null;
+
     const anchorPosition = useDialogBehavior({
         isOpen: props.isOpen,
         isBusy: props.isBusy,
@@ -164,6 +165,7 @@ export function Dialog(props: DialogProps) {
             className={`m-auto touch-pan-y overflow-y-auto overscroll-y-contain border-0 bg-transparent p-0 text-slate-200 backdrop:bg-black/60 ${props.size === "search" ? "h-dvh max-h-dvh w-full max-w-none sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-6xl" : `max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] ${props.size === "wide" ? "max-w-4xl" : "max-w-md"}`}`}
             onCancel={(event) => {
                 event.preventDefault();
+
                 if (!props.isBusy) {
                     props.onClose();
                 }
@@ -213,12 +215,14 @@ function useDialogBehavior(props: {
         };
 
         document.addEventListener("keydown", handleKeyDown, true);
+
         return () =>
             document.removeEventListener("keydown", handleKeyDown, true);
     }, [props.isAnchored, props.isBusy, props.isOpen, props.onClose]);
 
     React.useEffect(() => {
         const dialog = props.dialogRef.current;
+
         if (!props.isOpen || props.isAnchored || !dialog) {
             return;
         }
@@ -236,6 +240,7 @@ function useDialogBehavior(props: {
                 "input:not([type='hidden']):not([disabled]), textarea:not([disabled]), select:not([disabled])",
             ) ??
             (props.initialFocus === "panel" ? props.panelRef.current : null);
+
         autofocusTarget?.focus();
 
         return () => {
@@ -260,14 +265,17 @@ function useDialogBehavior(props: {
             const frame = window.requestAnimationFrame(() => {
                 props.panelRef.current?.focus();
             });
+
             return () => window.cancelAnimationFrame(frame);
         }
+
         return undefined;
     }, [props.initialFocus, props.isAnchored, props.isOpen, props.panelRef]);
 
     React.useLayoutEffect(() => {
         if (!props.isOpen || (!props.anchorRef && !props.anchorPoint)) {
             setAnchorPosition(null);
+
             return;
         }
 
@@ -278,6 +286,7 @@ function useDialogBehavior(props: {
                 point: props.anchorPoint,
                 anchor: props.anchorRef?.current,
             });
+
             if (nextPosition) {
                 setAnchorPosition(nextPosition);
             }
@@ -313,28 +322,35 @@ function getAnchoredDialogPosition(args: {
     const panelHeight = args.panel?.offsetHeight ?? 0;
     const gap = 8;
     const viewportPadding = 8;
+
     if (!args.point && !args.anchor) {
         return null;
     }
 
     const anchorRect = args.anchor?.getBoundingClientRect();
+
     const belowEdge = args.point
         ? args.point.y
         : (anchorRect?.bottom ?? 0) + gap;
+
     const aboveEdge = args.point ? args.point.y : (anchorRect?.top ?? 0) - gap;
     const availableBelow = window.innerHeight - viewportPadding - belowEdge;
     const availableAbove = aboveEdge - viewportPadding;
+
     let top =
         availableAbove > availableBelow ? aboveEdge - panelHeight : belowEdge;
+
     const leftEdge = args.point ? args.point.x : (anchorRect?.left ?? 0);
     const rightEdge = args.point ? args.point.x : (anchorRect?.right ?? 0);
     const availableLeft = leftEdge - viewportPadding;
     const availableRight = window.innerWidth - viewportPadding - rightEdge;
+
     let left =
         availableRight > availableLeft ? leftEdge : rightEdge - panelWidth;
 
     left = Math.min(left, window.innerWidth - panelWidth - viewportPadding);
     left = Math.max(viewportPadding, left);
     top = Math.max(viewportPadding, top);
+
     return { top, left };
 }

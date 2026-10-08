@@ -8,15 +8,19 @@ export const Route = createFileRoute("/agents/$agentId/logs")({
     loader: async ({ parentMatchPromise, context }) => {
         const agentMatch = await parentMatchPromise;
         const loaderData = agentMatch.loaderData;
+
         if (!loaderData) {
             throw new Error("Device loader data is unavailable");
         }
+
         const agent = loaderData.agent;
+
         if (agent.status === "connected") {
             await context.queryClient.ensureQueryData(
                 agentLoggingLevelQueryOptions(agent),
             );
         }
+
         return { agent };
     },
     component: AgentLogsPage,
@@ -25,6 +29,7 @@ export const Route = createFileRoute("/agents/$agentId/logs")({
 /** Avoids opening a retrying live socket when retained inventory says the agent is disconnected. */
 function AgentLogsPage() {
     const { agent } = Route.useLoaderData();
+
     if (agent.status !== "connected") {
         return (
             <div className="flex h-full items-center justify-center p-8">

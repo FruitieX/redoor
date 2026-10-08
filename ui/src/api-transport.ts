@@ -32,9 +32,11 @@ export function withAuthentication(
 ): RequestInit {
     const headers = new Headers(options?.headers);
     const sessionCookie = context.getSessionCookie?.();
+
     if (sessionCookie) {
         headers.set("Cookie", sessionCookie);
     }
+
     return { ...options, credentials: "same-origin", headers };
 }
 
@@ -46,13 +48,17 @@ export async function requireSuccessfulResponse(
     if (response.ok) {
         return;
     }
+
     if (response.status === 401) {
         context.onUnauthorized?.();
     }
+
     const text = await response.text();
+
     if (text) {
         try {
             const error = errorResponseSchema.parse(JSON.parse(text));
+
             if (error.error.length > 0) {
                 throw new ApiError(response.status, error.error, text);
             }
@@ -61,9 +67,12 @@ export async function requireSuccessfulResponse(
                 throw error;
             }
         }
+
         const trimmed = text.trim();
+
         const summary =
             trimmed.length > 280 ? `${trimmed.slice(0, 277)}...` : trimmed;
+
         throw new ApiError(
             response.status,
             summary ||
@@ -71,6 +80,7 @@ export async function requireSuccessfulResponse(
             text,
         );
     }
+
     throw new ApiError(
         response.status,
         `Request failed: ${response.status} ${response.statusText}`,
@@ -85,5 +95,6 @@ export async function apiRequest<T>(
 ): Promise<T> {
     const response = await fetch(url, withAuthentication(options, context));
     await requireSuccessfulResponse(response, context);
+
     return response.json();
 }

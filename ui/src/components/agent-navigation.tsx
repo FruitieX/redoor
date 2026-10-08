@@ -61,11 +61,13 @@ function AgentMenu(props: {
     const listRef = React.useRef<HTMLUListElement>(null);
     const inventoryIds = props.agents.map((agent) => agent.id);
     const agentsById = new Map(props.agents.map((agent) => [agent.id, agent]));
+
     const orderedAgents = resolveDeviceOrder(
         userState.deviceOrder,
         inventoryIds,
     ).flatMap((id) => {
         const agent = agentsById.get(id);
+
         return agent ? [agent] : [];
     });
 
@@ -103,9 +105,11 @@ function AgentMenu(props: {
                                 inventoryIds,
                                 move,
                             );
+
                             if (deviceOrder === current.deviceOrder) {
                                 return current;
                             }
+
                             return { ...current, deviceOrder };
                         });
                     }}
@@ -141,9 +145,11 @@ function AgentMenu(props: {
                                             agent.id,
                                             move,
                                         );
+
                                         if (bookmarks === current.bookmarks) {
                                             return current;
                                         }
+
                                         return { ...current, bookmarks };
                                     });
                                 }}
@@ -178,11 +184,14 @@ function DeviceBlock(props: {
     onRemoveBookmark: (bookmark: BookmarkEntry) => void;
 }) {
     const agentPrefix = `/agents/${encodeURIComponent(props.agent.id)}`;
+
     const isActive =
         props.pathname === agentPrefix ||
         props.pathname.startsWith(`${agentPrefix}/`);
+
     const canBrowse =
         props.agent.status === "connected" && props.agent.cwd !== null;
+
     const target = canBrowse ? props.rememberedTarget : agentPrefix;
 
     return (
@@ -269,6 +278,7 @@ function AgentBookmarks(props: {
     onRemove: (bookmark: BookmarkEntry) => void;
 }) {
     const listRef = React.useRef<HTMLUListElement>(null);
+
     return (
         <SortableList
             itemIds={props.bookmarks.map((bookmark) =>
@@ -313,8 +323,10 @@ function BookmarkRow(props: {
     onRemove: (bookmark: BookmarkEntry) => void;
 }) {
     const href = props.agent.getBrowserUrl(props.bookmark.path);
+
     const isActive =
         props.pathname === href || props.pathname.startsWith(`${href}/`);
+
     return (
         <SortableItem id={getBookmarkKey(props.bookmark)}>
             {(item) => (

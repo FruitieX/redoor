@@ -46,24 +46,43 @@ export const HIGHLIGHT_LANGUAGE_NAMES = {
 } satisfies Record<SupportedSyntaxLanguage | "plaintext", string>;
 
 hljs.registerLanguage("cpp", cpp);
+
 hljs.registerLanguage("csharp", csharp);
+
 hljs.registerLanguage("css", css);
+
 hljs.registerLanguage("go", go);
+
 hljs.registerLanguage("java", java);
+
 hljs.registerLanguage("javascript", javascript);
+
 hljs.registerLanguage("json", json);
+
 hljs.registerLanguage("lua", lua);
+
 hljs.registerLanguage("markdown", markdown);
+
 hljs.registerLanguage("perl", perl);
+
 hljs.registerLanguage("plaintext", plaintext);
+
 hljs.registerLanguage("properties", properties);
+
 hljs.registerLanguage("python", python);
+
 hljs.registerLanguage("ruby", ruby);
+
 hljs.registerLanguage("rust", rust);
+
 hljs.registerLanguage("shell", shell);
+
 hljs.registerLanguage("toml", toml);
+
 hljs.registerLanguage("typescript", typescript);
+
 hljs.registerLanguage("xml", xml);
+
 hljs.registerLanguage("yaml", yaml);
 
 export const syntaxHighlighter = hljs;

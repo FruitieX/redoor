@@ -151,20 +151,25 @@ export function SelectedFilesTransferTrigger(props: {
     children: (trigger: SelectedFilesTransferTriggerApi) => React.ReactNode;
 }) {
     const [isOpen, setIsOpen] = React.useState(false);
+
     const [existingMode, setExistingMode] =
         React.useState<CopyExistingMode>("error");
+
     const unselectFile = useSetAtom(unselectFileAtom);
     const copy = props.operation === "copy";
     const labels = copy ? transferTriggerCopy : transferTriggerMove;
     const destinationFileNames = new Set(props.destinationFileNames);
+
     const conflictingFiles = props.selectedFiles.filter((file) => {
         const destinationPath = joinBrowserPath(
             props.directoryPath,
             file.fileName,
         );
+
         const isSamePath =
             file.agentId === props.destinationAgent.id &&
             file.path === destinationPath;
+
         return !isSamePath && destinationFileNames.has(file.fileName);
     });
 

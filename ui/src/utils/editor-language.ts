@@ -143,6 +143,7 @@ export function syntaxLanguageFromFileName(
     }
 
     const lastDot = lowerName.lastIndexOf(".");
+
     if (lastDot <= 0) {
         return languageFromHashBang(content);
     }
@@ -231,21 +232,27 @@ function languageFromHashBang(
     content: string,
 ): SupportedSyntaxLanguage | undefined {
     const firstLineEnd = content.indexOf("\n");
+
     const firstLine = content.slice(
         0,
         firstLineEnd === -1 ? content.length : firstLineEnd,
     );
+
     const match = /^#!\s*(.+)$/.exec(firstLine);
+
     if (match === null) {
         return undefined;
     }
 
     const command = match[1];
+
     if (command === undefined) {
         return undefined;
     }
+
     const parts = command.trim().split(/\s+/);
     let interpreter = parts[0]?.split("/").pop()?.toLowerCase();
+
     if (interpreter === "env") {
         interpreter = parts
             .slice(1)
@@ -258,26 +265,34 @@ function languageFromHashBang(
     if (interpreter === undefined) {
         return undefined;
     }
+
     if (["sh", "bash", "zsh", "ksh", "dash", "ash"].includes(interpreter)) {
         return "shell";
     }
+
     if (interpreter.startsWith("python")) {
         return "python";
     }
+
     if (interpreter === "ruby") {
         return "ruby";
     }
+
     if (interpreter === "perl") {
         return "perl";
     }
+
     if (interpreter === "lua") {
         return "lua";
     }
+
     if (["ts-node", "tsx"].includes(interpreter)) {
         return "typescript";
     }
+
     if (["node", "nodejs", "deno", "bun"].includes(interpreter)) {
         return "javascript";
     }
+
     return undefined;
 }
