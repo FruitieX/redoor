@@ -1,3 +1,5 @@
+//! REST endpoint for bounded content search below an agent directory.
+
 use crate::http::{
     agent_client::ContentGrep,
     agent_helpers::{AgentFilePath, absolute_path_from_url},

@@ -1,3 +1,5 @@
+//! REST endpoints that read and change server and agent log levels at runtime.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

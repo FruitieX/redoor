@@ -1,3 +1,6 @@
+//! Agent endpoint for the persistent payload-only transfer socket that carries binary
+//! stream frames apart from control traffic.
+
 use crate::actors::router::{
     ConnectionStreams, RegisterTransferConnectionRequest, RouterHandle, RouterMsg,
 };

@@ -1,3 +1,5 @@
+//! MCP protocol revision constants and shared JSON-RPC message types.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 

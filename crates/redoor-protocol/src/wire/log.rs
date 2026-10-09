@@ -1,3 +1,5 @@
+//! Structured log records and the relay protocol agents use to stream their logs to the server.
+
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use ts_rs::TS;

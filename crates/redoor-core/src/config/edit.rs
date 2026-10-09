@@ -1,3 +1,6 @@
+//! Edits `[[agents]]` entries in place with `toml_edit` so operator comments and formatting
+//! survive programmatic changes.
+
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;

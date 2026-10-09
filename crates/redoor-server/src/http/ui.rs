@@ -1,3 +1,5 @@
+//! Serves the embedded browser UI with single-page-app fallback.
+
 use axum_embed::{FallbackBehavior, ServeEmbed};
 use rust_embed::RustEmbed;
 

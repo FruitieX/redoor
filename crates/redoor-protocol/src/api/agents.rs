@@ -254,6 +254,7 @@ pub struct ShutdownAgentResponse {
     pub agent: AgentInfoResponse,
 }
 
+/// Round-trips a message through an agent to verify command routing end to end.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct EchoRequest {
@@ -262,6 +263,7 @@ pub struct EchoRequest {
     pub random_sleep: bool,
 }
 
+/// Returns the echoed message so callers can confirm the agent answered their request.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct EchoResponse {

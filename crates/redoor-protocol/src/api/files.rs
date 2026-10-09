@@ -45,6 +45,7 @@ impl CreationOwnershipOptions {
     }
 }
 
+/// File facts the UI needs before choosing how to open a path (download, edit or preview).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MetadataResponse {
@@ -131,6 +132,7 @@ pub struct LsFileResponse {
     pub permissions: u32,
 }
 
+/// Reports the written path and byte count so clients can confirm the upload landed intact.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RawUploadResponse {
@@ -148,12 +150,14 @@ pub struct FileEditResponse {
     pub bytes_written: u64,
 }
 
+/// Echoes the deleted path so clients can update listings without re-deriving it.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RawDeleteResponse {
     pub path: String,
 }
 
+/// Echoes the created directory path so clients can navigate to it directly.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateDirectoryResponse {

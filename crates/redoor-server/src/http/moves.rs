@@ -1,3 +1,5 @@
+//! REST endpoint that starts an asynchronous move between agent filesystem endpoints.
+
 use axum::{Json, extract::State as AxumState};
 use redoor_protocol::api::transfers::{MoveFileRequest, MoveFileResponse};
 

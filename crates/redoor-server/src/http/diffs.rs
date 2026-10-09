@@ -1,3 +1,5 @@
+//! REST endpoint that diffs two editable files, possibly on different agents.
+
 use crate::actors::router::OutputStreamTracking;
 use axum::{Json, extract::State as AxumState};
 use redoor_protocol::{

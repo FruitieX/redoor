@@ -1,3 +1,5 @@
+//! Streamed raw file downloads (with single-range resume) and one-time download tokens.
+
 use axum::{
     Json,
     body::Body,

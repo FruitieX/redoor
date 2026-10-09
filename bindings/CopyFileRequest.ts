@@ -2,6 +2,9 @@
 import type { CopyEndpoint } from "./CopyEndpoint";
 import type { CopyExistingMode } from "./CopyExistingMode";
 
+/**
+ * Starts one asynchronous copy between agent filesystem endpoints.
+ */
 export type CopyFileRequest = { source: CopyEndpoint, dest: CopyEndpoint, 
 /**
  * What to do when `dest.path` already exists. Omitted requests keep the historical error behavior.

@@ -1,3 +1,5 @@
+//! REST endpoint that installs a selected release binary on an agent and restarts it.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

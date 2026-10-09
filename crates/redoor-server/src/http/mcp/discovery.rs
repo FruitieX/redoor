@@ -1,3 +1,5 @@
+//! MCP server capability discovery responses.
+
 use serde_json::Value;
 
 use super::schema::{PROTOCOL_VERSION, server_metadata};

@@ -1,3 +1,5 @@
+//! Typed router failures with their HTTP status, so handlers never map errors from text.
+
 use axum::http::StatusCode;
 use thiserror::Error;
 

@@ -1,3 +1,6 @@
+//! REST endpoints for agent inventory, details and process lifecycle (start, shutdown,
+//! restart), plus the per-agent filesystem routes in its submodules.
+
 use crate::actors;
 use axum::{
     Json,

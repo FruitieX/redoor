@@ -1,3 +1,6 @@
+//! Git status, context and diff commands, bounded so large repositories cannot exhaust
+//! agent memory or the control frame size.
+
 use std::{
     collections::BTreeMap,
     io::{Read, Write},

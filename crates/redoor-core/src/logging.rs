@@ -1,3 +1,6 @@
+//! Process-wide structured logging: the `log!` sink, stdout/file output and the live
+//! replay feed that browsers subscribe to.
+
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -22,8 +25,12 @@ use tokio::{
 };
 use ts_rs::TS;
 
+/// Live subscriber backlog; a slower subscriber lags and skips entries instead of blocking logging.
 const LIVE_LOG_CAPACITY: usize = 1_024;
+/// Bounds records queued for the output task so a stalled stdout or file cannot grow memory;
+/// overflow is counted as dropped instead of blocking the caller.
 const LOG_RECORD_CAPACITY: usize = 2_048;
+/// Appended to truncated diagnostics so readers know content was cut, not missing.
 const TRUNCATION_NOTICE: &str = "
 [diagnostic truncated]";
 

@@ -14,9 +14,15 @@ use redoor_protocol::{
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
+/// Stays under the server's control-command deadline so a slow recursive delete reports a
+/// timeout instead of the caller giving up first.
 const DIRECT_DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+/// Retries random quarantine names a few times so a collision cannot loop forever.
 const MOVE_SOURCE_QUARANTINE_ATTEMPTS: usize = 16;
+/// Limits concurrent background removal of quarantined move sources so cleanup cannot
+/// saturate disk IO on constrained agents.
 const MAX_MOVE_SOURCE_CLEANUPS: usize = 2;
+/// Process-wide gate enforcing `MAX_MOVE_SOURCE_CLEANUPS` across all move commands.
 static MOVE_SOURCE_CLEANUP_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_MOVE_SOURCE_CLEANUPS);
 

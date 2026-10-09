@@ -31,6 +31,8 @@ pub const DETACHED_ENV: &str = "REDOOR_DETACHED";
 
 /// Long-lived process that owns a PID file and optional daemon mode.
 ///
+/// Lives in core (not the binary) because the server's managed-agent launcher and the
+/// process-control commands must agree on the PID and log file names of each role.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessSlot {
     /// Standalone `redoor agent` process.

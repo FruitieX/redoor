@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub struct AgentId(pub String);
 
 impl AgentId {
+    /// Accepts both borrowed and owned strings so call sites need no explicit conversion.
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -48,6 +49,7 @@ impl fmt::Display for AgentId {
 pub struct SocketId(pub Uuid);
 
 impl SocketId {
+    /// Uses a random v4 UUID so concurrent sessions never collide without coordination.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -82,22 +84,28 @@ impl fmt::Display for SocketId {
 pub struct RequestId(pub u64);
 
 impl RequestId {
+    /// Wraps a raw counter value so request ids cannot be mixed up with other integers.
     pub fn new(value: u64) -> Self {
         Self(value)
     }
 
+    /// Advances the router's request counter to the next unused correlation id.
     pub fn next(self) -> Self {
         Self(self.0 + 1)
     }
 
+    /// Reuses the request id as the public transfer id for flows whose progress entry is
+    /// keyed by the request that started them, avoiding a second id allocation.
     pub fn as_transfer_id(self) -> TransferId {
         TransferId(self.0)
     }
 
+    /// Encodes the id for the binary stream frame header, which is little-endian.
     pub fn to_le_bytes(self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
 
+    /// Decodes the id from a binary stream frame header.
     pub fn from_le_bytes(bytes: [u8; 8]) -> Self {
         Self(u64::from_le_bytes(bytes))
     }
@@ -120,10 +128,12 @@ impl fmt::Display for RequestId {
 pub struct TransferId(pub u64);
 
 impl TransferId {
+    /// Wraps a raw counter value so transfer ids cannot be mixed up with request ids.
     pub fn new(value: u64) -> Self {
         Self(value)
     }
 
+    /// Advances the public transfer counter to the next unused id.
     pub fn next(self) -> Self {
         Self(self.0 + 1)
     }
@@ -145,26 +155,33 @@ impl fmt::Display for TransferId {
 pub struct ChunkIndex(pub u64);
 
 impl ChunkIndex {
+    /// Wraps a raw index so chunk positions cannot be mixed up with other counters.
     pub fn new(value: u64) -> Self {
         Self(value)
     }
 
+    /// Returns the index the following frame of the same stream must carry.
     pub fn next_index(self) -> Self {
         Self(self.0 + 1)
     }
 
+    /// Like `next_index` but never overflows, for long-lived streams where a panic would
+    /// tear down the transfer instead of reporting an ordering error.
     pub fn saturating_next_index(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
+    /// One-based position for human-readable error messages and logs.
     pub fn display_number(self) -> u64 {
         self.0 + 1
     }
 
+    /// Encodes the index for the binary stream frame header, which is little-endian.
     pub fn to_le_bytes(self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
 
+    /// Decodes the index from a binary stream frame header.
     pub fn from_le_bytes(bytes: [u8; 8]) -> Self {
         Self(u64::from_le_bytes(bytes))
     }
@@ -177,6 +194,7 @@ impl fmt::Display for ChunkIndex {
 }
 
 impl UnixTimestampSeconds {
+    /// Wraps raw epoch seconds so they cannot be confused with millisecond timestamps.
     pub fn new(value: i64) -> Self {
         Self(value)
     }

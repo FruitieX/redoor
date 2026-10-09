@@ -18,6 +18,7 @@ pub mod user_state;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Uniform JSON error body so clients can show failures without parsing per-route shapes.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ErrorResponse {

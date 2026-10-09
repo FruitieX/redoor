@@ -1,3 +1,5 @@
+//! REST endpoint that starts an asynchronous copy between agents.
+
 use axum::{Json, extract::State as AxumState};
 use redoor_protocol::api::transfers::{CopyFileRequest, CopyFileResponse};
 

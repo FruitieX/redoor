@@ -1,3 +1,5 @@
+//! REST endpoint that cancels one public transfer.
+
 use crate::actors::router::{CancelPublicTransferError, RouterMsg};
 use axum::{
     Json,

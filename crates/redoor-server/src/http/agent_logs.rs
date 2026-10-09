@@ -1,3 +1,6 @@
+//! Browser and agent websocket endpoints for live agent log streaming over a dedicated
+//! socket pair.
+
 use super::{state::ServerState, websocket_security::is_same_origin};
 use crate::{
     actors::router::{OpenAgentLogStreamRequest, RouterMsg},
@@ -24,8 +27,11 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
+/// Caps websocket frames on log sockets so one oversized event cannot force a large allocation.
 const MAX_LOG_MESSAGE_SIZE: usize = 256 * 1024;
+/// How long a browser waits for the agent to open its socket before setup is abandoned.
 const LOG_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Limits how long an unauthenticated agent socket can sit before sending its first frame.
 const LOG_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Distinguishes a paired socket from setup timeout and browser-owned cancellation.

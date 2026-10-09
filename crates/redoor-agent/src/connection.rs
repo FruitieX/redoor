@@ -1,3 +1,6 @@
+//! Server address and TLS settings shared by the control socket and every dedicated
+//! data-plane socket the agent opens.
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};

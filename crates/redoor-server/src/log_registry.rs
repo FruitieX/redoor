@@ -1,3 +1,6 @@
+//! Rendezvous for agent log streams: pairs a waiting browser socket with the dedicated
+//! socket the agent opens in response, with bounded pending setups.
+
 use axum::extract::ws::WebSocket;
 use redoor_protocol::{ids::AgentId, wire::log::LogStreamId};
 use std::{
@@ -7,7 +10,9 @@ use std::{
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
 
+/// Caps unpaired log setups server-wide so abandoned browser requests cannot pile up.
 const MAX_PENDING_LOG_STREAMS: usize = 64;
+/// Caps unpaired log setups per agent so one agent cannot use the whole global budget.
 const MAX_PENDING_LOG_STREAMS_PER_AGENT: usize = 8;
 
 /// Holds one browser-owned socket handoff until its requested agent authenticates.

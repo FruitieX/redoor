@@ -1,3 +1,5 @@
+//! REST endpoint that measures recursive directory size on an agent.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

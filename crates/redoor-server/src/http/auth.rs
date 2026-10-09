@@ -1,3 +1,5 @@
+//! Browser login, cookie sessions and login rate limiting.
+
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -31,7 +33,9 @@ use uuid::Uuid;
 
 use super::state::ServerState;
 
+/// Cookie carrying the opaque browser session id.
 const SESSION_COOKIE_NAME: &str = "redoor_session";
+/// One week, so routine use does not require frequent re-login while stolen cookies expire.
 const SESSION_LIFETIME: Duration = Duration::from_secs(60 * 60 * 24 * 7);
 /// Caps online brute force against a single source address.
 const LOGIN_MAX_FAILURES_PER_IP: u32 = 10;
@@ -39,6 +43,7 @@ const LOGIN_MAX_FAILURES_PER_IP: u32 = 10;
 const LOGIN_MAX_FAILURES_GLOBAL: u32 = 60;
 /// Bounds retained source addresses without evicting an active per-IP lockout.
 const LOGIN_MAX_TRACKED_IPS: usize = 1_024;
+/// Fixed window over which failed logins are counted before the counters reset.
 const LOGIN_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 /// How browser login passwords are verified after the username check succeeds.

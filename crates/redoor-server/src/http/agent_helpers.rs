@@ -1,3 +1,5 @@
+//! Path extraction and validation shared by agent-scoped REST handlers.
+
 use serde::Deserialize;
 
 use super::error::ApiError;

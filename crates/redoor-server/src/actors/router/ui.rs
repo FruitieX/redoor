@@ -1,3 +1,5 @@
+//! Throttled UI invalidation broadcasts so bursts of changes cause one browser refetch.
+
 use super::RouterHandle;
 use super::messages::{RegisterUiSubscriberRequest, RouterMsg};
 use super::state::RouterState;

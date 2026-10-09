@@ -16,6 +16,7 @@ use redoor_core::websocket::WebSocketTimeouts;
 use redoor_core::{app_name, config, process::ProcessSlot};
 use service::ServiceRole;
 
+// Top-level CLI. Plain comment on purpose: a doc comment would become clap help text.
 #[derive(Parser)]
 #[command(
     name = redoor_core::identity::BINARY_NAME,
@@ -65,6 +66,7 @@ struct Cli {
     command: Commands,
 }
 
+// Process roles; plain comment because clap turns doc comments into help text.
 #[derive(Subcommand)]
 enum Commands {
     /// Run the server or use its role-specific utilities.

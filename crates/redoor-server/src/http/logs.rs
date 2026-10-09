@@ -1,3 +1,5 @@
+//! Browser websocket that replays and live-streams the server's own log.
+
 use axum::{
     extract::{
         State,

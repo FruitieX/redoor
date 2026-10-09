@@ -1,3 +1,5 @@
+//! REST endpoints for git context, status and diffs in agent repositories.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

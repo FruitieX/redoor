@@ -1,3 +1,6 @@
+//! Bounded fuzzy path search over a directory tree, honoring gitignore and hidden-file
+//! settings.
+
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,

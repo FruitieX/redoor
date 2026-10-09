@@ -1,3 +1,6 @@
+//! Single-use download tokens that let plain browser links fetch a file without session
+//! cookies, while tracking delivered byte ranges so interrupted downloads can resume.
+
 use redoor_protocol::ids::AgentId;
 use std::{
     collections::HashMap,

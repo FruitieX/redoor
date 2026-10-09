@@ -1,3 +1,5 @@
+//! Browser and agent websocket endpoints that pair into one interactive terminal tunnel.
+
 use super::{
     agent_helpers::require_absolute_path, state::ServerState, websocket_security::is_same_origin,
 };
@@ -30,10 +32,16 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+/// Caps websocket frames on terminal sockets so one message cannot force a large allocation.
 const MAX_TERMINAL_MESSAGE_SIZE: usize = 1024 * 1024;
+/// How long a browser waits for the agent to open its terminal socket before setup is abandoned.
 const TERMINAL_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Limits how long an unauthenticated agent socket can sit before sending its first frame.
 const TERMINAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Frames of browser input kept while the agent connects, so early keystrokes are not lost
+/// but cannot accumulate without bound.
 const MAX_PRE_READY_FRAMES: usize = 32;
+/// Byte cap for the same pre-ready input buffer.
 const MAX_PRE_READY_BYTES: usize = 64 * 1024;
 
 /// Carries the paired socket and bounded browser input received during agent startup.

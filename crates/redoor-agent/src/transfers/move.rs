@@ -1,3 +1,5 @@
+//! Same-agent moves: atomic rename when possible, otherwise copy then verified source removal.
+
 use super::copy::{
     CopyContext, LocalCopyError, ensure_active, validate_local_copy_destination,
     validate_local_copy_parent,

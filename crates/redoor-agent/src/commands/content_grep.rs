@@ -1,3 +1,5 @@
+//! Bounded content search (grep) over a directory tree for the file browser.
+
 use super::{
     file_search::{TraversedDirectory, directory_identity, is_ignored, load_gitignore},
     metadata::has_common_binary_magic,

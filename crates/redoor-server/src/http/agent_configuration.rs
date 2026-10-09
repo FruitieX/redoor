@@ -1,3 +1,6 @@
+//! REST endpoints that create, edit and remove server-managed local and SSH agents in the
+//! TOML config.
+
 use crate::actors::router::{
     RegisterManagedAgentRequest, RouterMsg, UnregisterManagedAgentRequest,
 };

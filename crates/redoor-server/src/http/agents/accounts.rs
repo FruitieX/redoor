@@ -1,3 +1,5 @@
+//! REST endpoint listing an agent host's users and groups for ownership pickers.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

@@ -1,3 +1,6 @@
+//! Walks a directory once to size both its content and its tar archive, so downloads can
+//! report an accurate total before streaming starts.
+
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;

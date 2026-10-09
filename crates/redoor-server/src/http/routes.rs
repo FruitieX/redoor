@@ -1,3 +1,5 @@
+//! Axum router assembly: which routes are public and which require authentication.
+
 use axum::{
     Router, middleware,
     routing::{get, post, put},

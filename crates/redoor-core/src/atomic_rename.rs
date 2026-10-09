@@ -1,3 +1,6 @@
+//! No-replace and exchange renames that publish paths atomically without clobbering
+//! entries created concurrently by other processes.
+
 use crate::log;
 use redoor_protocol::wire::log::Level;
 use std::path::{Path, PathBuf};
@@ -213,9 +216,12 @@ pub async fn exchange_existing_paths(
     .await
 }
 
+/// Selects the platform rename flag so both public operations share one blocking implementation.
 #[derive(Clone, Copy)]
 enum RenameMode {
+    /// Fails instead of overwriting an existing destination.
     NoReplace,
+    /// Atomically swaps source and destination so neither name is ever missing.
     Exchange,
 }
 

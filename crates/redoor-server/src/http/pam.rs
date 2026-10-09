@@ -65,7 +65,9 @@ type PamEnd = unsafe extern "C" fn(pamh: *mut PamHandle, pam_status: c_int) -> c
 /// ABI signature for obtaining a PAM-owned description of a status code.
 type PamStrerror = unsafe extern "C" fn(pamh: *mut PamHandle, errnum: c_int) -> *const c_char;
 
+/// PAM status for success; mirrored here because PAM is loaded dynamically without headers.
 const PAM_SUCCESS: c_int = 0;
+/// PAM status the conversation callback returns to reject authentication on bad input.
 const PAM_AUTH_ERR: c_int = 7;
 /// Password prompt; PAM frees our strdup'd response after authentication.
 const PAM_PROMPT_ECHO_OFF: c_int = 1;

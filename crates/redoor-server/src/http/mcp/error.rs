@@ -1,3 +1,5 @@
+//! JSON-RPC error envelopes paired with the HTTP status each MCP failure requires.
+
 use axum::{
     Json,
     http::StatusCode,

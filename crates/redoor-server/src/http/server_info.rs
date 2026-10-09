@@ -1,3 +1,5 @@
+//! REST endpoint that returns server identity and UI bootstrap settings.
+
 use axum::{Json, extract::State as AxumState, http::StatusCode, response::IntoResponse};
 use redoor_protocol::api::server::ServerInfoResponse;
 

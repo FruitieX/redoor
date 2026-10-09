@@ -1,3 +1,5 @@
+//! Destination conflict policy (error, override, merge) shared by uploads and copies.
+
 use crate::atomic_rename::{AtomicRenameOutcome, rename_without_replacement};
 use redoor_protocol::api::transfers::CopyExistingMode;
 use std::path::{Path, PathBuf};

@@ -1,3 +1,5 @@
+//! Validation of the MCP HTTP transport headers against the JSON-RPC body.
+
 use axum::http::HeaderMap;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;

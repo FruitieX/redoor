@@ -1,3 +1,6 @@
+//! Resolves and applies requested owner and group for created files, serializing libc
+//! account lookups that are not thread-safe.
+
 use nix::unistd::{Gid, Group, Uid, User};
 use redoor_protocol::{api::files::CreationOwnershipOptions, wire::command::CommandErrorKind};
 use std::path::{Path, PathBuf};

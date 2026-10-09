@@ -1,3 +1,5 @@
+//! Shared handler state and server CLI arguments.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use super::auth::AuthState;
 use super::machine_tokens::MachineTokenService;
 use super::mcp::McpState;
 
+/// Everything handlers need, cloned cheaply per request because every member is a handle.
 #[derive(Clone)]
 pub(crate) struct ServerState {
     /// Namespace, data directories and websocket timings chosen at process start.

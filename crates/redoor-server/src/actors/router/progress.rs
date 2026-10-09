@@ -1,3 +1,5 @@
+//! Public transfer progress tracking and bounded terminal history for the transfers UI.
+
 use super::state::{RouterState, TransferProgressStore};
 use redoor_protocol::api::transfers::{
     CopyEndpoint, TransferDirection, TransferProgressEntry, TransferProgressListResponse,

@@ -1,3 +1,5 @@
+//! Websocket entry points for agent control connections and browser UI events.
+
 use crate::actors;
 use crate::watchdog::WatchdogRegistry;
 use axum::{

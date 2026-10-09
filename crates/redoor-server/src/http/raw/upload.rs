@@ -1,3 +1,5 @@
+//! Streamed raw file upload endpoint.
+
 use axum::{
     Json,
     body::Body,

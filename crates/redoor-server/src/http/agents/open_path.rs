@@ -1,3 +1,5 @@
+//! REST endpoint that opens a path with the agent host's desktop handler.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

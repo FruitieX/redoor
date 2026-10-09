@@ -4,6 +4,7 @@ use crate::ids::{AgentId, TransferId, UnixTimestampSeconds};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// One side of a copy or move; carries the agent so transfers can cross agent boundaries.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CopyEndpoint {
@@ -33,6 +34,7 @@ impl CopyExistingMode {
     }
 }
 
+/// Starts one asynchronous copy between agent filesystem endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CopyFileRequest {
@@ -43,6 +45,7 @@ pub struct CopyFileRequest {
     pub on_existing: CopyExistingMode,
 }
 
+/// Returns the public id used to follow asynchronous copy progress.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CopyFileResponse {
@@ -85,12 +88,14 @@ pub struct MoveFileResponse {
     pub move_request_id: TransferId,
 }
 
+/// Snapshot of all tracked transfers so the UI can render one combined progress list.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TransferProgressListResponse {
     pub transfers: Vec<TransferProgressEntry>,
 }
 
+/// Byte progress for one transfer, exported so TypeScript consumers share the shape.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TransferProgressUpdate {
@@ -102,6 +107,8 @@ pub struct TransferProgressUpdate {
     pub total_bytes: u64,
 }
 
+/// Public view of one upload, download, edit, copy or move, including its terminal state,
+/// so finished transfers stay visible after the HTTP request that started them ends.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TransferProgressEntry {
@@ -125,6 +132,7 @@ pub struct TransferProgressEntry {
     pub atomic: bool,
 }
 
+/// Kind of transfer, so clients can label entries and pick the right progress semantics.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[ts(rename_all = "snake_case")]
@@ -137,6 +145,8 @@ pub enum TransferDirection {
     Move,
 }
 
+/// Lifecycle of a transfer; `Canceling` is separate so clients know cancellation was
+/// accepted but the agent has not yet confirmed cleanup.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[ts(rename_all = "snake_case")]

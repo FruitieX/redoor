@@ -1,3 +1,6 @@
+//! Per-agent websocket session actor: authenticates registration and bridges the control
+//! socket to the router through bounded, prioritized lanes.
+
 use crate::actors::lanes::{ControlLaneReceivers, ControlLanes};
 use crate::actors::router::{
     ConnectionStreams, RegisterAgentRequest, RouteResponse, RouteTransferReadyRequest,

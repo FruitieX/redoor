@@ -1,3 +1,5 @@
+//! REST endpoint that saves editor content over an existing file.
+
 use axum::{
     Json,
     body::Body,

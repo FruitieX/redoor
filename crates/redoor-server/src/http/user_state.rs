@@ -1,3 +1,5 @@
+//! Per-user persisted UI state document stored on the server.
+
 use std::path::{Path, PathBuf};
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};

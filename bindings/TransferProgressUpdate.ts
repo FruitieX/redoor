@@ -2,4 +2,7 @@
 import type { AgentId } from "./AgentId";
 import type { TransferId } from "./TransferId";
 
+/**
+ * Byte progress for one transfer, exported so TypeScript consumers share the shape.
+ */
 export type TransferProgressUpdate = { agent_id: AgentId, request_id: TransferId, transferred_bytes: number, total_bytes: number, };

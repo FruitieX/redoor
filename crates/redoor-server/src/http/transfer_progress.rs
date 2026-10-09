@@ -1,3 +1,5 @@
+//! REST endpoint that lists retained transfer progress.
+
 use crate::actors::router::RouterMsg;
 use axum::{Json, extract::State as AxumState};
 use redoor_protocol::api::transfers::TransferProgressListResponse;

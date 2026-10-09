@@ -1,3 +1,5 @@
+//! Router mailbox messages and their request payloads; the router's whole public API.
+
 use super::RouterError;
 use super::state::CopyContentKind;
 use super::streams::{ConnectionStreams, OutboundStream, OutputReceiver, StreamEnd};

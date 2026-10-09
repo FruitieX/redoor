@@ -1,3 +1,5 @@
+//! Same-origin checks that stop cross-site pages from opening authenticated websockets.
+
 use axum::http::{HeaderMap, header};
 
 /// Enforces a browser WebSocket Origin authority against the HTTP Host authority.

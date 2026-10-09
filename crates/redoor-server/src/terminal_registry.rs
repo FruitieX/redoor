@@ -1,3 +1,6 @@
+//! Rendezvous for terminals: pairs a waiting browser socket with the dedicated socket the
+//! agent opens in response, with bounded pending setups.
+
 use axum::extract::ws::WebSocket;
 use redoor_protocol::ids::AgentId;
 use redoor_protocol::wire::terminal::TerminalId;
@@ -8,7 +11,9 @@ use std::{
 use thiserror::Error;
 use tokio::sync::oneshot;
 
+/// Caps unpaired terminal setups server-wide so abandoned browser requests cannot pile up.
 const MAX_PENDING_TERMINALS: usize = 64;
+/// Caps unpaired terminal setups per agent so one agent cannot use the whole global budget.
 const MAX_PENDING_TERMINALS_PER_AGENT: usize = 8;
 
 /// One not-yet-paired tunnel created by a browser connection.

@@ -1,3 +1,5 @@
+//! REST endpoint that changes ownership of an agent path.
+
 use axum::{
     Json,
     extract::{Path, Query, State as AxumState},

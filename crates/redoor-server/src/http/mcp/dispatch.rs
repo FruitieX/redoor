@@ -1,3 +1,5 @@
+//! JSON-RPC method routing for the MCP endpoint.
+
 use serde_json::Value;
 
 use super::{discovery, error::McpError, schema::JsonRpcRequest, tools};

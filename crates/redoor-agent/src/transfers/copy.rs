@@ -1,3 +1,5 @@
+//! Same-agent copies done directly on the filesystem, avoiding a round trip through the server.
+
 use crate::errors::AgentCommandError;
 use crate::runtime::responder::Responder;
 use redoor_core::destination::{
@@ -195,7 +197,9 @@ struct LocalCopyProgressReporter {
 }
 
 impl LocalCopyProgressReporter {
+    /// Byte threshold that triggers a progress update, so large copies do not flood the control lane.
     const REPORT_EVERY_BYTES: u64 = 1024 * 1024;
+    /// Time threshold that triggers a progress update, so slow copies still show movement.
     const REPORT_EVERY_DURATION: Duration = Duration::from_millis(250);
 
     /// Starts tracking one local copy so progress is visible to the server UI.

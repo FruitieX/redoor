@@ -1,3 +1,5 @@
+//! Terminal tunnel identifiers and messages for interactive PTY sessions on agents.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;

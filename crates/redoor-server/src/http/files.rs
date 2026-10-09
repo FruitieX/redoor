@@ -1,3 +1,5 @@
+//! REST endpoints for delete, mkdir and rename on agent filesystems.
+
 use axum::{
     Json,
     extract::{Path, Query, State as AxumState},

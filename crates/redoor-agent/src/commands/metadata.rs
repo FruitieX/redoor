@@ -1,3 +1,5 @@
+//! File metadata and content sniffing that decides whether the UI may edit or preview a file.
+
 use redoor_protocol::{api::files::MetadataResponse, wire::command::CommandResult};
 use std::{os::unix::fs::MetadataExt, path::Path};
 use tokio::{fs::File, io::AsyncReadExt};

@@ -1,3 +1,6 @@
+//! Best-effort desktop notification announcing that the agent started, so a user who
+//! launched it from a GUI sees it is running.
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Stdio;
 

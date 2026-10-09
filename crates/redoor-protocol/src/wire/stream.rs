@@ -1,7 +1,13 @@
+//! Binary framing for streamed payloads (uploads, downloads, copies and exec output) that
+//! travel on the transfer socket separately from JSON control frames.
+
 use crate::ids::{ChunkIndex, RequestId};
 use anyhow::{Result, bail};
 
+/// Leading marker that lets receivers reject binary frames that are not stream chunks.
 pub const PROTOCOL_MAGIC: u32 = 0x52415844;
+/// Fixed header length: magic (4) + request id (8) + chunk index (8) + last, error and
+/// payload-kind flag bytes (3), so the payload offset is known without parsing.
 pub const HEADER_SIZE: usize = 23;
 /// Preferred file read size for disk IO before websocket framing.
 pub const CHUNK_SIZE: usize = 64 * 1024;
@@ -30,6 +36,8 @@ pub enum StreamPayloadKind {
 }
 
 impl StreamPayloadKind {
+    /// Decodes the header byte strictly so an unknown payload kind fails the frame instead of
+    /// being misinterpreted as file data.
     fn from_byte(byte: u8) -> Result<Self> {
         match byte {
             0 => Ok(Self::RawFile),
@@ -82,6 +90,8 @@ pub struct StreamChunkFrameRequest<'a> {
 }
 
 impl<'a> StreamChunkFrameRequest<'a> {
+    /// Defaults to a single complete raw-file payload starting at chunk 0, the most common
+    /// case, so callers only override what differs.
     pub fn new(request_id: RequestId, data: &'a [u8]) -> Self {
         Self {
             request_id,
@@ -93,30 +103,38 @@ impl<'a> StreamChunkFrameRequest<'a> {
         }
     }
 
+    /// Continues numbering from an earlier payload of the same stream so ordering holds
+    /// across multiple framed writes.
     pub fn starting_chunk_index(mut self, starting_chunk_index: ChunkIndex) -> Self {
         self.starting_chunk_index = starting_chunk_index;
         self
     }
 
+    /// Tags the frames so the receiver knows whether to write raw bytes or unpack a tar stream.
     pub fn payload_kind(mut self, payload_kind: StreamPayloadKind) -> Self {
         self.payload_kind = payload_kind;
         self
     }
 
+    /// Marks the payload as an error message that terminates the stream instead of file data.
     pub fn is_error(mut self, is_error: bool) -> Self {
         self.is_error = is_error;
         self
     }
 
+    /// Controls whether the final emitted frame ends the stream, so large payloads can be
+    /// written in several framed pieces.
     pub fn is_last(mut self, is_last: bool) -> Self {
         self.is_last = is_last;
         self
     }
 
+    /// Exposes the configured error flag; named apart from the builder setter it shadows.
     pub fn is_error_flag(&self) -> bool {
         self.is_error
     }
 
+    /// Exposes the configured last-frame flag; named apart from the builder setter it shadows.
     pub fn is_last_flag(&self) -> bool {
         self.is_last
     }
@@ -132,6 +150,7 @@ impl StreamChunk {
         !self.is_last && !self.is_error
     }
 
+    /// Serializes the frame into its binary wire form, header first, for one websocket message.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(HEADER_SIZE + self.data.len());
 
@@ -146,10 +165,13 @@ impl StreamChunk {
         bytes
     }
 
+    /// Validates a frame and keeps only its payload, for callers that do not need the header.
     pub fn parse_data(bytes: &[u8]) -> Result<Vec<u8>> {
         Self::from_bytes(bytes).map(|chunk| chunk.data)
     }
 
+    /// Parses and validates a binary websocket message, rejecting short frames and wrong magic
+    /// so corrupt or foreign data is never treated as transfer content.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < HEADER_SIZE {
             bail!(

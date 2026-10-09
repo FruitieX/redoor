@@ -1,3 +1,6 @@
+//! Dedicated log-stream socket that relays this agent's live log entries to the server
+//! without competing with control or transfer traffic.
+
 use super::connection::AgentConnection;
 use anyhow::{Context, Result};
 use futures_util::{
@@ -12,8 +15,11 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Dedicated websocket carrying only this agent's log events.
 type LogSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// Write half, owned by the event sender so it can be backpressured independently.
 type LogSink = SplitSink<LogSocket, WsMessage>;
+/// Read half, watched only to detect server-side teardown.
 type LogStream = SplitStream<LogSocket>;
 
 /// Builds the dedicated data-plane URL while retaining the configured server authority and scheme.

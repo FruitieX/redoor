@@ -1,3 +1,5 @@
+//! Test fixtures shared by unit tests across crates via the `test-support` feature.
+
 use std::path::{Path, PathBuf};
 
 /// Owns an isolated filesystem root so test fixtures are removed even after a panic.

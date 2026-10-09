@@ -1,3 +1,5 @@
+//! Router-owned state: live agent connections, retained agent inventory and flow tables.
+
 use super::flows::FlowTable;
 use super::streams::ConnectionStreams;
 use crate::actors::lanes::ControlLanes;

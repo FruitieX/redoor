@@ -1,3 +1,5 @@
+//! REST endpoints for listing, path search, metadata and echo on an agent.
+
 use crate::http::{
     agent_client::{Echo, FileSearch, ListPath, Listing, Metadata},
     agent_helpers::{AgentFilePath, absolute_path_from_url},

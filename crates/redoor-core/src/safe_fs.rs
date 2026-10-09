@@ -1,9 +1,13 @@
+//! Guarded recursive deletion that refuses to remove filesystem root or the user's home.
+
 use std::{
     io,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
 
+/// Caches the effective user's home so every recursive removal does not repeat a blocking
+/// passwd lookup.
 static EFFECTIVE_USER_HOME: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
 
 /// Leaves a generous ceiling for large owned cleanup trees while preventing permanent stalls.

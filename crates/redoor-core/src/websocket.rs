@@ -1,3 +1,5 @@
+//! Keepalive and stale-connection timing shared by agent and server websocket sessions.
+
 use tokio::time::{Duration, Interval, MissedTickBehavior};
 
 /// Production ping period; tests shrink this so idle sockets prove liveness quickly.

@@ -16,6 +16,8 @@ use crate::wire::exec::{ExecEvent, ExecRequest};
 use crate::wire::log::Level;
 use serde::{Deserialize, Serialize};
 
+/// Every operation the server can ask an agent to perform; one enum keeps the wire contract
+/// and the agent's dispatch match exhaustive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
@@ -407,11 +409,13 @@ pub struct MoveMetadataResult {
     pub identity: MoveSourceIdentity,
 }
 
+/// Agent's echo reply, used to verify the command round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EchoResult {
     pub message: String,
 }
 
+/// Lightweight process and host load snapshot for agent status views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInfoResult {
     pub pid: u32,
@@ -452,6 +456,8 @@ impl CommandErrorKind {
     }
 }
 
+/// Terminal result of one `Command`, correlated by request id; streaming commands use it
+/// only to report completion since their data travels as binary frames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CommandResult {

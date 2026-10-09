@@ -1,3 +1,6 @@
+//! Router handlers for agent registration, transfer-socket pairing, managed lifecycle and
+//! one-shot command routing.
+
 use super::RouterError;
 use super::cleanup::AgentLoss;
 use super::flows::{CommandFlow, Flow};

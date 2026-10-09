@@ -16,8 +16,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// Default retained output per operation, keeping one chatty command from filling the store.
 const DEFAULT_JOB_QUOTA: usize = 1024 * 1024;
+/// Default retained output across all operations, bounding total disk and memory use.
 const DEFAULT_GLOBAL_QUOTA: usize = 64 * 1024 * 1024;
+/// Default age after which finished operations are dropped so history does not grow forever.
 const DEFAULT_EXPIRY_SECONDS: u64 = 24 * 60 * 60;
 
 /// One retained operation is addressable only through its stable owning grant.

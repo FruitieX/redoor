@@ -1,3 +1,6 @@
+//! Interactive terminal sessions: one PTY bridged to a dedicated websocket per terminal so
+//! keystrokes and output never queue behind transfers.
+
 use super::connection::AgentConnection;
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
@@ -28,13 +31,22 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// PTY read size; small enough to keep interactive output latency low.
 const PTY_BUFFER_SIZE: usize = 8 * 1024;
+/// Short output queue so a slow browser backpressures the PTY instead of buffering output.
 const OUTPUT_QUEUE_SIZE: usize = 8;
+/// Bounded queue for lifecycle and protocol control frames that the socket writer sends
+/// ahead of PTY output.
 const CONTROL_QUEUE_SIZE: usize = 8;
+/// How long teardown waits for the shell or a bridge task before escalating, so a stuck
+/// session cannot hold resources indefinitely.
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
 
+/// Dedicated websocket carrying one terminal's input and output.
 type TerminalSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// Write half, owned by one writer task that prioritizes control frames over output.
 type TerminalSink = SplitSink<TerminalSocket, WsMessage>;
+/// Read half, owned by the input and resize task.
 type TerminalStream = SplitStream<TerminalSocket>;
 
 /// One prioritized websocket command with optional delivery acknowledgement.

@@ -1,3 +1,6 @@
+//! Limits and handshake for the persistent payload-only transfer socket that carries
+//! binary stream frames apart from the control socket.
+
 use crate::ids::AgentId;
 use crate::wire::stream::{HEADER_SIZE, MAX_TRANSFER_FRAME_PAYLOAD_BYTES};
 use serde::{Deserialize, Serialize};

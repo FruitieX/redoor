@@ -1,3 +1,5 @@
+//! REST endpoints for listing, emptying and restoring agent trash.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

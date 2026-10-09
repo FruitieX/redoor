@@ -1,3 +1,5 @@
+//! REST endpoint that validates the config file and restarts the server in place.
+
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use redoor_protocol::api::{ErrorResponse, server::RestartResponse};
 

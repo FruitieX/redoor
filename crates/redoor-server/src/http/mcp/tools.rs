@@ -32,9 +32,11 @@ use crate::http::{
     state::ServerState,
 };
 
+/// Bounds the `hello` tool's echoed name so the greeting stays small.
 const MAX_NAME_LENGTH: usize = 64;
 /// Keeps inline MCP reads and writes small; larger files use the streaming endpoints.
 const INLINE_FILE_LIMIT: usize = 64 * 1024;
+/// Truncates directory listings so one large directory cannot blow up an MCP response.
 const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 
 /// A compact definition keeps annotations and schemas consistent with implemented dispatch.
@@ -46,6 +48,7 @@ struct ToolDefinition {
     required: &'static [&'static str],
 }
 
+/// Single source for the advertised tool catalog and the names accepted by dispatch.
 const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
         name: "hello",

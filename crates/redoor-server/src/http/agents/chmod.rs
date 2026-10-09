@@ -1,3 +1,5 @@
+//! REST endpoint that changes permission bits on an agent path.
+
 use axum::{
     Json,
     extract::{Path, State as AxumState},

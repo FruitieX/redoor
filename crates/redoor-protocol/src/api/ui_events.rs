@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// Coarse invalidation hints pushed to browsers so they refetch only when state changed
+/// instead of polling every resource.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[ts(rename_all = "snake_case")]
