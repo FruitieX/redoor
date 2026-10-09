@@ -69,19 +69,6 @@ const agentRoot = join(temporaryDirectory, "agent-root");
 
 const secondAgentRoot = join(temporaryDirectory, "agent-root-two");
 
-/** Full operator scope set shared by the device tokens. */
-const operatorScopes = [
-    "devices:read",
-    "files:read",
-    "files:write",
-    "files:delete",
-    "commands:execute",
-    "agents:manage",
-];
-
-/** Every device the operator tokens may reach. */
-const operatorDevices = [testDeviceId, secondDeviceId, managedDeviceId];
-
 type RawMcpRequest = {
     jsonrpc: string;
     id: string;
@@ -133,6 +120,22 @@ async function createToken(options: {
         token: output.token,
         credentialId: output.credential.credential_id,
     };
+}
+
+/** Creates a token with every operator scope on every test device and returns its secret. */
+async function createOperatorToken(name: string): Promise<string> {
+    const scopes = [
+        "devices:read",
+        "files:read",
+        "files:write",
+        "files:delete",
+        "commands:execute",
+        "agents:manage",
+    ];
+
+    const devices = [testDeviceId, secondDeviceId, managedDeviceId];
+
+    return (await createToken({ name, scopes, devices })).token;
 }
 
 /** Sends deliberately invalid protocol requests that the normal helper refuses to construct. */
@@ -242,20 +245,8 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
     });
     await Promise.all([secondRegistered, secondTransferred]);
 
-    deviceToken = (
-        await createToken({
-            name: "device operator",
-            scopes: operatorScopes,
-            devices: operatorDevices,
-        })
-    ).token;
-    secondDeviceToken = (
-        await createToken({
-            name: "other device operator",
-            scopes: operatorScopes,
-            devices: operatorDevices,
-        })
-    ).token;
+    deviceToken = await createOperatorToken("device operator");
+    secondDeviceToken = await createOperatorToken("other device operator");
 }, 30_000);
 
 afterAll(async () => {
@@ -606,17 +597,13 @@ describe("stateless authenticated MCP", () => {
         // The per-credential rolling request budget is shared by every test using the same
         // token, so this request-heavy test owns credentials instead of inheriting the budget
         // the preceding workflow test already spent.
-        const [primary, peer] = await Promise.all(
-            ["retention operator", "retention peer"].map((name) =>
-                createToken({
-                    name,
-                    scopes: operatorScopes,
-                    devices: operatorDevices,
-                }),
-            ),
-        );
-        const client = createMcpTestClient({ endpoint, token: primary.token });
-        const peerClient = createMcpTestClient({ endpoint, token: peer.token });
+        const [token, peerToken] = await Promise.all([
+            createOperatorToken("retention operator"),
+            createOperatorToken("retention peer"),
+        ]);
+
+        const client = createMcpTestClient({ endpoint, token });
+        const peerClient = createMcpTestClient({ endpoint, token: peerToken });
 
         const large = await client.callTool("run_command", {
             device_id: testDeviceId,
