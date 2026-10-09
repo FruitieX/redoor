@@ -17,7 +17,12 @@ use redoor_core::{app_name, config, process::ProcessSlot};
 use service::ServiceRole;
 
 #[derive(Parser)]
-#[command(author, version, about)]
+#[command(
+    name = redoor_core::identity::BINARY_NAME,
+    version = redoor_core::identity::BINARY_VERSION,
+    author,
+    about
+)]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 struct Cli {
     /// Namespace for config, data, logs, SSH caches, and generated service names.
@@ -461,6 +466,20 @@ mod tests {
     use clap::Parser;
 
     use super::{AgentCommand, Cli, Commands, RelayCommand};
+
+    /// SSH provisioning decides whether a remote install is current by comparing its
+    /// `--version` output with `redoor_core::identity::version_line()`, so the binary must
+    /// print exactly that line or every fresh upload is rejected as a version mismatch.
+    #[test]
+    fn version_output_matches_provisioning_expectation() {
+        use clap::CommandFactory;
+
+        let rendered = Cli::command().render_version();
+        // clap appends a newline; the remote probe trims its output before comparing.
+        assert_eq!(rendered.trim(), redoor_core::identity::version_line());
+        // Guards against a crate-local package name (e.g. "redoor-server") leaking in.
+        assert!(rendered.starts_with("redoor "));
+    }
 
     /// Keeps service-manager commands nested under their selected process role.
     #[test]

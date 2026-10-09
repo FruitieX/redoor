@@ -341,7 +341,7 @@ pub(super) async fn ensure_remote_binary(
     provision: &super::ProvisionContext,
     status: &ProvisioningStatusSink,
 ) -> Result<String, ProvisionError> {
-    let expected = format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    let expected = redoor_core::identity::version_line();
     let debug_binary = available_debug_binary(&sniff.os, &sniff.arch).await?;
 
     let (local_path, remote_version, remote_sha1, remote_bin) = if let Some(debug_binary) =
@@ -545,6 +545,19 @@ fn debug_binary_candidate(
     Some(manifest_dir.join("target/debug/redoor"))
 }
 
+/// Root of the cargo workspace this server was built from. `CARGO_MANIFEST_DIR` names
+/// `crates/redoor-server`, but `cargo build` writes `target/debug/redoor` at the workspace
+/// root, so the debug binary lookup must climb out of the crate directory (the same
+/// `../..` that `redoor-core/build.rs` uses to find `.git`).
+fn workspace_root() -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(manifest_dir)
+        .to_path_buf()
+}
+
 /// Resolves the matching local debug binary only when it exists. Missing debug
 /// output is not an error because GitHub release provisioning remains the
 /// intended fallback for fresh checkouts and cross-compiled server binaries.
@@ -558,7 +571,7 @@ async fn available_debug_binary(
         std::env::consts::ARCH,
         remote_os,
         remote_arch,
-        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &workspace_root(),
     );
 
     match candidate {
@@ -828,6 +841,31 @@ mod tests {
             path,
             Some(PathBuf::from("/workspace/redoor/target/debug/redoor"))
         );
+    }
+
+    /// Verifies the debug binary lookup points at the workspace build output that
+    /// `cargo build` produces, not at a per-crate target directory that never exists.
+    #[test]
+    fn debug_binary_resolves_from_workspace_root() {
+        let root = super::workspace_root();
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+            .expect("workspace root should contain Cargo.toml");
+        // Only the virtual workspace manifest declares `[workspace]`.
+        assert!(
+            manifest.contains("[workspace]"),
+            "{} is not the workspace root",
+            root.display()
+        );
+        let path = debug_binary_candidate(
+            true,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            &root,
+        );
+        // The candidate must be `<workspace>/target/debug/redoor`, where the binary is built.
+        assert_eq!(path, Some(root.join("target/debug/redoor")));
     }
 
     /// Verifies release servers keep using release provisioning even when a

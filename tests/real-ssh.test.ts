@@ -611,6 +611,35 @@ log = "${agentLogPath}"
                         message.startsWith("Uploading the binary to "),
                 ),
             ).toBe(true);
+            // The test cleared this namespace's remote binaries, so the first attempt must
+            // upload. A cache hit could only come from a retry after a failed attempt (for
+            // example a post-upload version check that rejects the binary it just uploaded).
+            expect(
+                provisioningMessages.some((message) =>
+                    message.startsWith("Uploading the binary to "),
+                ),
+            ).toBe(true);
+            expect(
+                provisioningMessages.filter(
+                    (message) =>
+                        message.startsWith("Using cached binary from ") ||
+                        message.startsWith("Using existing remote binary at "),
+                ),
+            ).toEqual([]);
+            if (process.platform === "linux" && process.arch === "x64") {
+                // The test server is a debug build for the SSH host's platform (x86_64 Linux),
+                // so it must deploy its own workspace build instead of a GitHub release.
+                expect(
+                    provisioningMessages.some((message) =>
+                        message.startsWith("Comparing the remote debug install"),
+                    ),
+                ).toBe(true);
+                expect(
+                    provisioningMessages.some((message) =>
+                        message.startsWith("Downloading the matching binary from "),
+                    ),
+                ).toBe(false);
+            }
             expect(
                 provisioningMessages.some((message) =>
                     message.startsWith("Spawning the remote binary"),
