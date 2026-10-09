@@ -1,5 +1,6 @@
 use super::copy::{
-    CopyContext, LocalCopyError, validate_local_copy_destination, validate_local_copy_parent,
+    CopyContext, LocalCopyError, ensure_active, validate_local_copy_destination,
+    validate_local_copy_parent,
 };
 use crate::errors::AgentCommandError;
 use redoor_core::atomic_rename::{
@@ -11,7 +12,7 @@ use redoor_core::destination::{
     remove_existing_path,
 };
 use redoor_core::log;
-use redoor_core::staging::StagingKind;
+use redoor_core::staging::{StagingKind, reserve_unique};
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{
     api::transfers::CopyExistingMode,
@@ -120,11 +121,11 @@ impl CopyContext<'_> {
             expected_identity
         );
         validate_local_copy_destination(&source, &dest, source_is_directory).await?;
-        self.ensure_active()?;
+        ensure_active(self.cancel)?;
         validate_local_copy_parent(&dest).await?;
-        self.ensure_active()?;
+        ensure_active(self.cancel)?;
         check_existing_destination(&dest, on_existing, source_is_directory).await?;
-        self.ensure_active()?;
+        ensure_active(self.cancel)?;
         let source_metadata = tokio::fs::symlink_metadata(&source)
             .await
             .map_err(|error| {
@@ -134,7 +135,7 @@ impl CopyContext<'_> {
                     LocalMoveError::from(LocalCopyError::AccessSourceFile(error))
                 }
             })?;
-        self.ensure_active()?;
+        ensure_active(self.cancel)?;
         {
             use std::os::unix::fs::MetadataExt;
             log!(
@@ -182,14 +183,14 @@ impl CopyContext<'_> {
             return Err(LocalMoveError::SourceChanged);
         }
         let destination_exists = destination_entry_exists(&dest).await?;
-        self.ensure_active()?;
+        ensure_active(self.cancel)?;
         let dest_parent = dest
             .parent()
             .ok_or_else(|| LocalCopyError::DestinationParentNotFound(dest.display().to_string()))?;
         let dest_parent_metadata = tokio::fs::metadata(dest_parent).await.map_err(|_| {
             LocalCopyError::AccessDestinationParent(dest_parent.display().to_string())
         })?;
-        self.ensure_active()?;
+        ensure_active(self.cancel)?;
         let same_mount = metadata_on_same_mount(&source_metadata, &dest_parent_metadata);
         let atomic_rename = can_use_atomic_rename(same_mount, destination_exists, on_existing);
         {
@@ -282,7 +283,7 @@ impl CopyContext<'_> {
         );
         if source_metadata.file_type().is_symlink() {
             self.copy_symlink(source.clone(), dest, on_existing).await?;
-            self.ensure_active()?;
+            ensure_active(self.cancel)?;
             verify_move_source_identity(&source, &expected_identity).await?;
             log!(
                 Level::Debug,
@@ -296,7 +297,7 @@ impl CopyContext<'_> {
             self.copy_directory(source.clone(), dest, on_existing)
                 .await?;
             // Cancellation after destination publication still wins before destructive source deletion.
-            self.ensure_active()?;
+            ensure_active(self.cancel)?;
             verify_move_source_identity(&source, &expected_identity).await?;
             log!(
                 Level::Debug,
@@ -309,7 +310,7 @@ impl CopyContext<'_> {
         } else {
             self.copy_file(source.clone(), dest, on_existing).await?;
             // Source preservation is the final cancel boundary for cross-device file moves.
-            self.ensure_active()?;
+            ensure_active(self.cancel)?;
             verify_move_source_identity(&source, &expected_identity).await?;
             log!(
                 Level::Debug,
@@ -404,43 +405,41 @@ enum SameFilesystemRenameResult {
 
 /// Removes the displaced destination from the visible source name without undoing a published move.
 async fn finish_atomic_override(source: PathBuf, dest: PathBuf) -> Result<(), LocalMoveError> {
-    let mut cleanup_path = None;
-    for _ in 0..16 {
-        let candidate = StagingKind::OverrideBackup.sibling_of(&source);
-        match tokio::fs::symlink_metadata(&candidate).await {
-            Ok(_) => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                restore_after_hide_failure(&source, &dest).await;
-                return Err(LocalMoveError::HideDisplacedDestination(error));
+    // A no-replace rename is the reservation: a check-then-rename could clobber an entry that
+    // appeared under the chosen name in between, and the cleanup below would then delete it.
+    let reserved = reserve_unique(
+        || StagingKind::OverrideBackup.sibling_of(&source),
+        |candidate| {
+            let source = source.clone();
+            async move {
+                match rename_without_replacement(&source, &candidate).await? {
+                    AtomicRenameOutcome::Renamed => Ok(()),
+                    AtomicRenameOutcome::DestinationExists => {
+                        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+                    }
+                    outcome => Err(std::io::Error::other(format!(
+                        "could not hide the displaced destination: {outcome:?}"
+                    ))),
+                }
             }
+        },
+    )
+    .await;
+    let cleanup_path = match reserved {
+        Ok((cleanup_path, ())) => {
+            log!(
+                Level::Debug,
+                "Smart move hid displaced destination: source={}, dest={}, cleanup={}",
+                source.display(),
+                dest.display(),
+                cleanup_path.display()
+            );
+            cleanup_path
         }
-        match tokio::fs::rename(&source, &candidate).await {
-            Ok(()) => {
-                log!(
-                    Level::Debug,
-                    "Smart move hid displaced destination: source={}, dest={}, cleanup={}",
-                    source.display(),
-                    dest.display(),
-                    candidate.display()
-                );
-                cleanup_path = Some(candidate);
-                break;
-            }
-            Err(error) => {
-                restore_after_hide_failure(&source, &dest).await;
-                return Err(LocalMoveError::HideDisplacedDestination(error));
-            }
+        Err(error) => {
+            restore_after_hide_failure(&source, &dest).await;
+            return Err(LocalMoveError::HideDisplacedDestination(error));
         }
-    }
-    let Some(cleanup_path) = cleanup_path else {
-        restore_after_hide_failure(&source, &dest).await;
-        return Err(LocalMoveError::HideDisplacedDestination(
-            std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "failed to reserve a unique displaced-destination cleanup path",
-            ),
-        ));
     };
 
     if let Err(error) = remove_existing_path(&cleanup_path).await {

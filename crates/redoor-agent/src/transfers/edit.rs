@@ -3,7 +3,7 @@
 use super::upload::{PublicationGate, SinkError, UploadSink};
 use crate::errors::AgentCommandError;
 use redoor_core::log;
-use redoor_core::staging::StagingKind;
+use redoor_core::staging::{StagingKind, reserve_unique};
 use redoor_protocol::{
     ids::RequestId,
     wire::{
@@ -20,8 +20,6 @@ use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
 };
 use tokio_util::sync::CancellationToken;
-
-const STAGING_CREATE_ATTEMPTS: usize = 16;
 
 /// Captures the inode properties that a successful editor rewrite must preserve.
 #[derive(Clone, Copy, Debug)]
@@ -247,40 +245,35 @@ impl UploadSink for EditSession {
 
 /// Creates an unlinked mode-0600 staging inode without following a colliding name.
 async fn create_unlinked_staging_file() -> Result<File, AgentCommandError> {
-    for _ in 0..STAGING_CREATE_ATTEMPTS {
-        let path = StagingKind::FileEdit.in_temp_dir();
-        let file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC)
-            .open(&path)
-            .await
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(edit_error(
-                    CommandErrorKind::from_io_error(&error),
-                    format!("Failed to create file edit staging file: {error}"),
-                ));
-            }
-        };
-        if let Err(error) = tokio::fs::remove_file(&path).await {
-            drop(file);
-            let _ = tokio::fs::remove_file(&path).await;
-            return Err(edit_error(
-                CommandErrorKind::from_io_error(&error),
-                format!("Failed to unlink file edit staging file: {error}"),
-            ));
-        }
-        return Ok(file);
+    let (path, file) = reserve_unique(
+        || StagingKind::FileEdit.in_temp_dir(),
+        |candidate| async move {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(candidate)
+                .await
+        },
+    )
+    .await
+    .map_err(|error| {
+        edit_error(
+            CommandErrorKind::from_io_error(&error),
+            format!("Failed to create file edit staging file: {error}"),
+        )
+    })?;
+    if let Err(error) = tokio::fs::remove_file(&path).await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(edit_error(
+            CommandErrorKind::from_io_error(&error),
+            format!("Failed to unlink file edit staging file: {error}"),
+        ));
     }
-    Err(edit_error(
-        CommandErrorKind::AlreadyExists,
-        "Failed to reserve a unique file edit staging file",
-    ))
+    Ok(file)
 }
 
 /// Preserves useful Unix pathname errors while making special-file rejection actionable.

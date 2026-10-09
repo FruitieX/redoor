@@ -15,7 +15,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt},
 };
 use tokio_util::sync::CancellationToken;
@@ -210,14 +210,9 @@ impl LocalCopyProgressReporter {
         }
     }
 
-    /// Stops at filesystem-safe boundaries after cancellation.
-    fn ensure_active(&self) -> Result<(), LocalCopyError> {
-        ensure_active(&self.cancel)
-    }
-
     /// Emits a progress update once enough bytes or time have passed.
     async fn report(&mut self, force: bool) -> Result<(), LocalCopyError> {
-        self.ensure_active()?;
+        ensure_active(&self.cancel)?;
         if self.responder.is_closed() {
             return Err(LocalCopyError::ProgressChannelClosed);
         }
@@ -282,8 +277,14 @@ async fn copy_file_streaming(
     temp_path: &Path,
     reporter: &mut LocalCopyProgressReporter,
 ) -> Result<(), LocalCopyError> {
-    stream_file_to_temp(source_path, temp_path, reporter).await?;
-    reporter.ensure_active()?;
+    // The temp path lies inside this copy's own fresh staging directory, so plain creation
+    // cannot claim anyone else's entry.
+    let destination = File::create(temp_path)
+        .await
+        .map_err(|_| LocalCopyError::CreateDestinationFile(temp_path.display().to_string()))?;
+    ensure_active(&reporter.cancel)?;
+    stream_file_to_temp(source_path, destination, temp_path, reporter).await?;
+    ensure_active(&reporter.cancel)?;
 
     tokio::fs::rename(temp_path, dest_path).await.map_err(|_| {
         LocalCopyError::FinalizeCopiedFile {
@@ -291,26 +292,23 @@ async fn copy_file_streaming(
             to: dest_path.display().to_string(),
         }
     })?;
-    reporter.ensure_active()?;
+    ensure_active(&reporter.cancel)?;
 
     Ok(())
 }
 
-/// Streams one source file into a temp path without publishing the final destination yet.
+/// Streams one source file into an already created temp file (at `temp_path`, named in
+/// errors) without publishing the final destination yet.
 async fn stream_file_to_temp(
     source_path: &Path,
+    mut destination: File,
     temp_path: &Path,
     reporter: &mut LocalCopyProgressReporter,
 ) -> Result<(), LocalCopyError> {
     let mut source = File::open(source_path)
         .await
         .map_err(|_| LocalCopyError::OpenSourceFile(source_path.display().to_string()))?;
-    reporter.ensure_active()?;
-
-    let mut destination = File::create(temp_path)
-        .await
-        .map_err(|_| LocalCopyError::CreateDestinationFile(temp_path.display().to_string()))?;
-    reporter.ensure_active()?;
+    ensure_active(&reporter.cancel)?;
 
     let mut buffer = vec![0u8; 1024 * 1024];
 
@@ -319,7 +317,7 @@ async fn stream_file_to_temp(
             .read(&mut buffer)
             .await
             .map_err(|_| LocalCopyError::ReadSourceFile(source_path.display().to_string()))?;
-        reporter.ensure_active()?;
+        ensure_active(&reporter.cancel)?;
 
         if bytes_read == 0 {
             break;
@@ -337,7 +335,7 @@ async fn stream_file_to_temp(
         .flush()
         .await
         .map_err(|_| LocalCopyError::FlushDestinationFile(temp_path.display().to_string()))?;
-    reporter.ensure_active()?;
+    ensure_active(&reporter.cancel)?;
     drop(destination);
 
     Ok(())
@@ -359,7 +357,7 @@ async fn copy_directory_streaming(
     )];
 
     while !stack.is_empty() {
-        reporter.ensure_active()?;
+        ensure_active(&reporter.cancel)?;
         let entry = {
             let (source_dir, _, entries) = stack.last_mut().expect("stack is known non-empty");
             entries
@@ -375,7 +373,7 @@ async fn copy_directory_streaming(
         let metadata = tokio::fs::symlink_metadata(&entry_path)
             .await
             .map_err(|_| LocalCopyError::ReadEntryMetadata(entry_path.display().to_string()))?;
-        reporter.ensure_active()?;
+        ensure_active(&reporter.cancel)?;
         let destination_path = stack
             .last()
             .expect("the current directory remains on the stack")
@@ -426,11 +424,6 @@ pub(crate) struct CopyContext<'a> {
 }
 
 impl CopyContext<'_> {
-    /// Rejects more work once the operation has been canceled.
-    pub(crate) fn ensure_active(&self) -> Result<(), LocalCopyError> {
-        ensure_active(self.cancel)
-    }
-
     /// Starts a progress reporter bound to this request.
     fn reporter(&self, total_bytes: u64) -> LocalCopyProgressReporter {
         LocalCopyProgressReporter::new(self.responder.clone(), total_bytes, self.cancel.clone())
@@ -496,26 +489,37 @@ impl CopyContext<'_> {
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
     ) -> Result<CommandResult, LocalCopyError> {
-        let staging = StagingPath::sibling(&dest_path, StagingKind::LocalCopy);
+        let source_metadata = tokio::fs::metadata(&source_path)
+            .await
+            .map_err(LocalCopyError::AccessSourceFile)?;
+        ensure_active(self.cancel)?;
+        if !source_metadata.is_file() {
+            return Err(LocalCopyError::SourceNotFile(
+                source_path.display().to_string(),
+            ));
+        }
+        validate_local_copy_destination(&source_path, &dest_path, false).await?;
+        ensure_active(self.cancel)?;
+        validate_local_copy_parent(&dest_path).await?;
+        ensure_active(self.cancel)?;
+        check_existing_destination(&dest_path, on_existing, false).await?;
+        ensure_active(self.cancel)?;
+        let mut reporter = self.reporter(source_metadata.len());
+        reporter.report(true).await?;
+        // Staging is owned only once `create_new` made it, so a colliding name is never
+        // truncated or later deleted.
+        let (staging, destination) =
+            StagingPath::create_sibling(&dest_path, StagingKind::LocalCopy, |candidate| async {
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(candidate)
+                    .await
+            })
+            .await
+            .map_err(|_| LocalCopyError::CreateDestinationFile(dest_path.display().to_string()))?;
         let result = async {
-            let source_metadata = tokio::fs::metadata(&source_path)
-                .await
-                .map_err(LocalCopyError::AccessSourceFile)?;
-            self.ensure_active()?;
-            if !source_metadata.is_file() {
-                return Err(LocalCopyError::SourceNotFile(
-                    source_path.display().to_string(),
-                ));
-            }
-            validate_local_copy_destination(&source_path, &dest_path, false).await?;
-            self.ensure_active()?;
-            validate_local_copy_parent(&dest_path).await?;
-            self.ensure_active()?;
-            check_existing_destination(&dest_path, on_existing, false).await?;
-            self.ensure_active()?;
-            let mut reporter = self.reporter(source_metadata.len());
-            reporter.report(true).await?;
-            stream_file_to_temp(&source_path, staging.path(), &mut reporter).await?;
+            stream_file_to_temp(&source_path, destination, staging.path(), &mut reporter).await?;
             reporter.finish().await?;
             place_temp_at_destination(staging.path(), &dest_path, on_existing, false)
                 .await
@@ -539,30 +543,33 @@ impl CopyContext<'_> {
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
     ) -> Result<CommandResult, LocalCopyError> {
-        let staging = StagingPath::sibling(&dest_path, StagingKind::LocalCopy);
+        let source_metadata = tokio::fs::symlink_metadata(&source_path)
+            .await
+            .map_err(LocalCopyError::AccessSourceFile)?;
+        ensure_active(self.cancel)?;
+        if !source_metadata.file_type().is_symlink() {
+            return Err(LocalCopyError::SourceNotFile(
+                source_path.display().to_string(),
+            ));
+        }
+        validate_local_copy_destination(&source_path, &dest_path, false).await?;
+        ensure_active(self.cancel)?;
+        validate_local_copy_parent(&dest_path).await?;
+        ensure_active(self.cancel)?;
+        check_existing_destination(&dest_path, on_existing, false).await?;
+        let target = tokio::fs::read_link(&source_path)
+            .await
+            .map_err(LocalCopyError::AccessSourceFile)?;
+        ensure_active(self.cancel)?;
+        // `symlink` refuses existing names, so creating the link is the reservation.
+        let (staging, ()) =
+            StagingPath::create_sibling(&dest_path, StagingKind::LocalCopy, |candidate| {
+                tokio::fs::symlink(target.clone(), candidate)
+            })
+            .await
+            .map_err(LocalCopyError::CreateTempSymlink)?;
         let result = async {
-            let source_metadata = tokio::fs::symlink_metadata(&source_path)
-                .await
-                .map_err(LocalCopyError::AccessSourceFile)?;
-            self.ensure_active()?;
-            if !source_metadata.file_type().is_symlink() {
-                return Err(LocalCopyError::SourceNotFile(
-                    source_path.display().to_string(),
-                ));
-            }
-            validate_local_copy_destination(&source_path, &dest_path, false).await?;
-            self.ensure_active()?;
-            validate_local_copy_parent(&dest_path).await?;
-            self.ensure_active()?;
-            check_existing_destination(&dest_path, on_existing, false).await?;
-            let target = tokio::fs::read_link(&source_path)
-                .await
-                .map_err(LocalCopyError::AccessSourceFile)?;
-            self.ensure_active()?;
-            tokio::fs::symlink(target, staging.path())
-                .await
-                .map_err(LocalCopyError::CreateTempSymlink)?;
-            self.ensure_active()?;
+            ensure_active(self.cancel)?;
             place_temp_at_destination(staging.path(), &dest_path, on_existing, false)
                 .await
                 .map_err(LocalCopyError::from)?;
@@ -585,27 +592,31 @@ impl CopyContext<'_> {
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
     ) -> Result<CommandResult, LocalCopyError> {
-        let staging = StagingPath::sibling(&dest_path, StagingKind::LocalCopyDirectory);
+        let source_metadata = tokio::fs::metadata(&source_path)
+            .await
+            .map_err(LocalCopyError::AccessSourceDirectory)?;
+        ensure_active(self.cancel)?;
+        if !source_metadata.is_dir() {
+            return Err(LocalCopyError::SourceNotDirectory(
+                source_path.display().to_string(),
+            ));
+        }
+        validate_local_copy_destination(&source_path, &dest_path, true).await?;
+        ensure_active(self.cancel)?;
+        validate_local_copy_parent(&dest_path).await?;
+        ensure_active(self.cancel)?;
+        check_existing_destination(&dest_path, on_existing, true).await?;
+        ensure_active(self.cancel)?;
+        // `create_dir` refuses existing names, so creating the directory is the reservation.
+        let (staging, ()) = StagingPath::create_sibling(
+            &dest_path,
+            StagingKind::LocalCopyDirectory,
+            tokio::fs::create_dir,
+        )
+        .await
+        .map_err(LocalCopyError::CreateTempDirectory)?;
         let result = async {
-            let source_metadata = tokio::fs::metadata(&source_path)
-                .await
-                .map_err(LocalCopyError::AccessSourceDirectory)?;
-            self.ensure_active()?;
-            if !source_metadata.is_dir() {
-                return Err(LocalCopyError::SourceNotDirectory(
-                    source_path.display().to_string(),
-                ));
-            }
-            validate_local_copy_destination(&source_path, &dest_path, true).await?;
-            self.ensure_active()?;
-            validate_local_copy_parent(&dest_path).await?;
-            self.ensure_active()?;
-            check_existing_destination(&dest_path, on_existing, true).await?;
-            self.ensure_active()?;
-            tokio::fs::create_dir(staging.path())
-                .await
-                .map_err(LocalCopyError::CreateTempDirectory)?;
-            self.ensure_active()?;
+            ensure_active(self.cancel)?;
             let mut reporter = self.reporter(0);
             reporter.report(true).await?;
             copy_directory_streaming(&source_path, staging.path(), &mut reporter).await?;

@@ -6,7 +6,40 @@
 
 use crate::log;
 use redoor_protocol::wire::log::Level;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+
+/// Fresh names tried before giving up. Names carry 64 random bits, so repeated collisions mean
+/// something else is wrong and retrying forever would only hide it.
+const RESERVE_ATTEMPTS: usize = 16;
+
+/// Creates a new entry under a fresh hidden name and returns the name with what `create`
+/// produced.
+///
+/// `create` must itself refuse an existing name with `ErrorKind::AlreadyExists`
+/// (`create_new`, `create_dir`, `symlink`, a no-replace rename): checking first and creating
+/// afterwards would let a concurrent entry with the same name be overwritten or, worse, owned
+/// and later deleted by this operation. Other errors are returned immediately.
+pub async fn reserve_unique<T, Fut>(
+    mut candidate: impl FnMut() -> PathBuf,
+    mut create: impl FnMut(PathBuf) -> Fut,
+) -> std::io::Result<(PathBuf, T)>
+where
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    for _ in 0..RESERVE_ATTEMPTS {
+        let path = candidate();
+        match create(path.clone()).await {
+            Ok(created) => return Ok((path, created)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "Failed to reserve a unique hidden staging name",
+    ))
+}
 
 /// Purpose of a hidden path; selects its recognizable name tag and fallback stem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +130,21 @@ impl StagingPath {
         Self::new(kind.sibling_of(destination))
     }
 
+    /// Creates a new hidden sibling of `destination` with `create` (see [`reserve_unique`])
+    /// and takes ownership only once the entry exists, so a name that turned out to be taken
+    /// is never deleted by this owner.
+    pub async fn create_sibling<T, Fut>(
+        destination: &Path,
+        kind: StagingKind,
+        create: impl FnMut(PathBuf) -> Fut,
+    ) -> std::io::Result<(Self, T)>
+    where
+        Fut: Future<Output = std::io::Result<T>>,
+    {
+        let (path, created) = reserve_unique(|| kind.sibling_of(destination), create).await?;
+        Ok((Self::new(path), created))
+    }
+
     /// Location of the owned entry.
     pub fn path(&self) -> &Path {
         &self.path
@@ -183,6 +231,53 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".dest.bin.redoor-local-copy-")
         );
+    }
+
+    /// A taken name is skipped rather than reused, and the existing entry is left untouched.
+    #[tokio::test]
+    async fn reserve_unique_skips_taken_names_without_touching_them() {
+        let temp = TempDir::create();
+        let taken = temp.path().join("taken");
+        tokio::fs::write(&taken, b"someone else's").await.unwrap();
+        let fresh = temp.path().join("fresh");
+        let mut candidates = vec![fresh.clone(), taken.clone()];
+        let (path, file) = reserve_unique(
+            || candidates.pop().unwrap(),
+            |path| async move {
+                tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .await
+            },
+        )
+        .await
+        .unwrap();
+        drop(file);
+        // The collision moved on to the next candidate.
+        assert_eq!(path, fresh);
+        // The pre-existing entry was neither truncated nor claimed.
+        assert_eq!(tokio::fs::read(&taken).await.unwrap(), b"someone else's");
+    }
+
+    /// Persistent collisions end with an error instead of looping or reusing a name.
+    #[tokio::test]
+    async fn reserve_unique_gives_up_after_bounded_collisions() {
+        let mut attempts = 0;
+        let result = reserve_unique(
+            || PathBuf::from("/unused"),
+            |_| {
+                attempts += 1;
+                async { Err::<(), _>(std::io::Error::from(std::io::ErrorKind::AlreadyExists)) }
+            },
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        // The retry budget is bounded.
+        assert_eq!(attempts, RESERVE_ATTEMPTS);
     }
 
     /// Verifies awaited discard removes both files and directory trees.

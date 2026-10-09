@@ -21,9 +21,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-/// Attempts to reserve a unique staging name before giving up.
-const STAGING_CREATE_ATTEMPTS: usize = 16;
-
 /// Captures metadata only from a regular destination entry and never from a symlink target.
 async fn existing_destination_metadata(
     path: &Path,
@@ -42,26 +39,17 @@ async fn existing_destination_metadata(
     }
 }
 
-/// Reserves a new sibling staging file without following a colliding symlink.
+/// Reserves a new sibling staging file without following a colliding symlink: `create_new`
+/// refuses any existing entry, so ownership only ever covers a file this upload created.
 async fn create_staging_file(path: &Path) -> std::io::Result<(StagingPath, File)> {
-    for _ in 0..STAGING_CREATE_ATTEMPTS {
-        // Ownership starts only after creation succeeds so a colliding entry is never removed.
-        let candidate = StagingKind::Upload.sibling_of(path);
-        match OpenOptions::new()
+    StagingPath::create_sibling(path, StagingKind::Upload, |candidate| async move {
+        OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&candidate)
+            .open(candidate)
             .await
-        {
-            Ok(file) => return Ok((StagingPath::new(candidate), file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        "Failed to reserve a unique upload temp file",
-    ))
+    })
+    .await
 }
 
 /// Replaces or creates one file through a hidden sibling staging file.

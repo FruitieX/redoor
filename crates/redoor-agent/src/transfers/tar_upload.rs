@@ -260,11 +260,15 @@ impl TarDirectorySink {
             .await
             .map_err(TarUploadError::from)?;
 
-        let staging_path = StagingKind::UploadDirectory.sibling_of(&destination);
-        tokio::fs::create_dir(&staging_path)
-            .await
-            .map_err(TarUploadError::CreateTempDirectory)?;
-        let staging = StagingPath::new(staging_path);
+        // `create_dir` refuses existing names, so a collision retries with a fresh name
+        // instead of failing the upload.
+        let (staging, ()) = StagingPath::create_sibling(
+            &destination,
+            StagingKind::UploadDirectory,
+            tokio::fs::create_dir,
+        )
+        .await
+        .map_err(TarUploadError::CreateTempDirectory)?;
         let (chunk_sender, chunk_receiver) = mpsc::channel::<Vec<u8>>(EXTRACTOR_QUEUE_CAPACITY);
         let root = staging.path().to_path_buf();
         let unpacker = tokio::task::spawn_blocking(move || {
