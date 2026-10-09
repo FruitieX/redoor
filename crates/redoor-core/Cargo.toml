@@ -10,21 +10,20 @@ test-support = []
 [dependencies]
 redoor-protocol.workspace = true
 anyhow.workspace = true
-argon2.workspace = true
 fastrand.workspace = true
+getrandom.workspace = true
 libc.workspace = true
 nix.workspace = true
-# Not referenced directly: enables `getrandom` for the `OsRng` re-exported through argon2.
-rand_core.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "process", "rt", "sync", "time"] }
 toml_edit = { workspace = true, features = ["serde"] }
 ts-rs.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 jiff.workspace = true

@@ -88,7 +88,7 @@ fn parse_server_address(value: &str) -> Result<(ServerAddress, Option<String>), 
         return Err("server address must not be empty".to_string());
     }
 
-    let url = reqwest::Url::parse(trimmed).map_err(|error| {
+    let url = url::Url::parse(trimmed).map_err(|error| {
         format!("server address must be an http(s):// or ws(s):// URL ({error})")
     })?;
 
@@ -149,7 +149,7 @@ fn parse_server_address(value: &str) -> Result<(ServerAddress, Option<String>), 
 
     // Rebuild through the URL crate so invalid host characters fail early.
     let candidate = ServerAddress { secure, host, port };
-    reqwest::Url::parse(&candidate.websocket_url())
+    url::Url::parse(&candidate.websocket_url())
         .map_err(|_| "server host is not valid in a WebSocket authority".to_string())?;
 
     Ok((candidate, warning))

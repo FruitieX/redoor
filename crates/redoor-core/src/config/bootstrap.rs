@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
-/// Generates a high-entropy secret for bootstrap agent tokens.
-fn generate_secret() -> String {
-    use argon2::password_hash::rand_core::{OsRng, RngCore};
+/// Generates a high-entropy secret for bootstrap agent tokens from the OS CSPRNG.
+fn generate_secret() -> Result<String> {
     let mut bytes = [0u8; 24];
-    OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("Failed to read OS randomness: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Renders the minimal starter config written only by `redoor server` on first run.
@@ -70,7 +70,7 @@ pub async fn create_default_config_if_missing(path: &Path) -> Result<Option<Crea
         return Ok(None);
     }
 
-    let agent_token = generate_secret();
+    let agent_token = generate_secret()?;
     // Non-Linux embeds fixed demo credentials because PAM is unavailable there.
     let password: Option<String> = {
         #[cfg(target_os = "linux")]

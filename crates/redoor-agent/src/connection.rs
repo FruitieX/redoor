@@ -34,7 +34,7 @@ impl AgentConnection {
         connect_address: Option<String>,
         insecure_tls: bool,
     ) -> Result<Self> {
-        let url = reqwest::Url::parse(&server_url).context("invalid agent websocket URL")?;
+        let url = url::Url::parse(&server_url).context("invalid agent websocket URL")?;
         if !matches!(url.scheme(), "ws" | "wss") {
             bail!("agent websocket URL must use ws:// or wss://");
         }

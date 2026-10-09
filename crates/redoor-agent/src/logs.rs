@@ -17,8 +17,8 @@ type LogSink = SplitSink<LogSocket, WsMessage>;
 type LogStream = SplitStream<LogSocket>;
 
 /// Builds the dedicated data-plane URL while retaining the configured server authority and scheme.
-fn log_stream_url(server_url: &str, log_stream_id: &LogStreamId) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(server_url).context("invalid agent websocket URL")?;
+fn log_stream_url(server_url: &str, log_stream_id: &LogStreamId) -> Result<url::Url> {
+    let mut url = url::Url::parse(server_url).context("invalid agent websocket URL")?;
     url.set_path(&format!("/api/v1/log-streams/{}/agent/ws", log_stream_id.0));
     url.set_query(None);
     url.set_fragment(None);

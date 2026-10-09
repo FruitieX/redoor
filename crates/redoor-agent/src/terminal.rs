@@ -53,8 +53,8 @@ enum SessionEnd {
 }
 
 /// Builds the dedicated data-plane URL without making assumptions about its authority.
-fn terminal_url(server_url: &str, terminal_id: &TerminalId) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(server_url).context("invalid agent websocket URL")?;
+fn terminal_url(server_url: &str, terminal_id: &TerminalId) -> Result<url::Url> {
+    let mut url = url::Url::parse(server_url).context("invalid agent websocket URL")?;
     url.set_path(&format!("/api/v1/terminals/{}/agent/ws", terminal_id.0));
     url.set_query(None);
     url.set_fragment(None);

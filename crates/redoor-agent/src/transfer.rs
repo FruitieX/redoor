@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
 /// Derives the payload endpoint while preserving the configured authority and WebSocket scheme.
-pub(crate) fn transfer_url(server_url: &str) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(server_url).context("invalid agent websocket URL")?;
+pub(crate) fn transfer_url(server_url: &str) -> Result<url::Url> {
+    let mut url = url::Url::parse(server_url).context("invalid agent websocket URL")?;
     url.set_path("/api/v1/agent-transfer/ws");
     url.set_query(None);
     url.set_fragment(None);

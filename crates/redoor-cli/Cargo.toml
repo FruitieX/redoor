@@ -12,7 +12,6 @@ async-stream.workspace = true
 bytes.workspace = true
 clap.workspace = true
 cookie_store.workspace = true
-fs2.workspace = true
 futures-util.workspace = true
 libc.workspace = true
 nix.workspace = true
@@ -22,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tokio-util.workspace = true
 uuid.workspace = true
 

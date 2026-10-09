@@ -8,9 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Args, Subcommand};
-use fs2::FileExt;
 use jiff::Timestamp;
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -251,7 +249,8 @@ impl MachineTokenService {
         };
         let credential_id = Uuid::new_v4();
         let mut random = [0_u8; 32];
-        OsRng.fill_bytes(&mut random);
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow::anyhow!("failed to read OS randomness: {error}"))?;
         let random_secret = URL_SAFE_NO_PAD.encode(random);
         let secret = format!("{TOKEN_PREFIX}_{credential_id}_{random_secret}");
         let credential = MachineCredential {
@@ -405,7 +404,8 @@ impl MachineTokenService {
         credential_id: Uuid,
     ) -> Result<Option<CreatedMachineToken>> {
         let mut random = [0_u8; 32];
-        OsRng.fill_bytes(&mut random);
+        getrandom::fill(&mut random)
+            .map_err(|error| anyhow::anyhow!("failed to read OS randomness: {error}"))?;
         let random_secret = URL_SAFE_NO_PAD.encode(random);
         self.mutate(move |store| {
             let Some(old_index) = store.credentials.iter().position(|item| {
@@ -567,8 +567,7 @@ where
         .write(true)
         .open(lock_path)
         .with_context(|| format!("failed to open MCP token lock {}", lock_path.display()))?;
-    lock.lock_exclusive()
-        .context("failed to lock MCP token storage")?;
+    lock.lock().context("failed to lock MCP token storage")?;
     let mut store = if path.exists() {
         let bytes =
             std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -587,7 +586,8 @@ where
     if changed {
         write_store(path, &store)?;
     }
-    FileExt::unlock(&lock).context("failed to unlock MCP token storage")?;
+    lock.unlock()
+        .context("failed to unlock MCP token storage")?;
     Ok(value)
 }
 

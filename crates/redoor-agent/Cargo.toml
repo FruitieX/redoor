@@ -22,7 +22,6 @@ mime_guess.workspace = true
 nix.workspace = true
 nucleo-matcher.workspace = true
 pty-process.workspace = true
-reqwest.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,10 +29,11 @@ similar.workspace = true
 sysinfo.workspace = true
 tar.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 mountpoints.workspace = true

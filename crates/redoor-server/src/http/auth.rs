@@ -8,7 +8,7 @@ use std::{
 
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use axum::{
     Json,
@@ -410,7 +410,12 @@ impl AuthState {
 
 /// Hashes a password with argon2id so AuthState never retains recoverable plaintext.
 fn hash_password(password: &str) -> anyhow::Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
+    // 16 bytes is the PHC-recommended salt length; the OS CSPRNG keeps salts unpredictable.
+    let mut salt_bytes = [0_u8; 16];
+    getrandom::fill(&mut salt_bytes)
+        .map_err(|error| anyhow::anyhow!("failed to read OS randomness: {error}"))?;
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|error| anyhow::anyhow!("failed to encode password salt: {error}"))?;
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())

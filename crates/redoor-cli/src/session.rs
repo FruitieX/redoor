@@ -102,7 +102,7 @@ impl SessionStore {
         let file = file.into_std().await;
         // flock may wait for another process; never hold up a Tokio worker while it does.
         tokio::task::spawn_blocking(move || {
-            fs2::FileExt::lock_exclusive(&file)?;
+            file.lock()?;
             Ok::<_, anyhow::Error>(file)
         })
         .await
