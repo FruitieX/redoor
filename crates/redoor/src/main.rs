@@ -1,10 +1,8 @@
 //! Redoor binary entry point: dispatches the server, agent, and remote CLI roles.
 
-mod launchd;
 mod process_control;
 mod process_logs;
-mod service_management;
-mod systemd;
+mod service;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,6 +14,7 @@ use redoor_core::paths::AppPaths;
 use redoor_core::runtime::RuntimeContext;
 use redoor_core::websocket::WebSocketTimeouts;
 use redoor_core::{app_name, config, process::ProcessSlot};
+use service::ServiceRole;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -71,28 +70,6 @@ enum Commands {
     Remote(redoor_cli::RemoteArgs),
 }
 
-/// Process role selected by the parent CLI command for service management.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ServiceRole {
-    /// Manage a standalone Redoor agent process.
-    Agent,
-    /// Manage the Redoor HTTP and WebSocket server process.
-    Server,
-}
-
-impl ServiceRole {
-    /// Returns the stable CLI and generated-service suffix for this role.
-    /// systemd/launchd helpers are OS-gated, so Android agent builds keep the
-    /// shared role enum without calling this helper.
-    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
-    pub(crate) fn cli_name(self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Server => "server",
-        }
-    }
-}
-
 /// Preserves flat server startup flags while exposing `server logs`.
 #[derive(Args)]
 struct ServerArgs {
@@ -114,9 +91,9 @@ enum ServerCommand {
     /// Print the configured server file log.
     Logs(ServerLogsArgs),
     /// Install or manage the server as a systemd service.
-    Systemd(systemd::SystemdArgs),
+    Systemd(service::SystemdArgs),
     /// Install or manage the server as a macOS LaunchAgent.
-    Launchd(launchd::LaunchdArgs),
+    Launchd(service::LaunchdArgs),
     /// Create, inspect, or revoke durable MCP machine credentials.
     McpToken(redoor_server::http::machine_tokens::MachineTokenArgs),
 }
@@ -159,9 +136,9 @@ enum AgentCommand {
     /// Print the configured standalone-agent file log.
     Logs(AgentLogsArgs),
     /// Install or manage the agent as a systemd service.
-    Systemd(systemd::SystemdArgs),
+    Systemd(service::SystemdArgs),
     /// Install or manage the agent as a macOS LaunchAgent.
-    Launchd(launchd::LaunchdArgs),
+    Launchd(service::LaunchdArgs),
     /// Start an agent on an SSH host and relay it through this machine to a redoor server.
     Relay(Box<RelayCommandArgs>),
 }
@@ -325,10 +302,10 @@ async fn run_server_command(
         Some(ServerCommand::Stop) => process_control::stop(ProcessSlot::Server, paths).await?,
         Some(ServerCommand::Status) => process_control::status(ProcessSlot::Server, paths).await?,
         Some(ServerCommand::Systemd(systemd)) => {
-            systemd::run(systemd, ServiceRole::Server, paths).await?
+            service::run_systemd(systemd, ServiceRole::Server, paths).await?
         }
         Some(ServerCommand::Launchd(launchd)) => {
-            launchd::run(launchd, ServiceRole::Server, paths).await?
+            service::run_launchd(launchd, ServiceRole::Server, paths).await?
         }
         Some(ServerCommand::McpToken(tokens)) => {
             redoor_server::http::machine_tokens::run_cli(tokens, paths).await?
@@ -364,10 +341,10 @@ async fn run_agent_command(
         Some(AgentCommand::Stop) => process_control::stop(ProcessSlot::Agent, paths).await?,
         Some(AgentCommand::Status) => process_control::status(ProcessSlot::Agent, paths).await?,
         Some(AgentCommand::Systemd(systemd)) => {
-            systemd::run(systemd, ServiceRole::Agent, paths).await?
+            service::run_systemd(systemd, ServiceRole::Agent, paths).await?
         }
         Some(AgentCommand::Launchd(launchd)) => {
-            launchd::run(launchd, ServiceRole::Agent, paths).await?
+            service::run_launchd(launchd, ServiceRole::Agent, paths).await?
         }
         Some(AgentCommand::Relay(relay)) => match relay.command {
             RelayCommand::Ls(list) => list_relays(list, paths).await?,

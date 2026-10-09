@@ -827,10 +827,8 @@ fn location(root: PathBuf, mount_top: Option<PathBuf>) -> Result<Location, Trash
 
 /// Finds the user's home without guessing a root-owned fallback.
 fn home_directory() -> Result<PathBuf, TrashError> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| TrashError::new(CommandErrorKind::InvalidInput, "HOME is not set"))
+    redoor_core::paths::home()
+        .map_err(|error| TrashError::new(CommandErrorKind::InvalidInput, error.to_string()))
 }
 
 /// Applies XDG_DATA_HOME only when it is an absolute path as required by XDG.

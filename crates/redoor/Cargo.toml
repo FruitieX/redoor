@@ -22,9 +22,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-uuid.workspace = true
-
 [dev-dependencies]
 redoor-core = { workspace = true, features = ["test-support"] }
 redoor-protocol.workspace = true
