@@ -1,92 +1,55 @@
-use crate::actors;
 use crate::http::{
+    agent_client::{Echo, FileSearch, ListPath, Listing, Metadata},
     agent_helpers::{AgentFilePath, absolute_path_from_url},
-    responses::command_error_status,
+    error::ApiError,
     state::ServerState,
 };
 use axum::{
     Json,
     extract::{Path, State as AxumState},
-    http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use redoor_protocol::{
     api::{
-        ErrorResponse,
         agents::{EchoRequest, EchoResponse},
-        files::{LsDirectoryResponse, LsFileResponse},
-        search::FindRequest,
+        files::{LsDirectoryResponse, LsFileResponse, MetadataResponse},
+        search::{FileSearchResponse, FindRequest},
     },
     ids::AgentId,
-    wire::command::{Command, CommandResult},
 };
 
 /// Route: `GET /api/v1/agents/{agent}/ls/{*path}`
 pub(crate) async fn ls_agent_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent.clone());
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::Ls { path: Some(path) },
-                reply,
+) -> Result<Response, ApiError> {
+    let call = ListPath {
+        path: absolute_path_from_url(path.unwrap_or_default()),
+    };
+    Ok(
+        match state.agents.call(&AgentId::from(agent), call).await? {
+            Listing::Directory(listing) => Json(LsDirectoryResponse {
+                files: listing.files,
+                path: listing.path,
+                owner: listing.owner,
+                group: listing.group,
+                uid: listing.uid,
+                gid: listing.gid,
+                permissions: listing.permissions,
             })
-        })
-        .await
-    {
-        Ok(result) => match result {
-            CommandResult::LsDirectory(ls_result) => (
-                StatusCode::OK,
-                Json(LsDirectoryResponse {
-                    files: ls_result.files,
-                    path: ls_result.path,
-                    owner: ls_result.owner,
-                    group: ls_result.group,
-                    uid: ls_result.uid,
-                    gid: ls_result.gid,
-                    permissions: ls_result.permissions,
-                }),
-            )
-                .into_response(),
-            CommandResult::LsFile(ls_result) => (
-                StatusCode::OK,
-                Json(LsFileResponse {
-                    size: ls_result.size,
-                    path: ls_result.path,
-                    owner: ls_result.owner,
-                    group: ls_result.group,
-                    uid: ls_result.uid,
-                    gid: ls_result.gid,
-                    permissions: ls_result.permissions,
-                }),
-            )
-                .into_response(),
-            CommandResult::Error { kind, message } => {
-                let status = command_error_status(&kind);
-                (status, Json(ErrorResponse { error: message })).into_response()
-            }
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected result type".to_string(),
-                }),
-            )
-                .into_response(),
+            .into_response(),
+            Listing::File(file) => Json(LsFileResponse {
+                size: file.size,
+                path: file.path,
+                owner: file.owner,
+                group: file.group,
+                uid: file.uid,
+                gid: file.gid,
+                permissions: file.permissions,
+            })
+            .into_response(),
         },
-        Err(error) => {
-            let error_msg = format!("Failed to execute ls command: {:?}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: error_msg }),
-            )
-                .into_response()
-        }
-    }
+    )
 }
 
 /// Route: `POST /api/v1/agents/{agent}/find/{*path}` searches below one filesystem root.
@@ -94,105 +57,32 @@ pub(crate) async fn file_search_agent_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
     Json(search): Json<FindRequest>,
-) -> impl IntoResponse {
+) -> Result<Json<FileSearchResponse>, ApiError> {
     if !(1..=60).contains(&search.timeout) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "File search timeout must be between 1 and 60 seconds".to_string(),
-            }),
-        )
-            .into_response();
+        return Err(ApiError::bad_request(
+            "File search timeout must be between 1 and 60 seconds",
+        ));
     }
-
-    let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent);
-    let request_timeout_ms = (search.timeout + 2) * 1000;
-    match state
-        .router_ref
-        .request(request_timeout_ms, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::FileSearch {
-                    path,
-                    query: search.query,
-                    timeout_seconds: search.timeout,
-                    include_hidden: search.include_hidden,
-                    respect_gitignore: search.respect_gitignore,
-                    case_sensitivity: search.case_sensitivity,
-                },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::FileSearch(result)) => (StatusCode::OK, Json(result)).into_response(),
-        Ok(CommandResult::Error { kind, message }) => (
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response(),
-        Ok(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected result type".to_string(),
-            }),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to execute file search command: {error:?}"),
-            }),
-        )
-            .into_response(),
-    }
+    let call = FileSearch {
+        path: absolute_path_from_url(path.unwrap_or_default()),
+        request: search,
+    };
+    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
 }
 
 /// Route: `GET /api/v1/agents/{agent}/metadata/{*path}`
 pub(crate) async fn metadata_agent_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
+) -> Result<Json<MetadataResponse>, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent.clone());
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::Metadata { path: path.clone() },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(result) => match result {
-            CommandResult::Metadata(mut metadata) => {
-                metadata.one_time_tokens = state.one_time_token_registry.list(&agent_id, &path);
-                (StatusCode::OK, Json(metadata)).into_response()
-            }
-            CommandResult::Error { kind, message } => {
-                let status = command_error_status(&kind);
-                (status, Json(ErrorResponse { error: message })).into_response()
-            }
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected result type".to_string(),
-                }),
-            )
-                .into_response(),
-        },
-        Err(error) => {
-            let error_msg = format!("Failed to execute metadata command: {:?}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: error_msg }),
-            )
-                .into_response()
-        }
-    }
+    let agent_id = AgentId::from(agent);
+    let mut metadata = state
+        .agents
+        .call(&agent_id, Metadata { path: path.clone() })
+        .await?;
+    metadata.one_time_tokens = state.one_time_token_registry.list(&agent_id, &path);
+    Ok(Json(metadata))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/echo`
@@ -200,49 +90,12 @@ pub(crate) async fn echo_agent_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
     Json(payload): Json<EchoRequest>,
-) -> impl IntoResponse {
-    let agent_id = AgentId::from(agent.clone());
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::Echo {
-                    request: payload.clone(),
-                },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(result) => match result {
-            CommandResult::Echo(echo_result) => (
-                StatusCode::OK,
-                Json(EchoResponse {
-                    message: echo_result.message,
-                }),
-            )
-                .into_response(),
-            CommandResult::Error { kind, message } => (
-                command_error_status(&kind),
-                Json(ErrorResponse { error: message }),
-            )
-                .into_response(),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected result type".to_string(),
-                }),
-            )
-                .into_response(),
-        },
-        Err(error) => {
-            let error_msg = format!("Failed to execute echo command: {:?}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: error_msg }),
-            )
-                .into_response()
-        }
-    }
+) -> Result<Json<EchoResponse>, ApiError> {
+    let echo = state
+        .agents
+        .call(&AgentId::from(agent), Echo { request: payload })
+        .await?;
+    Ok(Json(EchoResponse {
+        message: echo.message,
+    }))
 }

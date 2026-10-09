@@ -1,5 +1,6 @@
 //! Axum HTTP surface: REST handlers, websocket endpoints, MCP, and UI embedding.
 
+pub(crate) mod agent_client;
 mod agent_configuration;
 mod agent_helpers;
 mod agent_logs;
@@ -9,6 +10,7 @@ mod archive_upload;
 pub(crate) mod auth;
 mod copy;
 mod diffs;
+pub(crate) mod error;
 mod exec;
 mod file_edit;
 mod files;
@@ -22,7 +24,6 @@ mod moves;
 #[cfg(target_os = "linux")]
 mod pam;
 mod raw;
-mod responses;
 mod restart;
 mod retry_agent_start;
 pub(crate) mod routes;

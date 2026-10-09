@@ -1,19 +1,16 @@
-use crate::actors;
 use axum::{
     Json,
     extract::{Path, State as AxumState},
-    http::StatusCode,
-    response::{IntoResponse, Response},
 };
 use redoor_protocol::{
-    api::{ErrorResponse, git::GitDiffRequest},
+    api::git::{GitContextResponse, GitDiffRequest, GitDiffResponse, GitStatusResponse},
     ids::AgentId,
-    wire::command::{Command, CommandResult},
 };
 
 use super::{
+    agent_client::{GitContext, GitDiff, GitStatus},
     agent_helpers::{AgentFilePath, absolute_path_from_url, require_absolute_path},
-    responses::command_error_status,
+    error::ApiError,
     state::ServerState,
 };
 
@@ -21,44 +18,32 @@ use super::{
 pub(crate) async fn git_context_handler(
     Path(params): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
-) -> Response {
-    let path = match route_path(params.path) {
-        Ok(path) => path,
-        Err(response) => return *response,
+) -> Result<Json<GitContextResponse>, ApiError> {
+    let call = GitContext {
+        path: route_path(params.path)?,
     };
-    execute_git_command(
-        &state,
-        AgentId::from(params.agent),
-        Command::GitContext { path },
-        |result| match result {
-            CommandResult::GitContext(response) => Some(Json(response).into_response()),
-            _ => None,
-        },
-        "Git context",
-    )
-    .await
+    Ok(Json(
+        state
+            .agents
+            .call(&AgentId::from(params.agent), call)
+            .await?,
+    ))
 }
 
 /// Route: `GET /api/v1/agents/{agent}/git/status[/{*path}]`.
 pub(crate) async fn git_status_handler(
     Path(params): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
-) -> Response {
-    let path = match route_path(params.path) {
-        Ok(path) => path,
-        Err(response) => return *response,
+) -> Result<Json<GitStatusResponse>, ApiError> {
+    let call = GitStatus {
+        path: route_path(params.path)?,
     };
-    execute_git_command(
-        &state,
-        AgentId::from(params.agent),
-        Command::GitStatus { path },
-        |result| match result {
-            CommandResult::GitStatus(response) => Some(Json(response).into_response()),
-            _ => None,
-        },
-        "Git status",
-    )
-    .await
+    Ok(Json(
+        state
+            .agents
+            .call(&AgentId::from(params.agent), call)
+            .await?,
+    ))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/git/diff`.
@@ -66,79 +51,21 @@ pub(crate) async fn git_diff_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
     Json(mut request): Json<GitDiffRequest>,
-) -> Response {
-    if let Err(error) = request.normalize_files() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: error.to_string(),
-            }),
-        )
-            .into_response();
-    }
-    execute_git_command(
-        &state,
-        AgentId::from(agent),
-        Command::GitDiff {
-            files: request.files,
-            mode: request.mode,
-        },
-        |result| match result {
-            CommandResult::GitDiff(response) => Some(Json(response).into_response()),
-            _ => None,
-        },
-        "Git diff",
-    )
-    .await
+) -> Result<Json<GitDiffResponse>, ApiError> {
+    request
+        .normalize_files()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let call = GitDiff {
+        files: request.files,
+        mode: request.mode,
+    };
+    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
 }
 
 /// Restores the implicit root and applies the shared absolute-path policy.
-fn route_path(path: Option<String>) -> Result<String, Box<Response>> {
+fn route_path(path: Option<String>) -> Result<String, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
     require_absolute_path(path)
-}
-
-/// Sends one Git command over the prioritized control lane and maps shared failures.
-async fn execute_git_command(
-    state: &ServerState,
-    agent_id: AgentId,
-    command: Command,
-    success: impl FnOnce(CommandResult) -> Option<Response>,
-    operation: &str,
-) -> Response {
-    match state
-        .router_ref
-        .request(30_000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id,
-                command,
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::Error { kind, message }) => (
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response(),
-        Ok(result) => success(result).unwrap_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Unexpected response type from {operation} command"),
-                }),
-            )
-                .into_response()
-        }),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to execute {operation}: {error:?}"),
-            }),
-        )
-            .into_response(),
-    }
 }
 
 #[cfg(test)]

@@ -33,7 +33,6 @@ use uuid::Uuid;
 const MAX_TERMINAL_MESSAGE_SIZE: usize = 1024 * 1024;
 const TERMINAL_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const TERMINAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const ROUTER_REQUEST_TIMEOUT_MS: u64 = 5_000;
 const MAX_PRE_READY_FRAMES: usize = 32;
 const MAX_PRE_READY_BYTES: usize = 64 * 1024;
 
@@ -61,7 +60,7 @@ pub(crate) async fn browser_terminal_websocket_handler(
 ) -> Response {
     let cwd = match require_absolute_path(query.cwd) {
         Ok(cwd) => cwd,
-        Err(response) => return *response,
+        Err(error) => return error.into_response(),
     };
     let size = match TerminalSize::new(query.rows, query.cols) {
         Ok(size) => size,
@@ -127,7 +126,7 @@ async fn run_browser_setup(
 
     let request_result = state
         .router_ref
-        .request(ROUTER_REQUEST_TIMEOUT_MS, |reply| {
+        .request(|reply| {
             RouterMsg::OpenTerminal(OpenTerminalRequest {
                 agent_id: agent_id.clone(),
                 terminal_id: terminal_id.clone(),

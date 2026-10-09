@@ -3,18 +3,22 @@
 use crate::actors::router::RouterMsg;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use redoor_protocol::{
-    api::{files::CreationOwnershipOptions, search::CaseSensitivity, transfers::CopyExistingMode},
-    ids::{AgentId, RequestId, TransferId},
-    wire::{
-        command::{Command, CommandResult},
-        exec::{ExecEvent, ExecRequest},
+    api::{
+        files::CreationOwnershipOptions,
+        search::{CaseSensitivity, FindRequest, GrepRequest},
+        transfers::CopyExistingMode,
     },
+    ids::{AgentId, RequestId, TransferId},
+    wire::exec::{ExecEvent, ExecRequest},
 };
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::{error::McpError, policy, schema::server_metadata, services};
 use crate::http::{
+    agent_client::{
+        ContentGrep, CreateDirectory, DeletePath, FileSearch, ListPath, Listing, Metadata,
+    },
     machine_tokens::{MachinePrincipal, MachineScope},
     state::ServerState,
     streaming::OutputCancelGuard,
@@ -304,9 +308,9 @@ async fn list_devices(
     id: &Value,
 ) -> Result<Value, McpError> {
     require_scope(principal, MachineScope::DevicesRead, id)?;
-    let devices = services::inventory(state)
+    let devices = crate::http::agents::list_agent_snapshots(state)
         .await
-        .map_err(|error| op(error, id))?
+        .map_err(|error| op(error.to_string(), id))?
         .into_iter()
         .filter(|agent| principal.grant.device_ids.contains(&agent.id.to_string()))
         .map(device_json)
@@ -322,9 +326,9 @@ async fn get_device(
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
     policy::require_device(principal, MachineScope::DevicesRead, device, id)?;
-    let agent = services::inventory(state)
+    let agent = crate::http::agents::list_agent_snapshots(state)
         .await
-        .map_err(|error| op(error, id))?
+        .map_err(|error| op(error.to_string(), id))?
         .into_iter()
         .find(|agent| agent.id.to_string() == device)
         .ok_or_else(|| op("Device not found", id))?;
@@ -690,7 +694,7 @@ async fn cancel_operation(
         }
         ("copy" | "move", Some(remote), _) => state
             .router_ref
-            .request(5_000, |reply| RouterMsg::CancelPublicTransfer {
+            .request(|reply| RouterMsg::CancelPublicTransfer {
                 transfer_id: TransferId::new(remote),
                 reply,
             })
@@ -713,24 +717,21 @@ async fn list_directory(
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
     policy::require_device(principal, MachineScope::FilesRead, device, id)?;
-    match services::command(
-        state,
-        device,
-        Command::Ls {
-            path: Some(path.to_string()),
-        },
-        30_000,
-    )
-    .await
-    .map_err(|error| op(error, id))?
+    let call = ListPath {
+        path: path.to_string(),
+    };
+    match state
+        .agents
+        .call(&AgentId::from(device), call)
+        .await
+        .map_err(|error| op(error.to_string(), id))?
     {
-        CommandResult::LsDirectory(mut result) => {
+        Listing::Directory(mut result) => {
             let truncated = result.files.len() > MAX_DIRECTORY_ENTRIES;
             result.files.truncate(MAX_DIRECTORY_ENTRIES);
             Ok(json!({"path":result.path,"entries":result.files,"truncated":truncated}))
         }
-        CommandResult::Error { message, .. } => Err(op(message, id)),
-        _ => Err(op("Path is not a directory", id)),
+        Listing::File(_) => Err(op("Path is not a directory", id)),
     }
 }
 /// Maps agent metadata to a credential-free path contract.
@@ -742,23 +743,19 @@ async fn stat_path(
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
     policy::require_device(principal, MachineScope::FilesRead, device, id)?;
-    match services::command(
-        state,
-        device,
-        Command::Metadata {
-            path: path.to_string(),
-        },
-        30_000,
+    let result = state
+        .agents
+        .call(
+            &AgentId::from(device),
+            Metadata {
+                path: path.to_string(),
+            },
+        )
+        .await
+        .map_err(|error| op(error.to_string(), id))?;
+    Ok(
+        json!({"path":result.path,"size":result.file_size,"is_file":result.is_file,"is_directory":result.is_dir,"mime_type":result.mime_type}),
     )
-    .await
-    .map_err(|error| op(error, id))?
-    {
-        CommandResult::Metadata(result) => Ok(
-            json!({"path":result.path,"size":result.file_size,"is_file":result.is_file,"is_directory":result.is_dir,"mime_type":result.mime_type}),
-        ),
-        CommandResult::Error { message, .. } => Err(op(message, id)),
-        _ => Err(op("Unexpected metadata response", id)),
-    }
 }
 /// Reads one inline file page and preserves an exact byte continuation offset.
 async fn read_file(
@@ -985,46 +982,40 @@ async fn delete_path(
         .get("recursive")
         .and_then(Value::as_bool)
         .ok_or_else(|| invalid("recursive must be an explicit boolean", id))?;
+    let agent_id = AgentId::from(device);
     if !recursive {
-        match services::command(
-            state,
-            device,
-            Command::Metadata {
-                path: path.to_string(),
-            },
-            30_000,
-        )
-        .await
-        .map_err(|error| op(error, id))?
-        {
-            CommandResult::Metadata(metadata) if metadata.is_dir => {
-                return Err(invalid(
-                    "recursive must be true when deleting a directory",
-                    id,
-                ));
-            }
-            CommandResult::Metadata(_) => {}
-            CommandResult::Error { message, .. } => return Err(op(message, id)),
-            _ => return Err(op("Unexpected metadata response", id)),
+        let metadata = state
+            .agents
+            .call(
+                &agent_id,
+                Metadata {
+                    path: path.to_string(),
+                },
+            )
+            .await
+            .map_err(|error| op(error.to_string(), id))?;
+        if metadata.is_dir {
+            return Err(invalid(
+                "recursive must be true when deleting a directory",
+                id,
+            ));
         }
     }
-    let command = match string(args, "mode", id)? {
-        "permanent" => Command::RawDelete {
-            path: path.to_string(),
-        },
-        "trash" => Command::Trash {
-            path: path.to_string(),
-        },
+    let to_trash = match string(args, "mode", id)? {
+        "permanent" => false,
+        "trash" => true,
         _ => return Err(invalid("mode must be trash or permanent", id)),
     };
-    match services::command(state, device, command, 30_000)
+    let call = DeletePath {
+        path: path.to_string(),
+        to_trash,
+    };
+    state
+        .agents
+        .call(&agent_id, call)
         .await
-        .map_err(|error| op(error, id))?
-    {
-        CommandResult::RawDelete | CommandResult::Trash => Ok(json!({"path":path,"deleted":true})),
-        CommandResult::Error { message, .. } => Err(op(message, id)),
-        _ => Err(op("Unexpected delete response", id)),
-    }
+        .map_err(|error| op(error.to_string(), id))?;
+    Ok(json!({"path":path,"deleted":true}))
 }
 /// Creates one absolute directory through the same agent command used by REST.
 async fn create_directory(
@@ -1035,22 +1026,16 @@ async fn create_directory(
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
     policy::require_device(principal, MachineScope::FilesWrite, device, id)?;
-    match services::command(
-        state,
-        device,
-        Command::CreateDirectory {
-            path: path.to_string(),
-            ownership: CreationOwnershipOptions::default(),
-        },
-        30_000,
-    )
-    .await
-    .map_err(|error| op(error, id))?
-    {
-        CommandResult::CreateDirectory => Ok(json!({"path":path,"created":true})),
-        CommandResult::Error { message, .. } => Err(op(message, id)),
-        _ => Err(op("Unexpected mkdir response", id)),
-    }
+    let call = CreateDirectory {
+        path: path.to_string(),
+        ownership: CreationOwnershipOptions::default(),
+    };
+    state
+        .agents
+        .call(&AgentId::from(device), call)
+        .await
+        .map_err(|error| op(error.to_string(), id))?;
+    Ok(json!({"path":path,"created":true}))
 }
 /// Runs the existing bounded platform-aware path search implementation.
 async fn search_paths(
@@ -1067,34 +1052,32 @@ async fn search_paths(
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .clamp(1, 60);
-    let command = Command::FileSearch {
+    let call = FileSearch {
         path: root.to_string(),
-        query: string(args, "query", id)?.to_string(),
-        timeout_seconds: timeout,
-        include_hidden: args
-            .get("include_hidden")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        respect_gitignore: args
-            .get("respect_gitignore")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        case_sensitivity: case_sensitivity(args, id)?,
+        request: FindRequest {
+            query: string(args, "query", id)?.to_string(),
+            timeout,
+            include_hidden: args
+                .get("include_hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            respect_gitignore: args
+                .get("respect_gitignore")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            case_sensitivity: case_sensitivity(args, id)?,
+        },
     };
-    match services::command(state, device, command, (timeout + 2) * 1000)
+    let mut result = state
+        .agents
+        .call(&AgentId::from(device), call)
         .await
-        .map_err(|error| op(error, id))?
-    {
-        CommandResult::FileSearch(mut result) => {
-            let omitted = result.results.len().saturating_sub(2000);
-            result.results.truncate(2000);
-            Ok(
-                json!({"matches":result.results,"timed_out":result.timed_out,"truncated":omitted>0,"omitted":omitted,"matching":"substring path/name matching using the connected agent's platform rules"}),
-            )
-        }
-        CommandResult::Error { message, .. } => Err(op(message, id)),
-        _ => Err(op("Unexpected search response", id)),
-    }
+        .map_err(|error| op(error.to_string(), id))?;
+    let omitted = result.results.len().saturating_sub(2000);
+    result.results.truncate(2000);
+    Ok(
+        json!({"matches":result.results,"timed_out":result.timed_out,"truncated":omitted>0,"omitted":omitted,"matching":"substring path/name matching using the connected agent's platform rules"}),
+    )
 }
 /// Runs bounded grep while preserving regex, ignore, case, and context controls.
 async fn search_contents(
@@ -1111,10 +1094,9 @@ async fn search_contents(
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .clamp(1, 60);
-    let command = Command::ContentGrep {
-        path: root.to_string(),
+    let request = GrepRequest {
         query: string(args, "query", id)?.to_string(),
-        timeout_seconds: timeout,
+        timeout,
         include_hidden: args
             .get("include_hidden")
             .and_then(Value::as_bool)
@@ -1139,16 +1121,16 @@ async fn search_contents(
             .unwrap_or(0)
             .min(20),
     };
-    match services::command(state, device, command, (timeout + 2) * 1000)
+    let call = ContentGrep {
+        path: root.to_string(),
+        request,
+    };
+    let result = state
+        .agents
+        .call(&AgentId::from(device), call)
         .await
-        .map_err(|error| op(error, id))?
-    {
-        CommandResult::ContentGrep(result) => {
-            serde_json::to_value(result).map_err(|error| op(error.to_string(), id))
-        }
-        CommandResult::Error { message, .. } => Err(op(message, id)),
-        _ => Err(op("Unexpected content search response", id)),
-    }
+        .map_err(|error| op(error.to_string(), id))?;
+    serde_json::to_value(result).map_err(|error| op(error.to_string(), id))
 }
 /// Applies existing watchdog desired-state semantics only to configured managed devices.
 async fn managed_agent(

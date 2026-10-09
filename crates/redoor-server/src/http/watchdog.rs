@@ -95,7 +95,7 @@ pub(crate) async fn register_agent(
     let spawn = make_spawn_fn(config, redoor_port, agent_token.to_string());
     spawn_supervisor(key, spawn, registry, callback)?;
     router
-        .request(5000, |reply| {
+        .request(|reply| {
             RouterMsg::RegisterManagedAgent(RegisterManagedAgentRequest {
                 agent_id: agent_id.clone(),
                 default_directory,
@@ -105,7 +105,7 @@ pub(crate) async fn register_agent(
             })
         })
         .await
-        .map_err(|error| anyhow::anyhow!("Failed to register managed inventory: {error:?}"))?;
+        .map_err(|error| anyhow::anyhow!("Failed to register managed inventory: {error}"))?;
     Ok(agent_id)
 }
 

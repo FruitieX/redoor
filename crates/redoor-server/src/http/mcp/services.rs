@@ -2,10 +2,7 @@
 
 use crate::{
     actors,
-    actors::router::{
-        ExecuteCommandRequest, ExecuteStreamRequest, OutputReceiver, OutputStreamTracking,
-        RouterMsg,
-    },
+    actors::router::{ExecuteStreamRequest, OutputReceiver, OutputStreamTracking, RouterMsg},
 };
 use redoor_protocol::{
     api::{files::CreationOwnershipOptions, transfers::CopyExistingMode},
@@ -14,40 +11,12 @@ use redoor_protocol::{
 };
 
 use crate::http::{
-    agents,
     raw::{AgentUpload, AgentUploadStartError},
     state::ServerState,
 };
 
 /// Keeps inline MCP reads small; larger files use ranges or the streaming endpoint.
 pub(super) const INLINE_FILE_LIMIT: usize = 64 * 1024;
-/// Executes one ordinary agent command through the same router path as REST.
-pub(super) async fn command(
-    state: &ServerState,
-    device_id: &str,
-    command: Command,
-    timeout_ms: u64,
-) -> Result<CommandResult, String> {
-    state
-        .router_ref
-        .request(timeout_ms, |reply| {
-            RouterMsg::ExecuteCommandRest(ExecuteCommandRequest {
-                agent_id: AgentId::from(device_id),
-                command,
-                reply,
-            })
-        })
-        .await
-        .map_err(|error| format!("Agent request failed: {error:?}"))
-}
-
-/// Returns retained inventory for policy-filtering without exposing connection secrets.
-pub(super) async fn inventory(
-    state: &ServerState,
-) -> Result<Vec<redoor_protocol::api::agents::AgentInfoResponse>, String> {
-    agents::list_agent_snapshots(state).await
-}
-
 /// Downloads one bounded range while preserving router backpressure and cancellation.
 pub(super) async fn read_file(
     state: &ServerState,
@@ -61,7 +30,7 @@ pub(super) async fn read_file(
     let agent_id = AgentId::from(device_id);
     let mut receiver = state
         .router_ref
-        .request(30_000, |reply| {
+        .request(|reply| {
             RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                 agent_id: agent_id.clone(),
                 command: Command::RawDownload {
@@ -79,8 +48,8 @@ pub(super) async fn read_file(
             })
         })
         .await
-        .map_err(|error| format!("Read admission failed: {error:?}"))?
-        .map_err(|error| format!("Read rejected: {error:?}"))?;
+        .map_err(|error| format!("Read admission failed: {error}"))?
+        .map_err(|error| format!("Read rejected: {error}"))?;
     let request_id = receiver.request_id();
     let mut bytes = Vec::with_capacity(limit.min(8192));
     while let Some(chunk) = receiver.recv().await {
@@ -176,7 +145,7 @@ pub(super) async fn start_execution(
     let agent_id = AgentId::from(device_id);
     let receiver = state
         .router_ref
-        .request(30_000, |reply| {
+        .request(|reply| {
             RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                 agent_id: agent_id.clone(),
                 command: Command::Exec { request },
@@ -187,8 +156,8 @@ pub(super) async fn start_execution(
             })
         })
         .await
-        .map_err(|error| format!("Execution admission failed: {error:?}"))?
-        .map_err(|error| format!("Execution rejected: {error:?}"))?;
+        .map_err(|error| format!("Execution admission failed: {error}"))?
+        .map_err(|error| format!("Execution rejected: {error}"))?;
     drop(terminal_sender);
     Ok((receiver.request_id(), receiver, terminal_receiver))
 }
@@ -201,14 +170,14 @@ pub(super) async fn cancel_execution(
 ) -> Result<bool, String> {
     state
         .router_ref
-        .request(5_000, |reply| RouterMsg::CancelExecution {
+        .request(|reply| RouterMsg::CancelExecution {
             agent_id: AgentId::from(device_id),
             request_id,
             reply,
         })
         .await
-        .map_err(|error| format!("Cancellation failed: {error:?}"))?
-        .map_err(|error| format!("Cancellation delivery failed: {error:?}"))
+        .map_err(|error| format!("Cancellation failed: {error}"))?
+        .map_err(|error| format!("Cancellation delivery failed: {error}"))
 }
 
 /// Starts the existing same/cross-device copy pipeline and returns its public transfer ID.
@@ -229,26 +198,36 @@ pub(super) async fn start_transfer(
     ),
     String,
 > {
-    let metadata_command = if is_move {
-        Command::MoveMetadata {
-            path: source_path.to_string(),
-        }
-    } else {
-        Command::Metadata {
-            path: source_path.to_string(),
-        }
-    };
-    let metadata = command(state, source_device, metadata_command, 30_000).await?;
-    let (size, is_file, is_dir, identity) = match metadata {
-        CommandResult::Metadata(value) => (value.file_size, value.is_file, value.is_dir, None),
-        CommandResult::MoveMetadata(value) => (
+    let source_agent = AgentId::from(source_device);
+    let (size, is_file, is_dir, identity) = if is_move {
+        let value = state
+            .agents
+            .call(
+                &source_agent,
+                crate::http::agent_client::MoveMetadata {
+                    path: source_path.to_string(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        (
             value.file_size,
             value.is_file,
             value.is_dir,
             Some(value.identity),
-        ),
-        CommandResult::Error { message, .. } => return Err(message),
-        _ => return Err("Unexpected transfer metadata response".to_string()),
+        )
+    } else {
+        let value = state
+            .agents
+            .call(
+                &source_agent,
+                crate::http::agent_client::Metadata {
+                    path: source_path.to_string(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        (value.file_size, value.is_file, value.is_dir, None)
     };
     let content_kind = if is_file {
         actors::router::CopyContentKind::RawFile
@@ -260,7 +239,7 @@ pub(super) async fn start_transfer(
     let (terminal_sender, terminal_receiver) = tokio::sync::watch::channel(None);
     let id = state
         .router_ref
-        .request(30_000, |reply| {
+        .request(|reply| {
             RouterMsg::StartCopyRest(actors::router::StartCopyRequest {
                 source_agent_id: AgentId::from(source_device),
                 source_path: source_path.to_string(),
@@ -280,7 +259,7 @@ pub(super) async fn start_transfer(
             })
         })
         .await
-        .map_err(|error| format!("Transfer admission failed: {error:?}"))?
-        .map_err(|error| format!("Transfer rejected: {error:?}"))?;
+        .map_err(|error| format!("Transfer admission failed: {error}"))?
+        .map_err(|error| format!("Transfer rejected: {error}"))?;
     Ok((id.0, terminal_receiver))
 }

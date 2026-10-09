@@ -20,6 +20,8 @@ pub(crate) struct ServerState {
     /// Effective installation namespace displayed on the home page.
     pub(crate) app_name: String,
     pub(crate) router_ref: actors::router::RouterHandle,
+    /// Typed one-shot agent commands with their deadlines and cancel-on-abandon behavior.
+    pub(crate) agents: super::agent_client::AgentClient,
     /// Shared registry of agent supervisors. The WebSocket session uses
     /// this to look up the supervisor for the agent it just registered
     /// and signal it when the connection goes stale.

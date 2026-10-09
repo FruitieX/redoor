@@ -11,6 +11,7 @@ use super::streams::AgentLink;
 use axum::extract::ws::Message as WsMessage;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
+use redoor_protocol::wire::policy::CancelScope;
 use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
 use redoor_protocol::{
     ids::{AgentId, SocketId, UnixTimestampSeconds},
@@ -616,24 +617,57 @@ impl RouterState {
             ));
             return;
         };
-        if agent_connection.send_message(ServerToAgent::Command {
+        let cancelable = request.command.policy().cancel_scope == CancelScope::Request;
+        if !agent_connection.send_message(ServerToAgent::Command {
             agent_id: request.agent_id.clone(),
             request_id,
             command: request.command,
         }) {
-            self.flows.insert(
-                request_id,
-                Flow::Command(CommandFlow {
-                    request_id,
-                    agent_id: request.agent_id,
-                    reply: request.reply,
-                }),
-            );
-        } else {
             let _ = request.reply.send(CommandResult::error(
                 redoor_protocol::wire::command::CommandErrorKind::ServiceUnavailable,
                 format!("Agent control queue is full: {}", request.agent_id),
             ));
+            return;
+        }
+        self.flows.insert(
+            request_id,
+            Flow::Command(CommandFlow {
+                request_id,
+                agent_id: request.agent_id.clone(),
+                cancelable,
+                reply: request.reply,
+            }),
+        );
+        if request.admitted.send(request_id).is_err() {
+            // The caller left between queueing and admission, so nobody can cancel it later.
+            self.abandon_command(request_id, &request.agent_id);
+        }
+    }
+
+    /// Drops a one-shot command whose caller gave up and stops it on the agent when the agent
+    /// can stop it (request cancel scope); other commands are short or bounded by their own
+    /// agent-side timeouts and simply finish unobserved.
+    pub(crate) fn abandon_command(&mut self, flow_id: super::flows::FlowId, agent_id: &AgentId) {
+        match self.flows.get(flow_id) {
+            Some(Flow::Command(command)) if &command.agent_id == agent_id => {}
+            _ => return,
+        }
+        let Some(Flow::Command(command)) = self.flows.remove(flow_id) else {
+            return;
+        };
+        log!(
+            Level::Debug,
+            "Abandoned command: agent_id={}, request_id={}, cancelable={}",
+            agent_id,
+            command.request_id,
+            command.cancelable
+        );
+        if command.cancelable
+            && let Some(connection) = self.agents.by_id.get(agent_id)
+        {
+            // A retained delivery task finishes on its own; a closed lane means the
+            // connection is gone and its teardown already stops the command.
+            let _ = connection.queue_priority_cancel(command.request_id);
         }
     }
 
@@ -1102,9 +1136,11 @@ mod tests {
         ));
 
         let (first_reply, first_receiver) = oneshot::channel();
+        let (first_admitted, _first_admitted) = oneshot::channel();
         state.execute_command_rest(ExecuteCommandRequest {
             agent_id: agent_id.clone(),
             command: redoor_protocol::wire::command::Command::GetAgentDetails,
+            admitted: first_admitted,
             reply: first_reply,
         });
         // The admitted command owns exactly one pending reply while its frame fills the lane.
@@ -1112,9 +1148,11 @@ mod tests {
         drop(first_receiver);
 
         let (overload_reply, overload_receiver) = oneshot::channel();
+        let (overload_admitted, _overload_admitted) = oneshot::channel();
         state.execute_command_rest(ExecuteCommandRequest {
             agent_id: agent_id.clone(),
             command: redoor_protocol::wire::command::Command::GetAgentDetails,
+            admitted: overload_admitted,
             reply: overload_reply,
         });
         // Rejected commands never enter pending state, and the periodic tick prunes the

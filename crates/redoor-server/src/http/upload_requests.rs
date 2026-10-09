@@ -1,5 +1,6 @@
 //! Request tokens let an HTTP producer cancel even after its body has ended but publication has not.
 
+use super::error::ApiError;
 use super::state::ServerState;
 use crate::actors::router::{CancelPublicTransferError, RouterMsg};
 use axum::{
@@ -144,10 +145,7 @@ pub(crate) async fn cancel_handler(
     };
     match state
         .router_ref
-        .request(5_000, |reply| RouterMsg::CancelPublicTransfer {
-            transfer_id,
-            reply,
-        })
+        .request(|reply| RouterMsg::CancelPublicTransfer { transfer_id, reply })
         .await
     {
         Ok(Ok(transfer)) => Json(CancelUploadRequestResponse {
@@ -170,15 +168,9 @@ pub(crate) async fn cancel_handler(
         )
             .into_response(),
         Ok(Err(CancelPublicTransferError::Delivery(error))) => {
-            super::responses::router_error_response(error)
+            ApiError::from(error).into_response()
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to cancel upload request: {error:?}"),
-            }),
-        )
-            .into_response(),
+        Err(error) => ApiError::from(error).into_response(),
     }
 }
 

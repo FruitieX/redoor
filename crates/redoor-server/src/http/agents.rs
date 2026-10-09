@@ -8,15 +8,19 @@ use axum::{
 use redoor_protocol::{
     api::{
         ErrorResponse,
-        agents::{AgentInfoResponse, AgentListResponse, ShutdownAgentResponse, StartAgentResponse},
+        agents::{
+            AgentDetailsResponse, AgentInfoResponse, AgentListResponse, ShutdownAgentResponse,
+            StartAgentResponse,
+        },
         server::RestartResponse,
     },
     ids::AgentId,
-    wire::command::{Command, CommandResult},
 };
 
 use super::{
-    agent_helpers::get_agent_details, responses::command_error_status, state::ServerState,
+    agent_client::{GetAgentDetails, Restart},
+    error::ApiError,
+    state::ServerState,
 };
 
 mod accounts;
@@ -42,14 +46,11 @@ pub(crate) use upgrade::upgrade_agent_handler;
 /// Loads and sorts retained inventory so every client receives stable ordering.
 pub(super) async fn list_agent_snapshots(
     state: &ServerState,
-) -> Result<Vec<AgentInfoResponse>, String> {
+) -> Result<Vec<AgentInfoResponse>, ApiError> {
     let mut agents = state
-        .router_ref
-        .request(5000, |reply| actors::router::RouterMsg::GetAgentList {
-            reply,
-        })
-        .await
-        .map_err(|error| format!("Failed to get agents: {error:?}"))?
+        .agents
+        .inventory()
+        .await?
         .into_iter()
         .map(|agent| AgentInfoResponse {
             id: agent.id,
@@ -84,15 +85,9 @@ pub(super) async fn list_agent_snapshots(
 /// Route: `GET /api/v1/agents` returns configured, connected, and previously seen agents.
 pub(crate) async fn list_agents_handler(
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    match list_agent_snapshots(&state).await {
-        Ok(agents) => (StatusCode::OK, Json(AgentListResponse { agents })).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error }),
-        )
-            .into_response(),
-    }
+) -> Result<Json<AgentListResponse>, ApiError> {
+    let agents = list_agent_snapshots(&state).await?;
+    Ok(Json(AgentListResponse { agents }))
 }
 
 /// Finds one retained inventory record while preserving unknown/unmanaged distinctions.
@@ -100,9 +95,14 @@ pub(super) async fn managed_agent_snapshot(
     state: &ServerState,
     agent_id: &AgentId,
 ) -> Result<AgentInfoResponse, (StatusCode, ErrorResponse)> {
-    let agents = list_agent_snapshots(state)
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, ErrorResponse { error }))?;
+    let agents = list_agent_snapshots(state).await.map_err(|error| {
+        (
+            error.status_code(),
+            ErrorResponse {
+                error: error.to_string(),
+            },
+        )
+    })?;
     let agent = agents
         .into_iter()
         .find(|agent| &agent.id == agent_id)
@@ -152,7 +152,7 @@ async fn apply_managed_snapshot_with_eviction(
 ) -> Result<(), String> {
     state
         .router_ref
-        .request(5000, |reply| {
+        .request(|reply| {
             actors::router::RouterMsg::ApplyManagedLifecycle(
                 actors::router::ApplyManagedLifecycleRequest {
                     agent_id,
@@ -163,7 +163,7 @@ async fn apply_managed_snapshot_with_eviction(
             )
         })
         .await
-        .map_err(|error| format!("Failed to update managed inventory: {error:?}"))
+        .map_err(|error| format!("Failed to update managed inventory: {error}"))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/start` accepts desired-running without waiting for connection.
@@ -264,19 +264,10 @@ pub(crate) async fn shutdown_agent_handler(
     match list_agent_snapshots(&state).await {
         Ok(agents) => match agents.into_iter().find(|agent| agent.id == agent_id) {
             Some(agent) => (StatusCode::OK, Json(ShutdownAgentResponse { agent })).into_response(),
-            None => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Managed inventory disappeared: {agent_id}"),
-                }),
-            )
+            None => ApiError::internal(format!("Managed inventory disappeared: {agent_id}"))
                 .into_response(),
         },
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error }),
-        )
-            .into_response(),
+        Err(error) => error.into_response(),
     }
 }
 
@@ -284,65 +275,22 @@ pub(crate) async fn shutdown_agent_handler(
 pub(crate) async fn get_agent_details_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    let agent_id = AgentId::from(agent.clone());
-
-    match get_agent_details(&state, &agent_id).await {
-        Ok(details) => {
-            if details.name.is_empty() {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("Agent not found: {}", agent),
-                    }),
-                )
-                    .into_response()
-            } else {
-                (StatusCode::OK, Json(details)).into_response()
-            }
-        }
-        Err(response) => response,
+) -> Result<Json<AgentDetailsResponse>, ApiError> {
+    let details = state
+        .agents
+        .call(&AgentId::from(agent.as_str()), GetAgentDetails)
+        .await?;
+    if details.name.is_empty() {
+        return Err(ApiError::not_found(format!("Agent not found: {agent}")));
     }
+    Ok(Json(details))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/restart` asks the process to exec itself in place.
 pub(crate) async fn restart_agent_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    let agent_id = AgentId::from(agent);
-    match state
-        .router_ref
-        .request(5000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id,
-                command: Command::Restart,
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::Restart) => {
-            (StatusCode::OK, Json(RestartResponse { restarting: true })).into_response()
-        }
-        Ok(CommandResult::Error { kind, message }) => (
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response(),
-        Ok(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected response from agent restart".to_string(),
-            }),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to restart agent: {error:?}"),
-            }),
-        )
-            .into_response(),
-    }
+) -> Result<Json<RestartResponse>, ApiError> {
+    state.agents.call(&AgentId::from(agent), Restart).await?;
+    Ok(Json(RestartResponse { restarting: true }))
 }

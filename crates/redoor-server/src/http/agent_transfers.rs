@@ -47,7 +47,7 @@ async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
         mpsc::channel::<WsMessage>(TRANSFER_OUTBOUND_QUEUE_CAPACITY);
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let registration = router
-        .request(5_000, |reply| {
+        .request(|reply| {
             RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
                 agent_id: agent_id.clone(),
                 token,

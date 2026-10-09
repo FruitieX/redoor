@@ -1,51 +1,28 @@
-use crate::actors;
+use crate::actors::router::{CancelPublicTransferError, RouterMsg};
 use axum::{
     Json,
     extract::{Path, State as AxumState},
-    http::StatusCode,
-    response::IntoResponse,
 };
-use redoor_protocol::{api::ErrorResponse, ids::TransferId};
+use redoor_protocol::{api::transfers::CancelTransferResponse, ids::TransferId};
 
-use super::state::ServerState;
+use super::{error::ApiError, state::ServerState};
 
 /// Route: `DELETE /api/v1/transfers/{transfer_id}` cancels one active transfer.
 pub(crate) async fn cancel_transfer_handler(
     AxumState(state): AxumState<ServerState>,
     Path(transfer_id): Path<u64>,
-) -> impl IntoResponse {
+) -> Result<Json<CancelTransferResponse>, ApiError> {
     let transfer_id = TransferId::new(transfer_id);
     match state
         .router_ref
-        .request(5_000, |reply| {
-            actors::router::RouterMsg::CancelPublicTransfer { transfer_id, reply }
-        })
-        .await
+        .request(|reply| RouterMsg::CancelPublicTransfer { transfer_id, reply })
+        .await?
     {
-        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
-        Ok(Err(actors::router::CancelPublicTransferError::NotFound)) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Transfer not found".to_string(),
-            }),
-        )
-            .into_response(),
-        Ok(Err(actors::router::CancelPublicTransferError::NotCancelable)) => (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "Transfer can no longer be canceled".to_string(),
-            }),
-        )
-            .into_response(),
-        Ok(Err(actors::router::CancelPublicTransferError::Delivery(error))) => {
-            super::responses::router_error_response(error)
+        Ok(response) => Ok(Json(response)),
+        Err(CancelPublicTransferError::NotFound) => Err(ApiError::not_found("Transfer not found")),
+        Err(CancelPublicTransferError::NotCancelable) => {
+            Err(ApiError::conflict("Transfer can no longer be canceled"))
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to cancel transfer: {error:?}"),
-            }),
-        )
-            .into_response(),
+        Err(CancelPublicTransferError::Delivery(error)) => Err(error.into()),
     }
 }

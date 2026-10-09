@@ -1,6 +1,6 @@
 //! Dedicated non-PTY execution endpoint reuses stream routing and drop-triggered cancellation.
 
-use super::{responses::router_error_response, state::ServerState, streaming::OutputCancelGuard};
+use super::{error::ApiError, state::ServerState, streaming::OutputCancelGuard};
 use crate::actors::router::{
     ExecuteStreamRequest, OutputReceiver, OutputStreamTracking, RouterMsg,
 };
@@ -9,10 +9,10 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use redoor_protocol::{
-    api::{ErrorResponse, exec::CancelExecutionResponse},
+    api::exec::CancelExecutionResponse,
     ids::{AgentId, RequestId},
     wire::{command::Command, exec::ExecRequest},
 };
@@ -21,40 +21,21 @@ use redoor_protocol::{
 pub(crate) async fn cancel_execution_handler(
     Path((agent, execution_id)): Path<(String, u64)>,
     State(state): State<ServerState>,
-) -> Response {
+) -> Result<(StatusCode, Json<CancelExecutionResponse>), ApiError> {
     let request_id = RequestId::new(execution_id);
-    match state
-        .router_ref
-        .request(5_000, |reply| RouterMsg::CancelExecution {
-            agent_id: AgentId::from(agent),
-            request_id,
-            reply,
-        })
-        .await
+    if !state
+        .agents
+        .cancel_execution(AgentId::from(agent), request_id)
+        .await?
     {
-        Ok(Ok(true)) => (
-            StatusCode::ACCEPTED,
-            Json(CancelExecutionResponse {
-                execution_id: request_id,
-            }),
-        )
-            .into_response(),
-        Ok(Ok(false)) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Execution not found".to_string(),
-            }),
-        )
-            .into_response(),
-        Ok(Err(error)) => router_error_response(error),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to cancel execution: {error:?}"),
-            }),
-        )
-            .into_response(),
+        return Err(ApiError::not_found("Execution not found"));
     }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CancelExecutionResponse {
+            execution_id: request_id,
+        }),
+    ))
 }
 
 /// Returns NDJSON immediately after admission; dropping the body cancels the owned process.
@@ -62,15 +43,13 @@ pub(crate) async fn exec_handler(
     Path(agent): Path<String>,
     State(state): State<ServerState>,
     Json(request): Json<ExecRequest>,
-) -> Response {
-    if let Err(error) = request.validate() {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
-    }
+) -> Result<Response, ApiError> {
+    request.validate().map_err(ApiError::bad_request)?;
     let agent_id = AgentId::from(agent);
     let (terminal_sender, terminal_receiver) = tokio::sync::watch::channel(None);
-    let receiver = match state
+    let receiver = state
         .router_ref
-        .request(30_000, |reply| {
+        .request(|reply| {
             RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                 agent_id: agent_id.clone(),
                 command: Command::Exec { request },
@@ -80,28 +59,15 @@ pub(crate) async fn exec_handler(
                 reply,
             })
         })
-        .await
-    {
-        Ok(Ok(receiver)) => receiver,
-        Ok(Err(error)) => return router_error_response(error),
-        Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: format!("Execution admission failed: {error:?}"),
-                }),
-            )
-                .into_response();
-        }
-    };
+        .await??;
     let id = receiver.request_id();
     let guard = OutputCancelGuard::new(state.router_ref.clone(), agent_id, id);
     drop(terminal_sender);
-    Response::builder()
+    Ok(Response::builder()
         .header("Content-Type", "application/x-ndjson")
         .header("X-Redoor-Execution-Id", id.to_string())
         .body(execution_body(receiver, terminal_receiver, guard))
-        .unwrap()
+        .unwrap())
 }
 
 /// Drains already accepted payload before fallback completion so timeouts cannot erase trailing output.

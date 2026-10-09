@@ -276,7 +276,7 @@ async fn delete_managed_agent(
     } else {
         let inventory = list_agent_snapshots(state)
             .await
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+            .map_err(|error| (error.status_code(), error.to_string()))?;
         let retained = inventory
             .iter()
             .find(|agent| agent.id.to_string() == agent_id && agent.configuration_editable);
@@ -350,7 +350,7 @@ async fn unregister_runtime_agent(
         .map_err(internal_error)?;
     state
         .router_ref
-        .request(5000, |reply| {
+        .request(|reply| {
             RouterMsg::UnregisterManagedAgent(UnregisterManagedAgentRequest {
                 agent_id: agent_id.to_string().into(),
                 reply,
@@ -360,7 +360,7 @@ async fn unregister_runtime_agent(
         .map_err(|error| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to unregister managed inventory: {error:?}"),
+                format!("Failed to unregister managed inventory: {error}"),
             )
         })
 }
@@ -453,7 +453,7 @@ async fn ensure_ssh_agent_registered(
         // Persist succeeded and the supervisor survived; only router inventory may still be missing.
         state
             .router_ref
-            .request(5000, |reply| {
+            .request(|reply| {
                 RouterMsg::RegisterManagedAgent(RegisterManagedAgentRequest {
                     agent_id: agent_id.clone().into(),
                     default_directory: config.home,
@@ -466,7 +466,7 @@ async fn ensure_ssh_agent_registered(
             .map_err(|error| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to register managed inventory: {error:?}"),
+                    format!("Failed to register managed inventory: {error}"),
                 )
             })?;
         return Ok(agent_id.into());
@@ -492,7 +492,7 @@ async fn ensure_local_agent_registered(
         // Persist succeeded and the supervisor survived; only router inventory may still be missing.
         state
             .router_ref
-            .request(5000, |reply| {
+            .request(|reply| {
                 RouterMsg::RegisterManagedAgent(RegisterManagedAgentRequest {
                     agent_id: agent_id.clone().into(),
                     default_directory: config.home,
@@ -505,7 +505,7 @@ async fn ensure_local_agent_registered(
             .map_err(|error| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to register managed inventory: {error:?}"),
+                    format!("Failed to register managed inventory: {error}"),
                 )
             })?;
         return Ok(agent_id.into());
@@ -599,7 +599,7 @@ async fn ensure_unique_agent_id(
 ) -> Result<(), (StatusCode, String)> {
     let existing = list_agent_snapshots(state)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        .map_err(|error| (error.status_code(), error.to_string()))?;
     if existing
         .iter()
         .any(|agent| agent.id.to_string() == agent_id)

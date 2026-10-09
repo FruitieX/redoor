@@ -1,19 +1,16 @@
-use crate::actors;
 use axum::{
     Json,
     extract::{Path, Query, State as AxumState},
-    http::StatusCode,
-    response::IntoResponse,
 };
 use redoor_protocol::{
-    api::{ErrorResponse, files::ChownPathRequest},
+    api::files::{ChownPathRequest, ChownPathResponse},
     ids::AgentId,
-    wire::command::{Command, CommandResult},
 };
 
 use crate::http::{
+    agent_client::ChownPath,
     agent_helpers::{AgentFilePath, absolute_path_from_url},
-    responses::command_error_status,
+    error::ApiError,
     state::ServerState,
 };
 
@@ -22,53 +19,14 @@ pub(crate) async fn chown_path_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
     Query(request): Query<ChownPathRequest>,
-) -> impl IntoResponse {
+) -> Result<Json<ChownPathResponse>, ApiError> {
     if request.owner.is_none() && request.group.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Owner or group is required".to_string(),
-            }),
-        )
-            .into_response();
+        return Err(ApiError::bad_request("Owner or group is required"));
     }
-    let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent);
-
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::ChownPath {
-                    path,
-                    owner: request.owner,
-                    group: request.group,
-                },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::ChownPath(response)) => (StatusCode::OK, Json(response)).into_response(),
-        Ok(CommandResult::Error { kind, message }) => (
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response(),
-        Ok(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected result type while changing ownership".to_string(),
-            }),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to change ownership: {error:?}"),
-            }),
-        )
-            .into_response(),
-    }
+    let call = ChownPath {
+        path: absolute_path_from_url(path.unwrap_or_default()),
+        owner: request.owner,
+        group: request.group,
+    };
+    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
 }

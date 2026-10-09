@@ -89,10 +89,6 @@ pub(crate) async fn retry_agent_start_handler(
             )
                 .into_response(),
         },
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error }),
-        )
-            .into_response(),
+        Err(error) => error.into_response(),
     }
 }

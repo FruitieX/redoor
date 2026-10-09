@@ -15,8 +15,8 @@ use redoor_protocol::{
 
 use super::{
     agent_helpers::{AgentFilePath, absolute_path_from_url},
+    error::ApiError,
     raw::{AgentUpload, AgentUploadStartError, forward_request_body, required_content_length},
-    responses::{command_error_status, router_error_response},
     state::ServerState,
 };
 
@@ -75,11 +75,9 @@ fn file_edit_completion_response(
             }),
         )
             .into_response(),
-        Ok(CommandResult::Error { kind, message }) => (
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response(),
+        Ok(CommandResult::Error { kind, message }) => {
+            ApiError::Command { kind, message }.into_response()
+        }
         Ok(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -87,6 +85,6 @@ fn file_edit_completion_response(
             }),
         )
             .into_response(),
-        Err(error) => router_error_response(error),
+        Err(error) => ApiError::from(error).into_response(),
     }
 }

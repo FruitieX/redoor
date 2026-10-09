@@ -1,4 +1,3 @@
-use crate::actors;
 use axum::{
     Json,
     extract::{Path, State as AxumState},
@@ -20,9 +19,9 @@ use redoor_protocol::{
 
 use super::list_agent_snapshots;
 use crate::http::{
-    agent_helpers::get_agent_details,
+    agent_client::{GetAgentDetails, SelfExec},
+    error::ApiError,
     raw::{AgentUpload, AgentUploadStartError},
-    responses::command_error_status,
     state::ServerState,
 };
 
@@ -31,11 +30,9 @@ fn upgrade_upload_start_error(error: AgentUploadStartError) -> axum::response::R
     match error {
         AgentUploadStartError::Response(response) => response,
         AgentUploadStartError::Finished(completion) => match *completion {
-            Ok(CommandResult::Error { kind, message }) => (
-                command_error_status(&kind),
-                Json(ErrorResponse { error: message }),
-            )
-                .into_response(),
+            Ok(CommandResult::Error { kind, message }) => {
+                ApiError::Command { kind, message }.into_response()
+            }
             Ok(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -43,7 +40,7 @@ fn upgrade_upload_start_error(error: AgentUploadStartError) -> axum::response::R
                 }),
             )
                 .into_response(),
-            Err(error) => crate::http::responses::router_error_response(error),
+            Err(error) => ApiError::from(error).into_response(),
         },
     }
 }
@@ -166,11 +163,9 @@ async fn upload_upgrade_binary(
             );
             Ok(())
         }
-        (CommandResult::Error { kind, message }, _) => Err((
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response()),
+        (CommandResult::Error { kind, message }, _) => {
+            Err(ApiError::Command { kind, message }.into_response())
+        }
         _ => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -190,13 +185,7 @@ pub(crate) async fn upgrade_agent_handler(
     let agent_id = AgentId::from(agent.clone());
     let snapshot = match list_agent_snapshots(&state).await {
         Ok(agents) => agents.into_iter().find(|entry| entry.id == agent_id),
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error }),
-            )
-                .into_response();
-        }
+        Err(error) => return error.into_response(),
     };
     let Some(snapshot) = snapshot else {
         return (
@@ -227,9 +216,9 @@ pub(crate) async fn upgrade_agent_handler(
         )
             .into_response();
     }
-    let details = match get_agent_details(&state, &agent_id).await {
+    let details = match state.agents.call(&agent_id, GetAgentDetails).await {
         Ok(details) => details,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     if details.exe_path == "unknown" || !std::path::Path::new(&details.exe_path).is_absolute() {
         return (
@@ -345,20 +334,11 @@ pub(crate) async fn upgrade_agent_handler(
         binary_source,
         details.exe_path
     );
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::SelfExec {
-                    path: details.exe_path,
-                },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::SelfExec { .. }) => {
+    let call = SelfExec {
+        path: details.exe_path,
+    };
+    match state.agents.call(&agent_id, call).await {
+        Ok(()) => {
             log!(
                 Level::Info,
                 "Agent acknowledged upgrade self-exec: agent_id={}, target_version={}",
@@ -374,51 +354,15 @@ pub(crate) async fn upgrade_agent_handler(
             )
                 .into_response()
         }
-        Ok(CommandResult::Error { kind, message }) => {
-            log!(
-                Level::Info,
-                "Agent upgrade self-exec rejected: agent_id={}, target_version={}, kind={:?}, error={}",
-                agent_id,
-                target_version,
-                kind,
-                message
-            );
-            (
-                command_error_status(&kind),
-                Json(ErrorResponse { error: message }),
-            )
-                .into_response()
-        }
-        Ok(_) => {
-            log!(
-                Level::Info,
-                "Agent upgrade self-exec returned an unexpected response: agent_id={}, target_version={}",
-                agent_id,
-                target_version
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected response from agent self-exec".to_string(),
-                }),
-            )
-                .into_response()
-        }
         Err(error) => {
             log!(
                 Level::Info,
-                "Agent upgrade self-exec request failed: agent_id={}, target_version={}, error={:?}",
+                "Agent upgrade self-exec failed: agent_id={}, target_version={}, error={}",
                 agent_id,
                 target_version,
                 error
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to self-exec upgraded agent: {error:?}"),
-                }),
-            )
-                .into_response()
+            error.into_response()
         }
     }
 }

@@ -35,6 +35,9 @@ pub(crate) enum Flow {
 pub(crate) struct CommandFlow {
     pub(crate) request_id: RequestId,
     pub(crate) agent_id: AgentId,
+    /// Whether the agent registers the command for `cancel_transfer` (request cancel scope),
+    /// so an abandoned caller's cancel can actually stop its work.
+    pub(crate) cancelable: bool,
     pub(crate) reply: RouterReply<CommandResult>,
 }
 
@@ -414,6 +417,7 @@ mod tests {
             Flow::Command(CommandFlow {
                 request_id: RequestId::new(id),
                 agent_id: AgentId::from(agent),
+                cancelable: false,
                 reply,
             }),
             receiver,

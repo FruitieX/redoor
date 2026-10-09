@@ -206,6 +206,7 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
     let app = build_app(ServerState {
         app_name,
         router_ref: router_ref.clone(),
+        agents: crate::http::agent_client::AgentClient::new(router_ref.clone()),
         watchdog_registry: watchdog_registry.clone(),
         terminal_registry,
         log_registry,

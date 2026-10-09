@@ -19,11 +19,12 @@ mod ui;
 
 pub use error::RouterError;
 pub use messages::{
-    ApplyManagedLifecycleRequest, CancelPublicTransferError, CommitDirectUploadRequest,
-    ExecuteCommandRequest, ExecuteStreamRequest, OpenAgentLogStreamRequest, OpenTerminalRequest,
-    OutboundFailure, OutboundFailureReason, OutputStreamTracking, RegisterAgentRequest,
-    RegisterManagedAgentRequest, RegisterTransferConnectionRequest, RegisterUiSubscriberRequest,
-    RouteResponse, RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest,
+    AgentListEntry, ApplyManagedLifecycleRequest, CancelPublicTransferError,
+    CommitDirectUploadRequest, ExecuteCommandRequest, ExecuteStreamRequest,
+    OpenAgentLogStreamRequest, OpenTerminalRequest, OutboundFailure, OutboundFailureReason,
+    OutputStreamTracking, RegisterAgentRequest, RegisterManagedAgentRequest,
+    RegisterTransferConnectionRequest, RegisterUiSubscriberRequest, RouteResponse,
+    RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest,
     TransferProgressUpdateRequest, UnregisterManagedAgentRequest, UploadStartOutcome,
 };
 pub use state::CopyContentKind;
@@ -39,10 +40,13 @@ use redoor_protocol::wire::log::Level;
 use state::RouterState;
 use streams::StreamEnd;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Duration, error::Elapsed};
+use tokio::time::Duration;
 
 /// Control-plane messages only; payload frames never use this mailbox.
 const ROUTER_MAILBOX_CAPACITY: usize = 1024;
+/// Upper bound for one router reply. Handlers answer synchronously, so only a wedged or
+/// shut-down router comes close; agent work is bounded separately by its call deadline.
+pub const ROUTER_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared sender used to interact with the single-owner router task.
 #[derive(Clone, Debug)]
@@ -76,14 +80,16 @@ impl RouterHandle {
             .map_err(|_| RouterSendError::Stopped)
     }
 
-    /// Runs one request/reply interaction against the router task with a timeout.
+    /// Runs one request/reply interaction against the router task.
     ///
     /// `build` receives the one-shot sender that the router-side handler must use to
     /// deliver the reply for this request. The closure packages that sender into the
     /// appropriate `RouterMsg` variant together with any request-specific payload, which
     /// keeps the caller from having to construct and manage the reply channel manually.
+    /// Every router handler answers synchronously, so one shared [`ROUTER_REPLY_TIMEOUT`]
+    /// only guards against a wedged router; waits on agents use their own call deadlines.
     /// A reply the router still owns after a timeout is pruned by its periodic tick.
-    pub async fn request<T, F>(&self, timeout_ms: u64, build: F) -> Result<T, RouterCallError>
+    pub async fn request<T, F>(&self, build: F) -> Result<T, RouterCallError>
     where
         T: Send + 'static,
         F: FnOnce(oneshot::Sender<T>) -> RouterMsg,
@@ -93,10 +99,10 @@ impl RouterHandle {
             .await
             .map_err(|_| RouterCallError::RouterStopped)?;
 
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
+        match tokio::time::timeout(ROUTER_REPLY_TIMEOUT, reply_rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(RouterCallError::RouterStopped),
-            Err(error) => Err(RouterCallError::TimedOut(error)),
+            Err(_) => Err(RouterCallError::TimedOut),
         }
     }
 
@@ -126,9 +132,13 @@ pub enum RouterSendError {
 }
 
 /// Distinguishes request timeouts from router shutdown so callers can report the failure cause.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RouterCallError {
-    TimedOut(Elapsed),
+    /// The router did not answer within [`ROUTER_REPLY_TIMEOUT`], so it is wedged or overloaded.
+    #[error("router did not answer in time")]
+    TimedOut,
+    /// The router task has stopped, so the request can never be answered.
+    #[error("router has stopped")]
     RouterStopped,
 }
 
@@ -416,7 +426,7 @@ mod tests {
         };
         let (transfer_shutdown, _transfer_shutdown_rx) = watch::channel(false);
         router_ref
-            .request(1_000, |reply| {
+            .request(|reply| {
                 RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
                     agent_id: agent_id.clone(),
                     token: transfer_token,
@@ -435,7 +445,7 @@ mod tests {
         let router_for_start = router_ref.clone();
         let upload_start = tokio::spawn(async move {
             router_for_start
-                .request(1_000, |reply| {
+                .request(|reply| {
                     RouterMsg::StartUploadStreamRest(StartUploadRequest {
                         agent_id: AgentId::from("agent-1"),
                         command: Command::EditFile {
@@ -502,7 +512,7 @@ mod tests {
 
         let list_agents = timeout(Duration::from_millis(250), async {
             router_ref
-                .request(1_000, |reply| RouterMsg::GetAgentList { reply })
+                .request(|reply| RouterMsg::GetAgentList { reply })
                 .await
         })
         .await
@@ -539,7 +549,7 @@ mod tests {
 
         // A download whose consumer never reads must not stall other streams of this agent.
         let _stalled_download = router_ref
-            .request(1_000, |reply| {
+            .request(|reply| {
                 RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
                     command: Command::RawDownload {
@@ -565,7 +575,7 @@ mod tests {
         };
         let (terminal, _terminal_rx) = watch::channel(None);
         let mut exec_output = router_ref
-            .request(1_000, |reply| {
+            .request(|reply| {
                 RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
                     command: Command::Exec {
@@ -645,7 +655,7 @@ mod tests {
         drop(commit_response);
 
         let progress = router_ref
-            .request(1_000, |reply| RouterMsg::GetTransferProgress { reply })
+            .request(|reply| RouterMsg::GetTransferProgress { reply })
             .await
             .expect("live edit progress query succeeded");
         let live_edit = progress
@@ -691,7 +701,7 @@ mod tests {
             Ok(CommandResult::EditFile)
         ));
         let progress = router_ref
-            .request(1_000, |reply| RouterMsg::GetTransferProgress { reply })
+            .request(|reply| RouterMsg::GetTransferProgress { reply })
             .await
             .expect("completed edit progress query succeeded");
         let completed_edit = progress

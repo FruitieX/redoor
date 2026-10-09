@@ -196,6 +196,10 @@ pub struct ExecuteCommandRequest {
     pub agent_id: AgentId,
     /// One-shot command to run on the agent.
     pub command: Command,
+    /// Receives the request id once the command is queued, so a caller that gives up (deadline
+    /// or dropped HTTP request) can cancel exactly this command. A dropped receiver means the
+    /// caller already left and the router abandons the command right away.
+    pub admitted: RouterReply<RequestId>,
     /// Reply port that receives the final command result.
     pub reply: RouterReply<CommandResult>,
 }

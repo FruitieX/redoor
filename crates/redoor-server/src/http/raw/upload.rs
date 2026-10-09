@@ -22,7 +22,7 @@ use redoor_protocol::{
 
 use super::super::{
     agent_helpers::{AgentFilePath, absolute_path_from_url},
-    responses::{command_error_status, router_error_response},
+    error::ApiError,
     state::ServerState,
 };
 
@@ -163,7 +163,7 @@ impl AgentUpload {
         let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
         let stream = match state
             .router_ref
-            .request(30000, |reply| {
+            .request(|reply| {
                 actors::router::RouterMsg::StartUploadStreamRest(
                     actors::router::StartUploadRequest {
                         agent_id: agent_id.clone(),
@@ -180,16 +180,16 @@ impl AgentUpload {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
-                return Err(AgentUploadStartError::Response(router_error_response(
-                    error,
-                )));
+                return Err(AgentUploadStartError::Response(
+                    ApiError::from(error).into_response(),
+                ));
             }
             Err(error) => {
                 return Err(AgentUploadStartError::Response(
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse {
-                            error: format!("Failed to start upload: {error:?}"),
+                            error: format!("Failed to start upload: {error}"),
                         }),
                     )
                         .into_response(),
@@ -207,9 +207,9 @@ impl AgentUpload {
             }
             Ok(Ok(Err(error))) => {
                 cancel_guard.disarm();
-                return Err(AgentUploadStartError::Response(router_error_response(
-                    error,
-                )));
+                return Err(AgentUploadStartError::Response(
+                    ApiError::from(error).into_response(),
+                ));
             }
             Ok(Err(_)) => {
                 return Err(AgentUploadStartError::Response(
@@ -307,9 +307,10 @@ impl AgentUpload {
             .await
         {
             Ok(()) => Ok(()),
-            Err(actors::router::OutboundError::Stopped) => Err(router_error_response(
+            Err(actors::router::OutboundError::Stopped) => Err(ApiError::from(
                 actors::router::RouterError::ClientCanceledUpload,
-            )),
+            )
+            .into_response()),
             Err(actors::router::OutboundError::LaneClosed) => {
                 let _ = self
                     .state
@@ -322,12 +323,13 @@ impl AgentUpload {
                         },
                     ))
                     .await;
-                Err(router_error_response(
-                    actors::router::RouterError::UploadForwardFailed {
+                Err(
+                    ApiError::from(actors::router::RouterError::UploadForwardFailed {
                         agent_id: self.agent_id.to_string(),
                         request_id: self.request_id.to_string(),
-                    },
-                ))
+                    })
+                    .into_response(),
+                )
             }
         }
     }
@@ -362,7 +364,7 @@ impl AgentUpload {
                 self.cancel_guard.disarm();
                 Ok((completion, self.bytes_written))
             }
-            Ok(Err(error)) => Err(router_error_response(error)),
+            Ok(Err(error)) => Err(ApiError::from(error).into_response()),
             Err(error) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -418,7 +420,7 @@ impl AgentUpload {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: format!("Failed to hand off edit commit: {error:?}"),
+                        error: format!("Failed to hand off edit commit: {error}"),
                     }),
                 )
                     .into_response()
@@ -428,7 +430,7 @@ impl AgentUpload {
         self.cancel_guard.disarm();
         match tokio::time::timeout(std::time::Duration::from_millis(30000), response).await {
             Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(error))) => Err(router_error_response(error)),
+            Ok(Ok(Err(error))) => Err(ApiError::from(error).into_response()),
             Ok(Err(_)) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -582,8 +584,7 @@ fn raw_upload_completion_response(
         )
             .into_response(),
         Ok(CommandResult::Error { kind, message }) => {
-            let status = command_error_status(&kind);
-            (status, Json(ErrorResponse { error: message })).into_response()
+            ApiError::Command { kind, message }.into_response()
         }
         Ok(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -592,6 +593,6 @@ fn raw_upload_completion_response(
             }),
         )
             .into_response(),
-        Err(error) => router_error_response(error),
+        Err(error) => ApiError::from(error).into_response(),
     }
 }

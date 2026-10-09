@@ -27,7 +27,6 @@ use uuid::Uuid;
 const MAX_LOG_MESSAGE_SIZE: usize = 256 * 1024;
 const LOG_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const LOG_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const ROUTER_REQUEST_TIMEOUT_MS: u64 = 5_000;
 
 /// Distinguishes a paired socket from setup timeout and browser-owned cancellation.
 enum SetupResult {
@@ -96,7 +95,7 @@ async fn run_browser_setup(mut browser: WebSocket, agent_id: AgentId, state: Ser
 
     let request_result = state
         .router_ref
-        .request(ROUTER_REQUEST_TIMEOUT_MS, |reply| {
+        .request(|reply| {
             RouterMsg::OpenAgentLogStream(OpenAgentLogStreamRequest {
                 agent_id: agent_id.clone(),
                 log_stream_id: log_stream_id.clone(),

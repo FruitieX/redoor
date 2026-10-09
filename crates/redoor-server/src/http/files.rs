@@ -1,27 +1,22 @@
-use crate::actors;
 use axum::{
     Json,
     extract::{Path, Query, State as AxumState},
     http::StatusCode,
-    response::IntoResponse,
 };
 use redoor_protocol::{
-    api::{
-        ErrorResponse,
-        files::{
-            CreateDirectoryResponse, CreationOwnershipOptions, RawDeleteResponse,
-            RenamePathRequest, RenamePathResponse,
-        },
+    api::files::{
+        CreateDirectoryResponse, CreationOwnershipOptions, RawDeleteResponse, RenamePathRequest,
+        RenamePathResponse,
     },
     ids::AgentId,
-    wire::command::{Command, CommandResult},
 };
 use serde::Deserialize;
 use std::path::Path as FilePath;
 
 use super::{
+    agent_client::{CreateDirectory, DeletePath, RenamePath},
     agent_helpers::{AgentFilePath, absolute_path_from_url, require_absolute_path},
-    responses::command_error_status,
+    error::ApiError,
     state::ServerState,
     trash::require_move_to_trash_support,
 };
@@ -38,61 +33,18 @@ pub(crate) async fn raw_agent_delete_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     Query(query): Query<RawDeleteQuery>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    let agent_id = AgentId::from(agent.clone());
-    let resolved_path = absolute_path_from_url(path.unwrap_or_default());
-    if query.trash
-        && let Err(response) = require_move_to_trash_support(&state, &agent_id).await
-    {
-        return response;
+) -> Result<Json<RawDeleteResponse>, ApiError> {
+    let agent_id = AgentId::from(agent);
+    let path = absolute_path_from_url(path.unwrap_or_default());
+    if query.trash {
+        require_move_to_trash_support(&state, &agent_id).await?;
     }
-    let command = if query.trash {
-        Command::Trash {
-            path: resolved_path.clone(),
-        }
-    } else {
-        Command::RawDelete {
-            path: resolved_path.clone(),
-        }
+    let call = DeletePath {
+        path: path.clone(),
+        to_trash: query.trash,
     };
-
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command,
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::RawDelete | CommandResult::Trash) => (
-            StatusCode::OK,
-            Json(RawDeleteResponse {
-                path: resolved_path,
-            }),
-        )
-            .into_response(),
-        Ok(CommandResult::Error { kind, message }) => {
-            let status = command_error_status(&kind);
-            (status, Json(ErrorResponse { error: message })).into_response()
-        }
-        Ok(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected delete response".to_string(),
-            }),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to delete file: {:?}", error),
-            }),
-        )
-            .into_response(),
-    }
+    state.agents.call(&agent_id, call).await?;
+    Ok(Json(RawDeleteResponse { path }))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/mkdir/{*path}`
@@ -100,53 +52,15 @@ pub(crate) async fn create_directory_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     Query(ownership): Query<CreationOwnershipOptions>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    let agent_id = AgentId::from(agent.clone());
-    let resolved_path = absolute_path_from_url(path.unwrap_or_default());
-    if let Err(error) = ownership.validate() {
-        return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
-    }
-
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::CreateDirectory {
-                    path: resolved_path.clone(),
-                    ownership,
-                },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::CreateDirectory) => (
-            StatusCode::CREATED,
-            Json(CreateDirectoryResponse {
-                path: resolved_path,
-            }),
-        )
-            .into_response(),
-        Ok(CommandResult::Error { kind, message }) => {
-            let status = command_error_status(&kind);
-            (status, Json(ErrorResponse { error: message })).into_response()
-        }
-        Ok(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected create directory response".to_string(),
-            }),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to create directory: {:?}", error),
-            }),
-        )
-            .into_response(),
-    }
+) -> Result<(StatusCode, Json<CreateDirectoryResponse>), ApiError> {
+    let path = absolute_path_from_url(path.unwrap_or_default());
+    ownership.validate().map_err(ApiError::bad_request)?;
+    let call = CreateDirectory {
+        path: path.clone(),
+        ownership,
+    };
+    state.agents.call(&AgentId::from(agent), call).await?;
+    Ok((StatusCode::CREATED, Json(CreateDirectoryResponse { path })))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/rename`
@@ -154,19 +68,12 @@ pub(crate) async fn rename_path_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<RenamePathRequest>,
-) -> impl IntoResponse {
-    let dir = match require_absolute_path(request.dir) {
-        Ok(path) => path,
-        Err(response) => return *response,
-    };
+) -> Result<Json<RenamePathResponse>, ApiError> {
+    let dir = require_absolute_path(request.dir)?;
     if !is_filename(&request.old) || !is_filename(&request.new) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Rename names must each be a single filename".to_string(),
-            }),
-        )
-            .into_response();
+        return Err(ApiError::bad_request(
+            "Rename names must each be a single filename",
+        ));
     }
     let source_path = FilePath::new(&dir)
         .join(&request.old)
@@ -176,50 +83,16 @@ pub(crate) async fn rename_path_handler(
         .join(&request.new)
         .to_string_lossy()
         .into_owned();
-    let agent_id = AgentId::from(agent);
-
-    match state
-        .router_ref
-        .request(30000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::RenamePath {
-                    dir: dir.clone(),
-                    old: request.old.clone(),
-                    new: request.new.clone(),
-                },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::RenamePath) => (
-            StatusCode::OK,
-            Json(RenamePathResponse {
-                source_path,
-                dest_path,
-            }),
-        )
-            .into_response(),
-        Ok(CommandResult::Error { kind, message }) => {
-            let status = command_error_status(&kind);
-            (status, Json(ErrorResponse { error: message })).into_response()
-        }
-        Ok(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected rename response".to_string(),
-            }),
-        )
-            .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to rename path: {:?}", error),
-            }),
-        )
-            .into_response(),
-    }
+    let call = RenamePath {
+        dir,
+        old: request.old,
+        new: request.new,
+    };
+    state.agents.call(&AgentId::from(agent), call).await?;
+    Ok(Json(RenamePathResponse {
+        source_path,
+        dest_path,
+    }))
 }
 
 /// Rejects path syntax so the REST boundary only accepts entry names within `dir`.

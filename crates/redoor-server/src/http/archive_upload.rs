@@ -2,8 +2,8 @@
 
 use super::{
     agent_helpers::{AgentFilePath, absolute_path_from_url},
+    error::ApiError,
     raw::{AgentUpload, AgentUploadStartError, forward_request_body},
-    responses::{command_error_status, router_error_response},
     state::ServerState,
 };
 use axum::{
@@ -59,7 +59,7 @@ pub(crate) async fn upload_handler(
         Err(AgentUploadStartError::Finished(completion)) => {
             return match *completion {
                 Ok(result) => completion_response(result, path, 0),
-                Err(error) => router_error_response(error),
+                Err(error) => ApiError::from(error).into_response(),
             };
         }
     };
@@ -92,11 +92,9 @@ fn completion_response(result: CommandResult, path: String, bytes_written: u64) 
             bytes_written,
         })
         .into_response(),
-        CommandResult::Error { kind, message } => (
-            command_error_status(&kind),
-            Json(ErrorResponse { error: message }),
-        )
-            .into_response(),
+        CommandResult::Error { kind, message } => {
+            ApiError::Command { kind, message }.into_response()
+        }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

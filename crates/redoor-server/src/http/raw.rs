@@ -8,16 +8,15 @@ use axum::{
 };
 use headers::{HeaderMap, HeaderMapExt, Range as RangeHeader};
 use redoor_protocol::{
-    api::{ErrorResponse, files::CreateOneTimeTokenResponse},
-    ids::AgentId,
-    wire::command::{Command, CommandResult},
+    api::files::CreateOneTimeTokenResponse, ids::AgentId, wire::command::Command,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{
+    agent_client::Metadata,
     agent_helpers::{AgentFilePath, absolute_path_from_url},
-    responses::{command_error_status, router_error_response},
+    error::ApiError,
     state::ServerState,
     streaming::OutputCancelGuard,
 };
@@ -107,64 +106,27 @@ pub(crate) async fn raw_agent_handler(
     Query(params): Query<RawQueryParams>,
     AxumState(state): AxumState<ServerState>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Result<Response, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent.clone());
+    let agent_id = AgentId::from(agent);
     let token_download = if let Some(one_time_token) = params.one_time_token.as_ref() {
         if !state
             .one_time_token_registry
             .contains(&agent_id, &path, one_time_token)
         {
-            return (
+            return Err(ApiError::status(
                 StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Invalid or expired one-time token".to_string(),
-                }),
-            )
-                .into_response();
+                "Invalid or expired one-time token",
+            ));
         }
         true
     } else {
         false
     };
-    let metadata = match state
-        .router_ref
-        .request(5000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::Metadata { path: path.clone() },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::Metadata(metadata)) => metadata,
-        Ok(CommandResult::Error { kind, message }) => {
-            return (
-                command_error_status(&kind),
-                Json(ErrorResponse { error: message }),
-            )
-                .into_response();
-        }
-        Ok(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected response type from metadata command".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to get file metadata: {:?}", error),
-                }),
-            )
-                .into_response();
-        }
-    };
+    let metadata = state
+        .agents
+        .call(&agent_id, Metadata { path: path.clone() })
+        .await?;
 
     if metadata.is_dir {
         return stream_directory_archive(
@@ -192,23 +154,25 @@ pub(crate) async fn raw_agent_handler(
                     )
                 }
                 None => {
-                    return (
+                    // The Content-Range header tells the client the real size to retry with.
+                    return Ok((
                         StatusCode::RANGE_NOT_SATISFIABLE,
                         [("Content-Range", format!("bytes */{}", metadata.file_size))],
-                        Json(ErrorResponse {
-                            error: "Range not satisfiable".to_string(),
-                        }),
+                        ApiError::status(
+                            StatusCode::RANGE_NOT_SATISFIABLE,
+                            "Range not satisfiable",
+                        ),
                     )
-                        .into_response();
+                        .into_response());
                 }
             }
         } else {
             (None, None, StatusCode::OK, metadata.file_size, None)
         };
 
-    let response_receiver = match state
+    let response_receiver = state
         .router_ref
-        .request(30000, |reply| {
+        .request(|reply| {
             actors::router::RouterMsg::ExecuteStreamCommandRest(
                 actors::router::ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
@@ -227,22 +191,7 @@ pub(crate) async fn raw_agent_handler(
                 },
             )
         })
-        .await
-    {
-        Ok(Ok(receiver)) => receiver,
-        Ok(Err(error)) => {
-            return router_error_response(error);
-        }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to start stream".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
+        .await??;
 
     let cancel_guard = OutputCancelGuard::new(
         state.router_ref.clone(),
@@ -260,12 +209,8 @@ pub(crate) async fn raw_agent_handler(
         file_size: metadata.file_size,
     });
     let body_stream =
-        match begin_download_body_stream(response_receiver, &path, one_time_progress, cancel_guard)
-            .await
-        {
-            Ok(stream) => stream,
-            Err(response) => return response,
-        };
+        begin_download_body_stream(response_receiver, &path, one_time_progress, cancel_guard)
+            .await?;
 
     let mut response_builder = Response::builder()
         .status(status_code)
@@ -285,10 +230,10 @@ pub(crate) async fn raw_agent_handler(
         );
     }
 
-    response_builder
+    Ok(response_builder
         .body(Body::from_stream(body_stream))
         .unwrap()
-        .into_response()
+        .into_response())
 }
 
 /// Streams a directory as gzip-compressed tar using the existing agent tar download worker.
@@ -300,23 +245,18 @@ async fn stream_directory_archive(
     agent_id: AgentId,
     path: String,
     has_range_header: bool,
-) -> Response {
+) -> Result<Response, ApiError> {
     // Tar size is unknown until the agent finishes walking the tree, so byte ranges
     // cannot be satisfied the way they are for fixed-length file downloads.
     if has_range_header {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Range requests are not supported for directory archive downloads"
-                    .to_string(),
-            }),
-        )
-            .into_response();
+        return Err(ApiError::bad_request(
+            "Range requests are not supported for directory archive downloads",
+        ));
     }
 
-    let response_receiver = match state
+    let response_receiver = state
         .router_ref
-        .request(30000, |reply| {
+        .request(|reply| {
             actors::router::RouterMsg::ExecuteStreamCommandRest(
                 actors::router::ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
@@ -338,22 +278,7 @@ async fn stream_directory_archive(
                 },
             )
         })
-        .await
-    {
-        Ok(Ok(receiver)) => receiver,
-        Ok(Err(error)) => {
-            return router_error_response(error);
-        }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to start stream".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
+        .await??;
 
     let cancel_guard = OutputCancelGuard::new(
         state.router_ref.clone(),
@@ -362,10 +287,7 @@ async fn stream_directory_archive(
     );
 
     let body_stream =
-        match begin_download_body_stream(response_receiver, &path, None, cancel_guard).await {
-            Ok(stream) => stream,
-            Err(response) => return response,
-        };
+        begin_download_body_stream(response_receiver, &path, None, cancel_guard).await?;
 
     // Gzip only the HTTP body: agent still emits plain tar for reuse by copy uploads.
     let tar_reader = tokio_util::io::StreamReader::new(body_stream);
@@ -381,7 +303,7 @@ async fn stream_directory_archive(
     // Always attachment: directory bytes are an archive, never inline browser content.
     // application/gzip keeps the payload as a downloadable .tar.gz rather than transparent
     // Content-Encoding decompression that would leave clients with raw tar bytes.
-    Response::builder()
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/gzip")
         .header(
@@ -390,7 +312,7 @@ async fn stream_directory_archive(
         )
         .body(Body::from_stream(gzipped_stream))
         .unwrap()
-        .into_response()
+        .into_response())
 }
 
 /// Waits for the first agent chunk so immediate failures can still return JSON errors,
@@ -400,20 +322,12 @@ async fn begin_download_body_stream(
     path: &str,
     mut one_time_progress: Option<OneTimeDownloadProgress>,
     mut cancel_guard: OutputCancelGuard,
-) -> Result<impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + use<>, Response>
+) -> Result<impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + use<>, ApiError>
 {
-    let first_chunk = match response_receiver.recv().await {
-        Some(chunk) => chunk,
-        None => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "No data received".to_string(),
-                }),
-            )
-                .into_response());
-        }
-    };
+    let first_chunk = response_receiver
+        .recv()
+        .await
+        .ok_or_else(|| ApiError::internal("No data received"))?;
 
     if first_chunk.is_error {
         cancel_guard.disarm();
@@ -431,7 +345,7 @@ async fn begin_download_body_stream(
             StatusCode::INTERNAL_SERVER_ERROR
         };
 
-        return Err((status, Json(ErrorResponse { error: error_msg })).into_response());
+        return Err(ApiError::status(status, error_msg));
     }
 
     use async_stream::stream;
@@ -487,65 +401,20 @@ async fn begin_download_body_stream(
 pub(crate) async fn create_one_time_token_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
+) -> Result<Json<CreateOneTimeTokenResponse>, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
     let agent_id = AgentId::from(agent);
-    let metadata = match state
-        .router_ref
-        .request(5000, |reply| {
-            actors::router::RouterMsg::ExecuteCommandRest(actors::router::ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: Command::Metadata { path: path.clone() },
-                reply,
-            })
-        })
-        .await
-    {
-        Ok(CommandResult::Metadata(metadata)) if metadata.is_file => metadata,
-        Ok(CommandResult::Metadata(_)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "One-time download links can only be created for files".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Ok(CommandResult::Error { kind, message }) => {
-            return (
-                command_error_status(&kind),
-                Json(ErrorResponse { error: message }),
-            )
-                .into_response();
-        }
-        Ok(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected response type from metadata command".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to get file metadata: {:?}", error),
-                }),
-            )
-                .into_response();
-        }
-    };
+    let metadata = state.agents.call(&agent_id, Metadata { path }).await?;
+    if !metadata.is_file {
+        return Err(ApiError::bad_request(
+            "One-time download links can only be created for files",
+        ));
+    }
     let one_time_token = state
         .one_time_token_registry
         .create(agent_id, metadata.path)
         .to_string();
-    (
-        StatusCode::OK,
-        Json(CreateOneTimeTokenResponse { one_time_token }),
-    )
-        .into_response()
+    Ok(Json(CreateOneTimeTokenResponse { one_time_token }))
 }
 
 #[cfg(test)]
@@ -630,7 +499,7 @@ mod tests {
         };
         let (shutdown_sender, _shutdown_receiver) = watch::channel(false);
         router_ref
-            .request(1_000, |reply| {
+            .request(|reply| {
                 RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
                     agent_id: agent_id.clone(),
                     token: transfer_token,
@@ -646,7 +515,7 @@ mod tests {
 
         let path = "/tmp/stalled.bin".to_string();
         let chunk_receiver = router_ref
-            .request(1_000, |reply| {
+            .request(|reply| {
                 RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
                     command: Command::RawDownload {
@@ -731,7 +600,7 @@ mod tests {
         // The agent receives cancellation for the stalled request without a follow-up chunk.
         assert_eq!(cancel_request_id, request_id);
         let progress = router_ref
-            .request(1_000, |reply| RouterMsg::GetTransferProgress { reply })
+            .request(|reply| RouterMsg::GetTransferProgress { reply })
             .await
             .expect("progress request completed");
         let transfer = progress
