@@ -398,3 +398,84 @@ Items 1–4 of Phase 3, plus the pre-existing MCP rate-limit failure. Items 5–
     `RegisterAgentRequest` literal (tests included) now needs `streams: ConnectionStreams`.
   - Abandoned command replies are pruned by the tick; `AgentClient` timeouts should still send a
     cancel to the agent. `{:?}` error strings remain in exec/raw/MCP handlers.
+
+### Phase 3b – Server API layer (done)
+
+Items 5–8 of Phase 3.
+
+- Item 5 (`http/agent_client.rs`, `http/agent_client/calls.rs`, `http/error.rs`):
+  - `trait AgentCall { type Output; const OPERATION; fn timeout(&self) -> Option<Duration>;
+    fn command(self) -> Command; fn extract(CommandResult) -> Result<Output, ApiError> }` with one
+    call type per agent command REST/MCP use (~26). `AgentClient::call` maps
+    `CommandResult::Error` to `ApiError::Command` before `extract`, so `extract` only names the
+    one success variant. Deadlines live only in `calls.rs`: `STANDARD_TIMEOUT` 30 s, `QUICK_TIMEOUT`
+    5 s (restart, logging level), `EMPTY_TRASH_TIMEOUT` 300 s, agent-limited calls (find, grep,
+    directory size) wait their own limit + `AGENT_LIMIT_MARGIN` 2 s, `RestoreTrash` has none.
+  - Router replies (admission, inventory, cancel, progress) share `ROUTER_REPLY_TIMEOUT` (10 s):
+    `RouterHandle::request(build)` lost its timeout parameter because every handler answers
+    synchronously. `RouterCallError` implements `Display` (`TimedOut` no longer wraps `Elapsed`).
+  - `ApiError::{Command, Router(RouterError), RouterUnavailable(RouterCallError), Timeout(Duration),
+    Unexpected(&'static str), Status { status, message }}` + `IntoResponse` (same `ErrorResponse`
+    body); `status_code()` is the single REST error-status mapping (reuses
+    `RouterError::status_code`). `responses.rs` is gone. Almost every handler now returns
+    `Result<Json<T>, ApiError>`; `require_absolute_path`, `required_content_length` and upload
+    request tokens return `ApiError` too.
+  - Timeout/abandon: `ExecuteCommandRequest` gained `admitted: oneshot<RequestId>`. A
+    `PendingCommand` drop guard in `AgentClient` sends `RouterMsg::CancelTransfer` when the caller
+    stops waiting (deadline or dropped HTTP future); the router's `abandon_command` removes the
+    command flow and queues `cancel_transfer` only for `CancelScope::Request` commands (the only
+    ones the agent registers; others are short or agent-bounded). A caller gone before admission
+    is abandoned by the router itself when the `admitted` send fails.
+  - The router's `GetAgentDetails` rewrite is gone: `AgentClient::agent_details` overlays the
+    registration-owned fields from the inventory (`AgentListEntry::apply_registration`); mount
+    filtering is in the `GetAgentDetails` call's `extract`.
+  - No `{:?}` in user-visible errors remain in the HTTP layer (handlers, exec, raw, MCP, managed
+    inventory errors).
+- Item 6 (`http/services/`):
+  - `transfer.rs`: `TransferService::start_copy(CopySpec { op: CopyOperation, source, dest,
+    on_existing, observe_terminal })` validates paths and same-endpoint copies, reads `Metadata`
+    or `MoveMetadata` (identity) and admits the flow; used by REST copy, REST move and MCP
+    `copy_path`/`move_path`. `ServerState` holds `agents: AgentClient` and `transfers`.
+  - `output.rs`: `OutputStream::open(router, agent, command, tracking)` /
+    `open_execution(..)` own the `OutputReceiver` and an armed cancel guard that disarms on a
+    terminal frame; `recv` (cancel safe, via a `ReusableBoxFuture` kept in the stream), `peek`,
+    `read_bounded(limit)` and `impl Stream<Item = io::Result<Bytes>>`. Used by file/archive
+    downloads, diffs, REST exec and MCP exec/read_file (MCP reads now cancel the agent on drop).
+  - `upload.rs`: `AgentUpload` (moved from `raw/upload.rs`) with `start -> UploadStart::{Ready,
+    Completed}`, `send`, `forward_body`, `finish -> bytes` (checks the completion kind), all
+    returning `ApiError`; used by raw PUT, archive, edit, MCP write_file and agent upgrades.
+  - `mcp/services.rs` and `http/streaming.rs` were deleted; `raw::upload` is a public module
+    instead of a re-export shim.
+- Item 7: `redoor_protocol::wire::registration::{AgentIdentity, AgentCapabilities}` (no `TS`),
+  flattened into `AgentToServer::AgentRegister` (golden round-trip test; `cwd` is a serde rename of
+  `default_directory`; every capability defaults to false). `supports_stream_credit` is a
+  capability; `AgentCapabilities::normalized()` keeps "inventory implies move" in one place.
+  `RegisterAgentRequest`, `AgentConnection`, `KnownAgent` (`identity: Option<_>`) and
+  `AgentListEntry` embed the two values. Decision: the REST `AgentInfoResponse` stays a flat DTO
+  built by one `From<AgentListEntry>` (flattening would have turned the binding into an
+  intersection type), so `bindings/` is byte-identical.
+- Item 8 (`actors/lanes.rs`): `ControlLanes { commands, priority }` carry typed `ServerToAgent`
+  frames (`try_command`, `try_priority`, `try_priority_or_command`, `queue_priority`,
+  `send_priority`); the transfer lane carries `StreamChunk`. The session writer (`encode_frame`)
+  and the transfer writer are the only places that serialize. `AgentLink` holds `ControlLanes`, so
+  credit grants are typed too. No extra `Outbound` enum was needed: `ServerToAgent` is the typed
+  outbound frame. Router, stream, copy, output and session tests assert typed frames.
+- Tests: unit tests for `ApiError` mapping, `AgentClient` (agent failure and wrong-variant
+  extraction, timeout -> cancel for request-scoped commands, no cancel otherwise),
+  `OutputStream` (drop cancels, terminal disarms, byte stream error, bounded read + cancel),
+  `TransferService` (validation, special files, move identity forwarding), registration JSON
+  round trip, REST projection and details overlay, lanes (retention, fallback) and the writer
+  encoding. `http/fake_agent.rs` is a shared scripted agent on a real router for HTTP unit tests;
+  `RegisterAgentRequest::for_test` replaces the copied registration literals. Integration (new):
+  REST copy and move reject special files with an operation-specific 400. Full `pn test` green
+  on the first run, no flakes.
+- Behavior notes: agent deadlines answer 504 "Agent did not respond within N seconds"
+  (previously 500 with a Debug string; logging level was 503); router unavailability answers 503;
+  protocol mismatches answer 500 "Unexpected agent response while ...". MCP copy/move now reject
+  identical endpoints like REST, and MCP admission failures record the real error text.
+- Notes for Phase 4:
+  - Remaining `Result<_, String>` APIs in HTTP: watchdog lifecycle helpers
+    (`apply_managed_snapshot`, `watchdog.start()`), `managed_agent_snapshot`'s tuple error and the
+    agent configuration handlers; these are the natural next `ApiError`/`thiserror` conversions.
+  - `ROUTER_REPLY_TIMEOUT` and the call deadlines are constants; `RuntimeContext` could carry them
+    if tests ever need shorter values.
