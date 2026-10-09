@@ -235,7 +235,9 @@ impl RouterState {
     /// Periodic maintenance: prunes abandoned replies, publishes progress counted by the data
     /// path (throttled as UI refreshes), expires history and releases trailing refreshes.
     fn tick(&mut self) {
-        self.flows.prune_abandoned_commands();
+        for command in self.flows.prune_abandoned_commands() {
+            self.cancel_abandoned(&command);
+        }
         if self.sync_progress() {
             self.notify_transfer_refresh();
         }

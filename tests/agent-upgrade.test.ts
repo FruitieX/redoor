@@ -315,4 +315,148 @@ describe("connected external agent upgrade", () => {
         // No RawUpload command proves rejection happened before any remote mutation began.
         expect(receivedCommandTypes).toEqual([]);
     });
+
+    it("refuses to self-exec when the upgrade upload completes before any byte", async () => {
+        const earlyAgentName = "upgrade-early-completion-agent";
+        const serverInfo = await api.getServerInfo();
+        const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+        const control = new WebSocket(`ws://127.0.0.1:${serverPort}/ws`);
+        let transfer: WebSocket | undefined;
+        onTestFinished(() => {
+            control.close();
+            transfer?.close();
+        });
+        await waitForSocketOpen(control);
+        control.send(
+            JSON.stringify({
+                type: "agent_register",
+                agent_id: earlyAgentName,
+                agent_name: earlyAgentName,
+                os: "linux",
+                arch,
+                hostname: "early-host",
+                username: "early-user",
+                cwd: "/tmp",
+                token: serverInfo.agent_token,
+                binary: {
+                    version: serverInfo.version,
+                    git_rev: "early",
+                    git_dirty: false,
+                    version_dirty: false,
+                    build_mode: "debug",
+                    build_date: "unknown",
+                },
+                supports_self_exec: true,
+            }),
+        );
+        const transferOpen = await nextTransferSocketOpenMessage(control);
+
+        transfer = new WebSocket(
+            `ws://127.0.0.1:${serverPort}/api/v1/agent-transfer/ws`,
+        );
+        await waitForSocketOpen(transfer);
+        transfer.send(
+            JSON.stringify({
+                type: "authenticate",
+                agent_id: earlyAgentName,
+                token: transferOpen.token,
+            }),
+        );
+
+        const earlyAgent = await waitForValue({
+            description: "early-completion fixture transfer registration",
+            predicate: async () => {
+                const candidate = (await api.listAgents()).find(
+                    (entry) => entry.name === earlyAgentName,
+                );
+
+                return candidate?.status === "connected"
+                    ? candidate
+                    : undefined;
+            },
+        });
+
+        const commandSchema = z.object({
+            type: z.literal("command"),
+            request_id: z.number(),
+            command: z.object({ type: z.string() }),
+        });
+        const receivedCommandTypes: string[] = [];
+        control.on("message", (data) => {
+            const parsed = commandSchema.safeParse(
+                JSON.parse(webSocketDataToString(data)),
+            );
+
+            if (!parsed.success) {
+                return;
+            }
+
+            const { request_id: requestId, command } = parsed.data;
+            receivedCommandTypes.push(command.type);
+            const respond = (result: Record<string, unknown>): void => {
+                control.send(
+                    JSON.stringify({
+                        type: "command_response",
+                        agent_id: earlyAgentName,
+                        request_id: requestId,
+                        result,
+                    }),
+                );
+            };
+
+            if (command.type === "GetAgentDetails") {
+                respond({
+                    type: "GetAgentDetails",
+                    id: earlyAgentName,
+                    name: earlyAgentName,
+                    pid: 1,
+                    cwd: "/tmp",
+                    config_path: "",
+                    exe_path: "/tmp/early-redoor",
+                    load_average_one: 0,
+                    load_average_five: 0,
+                    load_average_fifteen: 0,
+                    system_uptime: 0,
+                    os: "linux",
+                    arch,
+                    hostname: "early-host",
+                    external_ip: null,
+                    username: "early-user",
+                    connected_at: 0,
+                    binary: {
+                        version: serverInfo.version,
+                        git_rev: "early",
+                        git_dirty: false,
+                        version_dirty: false,
+                        build_mode: "debug",
+                        build_date: "unknown",
+                    },
+                    mount_points: [],
+                    uid: 1000,
+                    is_root: false,
+                });
+            } else if (command.type === "RawUpload") {
+                // Finishing before transfer_ready means the agent never received the binary.
+                respond({ type: "RawUpload" });
+            }
+        });
+
+        let error: unknown;
+
+        try {
+            await earlyAgent.forceInstallRunningBinary();
+        } catch (caught) {
+            error = caught;
+        }
+
+        // An upload that stored no bytes must fail instead of reporting a started upgrade.
+        expect(error).toBeInstanceOf(ApiError);
+        expect(error).toMatchObject({
+            status: 500,
+            message: "Unexpected early upgrade upload completion",
+        });
+        // The upload was attempted, but self-exec must never follow it.
+        expect(receivedCommandTypes).toContain("RawUpload");
+        expect(receivedCommandTypes).not.toContain("SelfExec");
+    });
 });

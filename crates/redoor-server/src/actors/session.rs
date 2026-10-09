@@ -210,7 +210,7 @@ impl SessionRuntime {
             AgentToServer::AgentRegister { .. } => {}
             AgentToServer::AgentUnregister { .. } => {
                 if let Some(watchdog) = self.watchdog.as_ref() {
-                    watchdog.mark_disconnected(self.socket_id.clone()).await;
+                    watchdog.mark_disconnected(self.socket_id.clone());
                 }
                 if let Err(error) = self
                     .router_ref
@@ -317,7 +317,7 @@ impl SessionRuntime {
     /// Unregisters the session's agent after the websocket goes away.
     async fn shutdown(self) {
         if let Some(watchdog) = self.watchdog.as_ref() {
-            watchdog.mark_disconnected(self.socket_id.clone()).await;
+            watchdog.mark_disconnected(self.socket_id.clone());
         }
         if let Some(agent_id) = self.agent_id
             && let Err(error) = self
@@ -487,7 +487,7 @@ pub async fn handle_websocket(
                             watchdog.key(),
                             socket_id
                         );
-                        watchdog.signal_stale(socket_id.clone()).await;
+                        watchdog.signal_stale(socket_id.clone());
                     } else {
                         log!(
                             Level::Warning,

@@ -191,9 +191,20 @@ impl CopyFlow {
         self.then.is_some()
     }
 
-    /// Whether either side of the copy runs on `agent_id`.
+    /// Whether the copy's current phase still depends on `agent_id`.
+    ///
+    /// Only a remote stream needs both agents. A local copy runs entirely on the source
+    /// agent, and once a move published its destination only the source deletion is left,
+    /// so losing the destination agent then must not mark a successful move as errored.
     fn involves(&self, agent_id: &AgentId) -> bool {
-        &self.source_agent_id == agent_id || &self.dest_agent_id == agent_id
+        match self.phase {
+            CopyPhase::Remote(_) => {
+                &self.source_agent_id == agent_id || &self.dest_agent_id == agent_id
+            }
+            CopyPhase::Local { .. } | CopyPhase::DeletingSource { .. } => {
+                &self.source_agent_id == agent_id
+            }
+        }
     }
 }
 
@@ -374,14 +385,20 @@ impl FlowTable {
             .map(|(id, _)| *id)
     }
 
-    /// Drops command flows whose REST caller already gave up, so abandoned replies do not
-    /// accumulate; run from the periodic router tick instead of on every message.
-    pub(crate) fn prune_abandoned_commands(&mut self) {
-        let abandoned = self.extract_if(|flow| match flow {
+    /// Removes command flows whose REST caller already gave up, so abandoned replies do not
+    /// accumulate; run from the periodic router tick instead of on every message. Returns
+    /// the removed commands so the caller can cancel the cancelable ones on their agent.
+    pub(crate) fn prune_abandoned_commands(&mut self) -> Vec<CommandFlow> {
+        self.extract_if(|flow| match flow {
             Flow::Command(command) => command.reply.is_closed(),
             _ => false,
-        });
-        drop(abandoned);
+        })
+        .into_iter()
+        .filter_map(|(_, flow)| match flow {
+            Flow::Command(command) => Some(command),
+            _ => None,
+        })
+        .collect()
     }
 
     /// Current data-path byte counts of every flow that still owns its progress row.
@@ -440,6 +457,44 @@ mod tests {
         assert_eq!(table.id_for(RequestId::new(2)), Some(RequestId::new(2)));
     }
 
+    /// Builds a cross-agent move from `source` to `dest` in a stream-less phase.
+    fn move_flow(phase: CopyPhase) -> Flow {
+        Flow::Copy(Box::new(CopyFlow {
+            progress_id: TransferId::new(1),
+            source_agent_id: AgentId::from("source"),
+            dest_agent_id: AgentId::from("dest"),
+            content_kind: CopyContentKind::RawFile,
+            then: Some(DeleteSource {
+                path: "/src".to_string(),
+                identity: MoveSourceIdentity {
+                    device: 1,
+                    inode: 2,
+                    size: 3,
+                    modified_seconds: 4,
+                    modified_nanoseconds: 5,
+                    is_directory: false,
+                },
+            }),
+            phase,
+        }))
+    }
+
+    /// Once a move published its destination only the source deletion remains, so losing the
+    /// destination agent must not fail (and mark as errored) an already successful move.
+    #[test]
+    fn deleting_source_depends_only_on_the_source_agent() {
+        let flow = move_flow(CopyPhase::DeletingSource {
+            request_id: RequestId::new(9),
+        });
+        assert!(flow.involves(&AgentId::from("source")));
+        assert!(!flow.involves(&AgentId::from("dest")));
+        // A local phase likewise runs entirely on the source agent.
+        let local = move_flow(CopyPhase::Local {
+            request_id: RequestId::new(9),
+        });
+        assert!(!local.involves(&AgentId::from("dest")));
+    }
+
     /// Abandoned REST replies are pruned without touching live callers.
     #[test]
     fn prune_drops_only_abandoned_commands() {
@@ -449,7 +504,10 @@ mod tests {
         table.insert(RequestId::new(1), abandoned);
         table.insert(RequestId::new(2), live);
         drop(abandoned_reply);
-        table.prune_abandoned_commands();
+        let pruned = table.prune_abandoned_commands();
+        // The pruned command is handed back so its agent work can be canceled.
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].request_id, RequestId::new(1));
         // A timed-out caller's reply port must not be retained until the agent answers.
         assert_eq!(table.len(), 1);
         assert!(table.id_for(RequestId::new(2)).is_some());

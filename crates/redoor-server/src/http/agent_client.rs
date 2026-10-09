@@ -10,7 +10,9 @@ mod calls;
 pub(crate) use calls::*;
 
 use super::error::ApiError;
-use crate::actors::router::{AgentListEntry, ExecuteCommandRequest, RouterHandle, RouterMsg};
+use crate::actors::router::{
+    AgentListEntry, ExecuteCommandRequest, RouterCallError, RouterHandle, RouterMsg,
+};
 use redoor_core::log;
 use redoor_protocol::{
     api::agents::AgentDetailsResponse,
@@ -30,8 +32,12 @@ pub(crate) trait AgentCall {
     /// Operator-facing description used when the agent answers with the wrong result.
     const OPERATION: &'static str;
 
+    /// Whether the command must finish even when its caller goes away. Such a call is not
+    /// canceled on the agent when the HTTP request is dropped; only its answer is lost.
+    const RUNS_TO_COMPLETION: bool = false;
+
     /// Deadline for the agent's answer; `None` for work whose duration is unbounded (a
-    /// cross-device trash restore), which is still canceled when its caller goes away.
+    /// cross-device trash restore).
     fn timeout(&self) -> Option<Duration> {
         Some(STANDARD_TIMEOUT)
     }
@@ -66,7 +72,19 @@ impl AgentClient {
         call: C,
     ) -> Result<C::Output, ApiError> {
         let timeout = call.timeout();
-        match self.execute(agent_id, call.command(), timeout).await? {
+        let command = call.command();
+        let result = if C::RUNS_TO_COMPLETION {
+            // The detached task owns the reply port and the abandonment guard, so a dropped
+            // HTTP future neither cancels the agent nor lets the router prune the command.
+            let client = self.clone();
+            let agent_id = agent_id.clone();
+            tokio::spawn(async move { client.execute(&agent_id, command, timeout).await })
+                .await
+                .map_err(|_| ApiError::from(RouterCallError::RouterStopped))??
+        } else {
+            self.execute(agent_id, command, timeout).await?
+        };
+        match result {
             CommandResult::Error { kind, message } => Err(ApiError::Command { kind, message }),
             result => C::extract(result),
         }
@@ -130,7 +148,7 @@ impl AgentClient {
                 reply,
             }))
             .await
-            .map_err(|_| crate::actors::router::RouterCallError::RouterStopped)?;
+            .map_err(|_| RouterCallError::RouterStopped)?;
         let mut pending = PendingCommand {
             router: self.router.clone(),
             agent_id: agent_id.clone(),
@@ -154,7 +172,7 @@ impl AgentClient {
         };
         // Any answer, including the router dropping the reply, ends the command's lifetime.
         pending.armed = false;
-        result.map_err(|_| crate::actors::router::RouterCallError::RouterStopped.into())
+        result.map_err(|_| RouterCallError::RouterStopped.into())
     }
 }
 
@@ -315,6 +333,53 @@ mod tests {
             agent.next_priority().await,
             ServerToAgent::CancelTransfer { request_id: canceled } if canceled == request_id
         ));
+    }
+
+    /// A restore that outlives its HTTP caller keeps running: the agent is not told to
+    /// cancel (which would roll the restore back) and its answer is still accepted.
+    #[tokio::test]
+    async fn dropped_caller_does_not_cancel_run_to_completion_call() {
+        let mut agent = FakeAgent::connect().await;
+        let client = AgentClient::new(agent.router.clone());
+        let id = agent.agent_id.clone();
+        let call = tokio::spawn(async move {
+            client
+                .call(
+                    &id,
+                    RestoreTrash {
+                        location_id: "l".to_string(),
+                        item_id: "i".to_string(),
+                        destination_path: "/tmp/restored".to_string(),
+                    },
+                )
+                .await
+        });
+        let (request_id, _) = agent.next_command().await;
+        // The HTTP request goes away while the agent is still restoring.
+        call.abort();
+        let _ = call.await;
+        // A later command and its answer prove the router has processed any abandonment.
+        let client = AgentClient::new(agent.router.clone());
+        let id = agent.agent_id.clone();
+        let follow_up = tokio::spawn(async move { client.call(&id, ListAccounts).await });
+        let (follow_up_id, _) = agent.next_command().await;
+        agent
+            .respond(
+                follow_up_id,
+                CommandResult::error(CommandErrorKind::Internal, "done"),
+            )
+            .await;
+        assert!(follow_up.await.unwrap().is_err());
+        // No cancel frame may reach the agent for the restore.
+        assert!(agent.priority.try_recv().is_err());
+        agent
+            .respond(
+                request_id,
+                CommandResult::RestoreTrash {
+                    path: "/tmp/restored".to_string(),
+                },
+            )
+            .await;
     }
 
     /// Commands the agent cannot cancel are only forgotten, never sent a pointless cancel.

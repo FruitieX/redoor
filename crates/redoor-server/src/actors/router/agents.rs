@@ -577,18 +577,24 @@ impl RouterState {
             Some(Flow::Command(command)) if &command.agent_id == agent_id => {}
             _ => return,
         }
-        let Some(Flow::Command(command)) = self.flows.remove(flow_id) else {
-            return;
-        };
+        if let Some(Flow::Command(command)) = self.flows.remove(flow_id) {
+            self.cancel_abandoned(&command);
+        }
+    }
+
+    /// Stops an already removed, abandoned command on its agent when the agent registered it
+    /// for cancellation. Shared by explicit abandonment and the tick's pruning of closed
+    /// replies, so whichever notices the departed caller first still stops the work.
+    pub(crate) fn cancel_abandoned(&self, command: &CommandFlow) {
         log!(
             Level::Debug,
             "Abandoned command: agent_id={}, request_id={}, cancelable={}",
-            agent_id,
+            command.agent_id,
             command.request_id,
             command.cancelable
         );
         if command.cancelable
-            && let Some(connection) = self.agents.by_id.get(agent_id)
+            && let Some(connection) = self.agents.by_id.get(&command.agent_id)
         {
             // A retained delivery task finishes on its own; a closed lane means the
             // connection is gone and its teardown already stops the command.
@@ -757,6 +763,46 @@ mod tests {
         // The flow survives both attempts, so the real answer still reaches the caller.
         state.handle(response_message("owner", owner_socket, 7));
         assert!(matches!(reply.try_recv(), Ok(CommandResult::RawUpload)));
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// The tick's pruning of a command whose caller left must stop the agent's work just like
+    /// explicit abandonment; otherwise whichever path ran first decided whether it was canceled.
+    #[tokio::test]
+    async fn pruning_abandoned_cancelable_command_cancels_it_on_the_agent() {
+        let mut state = test_state();
+        let agent_id = AgentId::from("prune-agent");
+        let (lanes, mut receivers) = ControlLanes::bounded(64, 16);
+        state.commit_registration(RegisterAgentRequest::for_test(
+            &agent_id,
+            lanes,
+            super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
+        ));
+        // Drain the transfer bootstrap queued by registration.
+        assert!(matches!(
+            receivers.priority.try_recv(),
+            Ok(ServerToAgent::TransferSocketOpen { .. })
+        ));
+        let cancelable = insert_command(&mut state, 11, "prune-agent");
+        if let Some(Flow::Command(command)) = state
+            .flows
+            .get_mut(redoor_protocol::ids::RequestId::new(11))
+        {
+            command.cancelable = true;
+        }
+        let quiet = insert_command(&mut state, 12, "prune-agent");
+        drop(cancelable);
+        drop(quiet);
+        state.tick();
+        // Only the request-scoped command is canceled; the other is just forgotten.
+        assert!(matches!(
+            receivers.priority.try_recv(),
+            Ok(ServerToAgent::CancelTransfer { request_id })
+                if request_id == redoor_protocol::ids::RequestId::new(11)
+        ));
+        assert!(receivers.priority.try_recv().is_err());
+        // Both abandoned flows are gone from the table.
+        assert_eq!(state.flows.len(), 0);
         state.ui.refresh_check_task.abort();
     }
 

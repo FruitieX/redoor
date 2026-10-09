@@ -107,22 +107,27 @@ async fn upload_upgrade_binary(
         total_bytes,
     )
     .await?;
-    if let UploadStart::Ready(mut upload) = upload {
-        let mut buffer = vec![0; redoor_protocol::wire::stream::CHUNK_SIZE];
-        loop {
-            let bytes_read = file.read(&mut buffer).await.map_err(|error| {
-                ApiError::status(
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to read upgrade binary: {error}"),
-                )
-            })?;
-            if bytes_read == 0 {
-                break;
-            }
-            upload.send(&buffer[..bytes_read]).await?;
+    // An upgrade binary is never empty, so an agent that finished before reading a byte did
+    // not install it; self-exec would then run whatever (if anything) is at the destination.
+    let UploadStart::Ready(mut upload) = upload else {
+        return Err(ApiError::internal(
+            "Unexpected early upgrade upload completion",
+        ));
+    };
+    let mut buffer = vec![0; redoor_protocol::wire::stream::CHUNK_SIZE];
+    loop {
+        let bytes_read = file.read(&mut buffer).await.map_err(|error| {
+            ApiError::status(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to read upgrade binary: {error}"),
+            )
+        })?;
+        if bytes_read == 0 {
+            break;
         }
-        upload.finish().await?;
+        upload.send(&buffer[..bytes_read]).await?;
     }
+    upload.finish().await?;
     log!(
         Level::Info,
         "Agent upgrade binary upload completed: agent_id={}, destination={}, bytes={}",

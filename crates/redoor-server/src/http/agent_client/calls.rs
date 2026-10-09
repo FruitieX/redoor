@@ -455,9 +455,11 @@ pub(crate) struct RestoreTrash {
 impl AgentCall for RestoreTrash {
     type Output = String;
     const OPERATION: &'static str = "restoring a trash item";
+    /// A closed browser tab must not roll back a restore the user asked for; the agent only
+    /// stops it on disconnect or an explicit cancel.
+    const RUNS_TO_COMPLETION: bool = true;
 
-    /// A cross-device restore copies the whole item, so no fixed deadline fits; the agent can
-    /// cancel it, which happens when the HTTP caller goes away.
+    /// A cross-device restore copies the whole item, so no fixed deadline fits.
     fn timeout(&self) -> Option<Duration> {
         None
     }
