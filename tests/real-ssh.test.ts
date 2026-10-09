@@ -626,6 +626,7 @@ log = "${agentLogPath}"
                         message.startsWith("Using existing remote binary at "),
                 ),
             ).toEqual([]);
+
             if (process.platform === "linux" && process.arch === "x64") {
                 // The test server is a debug build for the SSH host's platform (x86_64 Linux),
                 // so it must deploy its own workspace build instead of a GitHub release.
@@ -640,6 +641,7 @@ log = "${agentLogPath}"
                     ),
                 ).toBe(false);
             }
+
             expect(
                 provisioningMessages.some((message) =>
                     message.startsWith("Spawning the remote binary"),

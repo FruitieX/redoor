@@ -11,6 +11,7 @@ import {
 import WebSocket from "ws";
 import { z } from "zod";
 
+import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import { ApiError, type Agent, type ApiClient } from "#ui/api-client";
 import {
     ProcessManager,
@@ -31,6 +32,11 @@ const transferSocketOpenSchema = z.object({
 });
 
 const controlMessageSchema = z.object({ type: z.string() });
+
+/** Agent results the early-completion fixture answers with, in their wire shape. */
+type FakeCommandResult =
+    | { type: "RawUpload" }
+    | ({ type: "GetAgentDetails" } & AgentDetailsResponse);
 
 /** Waits for a websocket to become writable without relying on timing delays. */
 async function waitForSocketOpen(socket: WebSocket): Promise<void> {
@@ -381,6 +387,7 @@ describe("connected external agent upgrade", () => {
             request_id: z.number(),
             command: z.object({ type: z.string() }),
         });
+
         const receivedCommandTypes: string[] = [];
         control.on("message", (data) => {
             const parsed = commandSchema.safeParse(
@@ -393,7 +400,8 @@ describe("connected external agent upgrade", () => {
 
             const { request_id: requestId, command } = parsed.data;
             receivedCommandTypes.push(command.type);
-            const respond = (result: Record<string, unknown>): void => {
+
+            const respond = (result: FakeCommandResult): void => {
                 control.send(
                     JSON.stringify({
                         type: "command_response",

@@ -25,6 +25,7 @@ import {
     startServerAndAgent,
     waitForLogMessage,
     waitForValue,
+    webSocketDataToString,
 } from "./test-utils";
 
 const AGENT_NAME = "test-agent";
@@ -1316,10 +1317,11 @@ describe("Agents API", () => {
             request_id: z.number(),
             command: z.object({ type: z.literal("Echo") }),
         });
+
         const echoCommand = new Promise<number>((resolve) => {
             target.on("message", (data) => {
                 const parsed = commandSchema.safeParse(
-                    JSON.parse(String(data)),
+                    JSON.parse(webSocketDataToString(data)),
                 );
 
                 if (parsed.success) {
@@ -1375,6 +1377,7 @@ describe("Agents API", () => {
             serverProcess,
             /Ignoring agent frame before successful registration: .*frame=command_response/,
         );
+
         // The attacker knows the agent id and the (sequential) request id but never registered.
         attacker.send(
             JSON.stringify({
