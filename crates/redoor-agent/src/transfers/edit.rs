@@ -1,24 +1,25 @@
-use super::super::{ActiveUploads, AgentActor, AgentCommandError, UploadSessionHandle};
+//! In-place file edits: stage the full body in an anonymous file, then rewrite the pinned inode.
+
+use super::upload::{PublicationGate, SinkError, UploadSink};
+use crate::errors::AgentCommandError;
 use redoor_core::log;
+use redoor_core::staging::StagingKind;
 use redoor_protocol::{
-    ids::{AgentId, RequestId},
+    ids::RequestId,
     wire::{
         command::{CommandErrorKind, CommandResult},
         log::Level,
-        stream,
-        stream::StreamPayloadKind,
     },
 };
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Path, PathBuf},
+    path::Path,
 };
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncSeekExt, AsyncWriteExt},
-    sync::{mpsc, watch},
 };
-use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
 const STAGING_CREATE_ATTEMPTS: usize = 16;
 
@@ -52,7 +53,7 @@ impl TargetIdentity {
 
 /// Holds both descriptors so staging failures cannot touch the selected target inode.
 #[derive(Debug)]
-struct EditSession {
+pub(crate) struct EditSession {
     path: String,
     target: File,
     staging: File,
@@ -62,7 +63,10 @@ struct EditSession {
 
 impl EditSession {
     /// Pins an existing regular file and reserves an anonymous staging inode before readiness.
-    async fn open(path: String) -> Result<Self, AgentCommandError> {
+    pub(crate) async fn open(
+        request_id: RequestId,
+        path: String,
+    ) -> Result<Self, AgentCommandError> {
         if !Path::new(&path).is_absolute() {
             return Err(edit_error(
                 CommandErrorKind::InvalidInput,
@@ -94,6 +98,12 @@ impl EditSession {
         }
 
         let staging = create_unlinked_staging_file().await?;
+        log!(
+            Level::Info,
+            "Started file edit: request_id={}, path={}",
+            request_id,
+            path
+        );
         Ok(Self {
             path,
             target,
@@ -116,7 +126,7 @@ impl EditSession {
     }
 
     /// Rechecks pathname identity, then rewrites only the inode pinned during setup.
-    async fn commit(mut self) -> Result<u64, AgentCommandError> {
+    async fn rewrite(mut self) -> Result<u64, AgentCommandError> {
         self.staging.flush().await.map_err(|error| {
             edit_error(
                 CommandErrorKind::from_io_error(&error),
@@ -216,218 +226,29 @@ impl EditSession {
     }
 }
 
-/// Owns one edit session and its cancellation-sensitive pre-commit stream loop.
-struct EditFileWorker {
-    active_uploads: ActiveUploads,
-    chunk_receiver: mpsc::Receiver<stream::StreamChunk>,
-    cancel_receiver: watch::Receiver<bool>,
-    session: EditSession,
-    tx: mpsc::Sender<WsMessage>,
-    agent_id: AgentId,
-    request_id: RequestId,
-}
+impl UploadSink for EditSession {
+    /// A terminal frame already accepted by the FIFO authorizes the rewrite even if transfer
+    /// teardown races it, because the full body is staged and nothing has been touched yet.
+    const TERMINAL_WINS_OVER_CANCEL: bool = true;
 
-/// Represents one event selected while an edit is still safe to discard.
-enum EditFileEvent {
-    Chunk(Option<stream::StreamChunk>),
-    Continue,
-    Cancel,
-    Exit,
-}
-
-impl EditFileWorker {
-    /// Waits for cancellation while preserving watch closure as worker shutdown.
-    async fn wait_for_cancel(cancel_receiver: &mut watch::Receiver<bool>) -> EditFileEvent {
-        match cancel_receiver.changed().await {
-            Ok(()) if *cancel_receiver.borrow() => EditFileEvent::Cancel,
-            Ok(()) => EditFileEvent::Continue,
-            Err(_) => EditFileEvent::Exit,
-        }
+    /// Appends the chunk to the anonymous staging file.
+    async fn write(&mut self, data: Vec<u8>, _cancel: &CancellationToken) -> Result<(), SinkError> {
+        self.stage(&data).await.map_err(SinkError::Failed)
     }
 
-    /// Sends one typed edit failure and releases registry ownership.
-    async fn fail(self, error: AgentCommandError) {
-        AgentActor
-            .send_command_response(&self.tx, &self.agent_id, self.request_id, error.into())
-            .await;
-        self.active_uploads.remove(self.request_id);
+    /// Rewrites the pinned inode; the non-atomic rewrite ignores cancellation once started.
+    async fn commit(self, _gate: PublicationGate<'_>) -> Result<CommandResult, AgentCommandError> {
+        self.rewrite().await.map(|_| CommandResult::EditFile)
     }
 
-    /// Discards staged bytes after an accepted cancellation without touching the target.
-    async fn cancel(self) {
-        log!(
-            Level::Info,
-            "Stopping file edit after cancel: request_id={}, path={}",
-            self.request_id,
-            self.session.path
-        );
-        self.fail(edit_error(
-            CommandErrorKind::InvalidInput,
-            "File edit canceled by server",
-        ))
-        .await;
-    }
-
-    /// Commits after the terminal frame and ignores cancellation until the rewrite finishes.
-    async fn commit(self) {
-        let EditFileWorker {
-            active_uploads,
-            session,
-            tx,
-            agent_id,
-            request_id,
-            ..
-        } = self;
-        let path = session.path.clone();
-        match session.commit().await {
-            Ok(bytes_written) => {
-                log!(
-                    Level::Info,
-                    "File edit complete: request_id={}, path={}, bytes_written={}",
-                    request_id,
-                    path,
-                    bytes_written
-                );
-                AgentActor
-                    .send_command_response(&tx, &agent_id, request_id, CommandResult::EditFile)
-                    .await;
-            }
-            Err(error) => {
-                AgentActor
-                    .send_command_response(&tx, &agent_id, request_id, error.into())
-                    .await;
-            }
-        }
-        active_uploads.remove(request_id);
-    }
-
-    /// Stages frames until terminal input authorizes the non-atomic inode rewrite.
-    async fn process(mut self) {
-        loop {
-            let event = tokio::select! {
-                biased;
-                chunk = self.chunk_receiver.recv() => EditFileEvent::Chunk(chunk),
-                event = Self::wait_for_cancel(&mut self.cancel_receiver) => event,
-            };
-            let Some(chunk) = (match event {
-                EditFileEvent::Chunk(chunk) => chunk,
-                EditFileEvent::Continue => continue,
-                EditFileEvent::Cancel => {
-                    self.cancel().await;
-                    return;
-                }
-                EditFileEvent::Exit => return,
-            }) else {
-                self.fail(edit_error(
-                    CommandErrorKind::Internal,
-                    "File edit stream ended before completion",
-                ))
-                .await;
-                return;
-            };
-
-            if chunk.payload_kind != StreamPayloadKind::RawFile {
-                self.fail(edit_error(
-                    CommandErrorKind::InvalidInput,
-                    format!(
-                        "File edit payload kind mismatch: expected {:?}, got {:?}",
-                        StreamPayloadKind::RawFile,
-                        chunk.payload_kind
-                    ),
-                ))
-                .await;
-                return;
-            }
-            if chunk.is_error {
-                let message = if chunk.data.is_empty() {
-                    "File edit aborted by server".to_string()
-                } else {
-                    String::from_utf8_lossy(&chunk.data).to_string()
-                };
-                self.fail(edit_error(CommandErrorKind::InvalidInput, message))
-                    .await;
-                return;
-            }
-            if let Err(error) = self.session.stage(&chunk.data).await {
-                self.fail(error).await;
-                return;
-            }
-            if chunk.is_last {
-                self.commit().await;
-                return;
-            }
-        }
-    }
-}
-
-impl AgentActor {
-    /// Starts a pinned-inode edit worker and registers it before readiness is announced.
-    pub(crate) async fn start_file_edit_session(
-        &self,
-        active_uploads: ActiveUploads,
-        write: &mpsc::Sender<WsMessage>,
-        agent_id: &AgentId,
-        request_id: RequestId,
-        path: String,
-    ) {
-        if active_uploads.contains(request_id) {
-            self.send_command_response(
-                write,
-                agent_id,
-                request_id,
-                edit_error(
-                    CommandErrorKind::AlreadyExists,
-                    format!("Upload session already exists for request_id={request_id}"),
-                )
-                .into(),
-            )
-            .await;
-            return;
-        }
-
-        let session = match EditSession::open(path.clone()).await {
-            Ok(session) => session,
-            Err(error) => {
-                self.send_command_response(write, agent_id, request_id, error.into())
-                    .await;
-                return;
-            }
-        };
-        let (chunk_sender, chunk_receiver) = mpsc::channel::<stream::StreamChunk>(8);
-        let (cancel_sender, cancel_receiver) = watch::channel(false);
-        active_uploads.insert(
-            request_id,
-            UploadSessionHandle {
-                path: path.clone(),
-                chunk_sender,
-                cancel_sender,
-            },
-        );
-        log!(
-            Level::Info,
-            "Started file edit: request_id={}, path={}",
-            request_id,
-            path
-        );
-        tokio::spawn(
-            EditFileWorker {
-                active_uploads,
-                chunk_receiver,
-                cancel_receiver,
-                session,
-                tx: write.clone(),
-                agent_id: agent_id.clone(),
-                request_id,
-            }
-            .process(),
-        );
-    }
+    /// Dropping both descriptors discards the anonymous staging inode without touching the target.
+    async fn abort(self) {}
 }
 
 /// Creates an unlinked mode-0600 staging inode without following a colliding name.
 async fn create_unlinked_staging_file() -> Result<File, AgentCommandError> {
     for _ in 0..STAGING_CREATE_ATTEMPTS {
-        let path = staging_path();
+        let path = StagingKind::FileEdit.in_temp_dir();
         let file = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -459,15 +280,6 @@ async fn create_unlinked_staging_file() -> Result<File, AgentCommandError> {
     Err(edit_error(
         CommandErrorKind::AlreadyExists,
         "Failed to reserve a unique file edit staging file",
-    ))
-}
-
-/// Generates an unpredictable staging name under the platform temporary directory.
-fn staging_path() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        ".redoor-edit-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
     ))
 }
 
@@ -520,20 +332,29 @@ fn post_commit_error(action: &str, error: std::io::Error) -> AgentCommandError {
 
 /// Builds the protocol error shape used consistently by edit setup and commit.
 fn edit_error(kind: CommandErrorKind, message: impl Into<String>) -> AgentCommandError {
-    AgentCommandError::edit_file(kind, message)
+    AgentCommandError::new(kind, message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ctx::{CommandCtx, Reply};
+    use crate::runtime::cancel::CancelRegistry;
+    use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
+    use redoor_protocol::{
+        ids::{AgentId, ChunkIndex},
+        wire::{policy::UploadKind, stream::StreamChunk, stream::StreamPayloadKind},
+    };
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::path::PathBuf;
 
     /// Stages and commits bytes directly so filesystem semantics can be tested without sockets.
     async fn edit(path: &Path, content: &[u8]) -> Result<u64, AgentCommandError> {
-        let mut session = EditSession::open(path.to_string_lossy().into_owned()).await?;
+        let mut session =
+            EditSession::open(RequestId::new(1), path.to_string_lossy().into_owned()).await?;
         session.stage(content).await?;
-        session.commit().await
+        session.rewrite().await
     }
 
     #[tokio::test]
@@ -615,10 +436,11 @@ mod tests {
         symlink("second", &first).unwrap();
         symlink("first", &second).unwrap();
 
-        let dangling_error = EditSession::open(dangling.to_string_lossy().into_owned())
-            .await
-            .unwrap_err();
-        let loop_error = EditSession::open(first.to_string_lossy().into_owned())
+        let dangling_error =
+            EditSession::open(RequestId::new(1), dangling.to_string_lossy().into_owned())
+                .await
+                .unwrap_err();
+        let loop_error = EditSession::open(RequestId::new(1), first.to_string_lossy().into_owned())
             .await
             .unwrap_err();
 
@@ -647,14 +469,15 @@ mod tests {
         tokio::fs::write(&first, b"first old").await.unwrap();
         tokio::fs::write(&second, b"second old").await.unwrap();
         symlink("first", &selected).unwrap();
-        let mut session = EditSession::open(selected.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let mut session =
+            EditSession::open(RequestId::new(1), selected.to_string_lossy().into_owned())
+                .await
+                .unwrap();
         session.stage(b"replacement").await.unwrap();
         tokio::fs::remove_file(&selected).await.unwrap();
         symlink("second", &selected).unwrap();
 
-        let error = session.commit().await.unwrap_err();
+        let error = session.rewrite().await.unwrap_err();
 
         // A namespace swap must be rejected as conflict before truncation.
         assert_eq!(error.kind(), CommandErrorKind::Conflict);
@@ -671,13 +494,14 @@ mod tests {
         let selected = temp.path().join("selected");
         tokio::fs::write(&target, b"old bytes").await.unwrap();
         symlink("target", &selected).unwrap();
-        let mut session = EditSession::open(selected.to_string_lossy().into_owned())
-            .await
-            .unwrap();
+        let mut session =
+            EditSession::open(RequestId::new(1), selected.to_string_lossy().into_owned())
+                .await
+                .unwrap();
         session.stage(b"replacement").await.unwrap();
         tokio::fs::remove_file(&selected).await.unwrap();
 
-        let error = session.commit().await.unwrap_err();
+        let error = session.rewrite().await.unwrap_err();
 
         // Losing the selected pathname after setup is a race conflict, not a missing initial target.
         assert_eq!(error.kind(), CommandErrorKind::Conflict);
@@ -696,13 +520,18 @@ mod tests {
             "FIFO fixture must be created for nonblocking setup coverage"
         );
 
-        let relative_error = EditSession::open("relative".to_string()).await.unwrap_err();
-        let directory_error = EditSession::open(temp.path().to_string_lossy().into_owned())
+        let relative_error = EditSession::open(RequestId::new(1), "relative".to_string())
             .await
             .unwrap_err();
+        let directory_error = EditSession::open(
+            RequestId::new(1),
+            temp.path().to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap_err();
         let fifo_error = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            EditSession::open(fifo.to_string_lossy().into_owned()),
+            EditSession::open(RequestId::new(1), fifo.to_string_lossy().into_owned()),
         )
         .await
         .expect("FIFO open must not hang")
@@ -722,7 +551,7 @@ mod tests {
         let path = temp.path().join("target");
         tokio::fs::write(&path, b"original").await.unwrap();
         let before = tokio::fs::metadata(&path).await.unwrap();
-        let mut session = EditSession::open(path.to_string_lossy().into_owned())
+        let mut session = EditSession::open(RequestId::new(1), path.to_string_lossy().into_owned())
             .await
             .unwrap();
         session.stage(b"partial replacement").await.unwrap();
@@ -765,7 +594,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut session = EditSession::open(path.to_string_lossy().into_owned())
+        let mut session = EditSession::open(RequestId::new(1), path.to_string_lossy().into_owned())
             .await
             .unwrap();
         session.stage(b"new").await.unwrap();
@@ -774,7 +603,7 @@ mod tests {
             .set_permissions(std::fs::Permissions::from_mode(0o751))
             .await
             .unwrap();
-        session.commit().await.unwrap();
+        session.rewrite().await.unwrap();
         let mode = tokio::fs::metadata(&path).await.unwrap().mode();
 
         // Mandatory ordinary bits survive even when special bits were cleared before commit.
@@ -789,77 +618,58 @@ mod tests {
         let temp = TempDir::create();
         let path = temp.path().join("target");
         tokio::fs::write(&path, b"old").await.unwrap();
-        let session = EditSession::open(path.to_string_lossy().into_owned())
-            .await
-            .unwrap();
-        let active_uploads = ActiveUploads::new();
-        let (chunk_sender, chunk_receiver) = mpsc::channel(8);
-        let (cancel_sender, cancel_receiver) = watch::channel(false);
         let request_id = RequestId::new(77);
-        active_uploads.insert(
-            request_id,
-            UploadSessionHandle {
-                path: path.to_string_lossy().into_owned(),
-                chunk_sender: chunk_sender.clone(),
-                cancel_sender,
-            },
+        let (mut ctx, mut frames) = CommandCtx::detached(request_id);
+        let registry = CancelRegistry::new(None);
+        let registration = registry.register(request_id).unwrap();
+        ctx.cancel = registration.token().clone();
+        ctx.registration = Some(registration);
+        let routes = ctx.services.upload_routes.clone();
+        let prepared = EditSession::open(request_id, path.to_string_lossy().into_owned()).await;
+        let task = tokio::spawn(
+            UploadDriver::new(
+                UploadKind::EditFile,
+                path.to_string_lossy().into_owned(),
+                ctx,
+            )
+            .run(prepared),
         );
-        let (tx, mut rx) = mpsc::channel(1);
-        chunk_sender
-            .send(stream::StreamChunk {
-                request_id,
-                chunk_index: redoor_protocol::ids::ChunkIndex::new(0),
-                is_last: false,
-                is_error: false,
-                payload_kind: StreamPayloadKind::RawFile,
-                data: b"replacement".to_vec(),
-            })
+        frames
+            .recv()
             .await
-            .unwrap();
-        chunk_sender
-            .send(stream::StreamChunk {
-                request_id,
-                chunk_index: redoor_protocol::ids::ChunkIndex::new(1),
-                is_last: true,
-                is_error: false,
-                payload_kind: StreamPayloadKind::RawFile,
-                data: Vec::new(),
-            })
-            .await
-            .unwrap();
-
-        // Transfer teardown sets cancellation and drops registry senders after terminal delivery.
-        active_uploads.clear();
-        drop(chunk_sender);
-        EditFileWorker {
-            active_uploads: active_uploads.clone(),
-            chunk_receiver,
-            cancel_receiver,
-            session,
-            tx,
-            agent_id: AgentId::from("agent-1"),
-            request_id,
+            .expect("edit readiness should be announced");
+        let (control, _control_frames) = tokio::sync::mpsc::channel(1);
+        for (index, (data, is_last)) in [(b"replacement".to_vec(), false), (Vec::new(), true)]
+            .into_iter()
+            .enumerate()
+        {
+            routes
+                .route_frame(
+                    &StreamChunk {
+                        request_id,
+                        chunk_index: ChunkIndex::new(index as u64),
+                        is_last,
+                        is_error: false,
+                        payload_kind: StreamPayloadKind::RawFile,
+                        data,
+                    }
+                    .to_bytes(),
+                    &control,
+                    &AgentId::from("agent-1"),
+                )
+                .await;
         }
-        .process()
-        .await;
+
+        // Transfer teardown revokes cancellation and detaches routes after terminal delivery.
+        registry.revoke_all();
+        routes.clear();
+        let Reply::Result(result) = task.await.unwrap() else {
+            panic!("edits answer on the control lane");
+        };
 
         // A terminal already accepted by the FIFO channel authorizes commit despite later teardown.
         assert_eq!(tokio::fs::read(&path).await.unwrap(), b"replacement");
-        // Completion must release worker ownership even though teardown cleared it first.
-        assert!(!active_uploads.contains(request_id));
-        let response = rx.recv().await.expect("edit completion response queued");
-        let WsMessage::Text(text) = response else {
-            panic!("edit completion must use the control text lane");
-        };
-        let message: redoor_protocol::wire::Message = serde_json::from_str(&text).unwrap();
         // Success proves cancellation did not nondeterministically win after terminal receipt.
-        assert!(matches!(
-            message,
-            redoor_protocol::wire::Message::CommandResponse {
-                request_id: response_id,
-                result: CommandResult::EditFile,
-                ..
-            } if response_id == request_id
-        ));
+        assert!(matches!(result, CommandResult::EditFile));
     }
 }

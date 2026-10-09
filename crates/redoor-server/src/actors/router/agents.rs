@@ -11,7 +11,7 @@ use axum::extract::ws::Message as WsMessage;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
-use redoor_protocol::{ids::AgentId, wire::Message};
+use redoor_protocol::{ids::AgentId, wire::ServerToAgent};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -45,17 +45,21 @@ impl AgentConnection {
     }
 
     /// Serializes and admits one ordinary command or bootstrap onto the bounded lane.
-    pub(crate) fn send_message(&self, message: Message) -> bool {
+    pub(crate) fn send_message(&self, message: ServerToAgent) -> bool {
         self.send_to_lane(message, &self.outgoing_commands)
     }
 
     /// Queues lifecycle or cancellation traffic independently of command admission.
-    pub(crate) fn send_priority_message(&self, message: Message) -> bool {
+    pub(crate) fn send_priority_message(&self, message: ServerToAgent) -> bool {
         self.send_to_lane(message, &self.outgoing_priority)
     }
 
     /// Serializes one message before attempting non-blocking admission to a bounded lane.
-    fn send_to_lane(&self, message: Message, lane: &tokio::sync::mpsc::Sender<WsMessage>) -> bool {
+    fn send_to_lane(
+        &self,
+        message: ServerToAgent,
+        lane: &tokio::sync::mpsc::Sender<WsMessage>,
+    ) -> bool {
         match serde_json::to_string(&message) {
             Ok(json) => {
                 if lane.try_send(WsMessage::Text(json.into())).is_err() {
@@ -202,7 +206,7 @@ fn commit_registration(state: &mut RouterState, request: RegisterAgentRequest) {
     known.is_root = is_root;
     ui::notify_agents_changed(state);
 
-    if let Ok(message) = serde_json::to_string(&Message::TransferSocketOpen {
+    if let Ok(message) = serde_json::to_string(&ServerToAgent::TransferSocketOpen {
         token: transfer_token,
     }) {
         let _ = transfer_open_sender.try_send(WsMessage::Text(message.into()));
@@ -261,7 +265,7 @@ pub(crate) async fn register(state: &mut RouterState, request: RegisterAgentRequ
             }
             // Notify the old session so its agent process exits promptly
             // instead of lingering as a zombie.
-            let _ = old_connection.send_priority_message(Message::Error {
+            let _ = old_connection.send_priority_message(ServerToAgent::Error {
                 message: "Connection replaced by a new agent with the same name".to_string(),
             });
         }
@@ -289,7 +293,7 @@ pub(crate) async fn register(state: &mut RouterState, request: RegisterAgentRequ
         }
     };
     if !accepted {
-        let rejection = serde_json::to_string(&Message::Error {
+        let rejection = serde_json::to_string(&ServerToAgent::Error {
             message: "Managed agent is intentionally stopped".to_string(),
         });
         if let Ok(rejection) = rejection {
@@ -533,7 +537,7 @@ pub(crate) async fn apply_managed_lifecycle(
             known.connected_at = None;
             known.socket_id = None;
         }
-        let _ = connection.send_priority_message(redoor_protocol::wire::Message::Error {
+        let _ = connection.send_priority_message(redoor_protocol::wire::ServerToAgent::Error {
             message: "Managed agent startup was retried".to_string(),
         });
         cleanup::cleanup_agent_requests(state, &agent_id).await;
@@ -582,7 +586,7 @@ pub(crate) async fn apply_managed_lifecycle(
             jiff::Timestamp::now().as_second(),
         ));
         known.socket_id = None;
-        let _ = connection.send_priority_message(redoor_protocol::wire::Message::Error {
+        let _ = connection.send_priority_message(redoor_protocol::wire::ServerToAgent::Error {
             message: "Managed agent was shut down".to_string(),
         });
         cleanup::cleanup_agent_requests(state, &agent_id).await;
@@ -644,7 +648,7 @@ pub(crate) fn execute_command_rest(state: &mut RouterState, request: ExecuteComm
         request.command
     );
     if let Some(agent_connection) = state.agents.by_id.get(&request.agent_id) {
-        if agent_connection.send_message(Message::Command {
+        if agent_connection.send_message(ServerToAgent::Command {
             agent_id: request.agent_id.clone(),
             request_id,
             command: request.command,
@@ -671,7 +675,7 @@ pub(crate) fn execute_command_rest(state: &mut RouterState, request: ExecuteComm
 pub(crate) fn open_log_stream(state: &RouterState, request: OpenAgentLogStreamRequest) {
     let result = match state.agents.by_id.get(&request.agent_id) {
         Some(connection)
-            if connection.send_message(Message::LogStreamOpen {
+            if connection.send_message(ServerToAgent::LogStreamOpen {
                 log_stream_id: request.log_stream_id.clone(),
                 token: request.token.clone(),
             }) =>
@@ -692,7 +696,7 @@ pub(crate) fn open_log_stream(state: &RouterState, request: OpenAgentLogStreamRe
 pub(crate) fn open_terminal(state: &RouterState, request: OpenTerminalRequest) {
     let result = match state.agents.by_id.get(&request.agent_id) {
         Some(connection)
-            if connection.send_message(Message::TerminalOpen {
+            if connection.send_message(ServerToAgent::TerminalOpen {
                 terminal_id: request.terminal_id.clone(),
                 token: request.token.clone(),
                 size: request.size,
@@ -1127,9 +1131,11 @@ mod tests {
         ));
 
         let connection = &state.agents.by_id[&agent_id];
-        assert!(connection.send_priority_message(Message::CancelTransfer {
-            request_id: redoor_protocol::ids::RequestId::new(99),
-        }));
+        assert!(
+            connection.send_priority_message(ServerToAgent::CancelTransfer {
+                request_id: redoor_protocol::ids::RequestId::new(99),
+            })
+        );
         // Priority admission succeeds despite the unread ordinary command frame.
         assert!(matches!(
             priority_receiver.recv().await,

@@ -154,25 +154,12 @@ pub async fn remove_existing_path(path: &Path) -> Result<(), DestinationPlaceErr
     }
 }
 
-/// Builds a uniquely named sibling path used to hold the previous destination during override.
-pub fn backup_path_for_destination(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("destination");
-    let backup_name = format!(".{file_name}.redoor-override-backup-{}", fastrand::u64(..));
-    match path.parent() {
-        Some(parent) => parent.join(backup_name),
-        None => PathBuf::from(backup_name),
-    }
-}
-
 /// Publishes temp content by moving the old destination aside first so a failed rename can restore it.
 async fn publish_over_existing_with_backup(
     temp_path: &Path,
     final_path: &Path,
 ) -> Result<(), DestinationPlaceError> {
-    let backup_path = backup_path_for_destination(final_path);
+    let backup_path = crate::staging::StagingKind::OverrideBackup.sibling_of(final_path);
 
     tokio::fs::rename(final_path, &backup_path)
         .await

@@ -6,7 +6,7 @@ use redoor_protocol::wire::command::{Command, CommandResult, MoveSourceIdentity}
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{
     ids::{AgentId, RequestId, TransferId},
-    wire::Message,
+    wire::ServerToAgent,
 };
 
 /// Builds the agent-local command while the copy module supplies only shared transport startup.
@@ -265,7 +265,7 @@ fn begin_source_deletion(
         .by_id
         .get(&source_agent_id)
         .is_some_and(|source_agent| {
-            source_agent.send_message(Message::Command {
+            source_agent.send_message(ServerToAgent::Command {
                 agent_id: source_agent_id.clone(),
                 request_id: delete_request_id,
                 command: Command::DeleteMoveSource {

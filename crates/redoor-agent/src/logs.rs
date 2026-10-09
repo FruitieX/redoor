@@ -6,13 +6,11 @@ use futures_util::{
 };
 use redoor_core::{log, logging, logging::LogSubscription};
 use redoor_protocol::wire::log::{Level, LogAgentHandshake, LogEntry, LogEvent, LogStreamId};
-use tokio::{
-    net::TcpStream,
-    sync::{broadcast, watch},
-};
+use tokio::{net::TcpStream, sync::broadcast};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, tungstenite::protocol::Message as WsMessage,
 };
+use tokio_util::sync::CancellationToken;
 
 type LogSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type LogSink = SplitSink<LogSocket, WsMessage>;
@@ -32,14 +30,14 @@ pub(crate) async fn connect_and_run(
     connection: &AgentConnection,
     log_stream_id: LogStreamId,
     token: String,
-    mut cancel_receiver: watch::Receiver<bool>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let url = log_stream_url(connection.server_url(), &log_stream_id)?;
-    if *cancel_receiver.borrow() {
+    if cancel.is_cancelled() {
         return Ok(());
     }
     let connection = tokio::select! {
-        _ = cancel_receiver.changed() => return Ok(()),
+        _ = cancel.cancelled() => return Ok(()),
         result = connection.connect(url.as_str()) => result,
     };
     let (mut socket, _) = connection.context("failed to connect dedicated log websocket")?;
@@ -47,13 +45,13 @@ pub(crate) async fn connect_and_run(
     let handshake = serde_json::to_string(&LogAgentHandshake::Authenticate { token })
         .context("failed to encode log handshake")?;
     let authenticated = tokio::select! {
-        _ = cancel_receiver.changed() => return Ok(()),
+        _ = cancel.cancelled() => return Ok(()),
         result = socket.send(WsMessage::text(handshake)) => result,
     };
     authenticated.context("failed to authenticate dedicated log websocket")?;
 
     let subscription = tokio::select! {
-        _ = cancel_receiver.changed() => return Ok(()),
+        _ = cancel.cancelled() => return Ok(()),
         result = logging::subscribe() => result,
     }
     .context("logger is unavailable")?;
@@ -63,7 +61,7 @@ pub(crate) async fn connect_and_run(
         "Agent log stream started: log_stream_id={}",
         log_stream_id.0
     );
-    let result = run_log_stream(socket, subscription, cancel_receiver).await;
+    let result = run_log_stream(socket, subscription, cancel).await;
     log!(
         Level::Info,
         "Agent log stream stopped: log_stream_id={}",
@@ -86,12 +84,12 @@ async fn wait_for_disconnect(stream: &mut LogStream) {
 /// Serializes one event so cancellation can interrupt a backpressured dedicated socket send.
 async fn send_event_or_cancel(
     sink: &mut LogSink,
-    cancel: &mut watch::Receiver<bool>,
+    cancel: &CancellationToken,
     event: &LogEvent,
 ) -> Result<bool> {
     let json = serde_json::to_string(event).context("failed to encode log event")?;
     let sent = tokio::select! {
-        _ = cancel.changed() => return Ok(false),
+        _ = cancel.cancelled() => return Ok(false),
         result = sink.send(WsMessage::text(json)) => result,
     };
     Ok(sent.is_ok())
@@ -101,12 +99,12 @@ async fn send_event_or_cancel(
 async fn send_snapshot_or_disconnect(
     sink: &mut LogSink,
     stream: &mut LogStream,
-    cancel: &mut watch::Receiver<bool>,
+    cancel: &CancellationToken,
     snapshot: &LogEvent,
 ) -> Result<bool> {
     let json = serde_json::to_string(snapshot).context("failed to encode log snapshot")?;
     tokio::select! {
-        _ = cancel.changed() => Ok(false),
+        _ = cancel.cancelled() => Ok(false),
         _ = wait_for_disconnect(stream) => Ok(false),
         result = sink.send(WsMessage::text(json)) => Ok(result.is_ok()),
     }
@@ -116,11 +114,11 @@ async fn send_snapshot_or_disconnect(
 async fn forward_live_entries(
     sink: &mut LogSink,
     receiver: &mut broadcast::Receiver<LogEntry>,
-    cancel: &mut watch::Receiver<bool>,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     loop {
         let entry = tokio::select! {
-            _ = cancel.changed() => return Ok(()),
+            _ = cancel.cancelled() => return Ok(()),
             result = receiver.recv() => result,
         };
         match entry {
@@ -142,18 +140,18 @@ async fn forward_live_entries(
 async fn run_log_stream(
     socket: LogSocket,
     mut subscription: LogSubscription,
-    mut cancel: watch::Receiver<bool>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let (mut sink, mut stream) = socket.split();
     let snapshot =
         LogEvent::bounded_snapshot(subscription.entries, subscription.file_logging_enabled);
 
-    if !send_snapshot_or_disconnect(&mut sink, &mut stream, &mut cancel, &snapshot).await? {
+    if !send_snapshot_or_disconnect(&mut sink, &mut stream, &cancel, &snapshot).await? {
         return Ok(());
     }
 
     tokio::select! {
-        result = forward_live_entries(&mut sink, &mut subscription.receiver, &mut cancel) => result,
+        result = forward_live_entries(&mut sink, &mut subscription.receiver, &cancel) => result,
         _ = wait_for_disconnect(&mut stream) => Ok(()),
     }
 }

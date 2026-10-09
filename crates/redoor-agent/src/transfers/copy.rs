@@ -1,12 +1,13 @@
-use super::super::{AgentActor, AgentCommandError};
+use crate::errors::AgentCommandError;
+use crate::runtime::responder::Responder;
 use redoor_core::destination::{
     DestinationPlaceError, check_existing_destination, place_temp_at_destination,
 };
 use redoor_core::log;
+use redoor_core::staging::{StagingKind, StagingPath};
 use redoor_protocol::{
     api::transfers::CopyExistingMode,
-    ids::{AgentId, RequestId},
-    wire::{Message, command::CommandResult, log::Level},
+    wire::{command::CommandResult, log::Level},
 };
 use std::{
     path::{Path, PathBuf},
@@ -16,9 +17,8 @@ use thiserror::Error;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{mpsc, watch},
 };
-use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
 /// Keeps local-copy failures typed so the HTTP layer never has to infer them from text.
 #[derive(Debug, Error)]
@@ -125,47 +125,6 @@ impl LocalCopyError {
     }
 }
 
-/// Builds the hidden temp file path used while a local file copy is still incomplete.
-fn temp_local_copy_path(destination: &Path) -> PathBuf {
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("copy");
-    let temp_name = format!(".{}.redoor-local-copy-{}", file_name, fastrand::u64(..));
-
-    match destination.parent() {
-        Some(parent) => parent.join(temp_name),
-        None => PathBuf::from(format!("./{}", temp_name)),
-    }
-}
-
-/// Removes one local-copy temp file or directory if it is still present.
-async fn cleanup_local_copy_temp_path(path: &Path) {
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.is_dir() => {
-            let _ = redoor_core::safe_fs::safe_rm_all(path).await;
-        }
-        Ok(_) => {
-            let _ = tokio::fs::remove_file(path).await;
-        }
-        Err(_) => {}
-    }
-}
-
-/// Builds the hidden temp directory path used while a local directory copy is still incomplete.
-fn temp_local_copy_dir_path(destination: &Path) -> PathBuf {
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("copy-dir");
-    let temp_name = format!(".{}.redoor-local-copy-dir-{}", file_name, fastrand::u64(..));
-
-    match destination.parent() {
-        Some(parent) => parent.join(temp_name),
-        None => PathBuf::from(format!("./{}", temp_name)),
-    }
-}
-
 /// Verifies the copy destination differs from the source and does not recurse into it.
 pub(crate) async fn validate_local_copy_destination(
     source_path: &Path,
@@ -225,16 +184,14 @@ pub(crate) async fn validate_local_copy_parent(dest_path: &Path) -> Result<(), L
     Ok(())
 }
 
-/// Reports local-copy byte progress over the websocket without spamming tiny updates.
+/// Reports local-copy byte progress over the control lane without spamming tiny updates.
 struct LocalCopyProgressReporter {
-    write: mpsc::Sender<WsMessage>,
-    agent_id: AgentId,
-    request_id: RequestId,
+    responder: Responder,
     total_bytes: u64,
     transferred_bytes: u64,
     last_reported_bytes: u64,
     last_reported_at: Instant,
-    cancel: watch::Receiver<bool>,
+    cancel: CancellationToken,
 }
 
 impl LocalCopyProgressReporter {
@@ -242,17 +199,9 @@ impl LocalCopyProgressReporter {
     const REPORT_EVERY_DURATION: Duration = Duration::from_millis(250);
 
     /// Starts tracking one local copy so progress is visible to the server UI.
-    fn new(
-        write: mpsc::Sender<WsMessage>,
-        agent_id: AgentId,
-        request_id: RequestId,
-        total_bytes: u64,
-        cancel: watch::Receiver<bool>,
-    ) -> Self {
+    fn new(responder: Responder, total_bytes: u64, cancel: CancellationToken) -> Self {
         Self {
-            write,
-            agent_id,
-            request_id,
+            responder,
             total_bytes,
             transferred_bytes: 0,
             last_reported_bytes: 0,
@@ -261,15 +210,15 @@ impl LocalCopyProgressReporter {
         }
     }
 
-    /// Stops at filesystem-safe boundaries after the owning control generation ends.
+    /// Stops at filesystem-safe boundaries after cancellation.
     fn ensure_active(&self) -> Result<(), LocalCopyError> {
-        ensure_local_copy_active(&self.cancel)
+        ensure_active(&self.cancel)
     }
 
     /// Emits a progress update once enough bytes or time have passed.
     async fn report(&mut self, force: bool) -> Result<(), LocalCopyError> {
         self.ensure_active()?;
-        if self.write.is_closed() {
+        if self.responder.is_closed() {
             return Err(LocalCopyError::ProgressChannelClosed);
         }
 
@@ -285,20 +234,11 @@ impl LocalCopyProgressReporter {
             return Ok(());
         }
 
-        let message = Message::TransferProgressUpdate {
-            agent_id: self.agent_id.clone(),
-            request_id: self.request_id,
-            transferred_bytes: self.transferred_bytes,
-            total_bytes: Some(self.total_bytes),
-        };
-
-        let json =
-            serde_json::to_string(&message).map_err(|_| LocalCopyError::ProgressChannelClosed)?;
         tokio::select! {
-            result = self.write.send(WsMessage::text(json)) => {
+            result = self.responder.progress(self.transferred_bytes, Some(self.total_bytes)) => {
                 result.map_err(|_| LocalCopyError::ProgressChannelClosed)?;
             }
-            _ = wait_for_local_copy_cancel(&mut self.cancel) => {
+            _ = self.cancel.cancelled() => {
                 return Err(LocalCopyError::Canceled);
             }
         }
@@ -326,28 +266,9 @@ impl LocalCopyProgressReporter {
     }
 }
 
-/// Holds the protocol response plumbing shared by local copy operations.
-pub(crate) struct LocalCopyResponseContext<'a> {
-    pub(crate) write: &'a mpsc::Sender<WsMessage>,
-    pub(crate) agent_id: &'a AgentId,
-    pub(crate) request_id: RequestId,
-    /// Stops temp-owning work when its authoritative control connection ends.
-    pub(crate) cancel: watch::Receiver<bool>,
-}
-
-/// Waits for control-generation cancellation, including an already-published signal.
-pub(super) async fn wait_for_local_copy_cancel(cancel: &mut watch::Receiver<bool>) {
-    if *cancel.borrow() {
-        return;
-    }
-    let _ = cancel.changed().await;
-}
-
 /// Rejects more work after cancellation without dropping an in-flight filesystem future.
-pub(super) fn ensure_local_copy_active(
-    cancel: &watch::Receiver<bool>,
-) -> Result<(), LocalCopyError> {
-    if *cancel.borrow() {
+pub(super) fn ensure_active(cancel: &CancellationToken) -> Result<(), LocalCopyError> {
+    if cancel.is_cancelled() {
         Err(LocalCopyError::Canceled)
     } else {
         Ok(())
@@ -475,7 +396,8 @@ async fn copy_directory_streaming(
             stack.push((entry_path, destination_path, entries));
         } else if metadata.is_file() {
             reporter.add_total_bytes(metadata.len());
-            let temp_path = temp_local_copy_path(&destination_path);
+            // The enclosing staging directory owns this name, so its cleanup covers failures.
+            let temp_path = StagingKind::LocalCopy.sibling_of(&destination_path);
             copy_file_streaming(&entry_path, &destination_path, &temp_path, reporter).await?;
         } else if metadata.file_type().is_symlink() {
             let target = tokio::fs::read_link(&entry_path)
@@ -496,264 +418,209 @@ async fn copy_directory_streaming(
     Ok(())
 }
 
-impl AgentActor {
-    /// Sends a consistent local-copy error response back to the router.
-    async fn send_local_copy_error(
-        &self,
-        response: &LocalCopyResponseContext<'_>,
-        error: LocalCopyError,
-    ) {
-        self.send_command_response(
-            response.write,
-            response.agent_id,
-            response.request_id,
-            AgentCommandError::from(error).into(),
-        )
-        .await;
+/// Cancellation and progress plumbing shared by local copy, move and trash restore.
+pub(crate) struct CopyContext<'a> {
+    pub(crate) responder: &'a Responder,
+    /// Stops staging-owning work when the request is canceled or its connection ends.
+    pub(crate) cancel: &'a CancellationToken,
+}
+
+impl CopyContext<'_> {
+    /// Rejects more work once the operation has been canceled.
+    pub(crate) fn ensure_active(&self) -> Result<(), LocalCopyError> {
+        ensure_active(self.cancel)
     }
 
-    /// Performs a same-agent file copy through a temp file so readers never see partial output.
-    pub(crate) async fn local_copy_file(
+    /// Starts a progress reporter bound to this request.
+    fn reporter(&self, total_bytes: u64) -> LocalCopyProgressReporter {
+        LocalCopyProgressReporter::new(self.responder.clone(), total_bytes, self.cancel.clone())
+    }
+
+    /// Runs one `LocalCopyFile` or `LocalCopyDirectory` command and logs its outcome.
+    pub(crate) async fn copy_command(
         &self,
         source_path: String,
         dest_path: String,
         on_existing: CopyExistingMode,
-        response: LocalCopyResponseContext<'_>,
-    ) {
+        directory: bool,
+    ) -> CommandResult {
+        let label = if directory {
+            "Local copy directory"
+        } else {
+            "Local copy file"
+        };
+        let request_id = self.responder.request_id();
         log!(
             Level::Info,
-            "Started local copy file: request_id={}, source={}, dest={}, on_existing={:?}",
-            response.request_id,
+            "Started {}: request_id={}, source={}, dest={}, on_existing={:?}",
+            label.to_lowercase(),
+            request_id,
             source_path,
             dest_path,
             on_existing
         );
-        match self
-            .run_local_copy_file(
-                PathBuf::from(source_path),
-                PathBuf::from(dest_path),
-                on_existing,
-                &response,
-            )
-            .await
-        {
+        let (source, dest) = (PathBuf::from(source_path), PathBuf::from(dest_path));
+        let result = if directory {
+            self.copy_directory(source, dest, on_existing).await
+        } else {
+            self.copy_file(source, dest, on_existing).await
+        };
+        match result {
             Ok(result) => {
                 log!(
                     Level::Info,
-                    "Local copy file complete: request_id={}, result={}",
-                    response.request_id,
+                    "{} complete: request_id={}, result={}",
+                    label,
+                    request_id,
                     result.summary()
                 );
-                self.send_command_response(
-                    response.write,
-                    response.agent_id,
-                    response.request_id,
-                    result,
-                )
-                .await;
+                result
             }
             Err(error) => {
                 log!(
                     Level::Info,
-                    "Local copy file failed: request_id={}, error={}",
-                    response.request_id,
+                    "{} failed: request_id={}, error={}",
+                    label,
+                    request_id,
                     error
                 );
-                self.send_local_copy_error(&response, error).await;
+                AgentCommandError::from(error).into()
             }
         }
     }
 
-    /// Executes one same-agent file copy and returns the final protocol result.
-    pub(crate) async fn run_local_copy_file(
+    /// Copies one file through a hidden sibling so readers never see partial output.
+    pub(crate) async fn copy_file(
         &self,
         source_path: PathBuf,
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
-        response: &LocalCopyResponseContext<'_>,
     ) -> Result<CommandResult, LocalCopyError> {
-        let temp_path = temp_local_copy_path(&dest_path);
+        let staging = StagingPath::sibling(&dest_path, StagingKind::LocalCopy);
         let result = async {
             let source_metadata = tokio::fs::metadata(&source_path)
                 .await
                 .map_err(LocalCopyError::AccessSourceFile)?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             if !source_metadata.is_file() {
                 return Err(LocalCopyError::SourceNotFile(
                     source_path.display().to_string(),
                 ));
             }
             validate_local_copy_destination(&source_path, &dest_path, false).await?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             validate_local_copy_parent(&dest_path).await?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             check_existing_destination(&dest_path, on_existing, false).await?;
-            ensure_local_copy_active(&response.cancel)?;
-            let mut reporter = LocalCopyProgressReporter::new(
-                response.write.clone(),
-                response.agent_id.clone(),
-                response.request_id,
-                source_metadata.len(),
-                response.cancel.clone(),
-            );
+            self.ensure_active()?;
+            let mut reporter = self.reporter(source_metadata.len());
             reporter.report(true).await?;
-            stream_file_to_temp(&source_path, &temp_path, &mut reporter).await?;
+            stream_file_to_temp(&source_path, staging.path(), &mut reporter).await?;
             reporter.finish().await?;
-            place_temp_at_destination(&temp_path, &dest_path, on_existing, false)
+            place_temp_at_destination(staging.path(), &dest_path, on_existing, false)
                 .await
                 .map_err(LocalCopyError::from)?;
             Ok(CommandResult::LocalCopyFile)
         }
         .await;
-        if result.is_err() {
-            cleanup_local_copy_temp_path(&temp_path).await;
+        match result {
+            Ok(_) => {
+                staging.keep();
+            }
+            Err(_) => staging.discard().await,
         }
         result
     }
 
     /// Copies a symbolic link itself through a hidden name instead of dereferencing its target.
-    pub(crate) async fn run_local_copy_symlink(
+    pub(crate) async fn copy_symlink(
         &self,
         source_path: PathBuf,
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
-        response: &LocalCopyResponseContext<'_>,
     ) -> Result<CommandResult, LocalCopyError> {
-        let temp_path = temp_local_copy_path(&dest_path);
+        let staging = StagingPath::sibling(&dest_path, StagingKind::LocalCopy);
         let result = async {
             let source_metadata = tokio::fs::symlink_metadata(&source_path)
                 .await
                 .map_err(LocalCopyError::AccessSourceFile)?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             if !source_metadata.file_type().is_symlink() {
                 return Err(LocalCopyError::SourceNotFile(
                     source_path.display().to_string(),
                 ));
             }
             validate_local_copy_destination(&source_path, &dest_path, false).await?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             validate_local_copy_parent(&dest_path).await?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             check_existing_destination(&dest_path, on_existing, false).await?;
             let target = tokio::fs::read_link(&source_path)
                 .await
                 .map_err(LocalCopyError::AccessSourceFile)?;
-            ensure_local_copy_active(&response.cancel)?;
-            tokio::fs::symlink(target, &temp_path)
+            self.ensure_active()?;
+            tokio::fs::symlink(target, staging.path())
                 .await
                 .map_err(LocalCopyError::CreateTempSymlink)?;
-            ensure_local_copy_active(&response.cancel)?;
-            place_temp_at_destination(&temp_path, &dest_path, on_existing, false)
+            self.ensure_active()?;
+            place_temp_at_destination(staging.path(), &dest_path, on_existing, false)
                 .await
                 .map_err(LocalCopyError::from)?;
             Ok(CommandResult::LocalCopyFile)
         }
         .await;
-        if result.is_err() {
-            cleanup_local_copy_temp_path(&temp_path).await;
+        match result {
+            Ok(_) => {
+                staging.keep();
+            }
+            Err(_) => staging.discard().await,
         }
         result
     }
 
-    /// Performs a same-agent directory copy by planning first and then streaming file contents.
-    pub(crate) async fn local_copy_directory(
-        &self,
-        source_path: String,
-        dest_path: String,
-        on_existing: CopyExistingMode,
-        response: LocalCopyResponseContext<'_>,
-    ) {
-        log!(
-            Level::Info,
-            "Started local copy directory: request_id={}, source={}, dest={}, on_existing={:?}",
-            response.request_id,
-            source_path,
-            dest_path,
-            on_existing
-        );
-        match self
-            .run_local_copy_directory(
-                PathBuf::from(source_path),
-                PathBuf::from(dest_path),
-                on_existing,
-                &response,
-            )
-            .await
-        {
-            Ok(result) => {
-                log!(
-                    Level::Info,
-                    "Local copy directory complete: request_id={}, result={}",
-                    response.request_id,
-                    result.summary()
-                );
-                self.send_command_response(
-                    response.write,
-                    response.agent_id,
-                    response.request_id,
-                    result,
-                )
-                .await;
-            }
-            Err(error) => {
-                log!(
-                    Level::Info,
-                    "Local copy directory failed: request_id={}, error={}",
-                    response.request_id,
-                    error
-                );
-                self.send_local_copy_error(&response, error).await;
-            }
-        }
-    }
-
-    /// Executes one same-agent directory copy and returns the final protocol result.
-    pub(crate) async fn run_local_copy_directory(
+    /// Copies a directory tree into hidden staging and publishes it in one placement.
+    pub(crate) async fn copy_directory(
         &self,
         source_path: PathBuf,
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
-        response: &LocalCopyResponseContext<'_>,
     ) -> Result<CommandResult, LocalCopyError> {
-        let temp_dest_root = temp_local_copy_dir_path(&dest_path);
+        let staging = StagingPath::sibling(&dest_path, StagingKind::LocalCopyDirectory);
         let result = async {
             let source_metadata = tokio::fs::metadata(&source_path)
                 .await
                 .map_err(LocalCopyError::AccessSourceDirectory)?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             if !source_metadata.is_dir() {
                 return Err(LocalCopyError::SourceNotDirectory(
                     source_path.display().to_string(),
                 ));
             }
             validate_local_copy_destination(&source_path, &dest_path, true).await?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             validate_local_copy_parent(&dest_path).await?;
-            ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             check_existing_destination(&dest_path, on_existing, true).await?;
-            ensure_local_copy_active(&response.cancel)?;
-            tokio::fs::create_dir(&temp_dest_root)
+            self.ensure_active()?;
+            tokio::fs::create_dir(staging.path())
                 .await
                 .map_err(LocalCopyError::CreateTempDirectory)?;
-            ensure_local_copy_active(&response.cancel)?;
-            let mut reporter = LocalCopyProgressReporter::new(
-                response.write.clone(),
-                response.agent_id.clone(),
-                response.request_id,
-                0,
-                response.cancel.clone(),
-            );
+            self.ensure_active()?;
+            let mut reporter = self.reporter(0);
             reporter.report(true).await?;
-            copy_directory_streaming(&source_path, &temp_dest_root, &mut reporter).await?;
+            copy_directory_streaming(&source_path, staging.path(), &mut reporter).await?;
             reporter.finish().await?;
-            place_temp_at_destination(&temp_dest_root, &dest_path, on_existing, true)
+            place_temp_at_destination(staging.path(), &dest_path, on_existing, true)
                 .await
                 .map_err(LocalCopyError::from)?;
             Ok(CommandResult::LocalCopyDirectory)
         }
         .await;
-        if result.is_err() {
-            cleanup_local_copy_temp_path(&temp_dest_root).await;
+        match result {
+            Ok(_) => {
+                staging.keep();
+            }
+            Err(_) => staging.discard().await,
         }
         result
     }
@@ -762,8 +629,9 @@ impl AgentActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AgentActor;
+    use crate::runtime::responder::Responder;
     use redoor_core::test_support::TempDir;
+    use redoor_protocol::ids::RequestId;
 
     use redoor_protocol::wire::command::{CommandErrorKind, CommandResult};
 
@@ -781,23 +649,21 @@ mod tests {
             .await
             .expect("test source file should be created");
 
-        let (write_tx, write_rx) = mpsc::channel(1);
-        drop(write_rx);
-        let (_cancel_sender, cancel_receiver) = watch::channel(false);
+        let (responder, frames) = Responder::recording(RequestId::new(42), 1);
+        drop(frames);
+        let cancel = CancellationToken::new();
 
-        AgentActor
-            .local_copy_file(
-                source_path.display().to_string(),
-                dest_path.display().to_string(),
-                CopyExistingMode::Error,
-                LocalCopyResponseContext {
-                    write: &write_tx,
-                    agent_id: &AgentId::from("agent-1"),
-                    request_id: RequestId::new(42),
-                    cancel: cancel_receiver,
-                },
-            )
-            .await;
+        CopyContext {
+            responder: &responder,
+            cancel: &cancel,
+        }
+        .copy_command(
+            source_path.display().to_string(),
+            dest_path.display().to_string(),
+            CopyExistingMode::Error,
+            false,
+        )
+        .await;
 
         assert!(
             !tokio::fs::try_exists(&dest_path)
@@ -828,15 +694,9 @@ mod tests {
 
     #[tokio::test]
     async fn local_copy_progress_reporter_surfaces_closed_channel() {
-        let (write_tx, write_rx) = mpsc::channel(1);
-        drop(write_rx);
-        let mut reporter = LocalCopyProgressReporter::new(
-            write_tx,
-            AgentId::from("agent-1"),
-            RequestId::new(7),
-            10,
-            watch::channel(false).1,
-        );
+        let (responder, frames) = Responder::recording(RequestId::new(7), 1);
+        drop(frames);
+        let mut reporter = LocalCopyProgressReporter::new(responder, 10, CancellationToken::new());
 
         let error = reporter
             .report(true)
@@ -873,24 +733,16 @@ mod tests {
         tokio::fs::symlink("missing-relative-target", &source_path)
             .await
             .expect("source symbolic link should be created");
-        let (write_tx, _write_rx) = mpsc::channel(1);
-        let agent_id = AgentId::from("agent-1");
-        let response = LocalCopyResponseContext {
-            write: &write_tx,
-            agent_id: &agent_id,
-            request_id: RequestId::new(44),
-            cancel: watch::channel(false).1,
-        };
+        let (responder, _frames) = Responder::recording(RequestId::new(44), 1);
+        let cancel = CancellationToken::new();
 
-        let result = AgentActor
-            .run_local_copy_symlink(
-                source_path,
-                dest_path.clone(),
-                CopyExistingMode::Error,
-                &response,
-            )
-            .await
-            .expect("symbolic link transfer should succeed without reading its target");
+        let result = CopyContext {
+            responder: &responder,
+            cancel: &cancel,
+        }
+        .copy_symlink(source_path, dest_path.clone(), CopyExistingMode::Error)
+        .await
+        .expect("symbolic link transfer should succeed without reading its target");
 
         // Reusing the file result keeps the existing transfer protocol stable for link entries.
         assert!(matches!(result, CommandResult::LocalCopyFile));
@@ -916,20 +768,16 @@ mod tests {
         tokio::fs::write(&source_path, vec![7; 2 * 1024 * 1024])
             .await
             .expect("copy cancellation source should be created");
-        let (write_tx, _write_rx) = mpsc::channel(1);
-        let (cancel_sender, cancel_receiver) = watch::channel(false);
-        let agent_id = AgentId::from("agent-1");
-        let response = LocalCopyResponseContext {
-            write: &write_tx,
-            agent_id: &agent_id,
-            request_id: RequestId::new(43),
-            cancel: cancel_receiver,
+        let (responder, _frames) = Responder::recording(RequestId::new(43), 1);
+        let cancel = CancellationToken::new();
+        let context = CopyContext {
+            responder: &responder,
+            cancel: &cancel,
         };
-        let copy = AgentActor.run_local_copy_file(
+        let copy = context.copy_file(
             source_path.clone(),
             dest_path.clone(),
             CopyExistingMode::Error,
-            &response,
         );
         tokio::pin!(copy);
 
@@ -958,9 +806,7 @@ mod tests {
             }
         };
 
-        cancel_sender
-            .send(true)
-            .expect("live copy should receive generation cancellation");
+        cancel.cancel();
         let result = copy.await;
 
         // The canceled result proves the control-generation signal won over blocked progress output.

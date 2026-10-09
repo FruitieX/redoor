@@ -19,8 +19,9 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    sync::{Semaphore, watch},
+    sync::Semaphore,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Bounds the JSON response and all retained matching-line state.
 const RESULT_LIMIT: usize = 100;
@@ -64,16 +65,10 @@ pub struct ContentGrepRequest {
     pub after_context: u64,
 }
 
-/// Runs grep without runtime coordination for direct command-dispatch callers and unit tests.
-pub(super) async fn execute(request: ContentGrepRequest) -> CommandResult {
-    let (_cancel_sender, cancel_receiver) = watch::channel(false);
-    execute_with_cancellation(request, cancel_receiver, Arc::new(Semaphore::new(1))).await
-}
-
 /// Includes exclusive-slot waiting in the deadline so queued requests always return promptly.
-pub(super) async fn execute_with_cancellation(
+pub(crate) async fn execute(
     request: ContentGrepRequest,
-    mut cancel_receiver: watch::Receiver<bool>,
+    cancel: &CancellationToken,
     permit: Arc<Semaphore>,
 ) -> CommandResult {
     let ContentGrepRequest {
@@ -144,12 +139,12 @@ pub(super) async fn execute_with_cancellation(
         let deadline = tokio::time::sleep(Duration::from_secs(timeout_seconds));
         tokio::pin!(deadline);
 
-        if *cancel_receiver.borrow() {
+        if cancel.is_cancelled() {
             (false, true, None)
         } else {
             tokio::select! {
                 biased;
-                _ = cancel_receiver.changed() => (false, true, None),
+                _ = cancel.cancelled() => (false, true, None),
                 _ = &mut deadline => (true, false, None),
                 result = &mut operation => (false, false, Some(result)),
             }
@@ -445,6 +440,16 @@ fn bounded_context_line(line_number: u64, line: &[u8]) -> ContentGrepContextLine
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs an uncancelled grep with its own slot so cases stay independent.
+    async fn grep(request: ContentGrepRequest) -> CommandResult {
+        execute(
+            request,
+            &CancellationToken::new(),
+            Arc::new(Semaphore::new(1)),
+        )
+        .await
+    }
     use redoor_core::test_support::TempDir;
 
     /// Builds the common unit-test request so fixtures only vary path, query, and match mode.
@@ -496,7 +501,7 @@ mod tests {
             .await
             .expect("magic-byte fixture should be written");
 
-        let result = execute(test_request(
+        let result = grep(test_request(
             root.to_string_lossy().into_owned(),
             "target",
             false,
@@ -542,7 +547,7 @@ mod tests {
         request.before_context = 2;
         request.after_context = 2;
 
-        let result = execute(request).await;
+        let result = grep(request).await;
         let CommandResult::ContentGrep(response) = result else {
             panic!("context grep should return its dedicated response");
         };
@@ -597,7 +602,7 @@ mod tests {
         request.before_context = 3;
         request.after_context = 1;
 
-        let result = execute(request).await;
+        let result = grep(request).await;
         let CommandResult::ContentGrep(response) = result else {
             panic!("context grep should return its dedicated response");
         };
@@ -638,7 +643,7 @@ mod tests {
             .await
             .expect("oversized fixture should be written");
 
-        let result = execute(test_request(
+        let result = grep(test_request(
             root.to_string_lossy().into_owned(),
             "target",
             false,
@@ -663,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_expressions_are_invalid_input() {
         for query in ["", "(", &"x".repeat(MAX_QUERY_BYTES + 1)] {
-            let result = execute(test_request("/missing", query, false)).await;
+            let result = grep(test_request("/missing", query, false)).await;
             // Validation must win over the deliberately missing traversal root.
             assert!(matches!(
                 result,
@@ -678,11 +683,11 @@ mod tests {
     /// Proves supersession has a distinct response flag rather than masquerading as a deadline.
     #[tokio::test]
     async fn cancellation_returns_bounded_partial_response() {
-        let (sender, receiver) = watch::channel(false);
-        sender.send(true).expect("receiver should remain active");
-        let result = execute_with_cancellation(
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = execute(
             test_request("/missing", "target", false),
-            receiver,
+            &cancel,
             Arc::new(Semaphore::new(1)),
         )
         .await;
@@ -705,7 +710,7 @@ mod tests {
             .await
             .expect("text fixture should be written");
 
-        let regex_dot = execute(test_request(
+        let regex_dot = grep(test_request(
             root.to_string_lossy().into_owned(),
             "nee.le",
             false,
@@ -717,7 +722,7 @@ mod tests {
         // A regex dot must still match the adjacent characters in default mode.
         assert_eq!(regex_response.results.len(), 1);
 
-        let literal_dot = execute(test_request(
+        let literal_dot = grep(test_request(
             root.to_string_lossy().into_owned(),
             "nee.le",
             true,
@@ -729,7 +734,7 @@ mod tests {
         // The same query must fail as a substring because the file has no literal period.
         assert!(literal_response.results.is_empty());
 
-        let literal_parens = execute(test_request(
+        let literal_parens = grep(test_request(
             root.to_string_lossy().into_owned(),
             "foo(bar",
             true,

@@ -13,7 +13,7 @@ use super::{
 use redoor_protocol::{
     ids::ChunkIndex,
     wire::{
-        Message,
+        ServerToAgent,
         command::{Command, CommandResult},
         exec::ExecEvent,
         stream::{StreamChunk, StreamPayloadKind},
@@ -35,7 +35,7 @@ impl DirectOutputStream {
                 agent_id: self.agent_id.to_string(),
             });
         }
-        let json = serde_json::to_string(&Message::CancelTransfer { request_id })
+        let json = serde_json::to_string(&ServerToAgent::CancelTransfer { request_id })
             .expect("Cancellation contains only a request id");
         let frame = axum::extract::ws::Message::Text(json.into());
         match connection.outgoing_priority.try_send(frame) {
@@ -89,7 +89,7 @@ pub(crate) fn start(state: &mut RouterState, request: ExecuteStreamRequest) {
         let _ = request.reply.send(Err(error));
         return;
     }
-    if !connection.send_message(Message::Command {
+    if !connection.send_message(ServerToAgent::Command {
         agent_id: request.agent_id.clone(),
         request_id: id,
         command: request.command,
@@ -443,7 +443,7 @@ mod tests {
             panic!("Expected cancel frame");
         };
         assert!(
-            matches!(serde_json::from_str::<Message>(&json).unwrap(), Message::CancelTransfer { request_id } if request_id == fixture.id)
+            matches!(serde_json::from_str::<ServerToAgent>(&json).unwrap(), ServerToAgent::CancelTransfer { request_id } if request_id == fixture.id)
         );
         assert!(fixture.priority.try_recv().is_err());
         assert!(fixture.commands.try_recv().is_ok());

@@ -1,162 +1,33 @@
 //! The Redoor agent: connects to a server over websockets and executes its commands.
 
-mod actor;
+pub mod args;
 mod commands;
 mod connection;
 mod directory_measurement;
+mod errors;
 mod exec;
 mod logs;
-mod messages;
 mod notification;
 mod ownership;
-mod protocol;
-mod raw;
-pub mod state;
+mod platform;
+mod runtime;
 mod terminal;
 mod transfer;
-pub(crate) mod transfers;
+mod transfers;
 mod trash;
 mod ws;
 
 use std::path::PathBuf;
 
+use args::{AgentArgs, NotificationDelay};
+use commands::ctx::AgentServices;
 use redoor_core::log;
 use redoor_protocol::{ids::AgentId, wire::log::Level};
+use runtime::{AgentHandle, AgentProfile, AgentRuntime};
 use sysinfo::System;
-use thiserror::Error;
-use tokio::{
-    sync::{mpsc, watch},
-    task::JoinSet,
-};
 
-pub(crate) use messages::{AgentLifecycleMsg, AgentMsg};
-pub(crate) use state::{
-    ActiveDownloads, ActiveUploads, AgentArgs, AgentState, DownloadSessionHandle,
-    LogStreamSessionHandle, NotificationDelay, TerminalSessionHandle, UploadSessionHandle,
-};
-
-/// Wraps subsystem-specific agent command failures behind one protocol boundary type.
-#[derive(Debug, Error)]
-pub(crate) enum AgentCommandError {
-    #[error(transparent)]
-    LocalCopy(#[from] transfers::copy::LocalCopyError),
-    #[error(transparent)]
-    LocalMove(#[from] transfers::r#move::LocalMoveError),
-    #[error(transparent)]
-    TarUpload(#[from] transfers::upload::TarUploadError),
-    #[error("{message}")]
-    RawUpload {
-        kind: redoor_protocol::wire::command::CommandErrorKind,
-        message: String,
-    },
-    #[error("{message}")]
-    EditFile {
-        kind: redoor_protocol::wire::command::CommandErrorKind,
-        message: String,
-    },
-}
-
-impl AgentCommandError {
-    /// Returns the protocol-stable kind that the server maps into an HTTP status.
-    pub(crate) fn kind(&self) -> redoor_protocol::wire::command::CommandErrorKind {
-        match self {
-            Self::LocalCopy(error) => error.kind(),
-            Self::LocalMove(error) => error.kind(),
-            Self::TarUpload(error) => error.kind(),
-            Self::RawUpload { kind, .. } => kind.clone(),
-            Self::EditFile { kind, .. } => kind.clone(),
-        }
-    }
-
-    /// Builds one raw-upload boundary error without forcing a dedicated inner enum yet.
-    pub(crate) fn raw_upload(
-        kind: redoor_protocol::wire::command::CommandErrorKind,
-        message: impl Into<String>,
-    ) -> Self {
-        Self::RawUpload {
-            kind,
-            message: message.into(),
-        }
-    }
-
-    /// Builds one edit boundary error while retaining its stable HTTP classification.
-    pub(crate) fn edit_file(
-        kind: redoor_protocol::wire::command::CommandErrorKind,
-        message: impl Into<String>,
-    ) -> Self {
-        Self::EditFile {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<AgentCommandError> for redoor_protocol::wire::command::CommandResult {
-    fn from(error: AgentCommandError) -> Self {
-        redoor_protocol::wire::command::CommandResult::error(error.kind(), error.to_string())
-    }
-}
-
-/// Runtime handle used to send control events into the agent task.
-#[derive(Clone)]
-pub(crate) struct AgentHandle {
-    sender: mpsc::Sender<AgentMsg>,
-    lifecycle_sender: mpsc::UnboundedSender<AgentLifecycleMsg>,
-}
-
-impl AgentHandle {
-    /// Awaits mailbox capacity so external producers can backpressure instead of
-    /// dropping inbound websocket frames when upload handlers slow down.
-    pub(crate) async fn send(
-        &self,
-        message: AgentMsg,
-    ) -> Result<(), mpsc::error::SendError<AgentMsg>> {
-        self.sender.send(message).await
-    }
-
-    /// Attempts to queue one control event without waiting.
-    ///
-    /// The agent runtime uses this only for self-scheduled messages so it does
-    /// not deadlock on its own bounded mailbox.
-    pub(crate) fn try_send(
-        &self,
-        message: AgentMsg,
-    ) -> Result<(), mpsc::error::TrySendError<AgentMsg>> {
-        self.sender.try_send(message)
-    }
-
-    /// Reports transport lifecycle without competing with bounded application traffic.
-    pub(crate) fn report_connection_lost(&self, connection_generation: u64, reason: String) {
-        let _ = self
-            .lifecycle_sender
-            .send(AgentLifecycleMsg::ConnectionLost {
-                connection_generation,
-                reason,
-            });
-    }
-}
-
-/// Stateless helper namespace for agent protocol and transfer operations.
-pub(crate) struct AgentActor;
-
-/// Long-lived agent runtime that owns connection lifecycle and transfer registries.
-pub(crate) struct AgentRuntime {
-    pub(crate) state: AgentState,
-    /// Owns command workers so a control generation cannot outlive its server connection.
-    command_tasks: JoinSet<()>,
-    /// Broadcasts control-generation cancellation before command workers are joined.
-    command_cancel: watch::Sender<bool>,
-    /// Desktop detected at process startup, if this agent can plausibly reach a GUI session.
-    desktop_environment: Option<redoor_core::desktop::DesktopEnvironment>,
-    /// User-selected wait after a successful connection, or `None` when notifications are disabled.
-    startup_notification_delay: Option<tokio::time::Duration>,
-    /// Identifies the connection whose delayed startup notification is currently authoritative.
-    startup_notification_generation: Option<(u64, u64)>,
-    /// Prevents reconnects from repeating the process-start notification.
-    startup_notification_sent: bool,
-    /// Counts consecutive reconnect attempts so prolonged outages use a slower retry window.
-    reconnect_attempts: u32,
-}
+/// Bounded runtime mailbox; awaited sends backpressure websocket ingress instead of dropping.
+const AGENT_MAILBOX_CAPACITY: usize = 256;
 
 /// Runs an agent after resolving settings with CLI > env > config file > default.
 pub async fn run(args: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -201,7 +72,7 @@ pub async fn run(args: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
     let notification_delay = resolved
         .notification_delay_seconds
         .map(tokio::time::Duration::from_secs);
-    let trash = trash::TrashService::initialize(resolved.trash_directory.map(PathBuf::from))
+    let trash = trash::Trash::select(resolved.trash_directory.map(PathBuf::from))
         .await
         .map_err(|error| format!("Failed to initialize trash: {error}"))?;
     let loaded_config_path = match resolved.loaded_config_path {
@@ -238,19 +109,16 @@ pub async fn run(args: AgentArgs) -> Result<(), Box<dyn std::error::Error>> {
         default_directory
     );
 
-    let (sender, receiver) = mpsc::channel::<AgentMsg>(256);
-    let (lifecycle_sender, lifecycle_receiver) = mpsc::unbounded_channel();
-    let handle = AgentHandle {
-        sender,
-        lifecycle_sender,
-    };
+    let (handle, receiver, lifecycle_receiver) = AgentHandle::channel(AGENT_MAILBOX_CAPACITY);
     let runtime = AgentRuntime::new(
-        agent_id,
-        agent_name,
+        AgentProfile {
+            agent_id,
+            agent_name,
+            default_directory,
+            token,
+        },
         connection,
-        default_directory,
-        token,
-        trash,
+        AgentServices::new(trash),
         notification_delay,
     );
 
@@ -447,68 +315,4 @@ where
     I: IntoIterator<Item = Option<String>>,
 {
     values.into_iter().flatten().find(|value| !value.is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AgentHandle, AgentMsg};
-    use tokio::sync::mpsc;
-
-    /// Creates a handle whose lifecycle lane stays open for bounded-mailbox tests.
-    fn test_handle(sender: mpsc::Sender<AgentMsg>) -> AgentHandle {
-        let (lifecycle_sender, _lifecycle_receiver) = mpsc::unbounded_channel();
-        AgentHandle {
-            sender,
-            lifecycle_sender,
-        }
-    }
-
-    /// Verifies awaited sends stay pending while the bounded mailbox is full so
-    /// websocket ingress can propagate upload backpressure instead of dropping frames.
-    #[tokio::test]
-    async fn send_waits_for_channel_capacity() {
-        let (sender, mut receiver) = mpsc::channel(1);
-        let handle = test_handle(sender);
-
-        handle
-            .try_send(AgentMsg::Connect)
-            .expect("initial enqueue should succeed");
-
-        let pending_send = handle.send(AgentMsg::ExitWithError);
-        tokio::pin!(pending_send);
-
-        // A pending send here proves the bounded mailbox is applying backpressure instead of accepting and losing another frame.
-        assert!(futures_util::poll!(&mut pending_send).is_pending());
-
-        let received = receiver.recv().await;
-        // Draining one slot verifies the send can complete only after the runtime makes room in the mailbox.
-        assert!(matches!(received, Some(AgentMsg::Connect)));
-
-        // Completing after capacity frees proves awaited ingress can resume without dropping the queued frame.
-        assert!(pending_send.await.is_ok());
-
-        let received = receiver.recv().await;
-        // Receiving the queued message confirms the mailbox preserved it while the sender was backpressured.
-        assert!(matches!(received, Some(AgentMsg::ExitWithError)));
-    }
-
-    /// Verifies non-blocking self-sends still fail fast when the mailbox is
-    /// full so the runtime does not await capacity on its own queue.
-    #[tokio::test]
-    async fn try_send_fails_fast_when_channel_is_full() {
-        let (sender, _receiver) = mpsc::channel(1);
-        let handle = test_handle(sender);
-
-        handle
-            .try_send(AgentMsg::Connect)
-            .expect("initial enqueue should succeed");
-
-        let result = handle.try_send(AgentMsg::ExitWithError);
-
-        // A full error here protects in-actor self-sends from deadlocking the runtime on its own bounded mailbox.
-        assert!(matches!(
-            result,
-            Err(mpsc::error::TrySendError::Full(AgentMsg::ExitWithError))
-        ));
-    }
 }

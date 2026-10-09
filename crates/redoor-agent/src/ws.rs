@@ -1,7 +1,10 @@
-use super::{AgentHandle, AgentMsg};
+//! Control-socket reader, writer, liveness monitor and stdin forwarding.
+
+use crate::runtime::responder::{ControlSender, OutboundFrame, PostSend};
+use crate::runtime::{AgentHandle, AgentMsg};
 use futures_util::{Sink, SinkExt, StreamExt};
 use redoor_core::log;
-use redoor_protocol::wire::{Message, log::Level};
+use redoor_protocol::wire::log::Level;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -16,7 +19,7 @@ pub(super) async fn spawn_read_task(
     >,
     agent_ref: AgentHandle,
     connection_generation: u64,
-    control_tx: mpsc::Sender<WsMessage>,
+    control_tx: ControlSender,
     shutdown_sender: watch::Sender<bool>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -116,7 +119,7 @@ pub(super) async fn spawn_read_task(
 /// Checks silence independently of bounded inbound delivery and tears down stale transports first.
 async fn monitor_connection_liveness(
     activity: watch::Receiver<Instant>,
-    control_tx: mpsc::Sender<WsMessage>,
+    control_tx: ControlSender,
     shutdown_sender: watch::Sender<bool>,
     mut shutdown: watch::Receiver<bool>,
     agent_ref: AgentHandle,
@@ -151,7 +154,7 @@ async fn monitor_connection_liveness(
                 }
             }
             _ = keepalive.tick() => {
-                match control_tx.try_send(WsMessage::Ping(bytes::Bytes::new())) {
+                match control_tx.try_send(OutboundFrame::ping()) {
                     Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
                     Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
@@ -174,7 +177,7 @@ fn report_connection_loss(
 /// Spawns the control writer and reports write failures through the non-blocking lifecycle lane.
 pub(super) fn spawn_write_task<W>(
     write: W,
-    control_rx: mpsc::Receiver<WsMessage>,
+    control_rx: mpsc::Receiver<OutboundFrame>,
     shutdown_sender: watch::Sender<bool>,
     shutdown: watch::Receiver<bool>,
     agent_ref: AgentHandle,
@@ -184,7 +187,7 @@ pub(super) fn spawn_write_task<W>(
     W::Error: Send,
 {
     tokio::spawn(async move {
-        if write_control_frames(write, control_rx, shutdown)
+        if write_control_frames(write, control_rx, shutdown, PostSend::run)
             .await
             .is_err()
         {
@@ -200,16 +203,21 @@ pub(super) fn spawn_write_task<W>(
 }
 
 /// Writes queued control frames while allowing shutdown to cancel an in-progress socket write.
-async fn write_control_frames<W>(
+///
+/// A frame's post-send action (process re-exec after a restart response) runs only once the
+/// frame was written, so the server always sees the response before the connection drops.
+async fn write_control_frames<W, F>(
     mut write: W,
-    mut control_rx: mpsc::Receiver<WsMessage>,
+    mut control_rx: mpsc::Receiver<OutboundFrame>,
     mut shutdown: watch::Receiver<bool>,
+    mut after_send: F,
 ) -> Result<(), ()>
 where
     W: Sink<WsMessage> + Unpin,
+    F: FnMut(PostSend),
 {
     loop {
-        let message = tokio::select! {
+        let frame = tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -217,12 +225,14 @@ where
                 }
                 continue;
             }
-            message = control_rx.recv() => match message {
-                Some(message) => message,
+            frame = control_rx.recv() => match frame {
+                Some(frame) => frame,
                 None => return Ok(()),
             },
         };
-        let reexec_path = reexec_path(&message);
+        let Some(message) = frame.encode() else {
+            continue;
+        };
         let send_result = tokio::select! {
             biased;
             changed = shutdown.changed() => {
@@ -236,34 +246,10 @@ where
         if send_result.is_err() {
             return Err(());
         }
-        if let Some(path) = reexec_path {
-            // The response is on the socket before exec interrupts this connection.
-            match path {
-                Some(path) => redoor_core::process::reexec_process(std::path::Path::new(&path)),
-                None => redoor_core::process::reexec_current_process(),
-            }
+        if let Some(action) = frame.after_send {
+            after_send(action);
         }
     }
-}
-
-/// Extracts process replacement only after identifying a successfully written command response.
-fn reexec_path(message: &WsMessage) -> Option<Option<String>> {
-    let WsMessage::Text(text) = message else {
-        return None;
-    };
-    serde_json::from_str::<Message>(text)
-        .ok()
-        .and_then(|message| match message {
-            Message::CommandResponse {
-                result: redoor_protocol::wire::command::CommandResult::Restart,
-                ..
-            } => Some(None),
-            Message::CommandResponse {
-                result: redoor_protocol::wire::command::CommandResult::SelfExec { path },
-                ..
-            } => Some(Some(path)),
-            _ => None,
-        })
 }
 
 /// Spawns stdin forwarding and optionally treats EOF as loss of the owning SSH relay.
@@ -293,8 +279,8 @@ where
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
                     let _ = agent_ref
-                        .send(AgentMsg::SendWebSocketMessage {
-                            msg: WsMessage::text(trimmed.to_string()),
+                        .send(AgentMsg::SendRawText {
+                            text: trimmed.to_string(),
                         })
                         .await;
                 }
@@ -316,23 +302,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-
-    /// Creates a handle whose two lanes can be inspected independently.
-    fn test_handle(
-        sender: mpsc::Sender<AgentMsg>,
-    ) -> (
-        AgentHandle,
-        mpsc::UnboundedReceiver<super::super::AgentLifecycleMsg>,
-    ) {
-        let (lifecycle_sender, lifecycle_receiver) = mpsc::unbounded_channel();
-        (
-            AgentHandle {
-                sender,
-                lifecycle_sender,
-            },
-            lifecycle_receiver,
-        )
-    }
+    use crate::runtime::AgentLifecycleMsg;
+    use redoor_protocol::wire::{AgentToServer, command::CommandResult};
+    use std::sync::{Arc, Mutex};
 
     /// Sink that models a socket whose transport never accepts another frame.
     struct BlockedSink;
@@ -364,8 +336,7 @@ mod tests {
     /// Verifies only SSH-owned agents stop when their input channel disappears.
     #[tokio::test]
     async fn relay_stdin_eof_requests_clean_shutdown() {
-        let (sender, mut receiver) = mpsc::channel(1);
-        let (handle, _lifecycle_receiver) = test_handle(sender);
+        let (handle, mut receiver, _lifecycle_receiver) = AgentHandle::channel(1);
 
         forward_stdin(BufReader::new(&b""[..]), handle, true).await;
 
@@ -376,8 +347,7 @@ mod tests {
     /// Verifies ordinary agents retain the existing behavior when terminal stdin closes.
     #[tokio::test]
     async fn regular_stdin_eof_does_not_stop_agent() {
-        let (sender, mut receiver) = mpsc::channel(1);
-        let (handle, _lifecycle_receiver) = test_handle(sender);
+        let (handle, mut receiver, _lifecycle_receiver) = AgentHandle::channel(1);
 
         forward_stdin(BufReader::new(&b""[..]), handle, false).await;
 
@@ -388,8 +358,7 @@ mod tests {
     /// Verifies stale detection bypasses a full ordinary actor mailbox.
     #[tokio::test]
     async fn liveness_reports_loss_while_inbound_delivery_is_backpressured() {
-        let (sender, _receiver) = mpsc::channel(1);
-        let (handle, mut lifecycle_receiver) = test_handle(sender);
+        let (handle, _receiver, mut lifecycle_receiver) = AgentHandle::channel(1);
         handle
             .try_send(AgentMsg::ExitWithError)
             .expect("mailbox saturation setup should fill its only slot");
@@ -421,7 +390,7 @@ mod tests {
         // The lifecycle event must retain its generation so delayed teardown cannot affect a replacement.
         assert!(matches!(
             lifecycle,
-            super::super::AgentLifecycleMsg::ConnectionLost {
+            AgentLifecycleMsg::ConnectionLost {
                 connection_generation: 7,
                 ..
             }
@@ -435,11 +404,11 @@ mod tests {
     async fn control_shutdown_interrupts_in_progress_write() {
         let (control_tx, control_rx) = mpsc::channel(1);
         control_tx
-            .send(WsMessage::text("blocked"))
+            .send(OutboundFrame::raw_text("blocked".to_string()))
             .await
             .expect("writer setup should queue one frame");
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-        let write = write_control_frames(BlockedSink, control_rx, shutdown_receiver);
+        let write = write_control_frames(BlockedSink, control_rx, shutdown_receiver, |_| {});
         tokio::pin!(write);
 
         // Polling pending proves the writer reached the sink rather than waiting on its queue.
@@ -450,5 +419,100 @@ mod tests {
 
         // Completion proves shutdown canceled the in-progress send without a network timeout.
         assert_eq!(write.await, Ok(()));
+    }
+
+    /// Sink that records written frames into a shared journal, optionally failing every write.
+    struct JournalSink {
+        journal: Arc<Mutex<Vec<String>>>,
+        fail: bool,
+    }
+
+    impl Sink<WsMessage> for JournalSink {
+        type Error = ();
+
+        /// Always ready so the test controls ordering only through the journal.
+        fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), ()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        /// Records the frame or simulates a broken socket.
+        fn start_send(self: Pin<&mut Self>, item: WsMessage) -> Result<(), ()> {
+            if self.fail {
+                return Err(());
+            }
+            self.journal
+                .lock()
+                .unwrap()
+                .push(format!("frame:{}", item.to_text().unwrap_or("")));
+            Ok(())
+        }
+
+        /// Nothing is buffered.
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), ()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        /// Nothing to close.
+        fn poll_close(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), ()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Queues one restart response and runs the writer to completion over `sink`.
+    async fn write_restart_response(sink: JournalSink) -> Result<(), ()> {
+        let journal = sink.journal.clone();
+        let (control_tx, control_rx) = mpsc::channel(1);
+        let frame = OutboundFrame {
+            after_send: Some(PostSend::Reexec { path: None }),
+            ..OutboundFrame::message(AgentToServer::CommandResponse {
+                agent_id: redoor_protocol::ids::AgentId::from("agent"),
+                request_id: redoor_protocol::ids::RequestId::new(1),
+                result: CommandResult::Restart,
+            })
+        };
+        control_tx.send(frame).await.unwrap();
+        drop(control_tx);
+        let (_shutdown_sender, shutdown_receiver) = watch::channel(false);
+        write_control_frames(sink, control_rx, shutdown_receiver, move |action| {
+            journal.lock().unwrap().push(format!("{action:?}"));
+        })
+        .await
+    }
+
+    /// Verifies re-exec runs only after the restart response reached the socket.
+    #[tokio::test]
+    async fn post_send_action_runs_after_the_frame_is_written() {
+        let journal = Arc::new(Mutex::new(Vec::new()));
+
+        let result = write_restart_response(JournalSink {
+            journal: journal.clone(),
+            fail: false,
+        })
+        .await;
+
+        // The writer finishes cleanly once the lane closes.
+        assert_eq!(result, Ok(()));
+        let journal = journal.lock().unwrap();
+        // The response must be on the wire before the process is replaced.
+        assert_eq!(journal.len(), 2);
+        assert!(journal[0].starts_with("frame:") && journal[0].contains("Restart"));
+        assert_eq!(journal[1], "Reexec { path: None }");
+    }
+
+    /// Verifies a failed write never triggers the post-send action.
+    #[tokio::test]
+    async fn failed_write_skips_the_post_send_action() {
+        let journal = Arc::new(Mutex::new(Vec::new()));
+
+        let result = write_restart_response(JournalSink {
+            journal: journal.clone(),
+            fail: true,
+        })
+        .await;
+
+        // The failure is reported so the connection is torn down.
+        assert_eq!(result, Err(()));
+        // Re-executing after an undelivered response would leave the router without an answer.
+        assert!(journal.lock().unwrap().is_empty());
     }
 }

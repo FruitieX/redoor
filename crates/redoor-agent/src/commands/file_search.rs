@@ -13,10 +13,8 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use tokio::{
-    io::{AsyncReadExt, BufReader},
-    sync::watch,
-};
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
 
 /// Bounds both response size and memory retained while traversing a large tree.
 const RESULT_LIMIT: usize = 100;
@@ -24,13 +22,13 @@ const RESULT_LIMIT: usize = 100;
 const MAX_GITIGNORE_LINE_BYTES: usize = 64 * 1024;
 
 /// Bundles path-search controls so cancellation coordination does not grow a positional API.
-pub struct FileSearchRequest {
-    pub path: String,
-    pub query: String,
-    pub timeout_seconds: u64,
-    pub include_hidden: bool,
-    pub respect_gitignore: bool,
-    pub case_sensitivity: CaseSensitivity,
+pub(crate) struct FileSearchRequest {
+    pub(crate) path: String,
+    pub(crate) query: String,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) include_hidden: bool,
+    pub(crate) respect_gitignore: bool,
+    pub(crate) case_sensitivity: CaseSensitivity,
 }
 
 /// Separates fuzzy terms from path fragments that must be skipped during traversal.
@@ -139,38 +137,20 @@ pub(super) fn directory_identity(metadata: &std::fs::Metadata) -> DirectoryIdent
     }
 }
 
-/// Traverses incrementally so timeout returns useful partial results without retaining the tree.
-pub(super) async fn execute(
-    path: String,
-    query: String,
-    timeout_seconds: u64,
-    include_hidden: bool,
-    respect_gitignore: bool,
-    case_sensitivity: CaseSensitivity,
+/// Traverses incrementally so timeout or cancellation returns useful partial results without
+/// retaining the tree.
+pub(crate) async fn execute(
+    request: FileSearchRequest,
+    cancel: &CancellationToken,
 ) -> CommandResult {
-    let (_cancel_sender, cancel_receiver) = watch::channel(false);
-    execute_with_cancellation(
+    let FileSearchRequest {
         path,
         query,
         timeout_seconds,
         include_hidden,
         respect_gitignore,
         case_sensitivity,
-        cancel_receiver,
-    )
-    .await
-}
-
-/// Preserves partial matches when a newer search supersedes this traversal.
-pub(super) async fn execute_with_cancellation(
-    path: String,
-    query: String,
-    timeout_seconds: u64,
-    include_hidden: bool,
-    respect_gitignore: bool,
-    case_sensitivity: CaseSensitivity,
-    mut cancel_receiver: watch::Receiver<bool>,
-) -> CommandResult {
+    } = request;
     if query.trim().is_empty() {
         return CommandResult::error(
             CommandErrorKind::InvalidInput,
@@ -194,7 +174,7 @@ pub(super) async fn execute_with_cancellation(
         tokio::pin!(timeout);
         tokio::select! {
             biased;
-            _ = cancel_receiver.changed() => None,
+            _ = cancel.cancelled() => None,
             result = &mut traversal => Some(result),
             _ = &mut timeout => None,
         }
@@ -462,24 +442,49 @@ mod tests {
     use super::*;
     use redoor_core::test_support::TempDir;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Runs an uncancelled search with positional options to keep the cases readable.
+    async fn search(
+        path: String,
+        query: String,
+        timeout_seconds: u64,
+        include_hidden: bool,
+        respect_gitignore: bool,
+        case_sensitivity: CaseSensitivity,
+    ) -> CommandResult {
+        execute(
+            FileSearchRequest {
+                path,
+                query,
+                timeout_seconds,
+                include_hidden,
+                respect_gitignore,
+                case_sensitivity,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+    }
     #[cfg(not(target_os = "macos"))]
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     /// Verifies superseded searches still return a terminal response to their original caller.
     #[tokio::test]
     async fn canceled_search_returns_empty_partial_response() {
-        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        let cancel = CancellationToken::new();
         // Pre-canceling makes this deterministic without sleeping or constructing a large tree.
-        cancel_sender.send(true).expect("receiver remains active");
+        cancel.cancel();
 
-        let result = execute_with_cancellation(
-            "/path-that-does-not-need-to-exist".to_string(),
-            "query".to_string(),
-            5,
-            false,
-            true,
-            CaseSensitivity::Smart,
-            cancel_receiver,
+        let result = execute(
+            FileSearchRequest {
+                path: "/path-that-does-not-need-to-exist".to_string(),
+                query: "query".to_string(),
+                timeout_seconds: 5,
+                include_hidden: false,
+                respect_gitignore: true,
+                case_sensitivity: CaseSensitivity::Smart,
+            },
+            &cancel,
         )
         .await;
 
@@ -514,7 +519,7 @@ mod tests {
             .await
             .expect("test directory permissions should be restricted");
 
-        let result = execute(
+        let result = search(
             root.to_string_lossy().into_owned(),
             "visibletarget".to_string(),
             5,
@@ -554,7 +559,7 @@ mod tests {
             .await
             .expect("target should be created");
 
-        let result = execute(
+        let result = search(
             root.to_string_lossy().into_owned(),
             "searchabletarget".to_string(),
             5,
@@ -604,7 +609,7 @@ mod tests {
             .await
             .expect("cycle link should be created");
 
-        let result = execute(
+        let result = search(
             root.to_string_lossy().into_owned(),
             "termuxvisibletarget".to_string(),
             5,
@@ -663,7 +668,7 @@ mod tests {
             .await
             .expect("quoted target should be created");
 
-        let excluded_result = execute(
+        let excluded_result = search(
             root.to_string_lossy().into_owned(),
             "-node_modules testtarget".to_string(),
             5,
@@ -672,7 +677,7 @@ mod tests {
             CaseSensitivity::Smart,
         )
         .await;
-        let quoted_result = execute(
+        let quoted_result = search(
             root.to_string_lossy().into_owned(),
             "\"-node_modules\"".to_string(),
             5,
@@ -717,7 +722,7 @@ mod tests {
             .await
             .expect("dotfile should be created");
 
-        let default_result = execute(
+        let default_result = search(
             root.to_string_lossy().into_owned(),
             "hiddentarget".to_string(),
             5,
@@ -726,7 +731,7 @@ mod tests {
             CaseSensitivity::Smart,
         )
         .await;
-        let included_result = execute(
+        let included_result = search(
             root.to_string_lossy().into_owned(),
             "hiddentarget".to_string(),
             5,
@@ -782,7 +787,7 @@ mod tests {
                 .expect("search target should be created");
         }
 
-        let respected = execute(
+        let respected = search(
             root.to_string_lossy().into_owned(),
             "target".to_string(),
             5,
@@ -791,7 +796,7 @@ mod tests {
             CaseSensitivity::Smart,
         )
         .await;
-        let disabled = execute(
+        let disabled = search(
             root.to_string_lossy().into_owned(),
             "target".to_string(),
             5,
@@ -840,7 +845,7 @@ mod tests {
             .await
             .expect("visible target should be written");
 
-        let result = execute(
+        let result = search(
             root.to_string_lossy().into_owned(),
             "target".to_string(),
             5,

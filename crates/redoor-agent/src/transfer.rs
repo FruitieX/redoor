@@ -1,7 +1,9 @@
-use super::{
-    ActiveUploads, AgentHandle, AgentMsg, AgentState, connection::AgentConnection,
-    protocol::route_upload_chunk,
-};
+//! The payload-only transfer socket: authentication, bounded ingress routing and egress.
+
+use crate::connection::AgentConnection;
+use crate::runtime::responder::ControlSender;
+use crate::runtime::{AgentHandle, AgentMsg};
+use crate::transfers::upload::UploadRoutes;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use redoor_core::log;
@@ -26,61 +28,17 @@ pub(crate) fn transfer_url(server_url: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
-/// Replaces transfer credentials and starts non-blocking setup for the current control generation.
-pub(crate) fn begin_transfer_connection(
-    state: &mut AgentState,
-    handle: AgentHandle,
-    token: String,
-) {
-    if let Some(shutdown) = state.transfer_shutdown.take() {
-        let _ = shutdown.send(true);
-    }
-    state.ws_transfer_tx = None;
-    state.transfer_token = Some(token.clone());
-    let transfer_generation = state.advance_transfer_generation();
-    spawn_transfer_connection(TransferConnectContext::from_state(
-        state,
-        handle,
-        token,
-        transfer_generation,
-    ));
-}
-
 /// Captures immutable connection inputs so setup never blocks the agent actor.
 pub(crate) struct TransferConnectContext {
-    connection: AgentConnection,
-    agent_id: AgentId,
-    token: String,
-    control_generation: u64,
-    transfer_generation: u64,
-    control_sender: mpsc::Sender<WsMessage>,
-    active_uploads: ActiveUploads,
-    handle: AgentHandle,
-}
-
-impl TransferConnectContext {
-    /// Snapshots only thread-safe handles needed by the independently running transfer task.
-    fn from_state(
-        state: &AgentState,
-        handle: AgentHandle,
-        token: String,
-        transfer_generation: u64,
-    ) -> Self {
-        Self {
-            connection: state.connection.clone(),
-            agent_id: state.agent_id.clone(),
-            token,
-            control_generation: state.connection_generation,
-            transfer_generation,
-            control_sender: state
-                .ws_control_tx
-                .as_ref()
-                .expect("control sender exists while handling transfer-open")
-                .clone(),
-            active_uploads: state.active_uploads.clone(),
-            handle,
-        }
-    }
+    pub(crate) connection: AgentConnection,
+    pub(crate) agent_id: AgentId,
+    pub(crate) token: String,
+    pub(crate) control_generation: u64,
+    pub(crate) transfer_generation: u64,
+    /// Used to report undeliverable upload chunks as command failures.
+    pub(crate) control_sender: ControlSender,
+    pub(crate) upload_routes: UploadRoutes,
+    pub(crate) handle: AgentHandle,
 }
 
 /// Spawns transfer setup and read/write loops so control mailbox handling never waits on networking.
@@ -152,13 +110,7 @@ async fn run_transfer_connection(context: &TransferConnectContext) -> Result<()>
         context.agent_id,
         context.transfer_generation
     );
-    let read = read_transfer_frames(
-        &mut reader,
-        context.active_uploads.clone(),
-        context.control_sender.clone(),
-        context.agent_id.clone(),
-        shutdown_receiver.clone(),
-    );
+    let read = read_transfer_frames(&mut reader, context, shutdown_receiver.clone());
     let write = write_transfer_frames(&mut writer, &mut receiver, &mut shutdown_receiver);
     tokio::select! {
         result = read => result,
@@ -173,9 +125,7 @@ async fn read_transfer_frames(
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     >,
-    active_uploads: ActiveUploads,
-    control_sender: mpsc::Sender<WsMessage>,
-    agent_id: AgentId,
+    context: &TransferConnectContext,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     loop {
@@ -185,13 +135,10 @@ async fn read_transfer_frames(
         };
         match frame {
             Some(Ok(WsMessage::Binary(bytes))) => {
-                route_upload_chunk(
-                    active_uploads.clone(),
-                    control_sender.clone(),
-                    agent_id.clone(),
-                    bytes.to_vec(),
-                )
-                .await;
+                context
+                    .upload_routes
+                    .route_frame(&bytes, &context.control_sender, &context.agent_id)
+                    .await;
             }
             Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {}
             Some(Ok(WsMessage::Close(_))) | None => return Ok(()),

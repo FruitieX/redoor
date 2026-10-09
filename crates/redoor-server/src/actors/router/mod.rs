@@ -443,10 +443,10 @@ mod tests {
 
         let transfer_token = match priority_rx.recv().await.expect("transfer bootstrap queued") {
             WsMessage::Text(text) => {
-                match serde_json::from_str::<redoor_protocol::wire::Message>(&text)
+                match serde_json::from_str::<redoor_protocol::wire::ServerToAgent>(&text)
                     .expect("transfer bootstrap is valid control JSON")
                 {
-                    redoor_protocol::wire::Message::TransferSocketOpen { token } => token,
+                    redoor_protocol::wire::ServerToAgent::TransferSocketOpen { token } => token,
                     other => panic!("unexpected control message: {other:?}"),
                 }
             }
@@ -490,10 +490,10 @@ mod tests {
         });
         let request_id = match text_rx.recv().await.expect("upload command queued") {
             WsMessage::Text(text) => {
-                match serde_json::from_str::<redoor_protocol::wire::Message>(&text)
+                match serde_json::from_str::<redoor_protocol::wire::ServerToAgent>(&text)
                     .expect("upload command is valid control JSON")
                 {
-                    redoor_protocol::wire::Message::Command { request_id, .. } => request_id,
+                    redoor_protocol::wire::ServerToAgent::Command { request_id, .. } => request_id,
                     other => panic!("unexpected control message: {other:?}"),
                 }
             }

@@ -26,6 +26,7 @@ use tokio::{
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, tungstenite::protocol::Message as WsMessage,
 };
+use tokio_util::sync::CancellationToken;
 
 const PTY_BUFFER_SIZE: usize = 8 * 1024;
 const OUTPUT_QUEUE_SIZE: usize = 8;
@@ -67,16 +68,16 @@ pub(crate) async fn connect_and_run(
     token: String,
     size: TerminalSize,
     cwd: String,
-    mut cancel_receiver: watch::Receiver<bool>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     size.validate()
         .map_err(|error| anyhow!(error.to_string()))?;
     let url = terminal_url(connection.server_url(), &terminal_id)?;
-    if *cancel_receiver.borrow() {
+    if cancel.is_cancelled() {
         return Ok(());
     }
     let connection = tokio::select! {
-        _ = cancel_receiver.changed() => return Ok(()),
+        _ = cancel.cancelled() => return Ok(()),
         result = connection.connect(url.as_str()) => result,
     };
     let (mut socket, _) = connection.context("failed to connect dedicated terminal websocket")?;
@@ -85,7 +86,7 @@ pub(crate) async fn connect_and_run(
     let handshake =
         serde_json::to_string(&handshake).context("failed to encode terminal handshake")?;
     let authenticated = tokio::select! {
-        _ = cancel_receiver.changed() => return Ok(()),
+        _ = cancel.cancelled() => return Ok(()),
         result = socket.send(WsMessage::text(handshake)) => result,
     };
     authenticated.context("failed to authenticate dedicated terminal websocket")?;
@@ -98,15 +99,8 @@ pub(crate) async fn connect_and_run(
                 terminal_id.0,
                 cwd
             );
-            let result = run_pty_session(
-                socket,
-                reader,
-                writer,
-                child,
-                process_group_id,
-                cancel_receiver,
-            )
-            .await;
+            let result =
+                run_pty_session(socket, reader, writer, child, process_group_id, cancel).await;
             log!(
                 Level::Info,
                 "Terminal destroyed: terminal_id={}",
@@ -179,7 +173,7 @@ async fn run_pty_session(
     writer: pty_process::OwnedWritePty,
     mut child: Child,
     process_group_id: i32,
-    mut cancel_receiver: watch::Receiver<bool>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let (socket_sink, socket_stream) = socket.split();
     let (output_sender, output_receiver) = mpsc::channel(OUTPUT_QUEUE_SIZE);
@@ -200,11 +194,11 @@ async fn run_pty_session(
         shutdown_receiver,
     ));
 
-    let mut end = match send_ready_or_cancel(&control_sender, &mut cancel_receiver).await {
+    let mut end = match send_ready_or_cancel(&control_sender, &cancel).await {
         Ok(true) => {
             wait_for_session_end(
                 &mut child,
-                &mut cancel_receiver,
+                &cancel,
                 &mut pty_reader,
                 &mut socket_reader,
                 &mut socket_writer,
@@ -249,13 +243,13 @@ async fn run_pty_session(
 /// Sends readiness while still allowing control-plane loss to cancel setup promptly.
 async fn send_ready_or_cancel(
     control_sender: &mpsc::Sender<SocketCommand>,
-    cancel_receiver: &mut watch::Receiver<bool>,
+    cancel: &CancellationToken,
 ) -> Result<bool> {
-    if *cancel_receiver.borrow() {
+    if cancel.is_cancelled() {
         return Ok(false);
     }
     tokio::select! {
-        _ = cancel_receiver.changed() => Ok(false),
+        _ = cancel.cancelled() => Ok(false),
         result = send_lifecycle(control_sender, TerminalServerMessage::Ready) => result.map(|()| true),
     }
 }
@@ -274,16 +268,16 @@ async fn resolve_pty_end(end: SessionEnd, child: &mut Child) -> SessionEnd {
 /// Waits for the first authoritative terminal-ending event with small select arms.
 async fn wait_for_session_end(
     child: &mut Child,
-    cancel_receiver: &mut watch::Receiver<bool>,
+    cancel: &CancellationToken,
     pty_reader: &mut JoinHandle<Result<()>>,
     socket_reader: &mut JoinHandle<Result<()>>,
     socket_writer: &mut JoinHandle<Result<()>>,
 ) -> SessionEnd {
-    if *cancel_receiver.borrow() {
+    if cancel.is_cancelled() {
         return SessionEnd::Cancelled;
     }
     tokio::select! {
-        _ = cancel_receiver.changed() => SessionEnd::Cancelled,
+        _ = cancel.cancelled() => SessionEnd::Cancelled,
         status = child.wait() => child_end(status),
         result = pty_reader => SessionEnd::PtyReader(join_result(result)),
         result = socket_reader => SessionEnd::SocketReader(join_result(result)),

@@ -12,7 +12,7 @@ use redoor_core::log;
 use redoor_protocol::wire::command::CommandResult;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::UploadKind;
-use redoor_protocol::{ids::AgentId, wire::Message};
+use redoor_protocol::{ids::AgentId, wire::ServerToAgent};
 
 /// Reserves the irreversible boundary only for the live destination worker, never after cancellation.
 fn authorize_publication(
@@ -66,7 +66,7 @@ pub(crate) fn begin_publication(
 ) {
     let allowed = authorize_publication(state, &agent_id, request_id);
     if let Some(connection) = state.agents.by_id.get(&agent_id) {
-        let decision = Message::UploadPublicationDecision {
+        let decision = ServerToAgent::UploadPublicationDecision {
             request_id,
             allowed,
         };
@@ -113,7 +113,7 @@ pub(crate) fn start(state: &mut RouterState, request: StartUploadRequest) {
         if request.reply.is_closed() {
             return;
         }
-        if !agent_connection.send_message(Message::Command {
+        if !agent_connection.send_message(ServerToAgent::Command {
             agent_id: request.agent_id.clone(),
             request_id,
             command: request.command,
@@ -147,7 +147,8 @@ pub(crate) fn start(state: &mut RouterState, request: StartUploadRequest) {
                 );
                 ui::notify_transfer_refresh(state);
             }
-            let _ = agent_connection.send_priority_message(Message::CancelTransfer { request_id });
+            let _ = agent_connection
+                .send_priority_message(ServerToAgent::CancelTransfer { request_id });
         }
     } else {
         log!(
@@ -409,8 +410,8 @@ fn fail_upload_route(
         return;
     }
     if let Some(connection) = state.agents.by_id.get(agent_id) {
-        if !connection.send_priority_message(Message::CancelTransfer { request_id }) {
-            connection.send_message(Message::CancelTransfer { request_id });
+        if !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id }) {
+            connection.send_message(ServerToAgent::CancelTransfer { request_id });
         }
     } else {
         // No control owner remains that could acknowledge cancellation, so local ownership ends now.

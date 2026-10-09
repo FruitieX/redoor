@@ -11,7 +11,7 @@ use redoor_protocol::{
 };
 use redoor_protocol::{
     ids::{AgentId, TransferId},
-    wire::Message,
+    wire::ServerToAgent,
 };
 
 /// Preserves an accepted cancellation when disconnect teardown releases the remaining ownership.
@@ -118,10 +118,10 @@ pub(crate) fn cancel_public_transfer(
         };
         for (agent_id, request_id) in controls {
             if let Some(connection) = state.agents.by_id.get(&agent_id)
-                && !connection.send_priority_message(Message::CancelTransfer { request_id })
+                && !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
             {
                 // Falling back to the command lane is slower but must not lose accepted cleanup.
-                connection.send_message(Message::CancelTransfer { request_id });
+                connection.send_message(ServerToAgent::CancelTransfer { request_id });
             }
         }
         return Ok(CancelTransferResponse {
@@ -142,9 +142,9 @@ pub(crate) fn cancel_public_transfer(
             let _ = sender.send(Err(RouterError::ClientCanceledUpload));
         }
         if let Some(connection) = state.agents.by_id.get(&agent_id)
-            && !connection.send_priority_message(Message::CancelTransfer { request_id })
+            && !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
         {
-            connection.send_message(Message::CancelTransfer { request_id });
+            connection.send_message(ServerToAgent::CancelTransfer { request_id });
         }
         return Ok(CancelTransferResponse {
             transfer_id,
@@ -352,7 +352,7 @@ pub(crate) async fn cleanup_agent_transfer_requests(
             if &dest_agent_id == agent_id
                 && let Some(source) = state.agents.by_id.get(&source_agent_id)
             {
-                source.send_priority_message(Message::CancelTransfer {
+                source.send_priority_message(ServerToAgent::CancelTransfer {
                     request_id: source_request_id,
                 });
             }
@@ -493,7 +493,8 @@ pub(crate) fn cancel_transfer(
                         agent_id,
                         request_id
                     );
-                    agent_connection.send_priority_message(Message::CancelTransfer { request_id });
+                    agent_connection
+                        .send_priority_message(ServerToAgent::CancelTransfer { request_id });
                 }
             }
             None => {

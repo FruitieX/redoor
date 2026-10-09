@@ -1,8 +1,8 @@
-use super::{TrashError, TrashService};
-use crate::{
-    AgentActor,
-    transfers::{copy::LocalCopyResponseContext, r#move::move_source_identity},
-};
+//! Freedesktop.org trash for Linux and Android (Termux), which both expose `$HOME`.
+
+use super::{TrashError, TrashProvider};
+use crate::transfers::copy::CopyContext;
+use futures_util::future::BoxFuture;
 use jiff::{
     Zoned,
     civil::DateTime,
@@ -18,7 +18,10 @@ use redoor_protocol::{
         trash::{TrashItem, TrashListResponse, TrashLocation},
     },
     ids::UnixTimestampSeconds,
-    wire::{command::CommandErrorKind, log::Level},
+    wire::{
+        command::{CommandErrorKind, MoveSourceIdentity},
+        log::Level,
+    },
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -44,7 +47,7 @@ struct InventoryItem {
 }
 
 /// Creates a forced or private per-user root without accepting symlinked directories.
-pub(super) async fn prepare_private_root(root: &Path) -> Result<(), TrashError> {
+async fn prepare_private_root(root: &Path) -> Result<(), TrashError> {
     if !root.is_absolute() {
         return Err(TrashError::new(
             CommandErrorKind::InvalidInput,
@@ -87,252 +90,460 @@ async fn create_private_directory_tree(path: &Path) -> Result<(), TrashError> {
     Ok(())
 }
 
-/// Moves a source only after the selected root and same-device relationship are revalidated.
-pub(super) async fn trash(service: &TrashService, path: PathBuf) -> Result<(), TrashError> {
-    let source = normalized_existing_entry(&path).await?;
-    log!(
-        Level::Debug,
-        "Trash source normalized: requested_path={}, source={}",
-        path.display(),
-        source.display()
-    );
-    let source_metadata = tokio::fs::symlink_metadata(&source)
-        .await
-        .map_err(|error| TrashError::io("Failed to inspect trash source", error))?;
-    log!(
-        Level::Debug,
-        "Trash source inspected: source={}, device={}, inode={}, directory={}, symlink={}, size={}",
-        source.display(),
-        source_metadata.dev(),
-        source_metadata.ino(),
-        source_metadata.is_dir(),
-        source_metadata.file_type().is_symlink(),
-        source_metadata.len()
-    );
-    let location = select_location(service, &source, &source_metadata).await?;
-    log!(
-        Level::Debug,
-        "Trash location selected: source={}, location_id={}, root={}, mount_top={}",
-        source.display(),
-        location.id,
-        location.root.display(),
-        location
-            .mount_top
-            .as_deref()
-            .map_or_else(|| "none".to_string(), |path| path.display().to_string())
-    );
-    validate_private_root(&location.root).await?;
-    reject_trash_containment(&source, &location.root)?;
-    let root_metadata = tokio::fs::metadata(&location.root)
-        .await
-        .map_err(|error| TrashError::io("Failed to inspect trash root", error))?;
-    if source_metadata.dev() != root_metadata.dev() {
-        return Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash source and trash directory are on different devices",
-        ));
+/// Freedesktop provider, optionally pinned to one operator-selected root.
+pub(super) struct FreedesktopTrash {
+    /// Exact same-device root used instead of home and per-mount discovery.
+    forced_root: Option<PathBuf>,
+}
+
+impl FreedesktopTrash {
+    /// Validates an operator-selected root before the agent advertises trash support.
+    pub(super) async fn initialize(forced_root: Option<PathBuf>) -> Result<Self, TrashError> {
+        if let Some(root) = &forced_root {
+            prepare_private_root(root).await?;
+        }
+        Ok(Self { forced_root })
+    }
+}
+
+impl TrashProvider for FreedesktopTrash {
+    /// Freedesktop trash supports moving entries.
+    fn supports_move(&self) -> bool {
+        true
     }
 
-    let basename = source.file_name().ok_or_else(|| {
-        TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Filesystem roots cannot be trashed",
-        )
-    })?;
-    if basename.as_bytes().is_empty() || basename.as_bytes().contains(&b'/') {
-        return Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash source has an invalid filename",
-        ));
+    /// Redoor can read and restore the freedesktop inventory format.
+    fn supports_inventory(&self) -> bool {
+        true
     }
-    let metadata_path = metadata_original_path(&source, location.mount_top.as_deref())?;
-    log!(
-        Level::Debug,
-        "Trash source validated: source={}, metadata_path={}, trash_device={}",
-        source.display(),
-        metadata_path.display(),
-        root_metadata.dev()
-    );
-    let deletion_date = Zoned::now().strftime("%Y-%m-%dT%H:%M:%S").to_string();
-    for attempt in 0..1024_u32 {
-        let name = collision_name(basename, attempt);
-        let payload = location.root.join("files").join(&name);
-        let info = trashinfo_path(&location.root, &name);
-        let mut file = match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&info)
-            .await
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                log!(
-                    Level::Debug,
-                    "Trash name collision: source={}, candidate={}, attempt={}",
-                    source.display(),
-                    name.to_string_lossy(),
-                    attempt
-                );
-                continue;
-            }
-            Err(error) => return Err(TrashError::io("Failed to reserve trash metadata", error)),
-        };
+
+    /// Moves one entry into the matching home or per-mount trash.
+    fn trash(&self, path: PathBuf) -> BoxFuture<'_, Result<(), TrashError>> {
+        Box::pin(self.trash_entry(path))
+    }
+
+    /// Lists every discoverable trash location.
+    fn list(&self) -> BoxFuture<'_, Result<TrashListResponse, TrashError>> {
+        Box::pin(self.list_locations())
+    }
+
+    /// Purges every discoverable trash location.
+    fn empty(&self) -> BoxFuture<'_, Result<u64, TrashError>> {
+        Box::pin(self.empty_locations())
+    }
+
+    /// Restores one item with smart-move semantics.
+    fn restore<'a>(
+        &'a self,
+        location_id: &'a str,
+        item_id: &'a str,
+        destination: PathBuf,
+        copy: CopyContext<'a>,
+    ) -> BoxFuture<'a, Result<PathBuf, TrashError>> {
+        Box::pin(self.restore_item(location_id, item_id, destination, copy))
+    }
+}
+
+impl FreedesktopTrash {
+    /// Moves a source only after the selected root and same-device relationship are revalidated.
+    async fn trash_entry(&self, path: PathBuf) -> Result<(), TrashError> {
+        let source = normalized_existing_entry(&path).await?;
         log!(
             Level::Debug,
-            "Trash metadata reserved: source={}, candidate={}, info={}",
-            source.display(),
-            name.to_string_lossy(),
-            info.display()
+            "Trash source normalized: requested_path={}, source={}",
+            path.display(),
+            source.display()
         );
-        let contents = format!(
-            "[Trash Info]
+        let source_metadata = tokio::fs::symlink_metadata(&source)
+            .await
+            .map_err(|error| TrashError::io("Failed to inspect trash source", error))?;
+        log!(
+            Level::Debug,
+            "Trash source inspected: source={}, device={}, inode={}, directory={}, symlink={}, size={}",
+            source.display(),
+            source_metadata.dev(),
+            source_metadata.ino(),
+            source_metadata.is_dir(),
+            source_metadata.file_type().is_symlink(),
+            source_metadata.len()
+        );
+        let location = self.select_location(&source, &source_metadata).await?;
+        log!(
+            Level::Debug,
+            "Trash location selected: source={}, location_id={}, root={}, mount_top={}",
+            source.display(),
+            location.id,
+            location.root.display(),
+            location
+                .mount_top
+                .as_deref()
+                .map_or_else(|| "none".to_string(), |path| path.display().to_string())
+        );
+        validate_private_root(&location.root).await?;
+        reject_trash_containment(&source, &location.root)?;
+        let root_metadata = tokio::fs::metadata(&location.root)
+            .await
+            .map_err(|error| TrashError::io("Failed to inspect trash root", error))?;
+        if source_metadata.dev() != root_metadata.dev() {
+            return Err(TrashError::new(
+                CommandErrorKind::InvalidInput,
+                "Trash source and trash directory are on different devices",
+            ));
+        }
+
+        let basename = source.file_name().ok_or_else(|| {
+            TrashError::new(
+                CommandErrorKind::InvalidInput,
+                "Filesystem roots cannot be trashed",
+            )
+        })?;
+        if basename.as_bytes().is_empty() || basename.as_bytes().contains(&b'/') {
+            return Err(TrashError::new(
+                CommandErrorKind::InvalidInput,
+                "Trash source has an invalid filename",
+            ));
+        }
+        let metadata_path = metadata_original_path(&source, location.mount_top.as_deref())?;
+        log!(
+            Level::Debug,
+            "Trash source validated: source={}, metadata_path={}, trash_device={}",
+            source.display(),
+            metadata_path.display(),
+            root_metadata.dev()
+        );
+        let deletion_date = Zoned::now().strftime("%Y-%m-%dT%H:%M:%S").to_string();
+        for attempt in 0..1024_u32 {
+            let name = collision_name(basename, attempt);
+            let payload = location.root.join("files").join(&name);
+            let info = trashinfo_path(&location.root, &name);
+            let mut file = match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&info)
+                .await
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    log!(
+                        Level::Debug,
+                        "Trash name collision: source={}, candidate={}, attempt={}",
+                        source.display(),
+                        name.to_string_lossy(),
+                        attempt
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(TrashError::io("Failed to reserve trash metadata", error));
+                }
+            };
+            log!(
+                Level::Debug,
+                "Trash metadata reserved: source={}, candidate={}, info={}",
+                source.display(),
+                name.to_string_lossy(),
+                info.display()
+            );
+            let contents = format!(
+                "[Trash Info]
 Path={}
 DeletionDate={}
 ",
-            percent_encode(metadata_path.as_os_str().as_bytes()),
-            deletion_date
-        );
-        if let Err(error) = async {
-            file.write_all(contents.as_bytes()).await?;
-            file.sync_all().await
-        }
-        .await
-        {
-            let _ = tokio::fs::remove_file(&info).await;
-            return Err(TrashError::io("Failed to write trash metadata", error));
-        }
-        drop(file);
-        log!(
-            Level::Debug,
-            "Trash metadata published: source={}, info={}, payload={}",
-            source.display(),
-            info.display(),
-            payload.display()
-        );
+                percent_encode(metadata_path.as_os_str().as_bytes()),
+                deletion_date
+            );
+            if let Err(error) = async {
+                file.write_all(contents.as_bytes()).await?;
+                file.sync_all().await
+            }
+            .await
+            {
+                let _ = tokio::fs::remove_file(&info).await;
+                return Err(TrashError::io("Failed to write trash metadata", error));
+            }
+            drop(file);
+            log!(
+                Level::Debug,
+                "Trash metadata published: source={}, info={}, payload={}",
+                source.display(),
+                info.display(),
+                payload.display()
+            );
 
-        log!(
-            Level::Debug,
-            "Trash payload rename started: source={}, payload={}, source_device={}, trash_device={}, copy_fallback=false",
-            source.display(),
-            payload.display(),
-            source_metadata.dev(),
-            root_metadata.dev()
-        );
-        match rename_without_replacement(&source, &payload).await {
-            Ok(AtomicRenameOutcome::Renamed) => {
-                log!(
-                    Level::Debug,
-                    "Trash payload moved: source={}, payload={}, info={}, method=filesystem_rename, copy_fallback=false",
-                    source.display(),
-                    payload.display(),
-                    info.display()
-                );
-                return Ok(());
-            }
-            Ok(AtomicRenameOutcome::DestinationExists) => {
-                log!(
-                    Level::Debug,
-                    "Trash payload candidate already exists: source={}, payload={}, attempt={}",
-                    source.display(),
-                    payload.display(),
-                    attempt
-                );
-                let _ = tokio::fs::remove_file(&info).await;
-                continue;
-            }
-            Ok(AtomicRenameOutcome::Unsupported) => {
-                let _ = tokio::fs::remove_file(&info).await;
-                return Err(TrashError::new(
-                    CommandErrorKind::InvalidInput,
-                    "Trash filesystem does not support no-replacement publication",
-                ));
-            }
-            Ok(AtomicRenameOutcome::Missing) => {
-                let _ = tokio::fs::remove_file(&info).await;
-                return Err(TrashError::new(
-                    CommandErrorKind::NotFound,
-                    format!(
-                        "Trash source or selected trash directory no longer exists during rename: source={}, payload={}",
-                        source.display(),
-                        payload.display()
-                    ),
-                ));
-            }
-            Ok(AtomicRenameOutcome::CrossDevice) => {
-                let _ = tokio::fs::remove_file(&info).await;
-                return Err(TrashError::new(
-                    CommandErrorKind::InvalidInput,
-                    format!(
-                        "Trash rename crossed filesystem boundaries despite device validation: source={}, payload={}, source_device={}, trash_device={}",
+            log!(
+                Level::Debug,
+                "Trash payload rename started: source={}, payload={}, source_device={}, trash_device={}, copy_fallback=false",
+                source.display(),
+                payload.display(),
+                source_metadata.dev(),
+                root_metadata.dev()
+            );
+            match rename_without_replacement(&source, &payload).await {
+                Ok(AtomicRenameOutcome::Renamed) => {
+                    log!(
+                        Level::Debug,
+                        "Trash payload moved: source={}, payload={}, info={}, method=filesystem_rename, copy_fallback=false",
                         source.display(),
                         payload.display(),
-                        source_metadata.dev(),
-                        root_metadata.dev()
-                    ),
-                ));
-            }
-            Err(error) => {
-                let _ = tokio::fs::remove_file(&info).await;
-                return Err(TrashError::io(
-                    &format!(
-                        "Filesystem rename into trash failed (copy fallback is disabled): source={}, payload={}",
+                        info.display()
+                    );
+                    return Ok(());
+                }
+                Ok(AtomicRenameOutcome::DestinationExists) => {
+                    log!(
+                        Level::Debug,
+                        "Trash payload candidate already exists: source={}, payload={}, attempt={}",
                         source.display(),
-                        payload.display()
-                    ),
-                    error,
-                ));
+                        payload.display(),
+                        attempt
+                    );
+                    let _ = tokio::fs::remove_file(&info).await;
+                    continue;
+                }
+                Ok(AtomicRenameOutcome::Unsupported) => {
+                    let _ = tokio::fs::remove_file(&info).await;
+                    return Err(TrashError::new(
+                        CommandErrorKind::InvalidInput,
+                        "Trash filesystem does not support no-replacement publication",
+                    ));
+                }
+                Ok(AtomicRenameOutcome::Missing) => {
+                    let _ = tokio::fs::remove_file(&info).await;
+                    return Err(TrashError::new(
+                        CommandErrorKind::NotFound,
+                        format!(
+                            "Trash source or selected trash directory no longer exists during rename: source={}, payload={}",
+                            source.display(),
+                            payload.display()
+                        ),
+                    ));
+                }
+                Ok(AtomicRenameOutcome::CrossDevice) => {
+                    let _ = tokio::fs::remove_file(&info).await;
+                    return Err(TrashError::new(
+                        CommandErrorKind::InvalidInput,
+                        format!(
+                            "Trash rename crossed filesystem boundaries despite device validation: source={}, payload={}, source_device={}, trash_device={}",
+                            source.display(),
+                            payload.display(),
+                            source_metadata.dev(),
+                            root_metadata.dev()
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&info).await;
+                    return Err(TrashError::io(
+                        &format!(
+                            "Filesystem rename into trash failed (copy fallback is disabled): source={}, payload={}",
+                            source.display(),
+                            payload.display()
+                        ),
+                        error,
+                    ));
+                }
             }
         }
+        Err(TrashError::new(
+            CommandErrorKind::AlreadyExists,
+            "Failed to reserve a unique trash item name",
+        ))
     }
-    Err(TrashError::new(
-        CommandErrorKind::AlreadyExists,
-        "Failed to reserve a unique trash item name",
-    ))
-}
 
-/// Lists only direct payload entries with trustworthy deletion timestamps.
-pub(super) async fn list(service: &TrashService) -> Result<TrashListResponse, TrashError> {
-    let locations = discover_locations(service).await?;
-    let mut public_locations = Vec::new();
-    for location in locations {
-        let mut items = inventory_for_location(&location).await?;
-        items.sort_by(|left, right| {
-            right
-                .public
-                .deleted_at
-                .cmp(&left.public.deleted_at)
-                .then_with(|| left.public.id.cmp(&right.public.id))
-        });
-        if !items.is_empty() {
-            public_locations.push(TrashLocation {
-                id: location.id,
-                path: location.display_path,
-                items: items.into_iter().map(|item| item.public).collect(),
+    /// Lists only direct payload entries with trustworthy deletion timestamps.
+    async fn list_locations(&self) -> Result<TrashListResponse, TrashError> {
+        let locations = self.discover_locations().await?;
+        let mut public_locations = Vec::new();
+        for location in locations {
+            let mut items = inventory_for_location(&location).await?;
+            items.sort_by(|left, right| {
+                right
+                    .public
+                    .deleted_at
+                    .cmp(&left.public.deleted_at)
+                    .then_with(|| left.public.id.cmp(&right.public.id))
             });
+            if !items.is_empty() {
+                public_locations.push(TrashLocation {
+                    id: location.id,
+                    path: location.display_path,
+                    items: items.into_iter().map(|item| item.public).collect(),
+                });
+            }
         }
+        public_locations.sort_by(|left, right| {
+            right.items[0]
+                .deleted_at
+                .cmp(&left.items[0].deleted_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(TrashListResponse {
+            locations: public_locations,
+        })
     }
-    public_locations.sort_by(|left, right| {
-        right.items[0]
-            .deleted_at
-            .cmp(&left.items[0].deleted_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(TrashListResponse {
-        locations: public_locations,
-    })
-}
 
-/// Removes every direct payload and metadata entry without deleting provider-owned directories.
-pub(super) async fn empty(service: &TrashService) -> Result<u64, TrashError> {
-    let locations = discover_locations(service).await?;
-    let mut deleted_items = 0_u64;
-    for location in locations {
-        validate_private_root(&location.root).await?;
-        deleted_items += remove_directory_contents(&location.root.join("files"), true).await?;
-        remove_directory_contents(&location.root.join("info"), false).await?;
+    /// Removes every direct payload and metadata entry without deleting provider-owned directories.
+    async fn empty_locations(&self) -> Result<u64, TrashError> {
+        let locations = self.discover_locations().await?;
+        let mut deleted_items = 0_u64;
+        for location in locations {
+            validate_private_root(&location.root).await?;
+            deleted_items += remove_directory_contents(&location.root.join("files"), true).await?;
+            remove_directory_contents(&location.root.join("info"), false).await?;
+        }
+        Ok(deleted_items)
     }
-    Ok(deleted_items)
+
+    /// Restores a freshly resolved item without replacing an occupied selected destination.
+    async fn restore_item(
+        &self,
+        location_id: &str,
+        item_id: &str,
+        destination: PathBuf,
+        copy: CopyContext<'_>,
+    ) -> Result<PathBuf, TrashError> {
+        validate_identifier(location_id)?;
+        validate_identifier(item_id)?;
+        if !destination.is_absolute() || destination == Path::new("/") {
+            return Err(TrashError::new(
+                CommandErrorKind::InvalidInput,
+                "Trash restore destination must be an absolute non-root path",
+            ));
+        }
+        let locations = self.discover_locations().await?;
+        let location = locations
+            .into_iter()
+            .find(|location| location.id == location_id)
+            .ok_or_else(|| {
+                TrashError::new(CommandErrorKind::NotFound, "Trash location not found")
+            })?;
+        validate_private_root(&location.root).await?;
+        let item = inventory_for_location(&location)
+            .await?
+            .into_iter()
+            .find(|item| item.public.id == item_id)
+            .ok_or_else(|| TrashError::new(CommandErrorKind::NotFound, "Trash item not found"))?;
+        let parent = destination.parent().ok_or_else(|| {
+            TrashError::new(
+                CommandErrorKind::InvalidInput,
+                "Trash restore destination has no parent",
+            )
+        })?;
+        let parent_directory = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(parent)
+            .await
+            .map_err(|error| {
+                if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+                    TrashError::new(
+                        CommandErrorKind::NotADirectory,
+                        "Trash restore parent must be an existing real directory",
+                    )
+                } else {
+                    TrashError::io("Failed to open restore parent", error)
+                }
+            })?;
+        let payload_metadata = tokio::fs::symlink_metadata(&item.payload)
+            .await
+            .map_err(|error| TrashError::io("Failed to inspect trash payload", error))?;
+        let atomic = copy
+            .move_entry(
+                item.payload.clone(),
+                destination.clone(),
+                payload_metadata.is_dir(),
+                MoveSourceIdentity::from_metadata(&payload_metadata),
+                CopyExistingMode::Error,
+            )
+            .await
+            .map_err(|error| {
+                TrashError::new(
+                    error.kind(),
+                    format!("Failed to restore trash payload with smart move: {error}"),
+                )
+            })?;
+        drop(parent_directory);
+        log!(
+            Level::Debug,
+            "Trash payload restored: payload={}, destination={}, method={}, copy_fallback={}",
+            item.payload.display(),
+            destination.display(),
+            if atomic {
+                "filesystem_rename"
+            } else {
+                "transfer_copy_delete"
+            },
+            !atomic
+        );
+        if let Err(error) = tokio::fs::remove_file(&item.info).await {
+            redoor_core::log_failure!(
+                Level::Error,
+                "Failed to remove trash metadata after restore: path={}, error={}",
+                item.info.display(),
+                error
+            );
+            return Err(TrashError::io(
+                "Trash item restored but metadata cleanup failed",
+                error,
+            ));
+        }
+        Ok(destination)
+    }
+
+    /// Selects the forced root, home trash, or a secure per-mount user trash.
+    async fn select_location(
+        &self,
+        source: &Path,
+        source_metadata: &std::fs::Metadata,
+    ) -> Result<Location, TrashError> {
+        if let Some(root) = self.forced_root.as_deref() {
+            return location(root.to_path_buf(), None);
+        }
+        let home_root = home_trash_root(&home_directory()?);
+        let home_trash_device = nearest_existing_ancestor_device(&home_root).await?;
+        if source_metadata.dev() == home_trash_device {
+            let root = home_root;
+            prepare_private_root(&root).await?;
+            return location(root, None);
+        }
+        let mount_top = mount_top_for(source, source_metadata.dev()).await?;
+        let root = mount_trash_root(&mount_top).await?;
+        prepare_private_root(&root).await?;
+        location(root, Some(mount_top))
+    }
+
+    /// Discovers only roots that can be safely validated at listing time.
+    async fn discover_locations(&self) -> Result<Vec<Location>, TrashError> {
+        if let Some(root) = self.forced_root.as_deref() {
+            validate_private_root(root).await?;
+            return Ok(vec![location(root.to_path_buf(), None)?]);
+        }
+        let home = home_directory()?;
+        let home_root = home_trash_root(&home);
+        let mut locations = Vec::new();
+        let mut seen = HashSet::new();
+        if validate_private_root(&home_root).await.is_ok() {
+            seen.insert(home_root.clone());
+            locations.push(location(home_root, None)?);
+        }
+        for mount_top in mount_points().await? {
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let shared = mount_top.join(".Trash");
+            let shared_user = shared.join(uid.to_string());
+            if validate_shared_trash(&shared).await
+                && seen.insert(shared_user.clone())
+                && validate_private_root(&shared_user).await.is_ok()
+            {
+                locations.push(location(shared_user, Some(mount_top.clone()))?);
+            }
+            let private = mount_top.join(format!(".Trash-{uid}"));
+            if seen.insert(private.clone()) && validate_private_root(&private).await.is_ok() {
+                locations.push(location(private, Some(mount_top.clone()))?);
+            }
+        }
+        Ok(locations)
+    }
 }
 
 /// Deletes one directory's direct entries, using guarded recursion only for real directories.
@@ -364,155 +575,6 @@ async fn remove_directory_contents(path: &Path, count_entries: bool) -> Result<u
         }
     }
     Ok(removed)
-}
-
-/// Restores a freshly resolved item without replacing an occupied selected destination.
-pub(super) async fn restore(
-    service: &TrashService,
-    location_id: &str,
-    item_id: &str,
-    destination: PathBuf,
-    response: &LocalCopyResponseContext<'_>,
-) -> Result<PathBuf, TrashError> {
-    validate_identifier(location_id)?;
-    validate_identifier(item_id)?;
-    if !destination.is_absolute() || destination == Path::new("/") {
-        return Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash restore destination must be an absolute non-root path",
-        ));
-    }
-    let locations = discover_locations(service).await?;
-    let location = locations
-        .into_iter()
-        .find(|location| location.id == location_id)
-        .ok_or_else(|| TrashError::new(CommandErrorKind::NotFound, "Trash location not found"))?;
-    validate_private_root(&location.root).await?;
-    let item = inventory_for_location(&location)
-        .await?
-        .into_iter()
-        .find(|item| item.public.id == item_id)
-        .ok_or_else(|| TrashError::new(CommandErrorKind::NotFound, "Trash item not found"))?;
-    let parent = destination.parent().ok_or_else(|| {
-        TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash restore destination has no parent",
-        )
-    })?;
-    let parent_directory = tokio::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(parent)
-        .await
-        .map_err(|error| {
-            if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
-                TrashError::new(
-                    CommandErrorKind::NotADirectory,
-                    "Trash restore parent must be an existing real directory",
-                )
-            } else {
-                TrashError::io("Failed to open restore parent", error)
-            }
-        })?;
-    let payload_metadata = tokio::fs::symlink_metadata(&item.payload)
-        .await
-        .map_err(|error| TrashError::io("Failed to inspect trash payload", error))?;
-    let atomic = AgentActor
-        .run_local_move(
-            item.payload.clone(),
-            destination.clone(),
-            payload_metadata.is_dir(),
-            move_source_identity(&payload_metadata),
-            CopyExistingMode::Error,
-            response,
-        )
-        .await
-        .map_err(|error| {
-            TrashError::new(
-                error.kind(),
-                format!("Failed to restore trash payload with smart move: {error}"),
-            )
-        })?;
-    drop(parent_directory);
-    log!(
-        Level::Debug,
-        "Trash payload restored: payload={}, destination={}, method={}, copy_fallback={}",
-        item.payload.display(),
-        destination.display(),
-        if atomic {
-            "filesystem_rename"
-        } else {
-            "transfer_copy_delete"
-        },
-        !atomic
-    );
-    if let Err(error) = tokio::fs::remove_file(&item.info).await {
-        redoor_core::log_failure!(
-            Level::Error,
-            "Failed to remove trash metadata after restore: path={}, error={}",
-            item.info.display(),
-            error
-        );
-        return Err(TrashError::io(
-            "Trash item restored but metadata cleanup failed",
-            error,
-        ));
-    }
-    Ok(destination)
-}
-
-/// Selects the forced root, home trash, or a secure per-mount user trash.
-async fn select_location(
-    service: &TrashService,
-    source: &Path,
-    source_metadata: &std::fs::Metadata,
-) -> Result<Location, TrashError> {
-    if let Some(root) = service.forced_root() {
-        return location(root.to_path_buf(), None);
-    }
-    let home_root = home_trash_root(&home_directory()?);
-    let home_trash_device = nearest_existing_ancestor_device(&home_root).await?;
-    if source_metadata.dev() == home_trash_device {
-        let root = home_root;
-        prepare_private_root(&root).await?;
-        return location(root, None);
-    }
-    let mount_top = mount_top_for(source, source_metadata.dev()).await?;
-    let root = mount_trash_root(&mount_top).await?;
-    prepare_private_root(&root).await?;
-    location(root, Some(mount_top))
-}
-
-/// Discovers only roots that can be safely validated at listing time.
-async fn discover_locations(service: &TrashService) -> Result<Vec<Location>, TrashError> {
-    if let Some(root) = service.forced_root() {
-        validate_private_root(root).await?;
-        return Ok(vec![location(root.to_path_buf(), None)?]);
-    }
-    let home = home_directory()?;
-    let home_root = home_trash_root(&home);
-    let mut locations = Vec::new();
-    let mut seen = HashSet::new();
-    if validate_private_root(&home_root).await.is_ok() {
-        seen.insert(home_root.clone());
-        locations.push(location(home_root, None)?);
-    }
-    for mount_top in mount_points().await? {
-        let uid = nix::unistd::Uid::effective().as_raw();
-        let shared = mount_top.join(".Trash");
-        let shared_user = shared.join(uid.to_string());
-        if validate_shared_trash(&shared).await
-            && seen.insert(shared_user.clone())
-            && validate_private_root(&shared_user).await.is_ok()
-        {
-            locations.push(location(shared_user, Some(mount_top.clone()))?);
-        }
-        let private = mount_top.join(format!(".Trash-{uid}"));
-        if seen.insert(private.clone()) && validate_private_root(&private).await.is_ok() {
-            locations.push(location(private, Some(mount_top.clone()))?);
-        }
-    }
-    Ok(locations)
 }
 
 /// Reads paired metadata without following or recursively examining payload entries.
@@ -889,22 +951,11 @@ async fn mount_top_for(source: &Path, device: u64) -> Result<PathBuf, TrashError
     ))
 }
 
-/// Uses the shared blocking mount discovery without filtering valid writable filesystems.
+/// Uses platform mount discovery without filtering valid writable filesystems.
 async fn mount_points() -> Result<Vec<PathBuf>, TrashError> {
-    tokio::task::spawn_blocking(mountpoints::mountpaths)
+    crate::platform::mounts::paths()
         .await
-        .map_err(|error| {
-            TrashError::new(
-                CommandErrorKind::Internal,
-                format!("Mount point task failed: {error}"),
-            )
-        })?
-        .map_err(|error| {
-            TrashError::new(
-                CommandErrorKind::Internal,
-                format!("Failed to list mount points: {error}"),
-            )
-        })
+        .map_err(|message| TrashError::new(CommandErrorKind::Internal, message))
 }
 
 #[cfg(test)]

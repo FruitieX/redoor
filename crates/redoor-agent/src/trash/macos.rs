@@ -1,4 +1,7 @@
-use super::TrashError;
+//! Foundation-backed macOS trash, which moves entries but exposes no restorable inventory.
+
+use super::{TrashError, TrashProvider};
+use futures_util::future::BoxFuture;
 use objc2::rc::autoreleasepool;
 use objc2_foundation::{
     NSCocoaErrorDomain, NSFileManager, NSFileNoSuchFileError, NSFileReadInvalidFileNameError,
@@ -9,9 +12,19 @@ use redoor_core::log;
 use redoor_protocol::wire::{command::CommandErrorKind, log::Level};
 use std::path::{Path, PathBuf};
 
-/// Moves one entry with Foundation so macOS selects the correct volume-local Trash.
-pub(super) async fn trash(path: PathBuf) -> Result<(), TrashError> {
-    trash_with_destination(path).await.map(|_| ())
+/// Provider that delegates placement to Foundation so macOS selects the volume-local Trash.
+pub(super) struct MacTrash;
+
+impl TrashProvider for MacTrash {
+    /// Foundation can move any entry the agent may rename.
+    fn supports_move(&self) -> bool {
+        true
+    }
+
+    /// Moves one entry with Foundation.
+    fn trash(&self, path: PathBuf) -> BoxFuture<'_, Result<(), TrashError>> {
+        Box::pin(async move { trash_with_destination(path).await.map(|_| ()) })
+    }
 }
 
 /// Retains Foundation's resulting URL internally so tests can clean the exact native item.

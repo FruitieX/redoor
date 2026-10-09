@@ -140,7 +140,7 @@ struct AgentCommandArgs {
     command: Option<AgentCommand>,
     /// Existing agent startup settings remain accepted directly after `agent`.
     #[command(flatten)]
-    run: redoor_agent::state::AgentArgs,
+    run: redoor_agent::args::AgentArgs,
 }
 
 /// Agent-specific utility commands.

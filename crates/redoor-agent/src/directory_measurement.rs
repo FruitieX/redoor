@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// One 512-byte tar record; headers, padding, and the two end blocks are all this size.
 const TAR_BLOCK_SIZE: u64 = 512;
@@ -88,9 +88,9 @@ fn tar_member_encoded_len(archive_path: &Path, content_len: u64) -> u64 {
 pub async fn measure_directory(
     source_path: &Path,
     include_root: bool,
-    cancel: &watch::Receiver<bool>,
+    cancel: &CancellationToken,
 ) -> Result<Option<DirectoryMeasurement>> {
-    if *cancel.borrow() {
+    if cancel.is_cancelled() {
         return Ok(None);
     }
 
@@ -105,7 +105,7 @@ pub async fn measure_directory(
 
     let mut pending = vec![source_path.to_path_buf()];
     while let Some(current_path) = pending.pop() {
-        if *cancel.borrow() {
+        if cancel.is_cancelled() {
             return Ok(None);
         }
 
@@ -136,7 +136,7 @@ pub async fn measure_directory(
         collected.sort_by_key(|entry| entry.file_name());
 
         for entry in collected {
-            if *cancel.borrow() {
+            if cancel.is_cancelled() {
                 return Ok(None);
             }
 

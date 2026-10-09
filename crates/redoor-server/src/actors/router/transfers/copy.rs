@@ -11,7 +11,7 @@ use super::super::state::{
 };
 use redoor_core::log;
 use redoor_protocol::ids::{AgentId, ChunkIndex, RequestId, TransferId};
-use redoor_protocol::wire::Message;
+use redoor_protocol::wire::ServerToAgent;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::stream::StreamChunkFrameRequest;
 use redoor_protocol::{
@@ -281,7 +281,7 @@ pub(crate) fn start(state: &mut RouterState, request: StartCopyRequest) {
                     },
                 };
 
-                if !source_agent_connection.send_message(Message::Command {
+                if !source_agent_connection.send_message(ServerToAgent::Command {
                     agent_id: request.source_agent_id,
                     request_id: local_request_id,
                     command,
@@ -370,7 +370,7 @@ pub(crate) fn start(state: &mut RouterState, request: StartCopyRequest) {
                 },
             );
 
-            if !dest_agent_connection.send_message(Message::Command {
+            if !dest_agent_connection.send_message(ServerToAgent::Command {
                 agent_id: request.dest_agent_id.clone(),
                 request_id: dest_request_id,
                 command: request
@@ -467,7 +467,7 @@ pub(crate) fn start_source_after_destination_ready(
         return;
     };
     if let Some(source) = state.agents.by_id.get(&source_agent_id)
-        && source.send_message(Message::Command {
+        && source.send_message(ServerToAgent::Command {
             agent_id: source_agent_id,
             request_id: source_request_id,
             command,

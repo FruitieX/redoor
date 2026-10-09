@@ -1,27 +1,27 @@
-#[cfg(target_os = "linux")]
-mod linux;
+//! Platform trash behind one provider trait selected once at startup.
+//!
+//! Previously every operation repeated a triple `cfg` and Android (whose `target_os` is not
+//! `linux`) silently lost freedesktop trash even though Termux provides `$HOME` and a normal
+//! filesystem. Providers now implement only what their platform supports and inherit
+//! "unsupported" answers for the rest.
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod freedesktop;
 #[cfg(target_os = "macos")]
 mod macos;
 
+use crate::transfers::copy::CopyContext;
+use futures_util::future::BoxFuture;
 use redoor_core::log;
 use redoor_protocol::{
     api::trash::TrashListResponse,
-    wire::{command::CommandErrorKind, log::Level},
+    wire::{
+        command::{CommandErrorKind, CommandResult},
+        log::Level,
+    },
 };
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
-use tokio::sync::Mutex;
-
-use super::transfers::copy::LocalCopyResponseContext;
-
-/// Immutable startup configuration used by every trash command worker.
-#[derive(Clone)]
-pub(crate) struct TrashService {
-    #[cfg(target_os = "linux")]
-    forced_root: Option<PathBuf>,
-    /// Prevents purge from racing with publication or restoration of provider metadata.
-    mutation_lock: Arc<Mutex<()>>,
-}
 
 /// Keeps provider failures mapped to stable command error categories.
 #[derive(Debug, Error)]
@@ -41,146 +41,221 @@ impl TrashError {
     }
 
     /// Adds operation context while preserving the OS error's stable category.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     pub(crate) fn io(context: &str, error: std::io::Error) -> Self {
         Self::new(
             CommandErrorKind::from_io_error(&error),
             format!("{context}: {error}"),
         )
     }
+
+    /// Answer for operations the selected provider does not implement.
+    fn unsupported() -> Self {
+        Self::new(
+            CommandErrorKind::InvalidInput,
+            "Trash is unsupported on this platform",
+        )
+    }
 }
 
-impl TrashService {
-    /// Resolves and validates runtime trash configuration once before registration.
-    pub(crate) async fn initialize(forced_root: Option<PathBuf>) -> Result<Self, TrashError> {
-        #[cfg(target_os = "linux")]
-        {
-            let service = Self {
-                forced_root,
-                mutation_lock: Arc::new(Mutex::new(())),
-            };
-            if let Some(root) = &service.forced_root {
-                linux::prepare_private_root(root).await?;
-            }
-            Ok(service)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            if forced_root.is_some() {
-                return Err(TrashError::new(
-                    CommandErrorKind::InvalidInput,
-                    "Trash directory overrides are supported only on Linux",
-                ));
-            }
-            Ok(Self {
-                mutation_lock: Arc::new(Mutex::new(())),
-            })
-        }
+impl From<TrashError> for CommandResult {
+    /// Trash failures cross the protocol boundary with their stable kind.
+    fn from(error: TrashError) -> Self {
+        CommandResult::error(error.kind.clone(), error.to_string())
+    }
+}
+
+/// Builds an already-resolved future for operations a provider does not support.
+fn unsupported<'a, T: Send + 'a>() -> BoxFuture<'a, Result<T, TrashError>> {
+    Box::pin(std::future::ready(Err(TrashError::unsupported())))
+}
+
+/// One platform's trash implementation.
+pub(crate) trait TrashProvider: Send + Sync {
+    /// Whether entries can be moved into this platform's trash.
+    fn supports_move(&self) -> bool {
+        false
     }
 
-    /// Advertises providers that can move entries to platform trash.
-    pub(crate) const fn supports_move(&self) -> bool {
-        cfg!(any(target_os = "linux", target_os = "macos"))
-    }
-
-    /// Advertises providers that implement Redoor trash inventory and restore.
-    pub(crate) const fn supports_inventory(&self) -> bool {
-        cfg!(target_os = "linux")
-    }
-
-    /// Supplies inert configuration to tests that do not execute trash commands.
-    #[cfg(test)]
-    pub(crate) fn for_tests() -> Self {
-        Self {
-            #[cfg(target_os = "linux")]
-            forced_root: None,
-            mutation_lock: Arc::new(Mutex::new(())),
-        }
+    /// Whether Redoor can list, purge and restore this platform's trash.
+    fn supports_inventory(&self) -> bool {
+        false
     }
 
     /// Moves one entry to the provider-selected same-device trash location.
-    pub(crate) async fn trash(&self, path: PathBuf) -> Result<(), TrashError> {
-        log!(
-            Level::Debug,
-            "Trash operation requested: path={}",
-            path.display()
-        );
-        let _guard = self.mutation_lock.lock().await;
-        log!(
-            Level::Debug,
-            "Trash mutation lock acquired: path={}",
-            path.display()
-        );
-        #[cfg(target_os = "linux")]
-        let result = linux::trash(self, path.clone()).await;
-        #[cfg(target_os = "macos")]
-        let result = macos::trash(path.clone()).await;
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        let result = Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash is unsupported on this platform",
-        ));
-        match &result {
-            Ok(()) => log!(
-                Level::Debug,
-                "Trash operation completed: path={}",
-                path.display()
-            ),
-            Err(error) => log!(
-                Level::Debug,
-                "Trash operation failed: path={}, kind={:?}, error={}",
-                path.display(),
-                error.kind,
-                error
-            ),
-        }
-        result
+    fn trash(&self, _path: PathBuf) -> BoxFuture<'_, Result<(), TrashError>> {
+        unsupported()
     }
 
-    /// Discovers and orders a fresh trash inventory without recursively scanning payloads.
-    pub(crate) async fn list(&self) -> Result<TrashListResponse, TrashError> {
-        #[cfg(target_os = "linux")]
-        return linux::list(self).await;
-        #[cfg(not(target_os = "linux"))]
-        Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash is unsupported on this platform",
-        ))
+    /// Discovers and orders a fresh inventory without recursively scanning payloads.
+    fn list(&self) -> BoxFuture<'_, Result<TrashListResponse, TrashError>> {
+        unsupported()
     }
 
     /// Permanently removes all payloads and metadata while preserving provider roots.
-    pub(crate) async fn empty(&self) -> Result<u64, TrashError> {
-        let _guard = self.mutation_lock.lock().await;
-        #[cfg(target_os = "linux")]
-        return linux::empty(self).await;
-        #[cfg(not(target_os = "linux"))]
-        Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash is unsupported on this platform",
-        ))
+    fn empty(&self) -> BoxFuture<'_, Result<u64, TrashError>> {
+        unsupported()
     }
 
-    /// Resolves opaque identifiers before restoring one payload to an explicit destination.
+    /// Restores one inventory item to an explicit destination with move semantics.
+    fn restore<'a>(
+        &'a self,
+        _location_id: &'a str,
+        _item_id: &'a str,
+        _destination: PathBuf,
+        _copy: CopyContext<'a>,
+    ) -> BoxFuture<'a, Result<PathBuf, TrashError>> {
+        unsupported()
+    }
+}
+
+/// Provider for platforms without a supported trash; every operation is rejected.
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
+struct UnsupportedTrash;
+
+#[cfg(any(
+    test,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
+impl TrashProvider for UnsupportedTrash {}
+
+/// Cloneable handle to the provider selected at startup, translating results for commands.
+#[derive(Clone)]
+pub(crate) struct Trash {
+    provider: Arc<dyn TrashProvider>,
+    /// Advertised at registration so servers do not offer an impossible action.
+    pub(crate) supports_move: bool,
+    /// Advertised at registration so servers only show inventories that can be read.
+    pub(crate) supports_inventory: bool,
+}
+
+impl Trash {
+    /// Selects and validates the platform provider once, before the agent registers.
+    pub(crate) async fn select(forced_root: Option<PathBuf>) -> Result<Self, TrashError> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let provider: Arc<dyn TrashProvider> =
+            Arc::new(freedesktop::FreedesktopTrash::initialize(forced_root).await?);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let provider: Arc<dyn TrashProvider> = {
+            if forced_root.is_some() {
+                return Err(TrashError::new(
+                    CommandErrorKind::InvalidInput,
+                    "Trash directory overrides are supported only with freedesktop trash (Linux and Android)",
+                ));
+            }
+            #[cfg(target_os = "macos")]
+            let provider = Arc::new(macos::MacTrash);
+            #[cfg(not(target_os = "macos"))]
+            let provider = Arc::new(UnsupportedTrash);
+            provider
+        };
+        Ok(Self::from_provider(provider))
+    }
+
+    /// Captures the provider's capabilities once so registration never re-queries them.
+    fn from_provider(provider: Arc<dyn TrashProvider>) -> Self {
+        Self {
+            supports_move: provider.supports_move(),
+            supports_inventory: provider.supports_inventory(),
+            provider,
+        }
+    }
+
+    /// Supplies a provider that rejects every operation, for tests that never touch trash.
+    #[cfg(test)]
+    pub(crate) fn unsupported() -> Self {
+        Self::from_provider(Arc::new(UnsupportedTrash))
+    }
+
+    /// Runs the `Trash` command, logging the request and outcome for operators and tests.
+    pub(crate) async fn move_to_trash(&self, path: String) -> CommandResult {
+        log!(Level::Debug, "Trash operation requested: path={}", path);
+        match self.provider.trash(PathBuf::from(&path)).await {
+            Ok(()) => {
+                log!(Level::Debug, "Trash operation completed: path={}", path);
+                CommandResult::Trash
+            }
+            Err(error) => {
+                log!(
+                    Level::Debug,
+                    "Trash operation failed: path={}, kind={:?}, error={}",
+                    path,
+                    error.kind,
+                    error
+                );
+                error.into()
+            }
+        }
+    }
+
+    /// Runs the `ListTrash` command.
+    pub(crate) async fn list(&self) -> CommandResult {
+        self.provider
+            .list()
+            .await
+            .map_or_else(CommandResult::from, CommandResult::TrashList)
+    }
+
+    /// Runs the `EmptyTrash` command.
+    pub(crate) async fn empty(&self) -> CommandResult {
+        self.provider
+            .empty()
+            .await
+            .map_or_else(CommandResult::from, |deleted_items| {
+                CommandResult::EmptyTrash { deleted_items }
+            })
+    }
+
+    /// Runs the `RestoreTrash` command and reports the restored path.
     pub(crate) async fn restore(
         &self,
-        _location_id: &str,
-        _item_id: &str,
-        _destination: PathBuf,
-        _response: &LocalCopyResponseContext<'_>,
-    ) -> Result<PathBuf, TrashError> {
-        let _guard = self.mutation_lock.lock().await;
-        #[cfg(target_os = "linux")]
-        return linux::restore(self, _location_id, _item_id, _destination, _response).await;
-        #[cfg(not(target_os = "linux"))]
-        Err(TrashError::new(
-            CommandErrorKind::InvalidInput,
-            "Trash is unsupported on this platform",
-        ))
+        location_id: &str,
+        item_id: &str,
+        destination_path: String,
+        copy: CopyContext<'_>,
+    ) -> CommandResult {
+        match self
+            .provider
+            .restore(location_id, item_id, PathBuf::from(destination_path), copy)
+            .await
+        {
+            Ok(path) => match path.into_os_string().into_string() {
+                Ok(path) => CommandResult::RestoreTrash { path },
+                Err(_) => CommandResult::error(
+                    CommandErrorKind::InvalidInput,
+                    "Restored path is not valid UTF-8",
+                ),
+            },
+            Err(error) => error.into(),
+        }
     }
+}
 
-    /// Exposes the immutable override only inside the platform provider.
-    #[cfg(target_os = "linux")]
-    fn forced_root(&self) -> Option<&std::path::Path> {
-        self.forced_root.as_deref()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies the unsupported provider rejects every operation without advertising support.
+    #[tokio::test]
+    async fn unsupported_provider_rejects_every_operation() {
+        redoor_core::logging::init(None).await.unwrap();
+        let trash = Trash::unsupported();
+
+        // Registration must not advertise capabilities the provider lacks.
+        assert!(!trash.supports_move && !trash.supports_inventory);
+        // Mutations fail with the stable invalid-input kind instead of panicking.
+        assert!(matches!(
+            trash.move_to_trash("/tmp/x".to_string()).await,
+            CommandResult::Error {
+                kind: CommandErrorKind::InvalidInput,
+                ..
+            }
+        ));
+        // Inventory reads are equally rejected.
+        assert!(matches!(trash.list().await, CommandResult::Error { .. }));
+        assert!(matches!(trash.empty().await, CommandResult::Error { .. }));
     }
 }

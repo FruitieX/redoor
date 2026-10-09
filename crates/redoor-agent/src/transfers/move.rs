@@ -1,17 +1,17 @@
 use super::copy::{
-    LocalCopyError, LocalCopyResponseContext, validate_local_copy_destination,
-    validate_local_copy_parent,
+    CopyContext, LocalCopyError, validate_local_copy_destination, validate_local_copy_parent,
 };
-use crate::{AgentActor, AgentCommandError};
+use crate::errors::AgentCommandError;
 use redoor_core::atomic_rename::{
     AtomicRenameOutcome, ReplacementRenameOutcome, exchange_existing_paths,
     rename_with_replacement, rename_without_replacement,
 };
 use redoor_core::destination::{
-    DestinationPlaceError, backup_path_for_destination, check_existing_destination,
-    destination_entry_exists, remove_existing_path,
+    DestinationPlaceError, check_existing_destination, destination_entry_exists,
+    remove_existing_path,
 };
 use redoor_core::log;
+use redoor_core::staging::StagingKind;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{
     api::transfers::CopyExistingMode,
@@ -53,28 +53,26 @@ impl LocalMoveError {
     }
 }
 
-impl AgentActor {
+impl CopyContext<'_> {
     /// Moves a same-agent path atomically when possible and otherwise copies before deleting.
-    pub(crate) async fn local_move(
+    pub(crate) async fn move_command(
         &self,
         source_path: String,
         dest_path: String,
         source_is_directory: bool,
         expected_identity: MoveSourceIdentity,
         on_existing: CopyExistingMode,
-        response: LocalCopyResponseContext<'_>,
-    ) {
+    ) -> CommandResult {
         let result = self
-            .run_local_move(
+            .move_entry(
                 PathBuf::from(&source_path),
                 PathBuf::from(&dest_path),
                 source_is_directory,
                 expected_identity,
                 on_existing,
-                &response,
             )
             .await;
-        let result = match result {
+        match result {
             Ok(atomic) => {
                 log!(
                     Level::Debug,
@@ -100,25 +98,17 @@ impl AgentActor {
                 );
                 AgentCommandError::from(error).into()
             }
-        };
-        self.send_command_response(
-            response.write,
-            response.agent_id,
-            response.request_id,
-            result,
-        )
-        .await;
+        }
     }
 
     /// Returns whether a filesystem rename published the destination for public progress stamping.
-    pub(crate) async fn run_local_move(
+    pub(crate) async fn move_entry(
         &self,
         source: PathBuf,
         dest: PathBuf,
         source_is_directory: bool,
         expected_identity: MoveSourceIdentity,
         on_existing: CopyExistingMode,
-        response: &LocalCopyResponseContext<'_>,
     ) -> Result<bool, LocalMoveError> {
         log!(
             Level::Debug,
@@ -130,11 +120,11 @@ impl AgentActor {
             expected_identity
         );
         validate_local_copy_destination(&source, &dest, source_is_directory).await?;
-        super::copy::ensure_local_copy_active(&response.cancel)?;
+        self.ensure_active()?;
         validate_local_copy_parent(&dest).await?;
-        super::copy::ensure_local_copy_active(&response.cancel)?;
+        self.ensure_active()?;
         check_existing_destination(&dest, on_existing, source_is_directory).await?;
-        super::copy::ensure_local_copy_active(&response.cancel)?;
+        self.ensure_active()?;
         let source_metadata = tokio::fs::symlink_metadata(&source)
             .await
             .map_err(|error| {
@@ -144,7 +134,7 @@ impl AgentActor {
                     LocalMoveError::from(LocalCopyError::AccessSourceFile(error))
                 }
             })?;
-        super::copy::ensure_local_copy_active(&response.cancel)?;
+        self.ensure_active()?;
         {
             use std::os::unix::fs::MetadataExt;
             log!(
@@ -187,19 +177,19 @@ impl AgentActor {
                 "Smart move source identity mismatch before rename: source={}, expected_identity={:?}, actual_identity={:?}",
                 source.display(),
                 expected_identity,
-                move_source_identity(&source_metadata)
+                MoveSourceIdentity::from_metadata(&source_metadata)
             );
             return Err(LocalMoveError::SourceChanged);
         }
         let destination_exists = destination_entry_exists(&dest).await?;
-        super::copy::ensure_local_copy_active(&response.cancel)?;
+        self.ensure_active()?;
         let dest_parent = dest
             .parent()
             .ok_or_else(|| LocalCopyError::DestinationParentNotFound(dest.display().to_string()))?;
         let dest_parent_metadata = tokio::fs::metadata(dest_parent).await.map_err(|_| {
             LocalCopyError::AccessDestinationParent(dest_parent.display().to_string())
         })?;
-        super::copy::ensure_local_copy_active(&response.cancel)?;
+        self.ensure_active()?;
         let same_mount = metadata_on_same_mount(&source_metadata, &dest_parent_metadata);
         let atomic_rename = can_use_atomic_rename(same_mount, destination_exists, on_existing);
         {
@@ -291,9 +281,8 @@ impl AgentActor {
             copy_kind
         );
         if source_metadata.file_type().is_symlink() {
-            self.run_local_copy_symlink(source.clone(), dest, on_existing, response)
-                .await?;
-            super::copy::ensure_local_copy_active(&response.cancel)?;
+            self.copy_symlink(source.clone(), dest, on_existing).await?;
+            self.ensure_active()?;
             verify_move_source_identity(&source, &expected_identity).await?;
             log!(
                 Level::Debug,
@@ -304,10 +293,10 @@ impl AgentActor {
                 .await
                 .map_err(LocalMoveError::DeleteSource)?;
         } else if source_is_directory {
-            self.run_local_copy_directory(source.clone(), dest, on_existing, response)
+            self.copy_directory(source.clone(), dest, on_existing)
                 .await?;
             // Cancellation after destination publication still wins before destructive source deletion.
-            super::copy::ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             verify_move_source_identity(&source, &expected_identity).await?;
             log!(
                 Level::Debug,
@@ -318,10 +307,9 @@ impl AgentActor {
                 .await
                 .map_err(LocalMoveError::DeleteSource)?;
         } else {
-            self.run_local_copy_file(source.clone(), dest, on_existing, response)
-                .await?;
+            self.copy_file(source.clone(), dest, on_existing).await?;
             // Source preservation is the final cancel boundary for cross-device file moves.
-            super::copy::ensure_local_copy_active(&response.cancel)?;
+            self.ensure_active()?;
             verify_move_source_identity(&source, &expected_identity).await?;
             log!(
                 Level::Debug,
@@ -333,20 +321,6 @@ impl AgentActor {
                 .map_err(LocalMoveError::DeleteSource)?;
         }
         Ok(false)
-    }
-}
-
-/// Identifies one local source for conditional cleanup after copy publication.
-pub(crate) fn move_source_identity(metadata: &std::fs::Metadata) -> MoveSourceIdentity {
-    use std::os::unix::fs::MetadataExt;
-
-    MoveSourceIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.len(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        is_directory: metadata.is_dir(),
     }
 }
 
@@ -370,7 +344,7 @@ async fn verify_move_source_identity(
             "Smart move source identity mismatch before deletion: source={}, expected_identity={:?}, actual_identity={:?}",
             source.display(),
             expected_identity,
-            move_source_identity(&metadata)
+            MoveSourceIdentity::from_metadata(&metadata)
         );
         return Err(LocalMoveError::SourceChanged);
     }
@@ -383,7 +357,7 @@ async fn move_source_matches_identity(
     entry_metadata: &std::fs::Metadata,
     expected_identity: &MoveSourceIdentity,
 ) -> Result<bool, LocalMoveError> {
-    let entry_identity = move_source_identity(entry_metadata);
+    let entry_identity = MoveSourceIdentity::from_metadata(entry_metadata);
     if entry_identity == *expected_identity {
         log!(
             Level::Debug,
@@ -406,7 +380,7 @@ async fn move_source_matches_identity(
     let target_metadata = tokio::fs::metadata(source)
         .await
         .map_err(LocalMoveError::DeleteSource)?;
-    let target_identity = move_source_identity(&target_metadata);
+    let target_identity = MoveSourceIdentity::from_metadata(&target_metadata);
     let matched = target_identity == *expected_identity;
     log!(
         Level::Debug,
@@ -432,7 +406,7 @@ enum SameFilesystemRenameResult {
 async fn finish_atomic_override(source: PathBuf, dest: PathBuf) -> Result<(), LocalMoveError> {
     let mut cleanup_path = None;
     for _ in 0..16 {
-        let candidate = backup_path_for_destination(&source);
+        let candidate = StagingKind::OverrideBackup.sibling_of(&source);
         match tokio::fs::symlink_metadata(&candidate).await {
             Ok(_) => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -668,7 +642,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[tokio::test]
     async fn atomic_rename_moves_missing_directory() {
         let temp_dir = TempDir::create();
@@ -706,7 +680,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[tokio::test]
     async fn atomic_rename_moves_missing_destination() {
         let temp_dir = TempDir::create();
@@ -741,7 +715,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[tokio::test]
     async fn atomic_rename_without_replacement_refuses_existing_destination() {
         let temp_dir = TempDir::create();
@@ -783,7 +757,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[tokio::test]
     async fn atomic_rename_exchanges_different_entry_types() {
         let temp_dir = TempDir::create();
@@ -832,7 +806,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[tokio::test]
     async fn atomic_rename_exchanges_directories() {
         let temp_dir = TempDir::create();

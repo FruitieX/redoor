@@ -590,7 +590,7 @@ mod tests {
         api::transfers::TransferProgressState,
         ids::{ChunkIndex, SocketId},
         wire::{
-            Message,
+            ServerToAgent,
             command::Command,
             stream::{StreamChunk, StreamPayloadKind},
         },
@@ -641,8 +641,10 @@ mod tests {
             .expect("transfer token queued")
         {
             axum::extract::ws::Message::Text(text) => {
-                match serde_json::from_str::<Message>(&text).expect("valid transfer bootstrap") {
-                    Message::TransferSocketOpen { token } => token,
+                match serde_json::from_str::<ServerToAgent>(&text)
+                    .expect("valid transfer bootstrap")
+                {
+                    ServerToAgent::TransferSocketOpen { token } => token,
                     other => panic!("unexpected bootstrap message: {other:?}"),
                 }
             }
@@ -693,8 +695,9 @@ mod tests {
         let command_request_id = match text_receiver.recv().await.expect("download command queued")
         {
             axum::extract::ws::Message::Text(text) => {
-                match serde_json::from_str::<Message>(&text).expect("valid download command") {
-                    Message::Command { request_id, .. } => request_id,
+                match serde_json::from_str::<ServerToAgent>(&text).expect("valid download command")
+                {
+                    ServerToAgent::Command { request_id, .. } => request_id,
                     other => panic!("unexpected command message: {other:?}"),
                 }
             }
@@ -749,8 +752,8 @@ mod tests {
             .expect("cancel message queued")
         {
             axum::extract::ws::Message::Text(text) => {
-                match serde_json::from_str::<Message>(&text).expect("valid cancel command") {
-                    Message::CancelTransfer { request_id } => request_id,
+                match serde_json::from_str::<ServerToAgent>(&text).expect("valid cancel command") {
+                    ServerToAgent::CancelTransfer { request_id } => request_id,
                     other => panic!("unexpected cancellation message: {other:?}"),
                 }
             }

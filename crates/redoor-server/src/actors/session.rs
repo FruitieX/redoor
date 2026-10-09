@@ -9,7 +9,7 @@ use redoor_core::log;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{
     ids::{AgentId, SocketId},
-    wire::Message,
+    wire::{AgentToServer, ServerToAgent},
 };
 use sha2::{Digest, Sha256};
 use std::time::Instant;
@@ -48,7 +48,7 @@ struct SessionRuntime {
     /// Provides the actor handle used to register the session and forward control
     /// and streaming messages into the routing layer.
     router_ref: RouterHandle,
-    /// Remains absent until the websocket sends `Message::AgentRegister`, because
+    /// Remains absent until the websocket sends `AgentToServer::AgentRegister`, because
     /// the socket exists before the remote agent has announced which logical
     /// agent identity it should be associated with.
     agent_id: Option<AgentId>,
@@ -71,11 +71,11 @@ impl SessionRuntime {
     /// Registers the agent with the router once the websocket announces itself.
     async fn handle_control_message(
         &mut self,
-        message: Message,
+        message: AgentToServer,
         watchdog_registry: &WatchdogRegistry,
     ) {
         match message {
-            Message::AgentRegister {
+            AgentToServer::AgentRegister {
                 agent_id,
                 agent_name,
                 os,
@@ -102,7 +102,7 @@ impl SessionRuntime {
                         self.socket_id
                     );
                     let _ = self.outgoing_priority.try_send(WsMessage::Text(
-                        serde_json::to_string(&Message::Error {
+                        serde_json::to_string(&ServerToAgent::Error {
                             message: "Invalid agent token".to_string(),
                         })
                         .unwrap_or_else(|_| {
@@ -130,7 +130,7 @@ impl SessionRuntime {
                             agent_name
                         );
                         let _ = self.outgoing_priority.try_send(WsMessage::Text(
-                            serde_json::to_string(&Message::Error {
+                            serde_json::to_string(&ServerToAgent::Error {
                                 message: "Managed agent is intentionally stopped".to_string(),
                             })
                             .unwrap_or_else(|_| {
@@ -175,7 +175,7 @@ impl SessionRuntime {
                     }));
                 self.agent_id = Some(agent_id);
             }
-            Message::AgentUnregister { agent_id } => {
+            AgentToServer::AgentUnregister { agent_id } => {
                 if let Some(watchdog) = self.watchdog.as_ref() {
                     watchdog.mark_disconnected(self.socket_id.clone());
                 }
@@ -196,7 +196,7 @@ impl SessionRuntime {
                     );
                 }
             }
-            Message::TransferReady {
+            AgentToServer::TransferReady {
                 agent_id,
                 request_id,
             } => {
@@ -220,7 +220,7 @@ impl SessionRuntime {
                     );
                 }
             }
-            Message::CommandResponse {
+            AgentToServer::CommandResponse {
                 agent_id,
                 request_id,
                 result,
@@ -245,7 +245,7 @@ impl SessionRuntime {
                     );
                 }
             }
-            Message::UploadPublicationRequest {
+            AgentToServer::UploadPublicationRequest {
                 agent_id,
                 request_id,
             } => {
@@ -259,7 +259,7 @@ impl SessionRuntime {
                         .await;
                 }
             }
-            Message::TransferProgressUpdate {
+            AgentToServer::TransferProgressUpdate {
                 agent_id,
                 request_id,
                 transferred_bytes,
@@ -274,7 +274,6 @@ impl SessionRuntime {
                     },
                 ));
             }
-            _ => {}
         }
     }
 
@@ -313,7 +312,7 @@ impl SessionRuntime {
         watchdog_registry: &WatchdogRegistry,
     ) -> bool {
         match message {
-            WsMessage::Text(text) => match serde_json::from_str::<Message>(&text) {
+            WsMessage::Text(text) => match serde_json::from_str::<AgentToServer>(&text) {
                 Ok(message) => {
                     self.handle_control_message(message, watchdog_registry)
                         .await
@@ -507,7 +506,7 @@ mod tests {
         };
         let watchdog_registry = WatchdogRegistry::new();
         let response = runtime.handle_control_message(
-            Message::CommandResponse {
+            AgentToServer::CommandResponse {
                 agent_id: agent_id.clone(),
                 request_id,
                 result: redoor_protocol::wire::command::CommandResult::RawUpload,

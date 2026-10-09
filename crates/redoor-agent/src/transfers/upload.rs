@@ -1,1008 +1,673 @@
-use super::super::{ActiveUploads, AgentActor, AgentCommandError, UploadSessionHandle};
-use super::bounded_tar::{BoundedTarReader, InvalidMetadata, InvalidTermination};
-use anyhow::Result;
-use redoor_core::destination::{
-    DestinationPlaceError, check_existing_destination, place_temp_at_destination,
-};
+//! Generic driver for server-to-agent uploads plus the chunk and publication routing they share.
+//!
+//! Raw file uploads, tar directory uploads and in-place file edits differ only in how bytes are
+//! staged and published. Their lifecycle (readiness, payload validation, cancellation, abort,
+//! unregistration and the terminal response) lives here once so the three cannot drift apart.
+
+use crate::commands::ctx::{CommandCtx, Reply};
+use crate::errors::AgentCommandError;
+use crate::runtime::responder::{ControlSender, Responder};
 use redoor_core::log;
 use redoor_protocol::{
-    api::transfers::CopyExistingMode,
     ids::{AgentId, RequestId},
     wire::{
         command::{CommandErrorKind, CommandResult},
         log::Level,
-        stream,
-        stream::StreamPayloadKind,
+        policy::UploadKind,
+        stream::StreamChunk,
     },
 };
-use std::path::{Component, Path, PathBuf};
-use thiserror::Error;
-use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
-/// Keeps tar upload failures typed so the API layer never depends on parsing text.
-#[derive(Debug, Error)]
-pub(crate) enum TarUploadError {
-    #[error("Tar entry path escapes destination: {0}")]
-    EscapingTarEntryPath(String),
-    #[error("Tar entry path cannot be empty")]
-    EmptyTarEntryPath,
-    #[error("Destination parent not found for {0}")]
-    DestinationParentNotFound(String),
-    #[error("Failed to access destination parent: {0}")]
-    AccessDestinationParent(#[source] std::io::Error),
-    #[error("Destination parent is not a directory: {0}")]
-    DestinationParentNotDirectory(String),
-    #[error(transparent)]
-    DestinationPlacement(#[from] DestinationPlaceError),
-    #[error("Failed to create temp directory: {0}")]
-    CreateTempDirectory(#[source] std::io::Error),
-    #[error("Failed to read tar entries")]
-    ReadTarEntries,
-    #[error("Failed to read tar entry")]
-    ReadTarEntry,
-    #[error("{0}")]
-    InvalidTarMetadata(String),
-    #[error("{0}")]
-    InvalidTarTermination(String),
-    #[error("Unsupported tar entry type: {0:?}")]
-    UnsupportedTarEntryType(tar::EntryType),
-    #[error("Failed to read tar entry path")]
-    ReadTarEntryPath,
-    #[error("Failed to create destination directory: {0}")]
-    CreateDestinationDirectory(String),
-    #[error("Failed to unpack tar entry to {0}")]
-    UnpackTarEntry(String),
-    #[error("Tar extraction worker failed: {0}")]
-    ExtractionWorkerFailed(String),
+/// Bounded per-upload chunk queue between the transfer socket reader and the worker.
+const CHUNK_QUEUE_CAPACITY: usize = 8;
+/// Upper bound on waiting for the router's publication decision.
+const PUBLICATION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Destination-specific staging and publication for one upload.
+pub(crate) trait UploadSink: Send + Sized {
+    /// Whether a terminal chunk already queued must win over a concurrent cancellation.
+    ///
+    /// Edits commit an accepted terminal frame even if transfer teardown races it; replacing
+    /// uploads instead stay promptly cancelable because publication is separately gated.
+    const TERMINAL_WINS_OVER_CANCEL: bool = false;
+
+    /// Stages one chunk of payload bytes.
+    fn write(
+        &mut self,
+        data: Vec<u8>,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<(), SinkError>> + Send;
+
+    /// Publishes the staged content after the terminal chunk and returns the success result.
+    ///
+    /// Implementations remove their own staging output when publication fails.
+    fn commit(
+        self,
+        gate: PublicationGate<'_>,
+    ) -> impl Future<Output = Result<CommandResult, AgentCommandError>> + Send;
+
+    /// Discards staged output after cancellation or failure.
+    fn abort(self) -> impl Future<Output = ()> + Send;
 }
 
-impl TarUploadError {
-    /// Maps one tar-upload failure to the stable command error kind carried over the protocol.
-    pub(crate) fn kind(&self) -> CommandErrorKind {
-        match self {
-            Self::AccessDestinationParent(error) | Self::CreateTempDirectory(error) => {
-                CommandErrorKind::from_io_error(error)
-            }
-            Self::DestinationPlacement(error) => error.kind(),
-            Self::DestinationParentNotDirectory(_) => CommandErrorKind::NotADirectory,
-            Self::EscapingTarEntryPath(_)
-            | Self::EmptyTarEntryPath
-            | Self::InvalidTarMetadata(_)
-            | Self::InvalidTarTermination(_)
-            | Self::DestinationParentNotFound(_)
-            | Self::UnsupportedTarEntryType(_) => CommandErrorKind::InvalidInput,
-            Self::ReadTarEntries
-            | Self::ReadTarEntry
-            | Self::ReadTarEntryPath
-            | Self::CreateDestinationDirectory(_)
-            | Self::UnpackTarEntry(_)
-            | Self::ExtractionWorkerFailed(_) => CommandErrorKind::Internal,
-        }
+/// Why staging one chunk stopped.
+pub(crate) enum SinkError {
+    /// Cancellation won while the sink waited for internal capacity.
+    Canceled,
+    /// The chunk could not be staged.
+    Failed(AgentCommandError),
+}
+
+impl From<AgentCommandError> for SinkError {
+    /// Staging failures carry their protocol error kind unchanged.
+    fn from(error: AgentCommandError) -> Self {
+        Self::Failed(error)
     }
 }
 
-/// Removes an abandoned upload temp directory so failed tar uploads do not leave partial trees behind.
-async fn remove_upload_temp_directory(temp_path: &Path) {
-    if let Err(error) = redoor_core::safe_fs::safe_rm_all(temp_path).await {
-        log!(
-            Level::Warning,
-            "Failed to remove upload temp directory: path={}, error={}",
-            temp_path.display(),
-            error
-        );
-    }
+/// Router-ordered permission to change the destination with staged content.
+pub(crate) struct PublicationGate<'a> {
+    routes: &'a UploadRoutes,
+    responder: &'a Responder,
+    cancel: &'a CancellationToken,
 }
 
-/// Builds the hidden temp directory path used while a tar upload is still incomplete.
-fn temp_upload_dir_path(path: &str) -> PathBuf {
-    let destination = Path::new(path);
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("upload-dir");
-    let temp_name = format!(".{}.redoor-upload-dir-{}", file_name, fastrand::u64(..));
-
-    match destination.parent() {
-        Some(parent) => parent.join(temp_name),
-        None => PathBuf::from(format!("./{}", temp_name)),
-    }
-}
-
-/// Rejects tar entry paths that could escape the destination directory during extraction.
-fn sanitize_tar_entry_path(entry_path: &Path) -> Result<PathBuf, TarUploadError> {
-    let mut sanitized = PathBuf::new();
-
-    for component in entry_path.components() {
-        match component {
-            Component::Normal(part) => sanitized.push(part),
-            Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
-                return Err(TarUploadError::EscapingTarEntryPath(
-                    entry_path.display().to_string(),
-                ));
-            }
+impl<'a> PublicationGate<'a> {
+    /// Binds the gate to one request's routing, responder and cancellation.
+    pub(crate) fn new(
+        routes: &'a UploadRoutes,
+        responder: &'a Responder,
+        cancel: &'a CancellationToken,
+    ) -> Self {
+        Self {
+            routes,
+            responder,
+            cancel,
         }
     }
 
-    if sanitized.as_os_str().is_empty() {
-        return Err(TarUploadError::EmptyTarEntryPath);
+    /// Whether the upload was canceled; checked after work the sink could not interrupt.
+    pub(crate) fn is_canceled(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 
-    Ok(sanitized)
+    /// Asks the router whether publication may proceed while cancellation stays possible.
+    ///
+    /// Metadata preparation touches only owned staging; the router orders cancellation before
+    /// the first rename, backup or merge can affect user data.
+    pub(crate) async fn authorize(&self) -> bool {
+        if self.cancel.is_cancelled() {
+            return false;
+        }
+        let request_id = self.responder.request_id();
+        let decision = self.routes.await_publication(request_id);
+        let authorization = async {
+            self.responder.request_publication().await.ok()?;
+            decision.await.ok()
+        };
+        let allowed = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => false,
+            result = tokio::time::timeout(PUBLICATION_DECISION_TIMEOUT, authorization) => {
+                result.ok().flatten().unwrap_or(false)
+            }
+        };
+        self.routes.forget_publication(request_id);
+        allowed && !self.cancel.is_cancelled()
+    }
 }
 
-/// Creates the temp destination and background unpack worker for one tar upload request.
-async fn create_tar_upload_session(
+/// One event observed while the upload is still reversible.
+enum UploadEvent {
+    Chunk(Option<StreamChunk>),
+    Canceled,
+}
+
+/// Why the receive loop ended without publishing.
+enum UploadStop {
+    Canceled,
+    Failed(AgentCommandError),
+}
+
+/// Lifecycle owner for one upload request.
+pub(crate) struct UploadDriver {
+    kind: UploadKind,
     path: String,
-    on_existing: CopyExistingMode,
-) -> Result<TarUploadSession, TarUploadError> {
-    let destination = PathBuf::from(&path);
-    let parent = destination
-        .parent()
-        .ok_or_else(|| TarUploadError::DestinationParentNotFound(path.clone()))?
-        .to_path_buf();
-
-    let parent_metadata = tokio::fs::metadata(&parent)
-        .await
-        .map_err(TarUploadError::AccessDestinationParent)?;
-    if !parent_metadata.is_dir() {
-        return Err(TarUploadError::DestinationParentNotDirectory(
-            parent.display().to_string(),
-        ));
-    }
-
-    check_existing_destination(&destination, on_existing, true).await?;
-
-    let temp_path = temp_upload_dir_path(&path);
-    tokio::fs::create_dir(&temp_path)
-        .await
-        .map_err(TarUploadError::CreateTempDirectory)?;
-
-    let (chunk_sender, chunk_receiver) = mpsc::channel::<Vec<u8>>(8);
-    let temp_path_for_worker = temp_path.clone();
-
-    let unpacker_handle = tokio::task::spawn_blocking(move || {
-        unpack_tar_stream_into_directory(chunk_receiver, &temp_path_for_worker)
-    });
-
-    Ok(TarUploadSession {
-        path,
-        temp_path,
-        on_existing,
-        chunk_sender: Some(chunk_sender),
-        unpacker_handle: Some(unpacker_handle),
-        bytes_written: 0,
-    })
+    ctx: CommandCtx,
 }
 
-/// Extracts tar bytes from the async-safe chunk channel into the temp destination directory.
-fn unpack_tar_stream_into_directory(
-    chunk_receiver: mpsc::Receiver<Vec<u8>>,
-    destination_root: &Path,
-) -> Result<(), TarUploadError> {
-    struct ChannelTarReader {
-        chunk_receiver: mpsc::Receiver<Vec<u8>>,
-        current_chunk: Vec<u8>,
-        offset: usize,
-        finished: bool,
+impl UploadDriver {
+    /// Binds the driver to the command's context and destination for logs.
+    pub(crate) fn new(kind: UploadKind, path: String, ctx: CommandCtx) -> Self {
+        Self { kind, path, ctx }
     }
 
-    impl std::io::Read for ChannelTarReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if buf.is_empty() {
-                return Ok(0);
-            }
+    /// Subject used in user-facing failure messages.
+    fn subject(&self) -> &'static str {
+        match self.kind {
+            UploadKind::RawUpload | UploadKind::TarUpload => "Upload",
+            UploadKind::EditFile => "File edit",
+        }
+    }
 
-            loop {
-                if self.offset < self.current_chunk.len() {
-                    let remaining = self.current_chunk.len() - self.offset;
-                    let bytes_to_copy = remaining.min(buf.len());
-                    buf[..bytes_to_copy].copy_from_slice(
-                        &self.current_chunk[self.offset..self.offset + bytes_to_copy],
+    /// Operation name used in logs.
+    fn label(&self) -> &'static str {
+        match self.kind {
+            UploadKind::RawUpload => "Raw upload",
+            UploadKind::TarUpload => "Tar upload",
+            UploadKind::EditFile => "File edit",
+        }
+    }
+
+    /// Runs the upload: announce readiness, stage chunks, then commit or abort.
+    ///
+    /// Owns the ordering every upload must follow on cancellation or failure: stop staging,
+    /// discard staging output, unregister the chunk route and request, and only then let the
+    /// dispatcher send the terminal response.
+    pub(crate) async fn run<S: UploadSink>(self, prepared: Result<S, AgentCommandError>) -> Reply {
+        let mut sink = match prepared {
+            Ok(sink) => sink,
+            Err(error) => return Reply::Result(error.into()),
+        };
+        let request_id = self.ctx.responder.request_id();
+        let (route, mut chunks) = self.ctx.services.upload_routes.open(request_id, &self.path);
+        // Readiness is sent only after the route exists so no chunk can arrive unroutable.
+        let _ = self.ctx.responder.transfer_ready().await;
+
+        let mut bytes_written = 0_u64;
+        let stop = loop {
+            let chunk = match Self::next_event::<S>(&mut chunks, &self.ctx.cancel).await {
+                UploadEvent::Canceled => break UploadStop::Canceled,
+                UploadEvent::Chunk(Some(chunk)) => chunk,
+                UploadEvent::Chunk(None) => {
+                    break UploadStop::Failed(AgentCommandError::new(
+                        CommandErrorKind::Internal,
+                        format!("{} stream ended before completion", self.subject()),
+                    ));
+                }
+            };
+            if let Err(error) = self.validate(&chunk) {
+                break UploadStop::Failed(error);
+            }
+            let is_last = chunk.is_last;
+            let length = chunk.data.len() as u64;
+            match sink.write(chunk.data, &self.ctx.cancel).await {
+                Ok(()) => bytes_written = bytes_written.saturating_add(length),
+                Err(SinkError::Canceled) => break UploadStop::Canceled,
+                Err(SinkError::Failed(error)) => break UploadStop::Failed(error),
+            }
+            if is_last {
+                let gate = PublicationGate::new(
+                    &self.ctx.services.upload_routes,
+                    &self.ctx.responder,
+                    &self.ctx.cancel,
+                );
+                let result = sink.commit(gate).await;
+                if result.is_ok() {
+                    log!(
+                        Level::Info,
+                        "{} complete: request_id={}, path={}, bytes_written={}",
+                        self.label(),
+                        request_id,
+                        self.path,
+                        bytes_written
                     );
-                    self.offset += bytes_to_copy;
-                    return Ok(bytes_to_copy);
                 }
-
-                if self.finished {
-                    return Ok(0);
-                }
-
-                match self.chunk_receiver.blocking_recv() {
-                    Some(chunk) => {
-                        self.current_chunk = chunk;
-                        self.offset = 0;
-                    }
-                    None => {
-                        self.finished = true;
-                        return Ok(0);
-                    }
-                }
+                drop(route);
+                drop(self.ctx);
+                return Reply::Result(result.unwrap_or_else(CommandResult::from));
             }
-        }
-    }
-
-    let reader = ChannelTarReader {
-        chunk_receiver,
-        current_chunk: Vec::new(),
-        offset: 0,
-        finished: false,
-    };
-    let mut archive = tar::Archive::new(BoundedTarReader::new(reader));
-    let entries = archive
-        .entries()
-        .map_err(|_| TarUploadError::ReadTarEntries)?;
-
-    for entry_result in entries {
-        let mut entry = entry_result.map_err(|error| {
-            match error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<InvalidMetadata>())
-            {
-                Some(error) => TarUploadError::InvalidTarMetadata(error.to_string()),
-                None => match error
-                    .get_ref()
-                    .and_then(|source| source.downcast_ref::<InvalidTermination>())
-                {
-                    Some(error) => TarUploadError::InvalidTarTermination(error.to_string()),
-                    None => TarUploadError::ReadTarEntry,
-                },
-            }
-        })?;
-
-        let entry_type = entry.header().entry_type();
-        if !(entry_type.is_dir() || entry_type.is_file()) {
-            return Err(TarUploadError::UnsupportedTarEntryType(entry_type));
-        }
-
-        let entry_path = entry.path().map_err(|_| TarUploadError::ReadTarEntryPath)?;
-        let sanitized_path = sanitize_tar_entry_path(&entry_path)?;
-        let output_path = destination_root.join(&sanitized_path);
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| {
-                TarUploadError::CreateDestinationDirectory(parent.display().to_string())
-            })?;
-        }
-
-        if entry_type.is_dir() {
-            std::fs::create_dir_all(&output_path).map_err(|_| {
-                TarUploadError::CreateDestinationDirectory(output_path.display().to_string())
-            })?;
-            continue;
-        }
-
-        entry
-            .unpack(&output_path)
-            .map_err(|_| TarUploadError::UnpackTarEntry(output_path.display().to_string()))?;
-    }
-
-    archive
-        .into_inner()
-        .finish()
-        .map_err(|error| TarUploadError::InvalidTarTermination(error.to_string()))
-}
-
-/// Streams tar bytes into a blocking unpack worker that extracts into a temp directory.
-struct TarUploadSession {
-    path: String,
-    temp_path: PathBuf,
-    on_existing: CopyExistingMode,
-    chunk_sender: Option<mpsc::Sender<Vec<u8>>>,
-    unpacker_handle: Option<JoinHandle<Result<(), TarUploadError>>>,
-    bytes_written: u64,
-}
-
-impl TarUploadSession {
-    /// Closes the tar input and joins the blocking extractor before its temp tree can be touched.
-    async fn join_unpacker(&mut self) -> Result<(), TarUploadError> {
-        self.chunk_sender.take();
-
-        let Some(unpacker_handle) = self.unpacker_handle.take() else {
-            return Err(TarUploadError::ExtractionWorkerFailed(
-                "extractor was already joined".to_string(),
-            ));
         };
 
-        match unpacker_handle.await {
-            Ok(result) => result,
-            Err(error) => Err(TarUploadError::ExtractionWorkerFailed(error.to_string())),
-        }
-    }
-}
-
-/// Outcome of waiting for either the next tar upload chunk or a cancel signal.
-enum TarUploadEvent {
-    Chunk(Option<stream::StreamChunk>),
-    Cancel,
-    Exit,
-}
-
-/// Outcome of waiting for extractor capacity while cancellation remains responsive.
-enum TarChunkForwardEvent {
-    Sent(Result<(), mpsc::error::SendError<Vec<u8>>>),
-    Cancel,
-    Exit,
-}
-
-/// Owns the state and side effects for one in-progress tar upload.
-struct TarUploadWorker {
-    active_uploads: ActiveUploads,
-    chunk_receiver: mpsc::Receiver<stream::StreamChunk>,
-    cancel_receiver: watch::Receiver<bool>,
-    session: TarUploadSession,
-    tx: mpsc::Sender<WsMessage>,
-    agent_id: AgentId,
-    request_id: RequestId,
-}
-
-impl TarUploadWorker {
-    /// Waits for the cooperative cancel signal used by tar upload workers.
-    async fn wait_for_cancel(cancel_receiver: &mut watch::Receiver<bool>) -> TarUploadEvent {
-        match cancel_receiver.wait_for(|cancel| *cancel).await {
-            Ok(_) => TarUploadEvent::Cancel,
-            Err(_) => TarUploadEvent::Exit,
-        }
-    }
-
-    /// Waits asynchronously for unpacker capacity without delaying cancellation on a full queue.
-    async fn forward_chunk(&mut self, data: Vec<u8>) -> TarChunkForwardEvent {
-        let Some(chunk_sender) = self.session.chunk_sender.as_ref() else {
-            return TarChunkForwardEvent::Sent(Err(mpsc::error::SendError(data)));
-        };
-        let cancel_receiver = &mut self.cancel_receiver;
-
-        tokio::select! {
-            event = Self::wait_for_cancel(cancel_receiver) => match event {
-                TarUploadEvent::Cancel => TarChunkForwardEvent::Cancel,
-                TarUploadEvent::Exit => TarChunkForwardEvent::Exit,
-                TarUploadEvent::Chunk(_) => unreachable!("cancel wait cannot produce a chunk"),
-            },
-            result = chunk_sender.send(data) => TarChunkForwardEvent::Sent(result),
-        }
-    }
-
-    /// Sends an error command response for this tar upload request.
-    async fn send_error_response(&self, kind: CommandErrorKind, message: String) {
-        AgentActor
-            .send_command_response(
-                &self.tx,
-                &self.agent_id,
-                self.request_id,
-                AgentCommandError::raw_upload(kind, message).into(),
-            )
-            .await;
-    }
-
-    /// Removes the temporary directory and unregisters the upload worker.
-    async fn cleanup(&self) {
-        remove_upload_temp_directory(&self.session.temp_path).await;
-        self.active_uploads.remove(self.request_id);
-    }
-
-    /// Stops and joins the tar extractor while retaining request context for lifecycle failures.
-    async fn stop_unpacker(&mut self) {
-        if let Err(error) = self.session.join_unpacker().await {
-            log!(
-                Level::Warning,
-                "Tar upload extractor failed while stopping: request_id={}, path={}, error={}",
-                self.request_id,
-                self.session.path,
-                error
-            );
-        }
-    }
-
-    /// Handles an explicit server-side cancellation request.
-    async fn cancel(mut self) {
-        log!(
-            Level::Info,
-            "Stopping tar upload after cancel: request_id={}, path={}",
-            self.request_id,
-            self.session.path
-        );
-        self.stop_unpacker().await;
-        self.cleanup().await;
-        self.send_error_response(
-            CommandErrorKind::InvalidInput,
-            "Upload canceled by server".to_string(),
-        )
-        .await;
-    }
-
-    /// Handles worker shutdown after the upload registry has been torn down.
-    async fn shutdown(mut self) {
-        // Registry teardown drops the watch sender before the chunk receiver
-        // necessarily closes, so treat it as an instruction to stop and clean
-        // up now.
-        self.stop_unpacker().await;
-        self.cleanup().await;
-    }
-
-    /// Reports a terminal upload error and cleans up temporary state.
-    async fn fail(mut self, kind: CommandErrorKind, message: String) {
-        self.stop_unpacker().await;
-        self.cleanup().await;
-        self.send_error_response(kind, message).await;
-    }
-
-    /// Finalizes a successfully received tar stream and reports completion.
-    async fn finalize(self) {
-        let TarUploadWorker {
-            active_uploads,
-            session,
-            tx,
-            agent_id,
-            request_id,
-            mut cancel_receiver,
-            ..
-        } = self;
-
-        finalize_tar_upload(
-            &tx,
-            &agent_id,
-            request_id,
-            session,
-            &active_uploads,
-            &mut cancel_receiver,
-        )
-        .await;
-        active_uploads.remove(request_id);
-    }
-
-    /// Runs the tar upload loop until completion, cancellation, or failure.
-    async fn process(mut self) {
-        loop {
-            let cancel_receiver = &mut self.cancel_receiver;
-            let chunk_receiver = &mut self.chunk_receiver;
-            let next_chunk = tokio::select! {
-                event = Self::wait_for_cancel(cancel_receiver) => event,
-                chunk = chunk_receiver.recv() => TarUploadEvent::Chunk(chunk),
-            };
-
-            let next_chunk = match next_chunk {
-                TarUploadEvent::Chunk(chunk) => chunk,
-                TarUploadEvent::Cancel => {
-                    self.cancel().await;
-                    return;
-                }
-                TarUploadEvent::Exit => {
-                    self.shutdown().await;
-                    return;
-                }
-            };
-
-            let Some(chunk) = next_chunk else {
-                break;
-            };
-
-            // Tar uploads must remain tar-framed end-to-end because the unpack
-            // worker consumes a tar byte stream from the chunk channel.
-            if chunk.payload_kind != StreamPayloadKind::Tar {
-                let error_message = format!(
-                    "Upload payload kind mismatch: expected {:?}, got {:?}",
-                    StreamPayloadKind::Tar,
-                    chunk.payload_kind
-                );
-                self.fail(CommandErrorKind::InvalidInput, error_message)
-                    .await;
-                return;
-            }
-
-            if chunk.is_error {
-                let error_message = if chunk.data.is_empty() {
-                    "Upload aborted by server".to_string()
-                } else {
-                    String::from_utf8_lossy(&chunk.data).to_string()
-                };
-
-                log!(
-                    Level::Warning,
-                    "Upload aborted: request_id={}, path={}, error={}",
-                    self.request_id,
-                    self.session.path,
-                    error_message
-                );
-
-                self.fail(CommandErrorKind::InvalidInput, error_message)
-                    .await;
-                return;
-            }
-
-            if !chunk.data.is_empty() {
-                let chunk_len = chunk.data.len() as u64;
-                match self.forward_chunk(chunk.data).await {
-                    TarChunkForwardEvent::Sent(Ok(())) => {
-                        self.session.bytes_written += chunk_len;
-                    }
-                    TarChunkForwardEvent::Sent(Err(error)) => {
-                        let error_message =
-                            format!("Failed to forward tar upload chunk to unpacker: {}", error);
-                        self.fail(CommandErrorKind::Internal, error_message).await;
-                        return;
-                    }
-                    TarChunkForwardEvent::Cancel => {
-                        self.cancel().await;
-                        return;
-                    }
-                    TarChunkForwardEvent::Exit => {
-                        self.shutdown().await;
-                        return;
-                    }
-                }
-            }
-
-            if !chunk.is_last {
-                continue;
-            }
-
-            self.finalize().await;
-            return;
-        }
-
-        self.fail(
-            CommandErrorKind::Internal,
-            "Upload stream ended before completion".to_string(),
-        )
-        .await;
-    }
-}
-
-impl AgentActor {
-    /// Starts the agent-side tar upload worker after reserving request tracking state.
-    pub(crate) async fn start_tar_upload_session(
-        &self,
-        active_uploads: ActiveUploads,
-        write: &mpsc::Sender<WsMessage>,
-        agent_id: &AgentId,
-        request_id: RequestId,
-        path: String,
-        on_existing: CopyExistingMode,
-    ) {
-        let upload_already_exists = active_uploads.contains(request_id);
-
-        if upload_already_exists {
-            self.send_command_response(
-                write,
-                agent_id,
-                request_id,
-                AgentCommandError::raw_upload(
-                    CommandErrorKind::AlreadyExists,
-                    format!(
-                        "Upload session already exists for request_id={}",
-                        request_id
-                    ),
-                )
-                .into(),
-            )
-            .await;
-            return;
-        }
-
-        match create_tar_upload_session(path.clone(), on_existing).await {
-            Ok(session) => {
-                let (chunk_sender, chunk_receiver) = mpsc::channel::<stream::StreamChunk>(8);
-                let (cancel_sender, cancel_receiver) = watch::channel(false);
+        let result = match stop {
+            UploadStop::Canceled => {
                 log!(
                     Level::Info,
-                    "Started tar upload: request_id={}, path={}, temp_path={}, on_existing={:?}",
+                    "Stopping {} after cancel: request_id={}, path={}",
+                    self.label().to_lowercase(),
                     request_id,
-                    path,
-                    session.temp_path.display(),
-                    on_existing
+                    self.path
                 );
-                active_uploads.insert(
-                    request_id,
-                    UploadSessionHandle {
-                        path: path.clone(),
-                        chunk_sender,
-                        cancel_sender,
-                    },
-                );
-                tokio::spawn(
-                    TarUploadWorker {
-                        active_uploads,
-                        chunk_receiver,
-                        cancel_receiver,
-                        session,
-                        tx: write.clone(),
-                        agent_id: agent_id.clone(),
-                        request_id,
-                    }
-                    .process(),
-                );
-            }
-            Err(error) => {
-                self.send_command_response(
-                    write,
-                    agent_id,
-                    request_id,
-                    AgentCommandError::from(error).into(),
+                CommandResult::error(
+                    CommandErrorKind::InvalidInput,
+                    format!("{} canceled by server", self.subject()),
                 )
-                .await;
+            }
+            UploadStop::Failed(error) => error.into(),
+        };
+        sink.abort().await;
+        drop(route);
+        drop(self.ctx);
+        Reply::Result(result)
+    }
+
+    /// Waits for the next chunk or cancellation, preferring an already queued terminal frame
+    /// only for sinks that require it.
+    async fn next_event<S: UploadSink>(
+        chunks: &mut mpsc::Receiver<StreamChunk>,
+        cancel: &CancellationToken,
+    ) -> UploadEvent {
+        if S::TERMINAL_WINS_OVER_CANCEL {
+            tokio::select! {
+                biased;
+                chunk = chunks.recv() => UploadEvent::Chunk(chunk),
+                _ = cancel.cancelled() => UploadEvent::Canceled,
+            }
+        } else {
+            tokio::select! {
+                chunk = chunks.recv() => UploadEvent::Chunk(chunk),
+                _ = cancel.cancelled() => UploadEvent::Canceled,
             }
         }
+    }
+
+    /// Rejects frames that indicate protocol corruption or a server-side abort.
+    fn validate(&self, chunk: &StreamChunk) -> Result<(), AgentCommandError> {
+        let expected = self.kind.payload_kind();
+        if chunk.payload_kind != expected {
+            return Err(AgentCommandError::new(
+                CommandErrorKind::InvalidInput,
+                format!(
+                    "{} payload kind mismatch: expected {:?}, got {:?}",
+                    self.subject(),
+                    expected,
+                    chunk.payload_kind
+                ),
+            ));
+        }
+        if chunk.is_error {
+            let message = if chunk.data.is_empty() {
+                format!("{} aborted by server", self.subject())
+            } else {
+                String::from_utf8_lossy(&chunk.data).to_string()
+            };
+            log!(
+                Level::Warning,
+                "Upload aborted: request_id={}, path={}, error={}",
+                chunk.request_id,
+                self.path,
+                message
+            );
+            return Err(AgentCommandError::new(
+                CommandErrorKind::InvalidInput,
+                message,
+            ));
+        }
+        Ok(())
     }
 }
 
-/// Finalizes a tar upload by waiting for extraction, placing the temp tree, and reporting the result.
-async fn finalize_tar_upload(
-    tx: &mpsc::Sender<WsMessage>,
-    agent_id: &AgentId,
-    request_id: RequestId,
-    mut session: TarUploadSession,
-    active_uploads: &ActiveUploads,
-    cancel_receiver: &mut watch::Receiver<bool>,
-) {
-    let final_path = session.path.clone();
-    let temp_path = session.temp_path.clone();
-    let on_existing = session.on_existing;
-    let bytes_written = session.bytes_written;
+/// Destination recorded for one routed upload, used in delivery diagnostics.
+struct UploadRoute {
+    serial: u64,
+    path: String,
+    chunks: mpsc::Sender<StreamChunk>,
+}
 
-    let unpack_result = session.join_unpacker().await;
+/// Shared routing tables guarded together so clearing them is atomic.
+#[derive(Default)]
+struct RouteTable {
+    routes: HashMap<RequestId, UploadRoute>,
+    publication_replies: HashMap<RequestId, oneshot::Sender<bool>>,
+    next_serial: u64,
+}
 
-    // The extractor owns the staging tree until joined. A cancel received while
-    // it finishes must discard that tree, never publish it over the destination.
-    if *cancel_receiver.borrow() || cancel_receiver.has_changed().is_err() {
-        remove_upload_temp_directory(&temp_path).await;
-        AgentActor
-            .send_command_response(
-                tx,
-                agent_id,
-                request_id,
-                AgentCommandError::raw_upload(
-                    CommandErrorKind::InvalidInput,
-                    "Upload canceled before publication".to_string(),
-                )
-                .into(),
-            )
-            .await;
-        return;
+/// Routes transfer-socket chunks and router publication decisions to upload workers.
+///
+/// Chunks bypass the runtime mailbox entirely so a slow disk backpressures only the transfer
+/// socket, never control traffic.
+#[derive(Clone, Default)]
+pub(crate) struct UploadRoutes {
+    shared: Arc<Mutex<RouteTable>>,
+}
+
+impl UploadRoutes {
+    /// Locks the tables, tolerating poison because each operation leaves them consistent.
+    fn table(&self) -> std::sync::MutexGuard<'_, RouteTable> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    match unpack_result {
-        Ok(()) => {
-            if !active_uploads
-                .begin_publication(tx, agent_id, request_id, cancel_receiver)
-                .await
-            {
-                remove_upload_temp_directory(&temp_path).await;
-                AgentActor
-                    .send_command_response(
-                        tx,
-                        agent_id,
-                        request_id,
-                        AgentCommandError::raw_upload(
-                            CommandErrorKind::InvalidInput,
-                            "Upload publication was not authorized".to_string(),
-                        )
-                        .into(),
-                    )
-                    .await;
-                return;
-            }
-            if let Err(error) =
-                place_temp_at_destination(&temp_path, Path::new(&final_path), on_existing, true)
-                    .await
-            {
-                let _ = redoor_core::safe_fs::safe_rm_all(&temp_path).await;
-
-                AgentActor
-                    .send_command_response(
-                        tx,
-                        agent_id,
-                        request_id,
-                        AgentCommandError::from(TarUploadError::from(error)).into(),
-                    )
-                    .await;
-                return;
-            }
-
-            log!(
-                Level::Info,
-                "Tar upload complete: request_id={}, path={}, bytes_written={}",
+    /// Registers a chunk route for `request_id`; the guard removes it on drop.
+    pub(crate) fn open(
+        &self,
+        request_id: RequestId,
+        path: &str,
+    ) -> (RouteGuard, mpsc::Receiver<StreamChunk>) {
+        let (chunks, receiver) = mpsc::channel(CHUNK_QUEUE_CAPACITY);
+        let mut table = self.table();
+        table.next_serial = table.next_serial.wrapping_add(1);
+        let serial = table.next_serial;
+        table.routes.insert(
+            request_id,
+            UploadRoute {
+                serial,
+                path: path.to_string(),
+                chunks,
+            },
+        );
+        (
+            RouteGuard {
+                routes: self.clone(),
                 request_id,
-                final_path,
-                bytes_written
-            );
+                serial,
+            },
+            receiver,
+        )
+    }
 
-            AgentActor
-                .send_command_response(tx, agent_id, request_id, CommandResult::TarUpload)
-                .await;
+    /// Delivers one binary frame to its upload worker, waiting for queue capacity.
+    pub(crate) async fn route_frame(
+        &self,
+        bytes: &[u8],
+        control: &ControlSender,
+        agent_id: &AgentId,
+    ) {
+        let chunk = match StreamChunk::from_bytes(bytes) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                log!(
+                    Level::Warning,
+                    "Failed to parse binary stream chunk: {}",
+                    error
+                );
+                return;
+            }
+        };
+        let request_id = chunk.request_id;
+        let route = self
+            .table()
+            .routes
+            .get(&request_id)
+            .map(|route| (route.serial, route.path.clone(), route.chunks.clone()));
+        let Some((serial, path, chunks)) = route else {
+            return;
+        };
+        if chunks.send(chunk).await.is_ok() {
+            return;
         }
-        Err(error) => {
-            let _ = redoor_core::safe_fs::safe_rm_all(&temp_path).await;
-            AgentActor
-                .send_command_response(
-                    tx,
-                    agent_id,
-                    request_id,
-                    AgentCommandError::from(error).into(),
-                )
-                .await;
+        log!(
+            Level::Warning,
+            "Upload worker dropped before chunk delivery: request_id={}, path={}",
+            request_id,
+            path
+        );
+        self.remove(request_id, serial);
+        let _ = Responder::new(control.clone(), agent_id.clone(), request_id)
+            .respond(CommandResult::error(
+                CommandErrorKind::Internal,
+                "Upload worker is no longer available",
+            ))
+            .await;
+    }
+
+    /// Removes a route only if it is still the registration identified by `serial`.
+    fn remove(&self, request_id: RequestId, serial: u64) {
+        let mut table = self.table();
+        if table
+            .routes
+            .get(&request_id)
+            .is_some_and(|route| route.serial == serial)
+        {
+            table.routes.remove(&request_id);
         }
+    }
+
+    /// Registers the waiter for the router's publication decision.
+    fn await_publication(&self, request_id: RequestId) -> oneshot::Receiver<bool> {
+        let (sender, receiver) = oneshot::channel();
+        self.table().publication_replies.insert(request_id, sender);
+        receiver
+    }
+
+    /// Drops a publication waiter that finished or gave up.
+    fn forget_publication(&self, request_id: RequestId) {
+        self.table().publication_replies.remove(&request_id);
+    }
+
+    /// Delivers the router's decision only to the worker that still waits for it.
+    pub(crate) fn resolve_publication(&self, request_id: RequestId, allowed: bool) {
+        if let Some(sender) = self.table().publication_replies.remove(&request_id) {
+            let _ = sender.send(allowed);
+        }
+    }
+
+    /// Detaches every route when the transfer socket is lost; workers observe closed queues.
+    pub(crate) fn clear(&self) {
+        let mut table = self.table();
+        table.routes.clear();
+        table.publication_replies.clear();
+    }
+
+    /// Reports whether a route exists, for lifecycle tests.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, request_id: RequestId) -> bool {
+        self.table().routes.contains_key(&request_id)
+    }
+}
+
+/// Removes its chunk route when the upload worker finishes.
+pub(crate) struct RouteGuard {
+    routes: UploadRoutes,
+    request_id: RequestId,
+    serial: u64,
+}
+
+impl Drop for RouteGuard {
+    /// Unroutes this worker without disturbing a newer route for the same id.
+    fn drop(&mut self) {
+        self.routes.remove(self.request_id, self.serial);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redoor_core::test_support::TempDir;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use crate::runtime::cancel::CancelRegistry;
+    use redoor_protocol::{ids::ChunkIndex, wire::stream::StreamPayloadKind};
 
-    /// Bounded validation must preserve ordinary, GNU and PAX paths through real extraction.
-    #[tokio::test]
-    async fn metadata_validation_preserves_supported_long_paths() {
-        for format in ["ordinary", "ustar", "gnu", "pax"] {
-            let temp = TempDir::create();
-            let name = if format == "ordinary" {
-                "short/file".to_string()
-            } else {
-                format!("{}/{}/file", "a".repeat(80), "b".repeat(80))
-            };
-            let mut builder = tar::Builder::new(Vec::new());
-            if format == "pax" {
-                builder
-                    .append_pax_extensions([("path", name.as_bytes())])
-                    .unwrap();
-            }
-            let mut header = if format == "ustar" {
-                tar::Header::new_ustar()
-            } else {
-                tar::Header::new_gnu()
-            };
-            header.set_mode(0o600);
-            header.set_size(7);
-            builder
-                .append_data(
-                    &mut header,
-                    if format == "pax" {
-                        "placeholder"
-                    } else {
-                        &name
-                    },
-                    b"payload".as_slice(),
-                )
-                .unwrap();
-            let bytes = builder.into_inner().unwrap();
-            let (sender, receiver) = mpsc::channel(1);
-            sender.send(bytes).await.unwrap();
-            drop(sender);
-            let root = temp.path().to_path_buf();
-            tokio::task::spawn_blocking(move || unpack_tar_stream_into_directory(receiver, &root))
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                tokio::fs::read(temp.path().join(name)).await.unwrap(),
-                b"payload",
-                "validation must retain the dependency's supported path interpretation for {format}"
+    /// Records lifecycle calls and whether the request was still routed and registered.
+    struct RecordingSink {
+        events: Arc<Mutex<Vec<String>>>,
+        routes: UploadRoutes,
+        registry: CancelRegistry<RequestId>,
+        request_id: RequestId,
+    }
+
+    impl RecordingSink {
+        /// Notes one lifecycle step along with the registration state observed at that moment.
+        fn record(&self, step: &str) {
+            let state = format!(
+                "{step} routed={} registered={}",
+                self.routes.contains(self.request_id),
+                self.registry.contains(&self.request_id)
             );
+            self.events.lock().unwrap().push(state);
         }
     }
 
-    /// A completed extractor is still reversible until the router grants placement.
-    #[tokio::test]
-    async fn denied_archive_publication_preserves_destination_and_cleans_staging() {
-        redoor_core::logging::init(None).await.unwrap();
-        let temp = TempDir::create();
-        let destination = temp.path().join("destination");
-        let staging = temp.path().join("staging");
-        tokio::fs::create_dir(&destination).await.unwrap();
-        tokio::fs::write(destination.join("original"), b"keep")
-            .await
-            .unwrap();
-        tokio::fs::create_dir(&staging).await.unwrap();
-        tokio::fs::write(staging.join("replacement"), b"new")
-            .await
-            .unwrap();
-        let uploads = ActiveUploads::new();
-        let (cancel, cancel_receiver) = watch::channel(false);
-        let (_chunks, chunk_receiver) = mpsc::channel(1);
-        let (tx, mut responses) = mpsc::channel(2);
-        let request_id = RequestId::new(4);
-        let worker = TarUploadWorker {
-            active_uploads: uploads.clone(),
-            chunk_receiver,
-            cancel_receiver,
-            session: TarUploadSession {
-                path: destination.display().to_string(),
-                temp_path: staging.clone(),
-                on_existing: CopyExistingMode::Merge,
-                chunk_sender: None,
-                unpacker_handle: Some(tokio::spawn(async { Ok(()) })),
-                bytes_written: 1,
-            },
-            tx,
-            agent_id: AgentId::new("test-agent"),
+    impl UploadSink for RecordingSink {
+        /// Records a staged chunk.
+        async fn write(
+            &mut self,
+            _data: Vec<u8>,
+            _cancel: &CancellationToken,
+        ) -> Result<(), SinkError> {
+            self.record("write");
+            Ok(())
+        }
+
+        /// Records publication and reports success.
+        async fn commit(
+            self,
+            _gate: PublicationGate<'_>,
+        ) -> Result<CommandResult, AgentCommandError> {
+            self.record("commit");
+            Ok(CommandResult::RawUpload)
+        }
+
+        /// Records staging cleanup.
+        async fn abort(self) {
+            self.record("abort");
+        }
+    }
+
+    /// Fixture wiring a registered request, a recording sink and a frame receiver.
+    struct Harness {
+        events: Arc<Mutex<Vec<String>>>,
+        registry: CancelRegistry<RequestId>,
+        routes: UploadRoutes,
+        frames: mpsc::Receiver<crate::runtime::responder::OutboundFrame>,
+        task: tokio::task::JoinHandle<Reply>,
+    }
+
+    /// Starts a raw-upload driver over a recording sink.
+    fn start() -> Harness {
+        let request_id = RequestId::new(5);
+        let (mut ctx, frames) = CommandCtx::detached(request_id);
+        let registry = CancelRegistry::new(None);
+        let registration = registry.register(request_id).unwrap();
+        ctx.cancel = registration.token().clone();
+        ctx.registration = Some(registration);
+        let routes = ctx.services.upload_routes.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingSink {
+            events: events.clone(),
+            routes: routes.clone(),
+            registry: registry.clone(),
             request_id,
         };
-        let task = tokio::spawn(worker.finalize());
-        let request = responses.recv().await.unwrap();
-        assert!(
-            matches!(
-                serde_json::from_str::<redoor_protocol::wire::Message>(request.to_text().unwrap())
-                    .unwrap(),
-                redoor_protocol::wire::Message::UploadPublicationRequest { .. }
-            ),
-            "completed extraction must not begin even a merge before router authorization"
+        let task = tokio::spawn(
+            UploadDriver::new(UploadKind::RawUpload, "/tmp/dest".to_string(), ctx).run(Ok(sink)),
         );
-        // Simulate cancellation winning in the router before its separate cancel control arrives.
-        uploads.resolve_publication(request_id, false);
-        task.await.unwrap();
-        assert_eq!(
-            tokio::fs::read(destination.join("original")).await.unwrap(),
-            b"keep",
-            "denied publication must leave destination-only content intact"
-        );
-        assert!(
-            !tokio::fs::try_exists(destination.join("replacement"))
-                .await
-                .unwrap(),
-            "denied publication must not merge any staged entries"
-        );
-        assert!(
-            !tokio::fs::try_exists(staging).await.unwrap(),
-            "a router denial must release the owned extracted tree"
-        );
-        drop(cancel);
+        Harness {
+            events,
+            registry,
+            routes,
+            frames,
+            task,
+        }
     }
 
-    /// Holds extraction after body completion to reproduce cancellation before overwrite deterministically.
+    /// Encodes one chunk for the given request as the transfer socket would deliver it.
+    fn frame(kind: StreamPayloadKind, is_last: bool) -> Vec<u8> {
+        StreamChunk {
+            request_id: RequestId::new(5),
+            chunk_index: ChunkIndex::new(0),
+            is_last,
+            is_error: false,
+            payload_kind: kind,
+            data: b"bytes".to_vec(),
+        }
+        .to_bytes()
+    }
+
+    /// Extracts the terminal result from a driver reply.
+    fn result(reply: Reply) -> CommandResult {
+        match reply {
+            Reply::Result(result) => result,
+            Reply::Streamed | Reply::Fallback { .. } => panic!("uploads answer on control"),
+        }
+    }
+
+    /// Verifies the cancel ordering: abort staging, unregister, then answer.
     #[tokio::test]
-    async fn cancellation_during_final_extraction_preserves_destination_and_cleans_staging() {
+    async fn cancel_aborts_before_unregistering_and_answering() {
         redoor_core::logging::init(None).await.unwrap();
-        let temp = TempDir::create();
-        let destination = temp.path().join("destination");
-        let staging = temp.path().join("staging");
-        tokio::fs::create_dir(&destination).await.unwrap();
-        tokio::fs::write(destination.join("original"), b"keep")
-            .await
-            .unwrap();
-        tokio::fs::create_dir(&staging).await.unwrap();
-        let (release, released) = tokio::sync::oneshot::channel();
-        let staging_in_worker = staging.clone();
-        let unpacker = tokio::spawn(async move {
-            released.await.unwrap();
-            tokio::fs::write(staging_in_worker.join("replacement"), b"new")
-                .await
-                .unwrap();
-            Ok(())
-        });
-        let (cancel, cancel_receiver) = watch::channel(false);
-        let (_chunks, chunk_receiver) = mpsc::channel(1);
-        let (tx, mut responses) = mpsc::channel(2);
-        let worker = TarUploadWorker {
-            active_uploads: ActiveUploads::new(),
-            chunk_receiver,
-            cancel_receiver,
-            session: TarUploadSession {
-                path: destination.display().to_string(),
-                temp_path: staging.clone(),
-                on_existing: CopyExistingMode::Override,
-                chunk_sender: None,
-                unpacker_handle: Some(unpacker),
-                bytes_written: 1,
-            },
-            tx,
-            agent_id: AgentId::new("test-agent"),
-            request_id: RequestId::new(2),
-        };
-        let mut finalization = Box::pin(worker.finalize());
-        assert!(
-            matches!(
-                futures_util::poll!(&mut finalization),
-                std::task::Poll::Pending
-            ),
-            "post-body finalization must still own the unfinished extractor"
-        );
-        cancel
-            .send(true)
-            .expect("finalization must retain its cancellation receiver");
-        release.send(()).unwrap();
-        finalization.await;
+        let mut harness = start();
+        let ready = harness.frames.recv().await.unwrap();
+        // Readiness is announced only once the route exists.
+        assert!(matches!(
+            ready.as_message(),
+            Some(redoor_protocol::wire::AgentToServer::TransferReady { .. })
+        ));
+
+        harness.registry.cancel(&RequestId::new(5));
+        let result = result(harness.task.await.unwrap());
+
+        // Staging is discarded while the request is still routed and cancelable, never after.
         assert_eq!(
-            tokio::fs::read(destination.join("original")).await.unwrap(),
-            b"keep",
-            "cancellation during extraction must preserve the existing destination"
+            *harness.events.lock().unwrap(),
+            vec!["abort routed=true registered=true".to_string()]
         );
-        assert!(
-            !tokio::fs::try_exists(&staging).await.unwrap(),
-            "staging must be removed only after the extractor finishes writing"
-        );
-        let response = responses.recv().await.unwrap();
-        assert!(
-            matches!(
-                serde_json::from_str::<redoor_protocol::wire::Message>(response.to_text().unwrap())
-                    .unwrap(),
-                redoor_protocol::wire::Message::CommandResponse {
-                    result: CommandResult::Error { .. },
-                    ..
-                }
-            ),
-            "canceled extraction must not report success or request publication"
-        );
+        // The terminal response follows unregistration so late cancels become harmless.
+        assert!(!harness.registry.contains(&RequestId::new(5)));
+        assert!(!harness.routes.contains(RequestId::new(5)));
+        // Cancellation keeps its established user-facing classification.
+        assert!(matches!(
+            result,
+            CommandResult::Error { kind: CommandErrorKind::InvalidInput, message } if message == "Upload canceled by server"
+        ));
     }
 
+    /// Verifies protocol corruption aborts staging like a cancellation.
     #[tokio::test]
-    async fn full_unpacker_queue_keeps_cancellation_async_and_joins_before_cleanup() {
-        let temp_dir = TempDir::create();
-        let temp_path = temp_dir.path().join("tar-upload-cancel");
-        tokio::fs::create_dir(&temp_path)
-            .await
-            .expect("tar upload temp directory should be created");
+    async fn protocol_failure_aborts_and_reports_the_error() {
+        redoor_core::logging::init(None).await.unwrap();
+        let mut harness = start();
+        harness.frames.recv().await.unwrap();
+        let (control, _control_frames) = mpsc::channel(1);
 
-        let (chunk_sender, mut chunk_receiver) = mpsc::channel::<Vec<u8>>(1);
-        chunk_sender
-            .try_send(vec![1])
-            .expect("the first chunk should fill the bounded queue");
-        let (release_sender, release_receiver) = tokio::sync::oneshot::channel::<()>();
-        let extractor_stopped = Arc::new(AtomicBool::new(false));
-        let extractor_stopped_in_worker = Arc::clone(&extractor_stopped);
-        let unpacker_handle = tokio::task::spawn_blocking(move || {
-            release_receiver
-                .blocking_recv()
-                .expect("the test should release the extractor");
-            while chunk_receiver.blocking_recv().is_some() {}
-            extractor_stopped_in_worker.store(true, Ordering::Release);
-            Ok(())
-        });
+        harness
+            .routes
+            .route_frame(
+                &frame(StreamPayloadKind::Tar, false),
+                &control,
+                &AgentId::from("test-agent"),
+            )
+            .await;
+        let result = result(harness.task.await.unwrap());
 
-        let (_stream_sender, stream_receiver) = mpsc::channel(1);
-        let (cancel_sender, cancel_receiver) = watch::channel(false);
-        let (tx, _rx) = mpsc::channel(1);
-        let mut worker = TarUploadWorker {
-            active_uploads: ActiveUploads::new(),
-            chunk_receiver: stream_receiver,
-            cancel_receiver,
-            session: TarUploadSession {
-                path: temp_path.display().to_string(),
-                temp_path: temp_path.clone(),
-                on_existing: CopyExistingMode::Error,
-                chunk_sender: Some(chunk_sender),
-                unpacker_handle: Some(unpacker_handle),
-                bytes_written: 0,
-            },
-            tx,
-            agent_id: AgentId::new("test-agent"),
-            request_id: RequestId::new(1),
-        };
+        // A corrupt stream must discard staging exactly like a cancellation.
+        assert_eq!(
+            *harness.events.lock().unwrap(),
+            vec!["abort routed=true registered=true".to_string()]
+        );
+        // The mismatch is reported as invalid input rather than an internal failure.
+        assert!(matches!(
+            result,
+            CommandResult::Error {
+                kind: CommandErrorKind::InvalidInput,
+                ..
+            }
+        ));
+    }
 
-        let mut forward = Box::pin(worker.forward_chunk(vec![2]));
-        assert!(
-            matches!(futures_util::poll!(&mut forward), std::task::Poll::Pending),
-            "a full extractor queue must yield instead of blocking the Tokio worker"
-        );
-        cancel_sender
-            .send(true)
-            .expect("the active worker should receive cancellation");
-        assert!(
-            matches!(forward.await, TarChunkForwardEvent::Cancel),
-            "cancellation must win without waiting for extractor queue capacity"
-        );
+    /// Verifies publication runs while cancel_transfer can still reach the gate.
+    #[tokio::test]
+    async fn terminal_chunk_commits_while_still_registered() {
+        redoor_core::logging::init(None).await.unwrap();
+        let mut harness = start();
+        harness.frames.recv().await.unwrap();
+        let (control, _control_frames) = mpsc::channel(1);
 
-        release_sender
-            .send(())
-            .expect("the extractor should still be owned by the upload session");
-        worker.stop_unpacker().await;
-        assert!(
-            extractor_stopped.load(Ordering::Acquire),
-            "the blocking extractor must be joined before terminal cleanup continues"
-        );
-        assert!(
-            temp_path.exists(),
-            "joining the extractor must happen before its temp tree is removed"
-        );
+        harness
+            .routes
+            .route_frame(
+                &frame(StreamPayloadKind::RawFile, true),
+                &control,
+                &AgentId::from("test-agent"),
+            )
+            .await;
+        let result = result(harness.task.await.unwrap());
 
-        worker.cleanup().await;
-        assert!(
-            !temp_path.exists(),
-            "terminal cleanup must remove the temp tree after the extractor exits"
+        // Publication runs while cancel_transfer can still reach the publication gate.
+        assert_eq!(
+            *harness.events.lock().unwrap(),
+            vec![
+                "write routed=true registered=true".to_string(),
+                "commit routed=true registered=true".to_string()
+            ]
         );
+        // Success releases both registrations before the response is sent.
+        assert!(!harness.registry.contains(&RequestId::new(5)));
+        assert!(matches!(result, CommandResult::RawUpload));
     }
 }

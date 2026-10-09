@@ -1,18 +1,18 @@
 //! Runs pipe-based processes independently of the control mailbox and bounds every output read.
 
+use crate::commands::ctx::Reply;
+use crate::runtime::cancel::Registration;
+use crate::transfers::stream::StreamWriter;
 use redoor_protocol::{
-    ids::{ChunkIndex, RequestId},
+    ids::RequestId,
     wire::{
+        command::CommandResult,
         exec::{ExecEvent, ExecRequest},
-        stream::StreamChunkFrameRequest,
     },
 };
 use std::{os::unix::process::ExitStatusExt, process::Stdio};
-use tokio::{
-    io::AsyncReadExt,
-    sync::{mpsc, watch},
-};
-use tokio_tungstenite::tungstenite::Message;
+use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
 /// Owns the process group so disconnect, timeout and dropped tasks also stop descendants.
 struct ProcessGroup(i32);
@@ -29,9 +29,7 @@ impl Drop for ProcessGroup {
 
 /// Holds stream ordering while each event remains small enough for one bounded HTTP record.
 struct ExecWorker {
-    request_id: RequestId,
-    write: mpsc::Sender<Message>,
-    index: ChunkIndex,
+    stream: StreamWriter,
 }
 
 impl ExecWorker {
@@ -40,12 +38,7 @@ impl ExecWorker {
         let mut data = serde_json::to_vec(&event)?;
         data.push(b'\n');
         anyhow::ensure!(
-            super::raw::send_framed_stream_bytes(
-                &self.write,
-                &mut self.index,
-                StreamChunkFrameRequest::new(self.request_id, &data).is_last(last)
-            )
-            .await,
+            self.stream.send(&data, last).await,
             "Execution output connection closed"
         );
         Ok(())
@@ -103,10 +96,10 @@ impl ExecWorker {
     async fn execute(
         &mut self,
         request: ExecRequest,
-        cancel: &mut watch::Receiver<bool>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<ExecEvent> {
         request.validate().map_err(anyhow::Error::msg)?;
-        if *cancel.borrow() {
+        if cancel.is_cancelled() {
             return Ok(ExecEvent::Canceled);
         }
         let mut command = tokio::process::Command::new(&request.argv[0]);
@@ -135,7 +128,7 @@ impl ExecWorker {
         };
         let event = tokio::select! {
             result = self.output(&mut child) => result,
-            _ = cancel.changed() => Ok(ExecEvent::Canceled),
+            _ = cancel.cancelled() => Ok(ExecEvent::Canceled),
             _ = deadline => Ok(ExecEvent::TimedOut),
         };
         drop(group);
@@ -148,56 +141,52 @@ impl ExecWorker {
     async fn terminal(
         &mut self,
         event: ExecEvent,
-        cancel: &mut watch::Receiver<bool>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         if matches!(event, ExecEvent::Canceled | ExecEvent::TimedOut) {
             // These paths must finish so generation shutdown can join the worker even with a full lane.
             return tokio::time::timeout(std::time::Duration::from_secs(5), self.send(event, true))
                 .await?;
         }
-        // execute may already have observed the watch update, so changed() alone is insufficient.
         anyhow::ensure!(
-            !*cancel.borrow() && cancel.has_changed().is_ok(),
+            !cancel.is_cancelled(),
             "Execution canceled before terminal delivery"
         );
         tokio::select! {
             biased;
-            _ = cancel.changed() => anyhow::bail!("Execution canceled during terminal delivery"),
+            _ = cancel.cancelled() => anyhow::bail!("Execution canceled during terminal delivery"),
             result = self.send(event, true) => result,
         }
     }
 }
 
 /// Emits a terminal event even for spawn failures; generation teardown drops the process guard.
-pub(super) async fn run(
-    request_id: RequestId,
+///
+/// When the payload lane cannot deliver completion, the reply asks the dispatcher to close
+/// server ownership on the control lane instead, retained until the registry generation (and
+/// with it the connection that would carry it) is torn down.
+pub(crate) async fn run(
     request: ExecRequest,
-    write: mpsc::Sender<Message>,
-    mut cancel: watch::Receiver<bool>,
-    control: mpsc::Sender<Message>,
-    agent_id: redoor_protocol::ids::AgentId,
-) {
-    let mut worker = ExecWorker {
-        request_id,
-        write,
-        index: ChunkIndex::new(0),
-    };
+    stream: StreamWriter,
+    registration: Registration<RequestId>,
+) -> Reply {
+    let cancel = registration.token().clone();
+    let abandon = registration.revoked().clone();
+    let mut worker = ExecWorker { stream };
     let event = worker
-        .execute(request, &mut cancel)
+        .execute(request, &cancel)
         .await
         .unwrap_or_else(|error| ExecEvent::Error {
             message: error.to_string(),
         });
-    if worker.terminal(event.clone(), &mut cancel).await.is_err() {
-        // If the payload lane cannot deliver completion, the independent control lane closes server ownership.
-        let result = redoor_protocol::wire::command::CommandResult::Exec { event };
-        // Retain the acknowledgement while control is backpressured, but let generation
-        // teardown release the worker. Its active slot bounds retained terminal results.
-        tokio::select! {
-            // Request cancellation does not invalidate an already reaped process's acknowledgement.
-            // Registry teardown drops its sender; only that closure may abandon retained delivery.
-            _ = async { while cancel.changed().await.is_ok() {} } => {},
-            _ = super::AgentActor.send_command_response(&control, &agent_id, request_id, result) => {},
+    let delivered = worker.terminal(event.clone(), &cancel).await.is_ok();
+    drop(registration);
+    if delivered {
+        Reply::Streamed
+    } else {
+        Reply::Fallback {
+            result: CommandResult::Exec { event },
+            abandon,
         }
     }
 }
@@ -205,15 +194,16 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::cancel::CancelRegistry;
+    use crate::runtime::responder::Responder;
     use futures_util::poll;
-    use redoor_protocol::{
-        ids::AgentId,
-        wire::{
-            command::{CommandErrorKind, CommandResult},
-            stream::StreamChunk,
-        },
+    use redoor_protocol::wire::{
+        command::CommandErrorKind,
+        stream::{StreamChunk, StreamPayloadKind},
     };
     use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::protocol::Message;
 
     /// Uses a real nonzero exit so delivery cannot accidentally substitute a local success or failure.
     fn exit_request() -> ExecRequest {
@@ -226,15 +216,11 @@ mod tests {
     }
 
     /// Saturates the actual framed-payload sender without involving socket buffer sizes or wall time.
-    async fn blocked_worker() -> (ExecWorker, mpsc::Receiver<Message>) {
+    async fn blocked_stream() -> (StreamWriter, mpsc::Receiver<Message>) {
         let (write, receiver) = mpsc::channel(1);
         write.send(Message::binary(vec![0])).await.unwrap();
         (
-            ExecWorker {
-                request_id: RequestId::new(41),
-                write,
-                index: ChunkIndex::new(0),
-            },
+            StreamWriter::new(write, RequestId::new(41), StreamPayloadKind::RawFile),
             receiver,
         )
     }
@@ -242,9 +228,11 @@ mod tests {
     /// A completed and reaped process must retain its remote status for arbitrarily slow consumers.
     #[tokio::test]
     async fn normal_exit_waits_beyond_five_seconds_and_preserves_control_lane() {
-        let (mut worker, mut payload) = blocked_worker().await;
-        let (_cancel_sender, mut cancel) = watch::channel(false);
-        let event = worker.execute(exit_request(), &mut cancel).await.unwrap();
+        redoor_core::logging::init(None).await.unwrap();
+        let (stream, mut payload) = blocked_stream().await;
+        let mut worker = ExecWorker { stream };
+        let cancel = CancellationToken::new();
+        let event = worker.execute(exit_request(), &cancel).await.unwrap();
         // This also synchronizes with child reaping before testing terminal-only backpressure.
         assert!(matches!(
             event,
@@ -254,7 +242,7 @@ mod tests {
             }
         ));
         tokio::time::pause();
-        let terminal = worker.terminal(event, &mut cancel);
+        let terminal = worker.terminal(event, &cancel);
         tokio::pin!(terminal);
         // Polling installs the blocked enqueue before advancing virtual time.
         assert!(poll!(&mut terminal).is_pending());
@@ -262,17 +250,16 @@ mod tests {
         // Normal completion has no five-second fallback (or other delivery deadline).
         assert!(poll!(&mut terminal).is_pending());
 
-        let (control, mut responses) = mpsc::channel(1);
-        super::super::AgentActor
-            .send_command_response(
-                &control,
-                &AgentId::from("terminal-test"),
-                RequestId::new(42),
-                CommandResult::error(CommandErrorKind::ServiceUnavailable, "independent response"),
-            )
-            .await;
+        let (responder, mut responses) = Responder::recording(RequestId::new(42), 1);
+        responder
+            .respond(CommandResult::error(
+                CommandErrorKind::ServiceUnavailable,
+                "independent response",
+            ))
+            .await
+            .unwrap();
         // Control delivery remains independent while the shared binary lane is full.
-        assert!(matches!(responses.try_recv(), Ok(Message::Text(_))));
+        assert!(responses.try_recv().is_ok());
         payload.recv().await.unwrap();
         terminal.await.unwrap();
         let Message::Binary(bytes) = payload.recv().await.unwrap() else {
@@ -290,26 +277,29 @@ mod tests {
         ));
     }
 
-    /// Cancellation and both disconnect signals must release a normal terminal enqueue immediately.
+    /// Cancellation, teardown and transfer disconnection must release a normal terminal enqueue.
     #[tokio::test(start_paused = true)]
     async fn blocked_normal_terminal_observes_cancel_and_disconnect() {
         for mode in 0..3 {
-            let (mut worker, payload) = blocked_worker().await;
-            let (sender, mut cancel) = watch::channel(false);
+            let (stream, payload) = blocked_stream().await;
+            let mut worker = ExecWorker { stream };
+            let registry = CancelRegistry::new(None);
+            let registration = registry.register(RequestId::new(41)).unwrap();
+            let cancel = registration.token().clone();
             let terminal = worker.terminal(
                 ExecEvent::Exit {
                     code: Some(37),
                     signal: None,
                 },
-                &mut cancel,
+                &cancel,
             );
             tokio::pin!(terminal);
             // All cases start blocked on the same saturated lane.
             assert!(poll!(&mut terminal).is_pending());
             match mode {
-                0 => sender.send(true).unwrap(),
-                1 => drop(sender), // Generation teardown clears the local cancellation registry.
-                _ => drop(payload), // Transfer disconnection closes the payload sender.
+                0 => registration.cancel(),
+                1 => registry.revoke_all(), // Generation teardown revokes every registration.
+                _ => drop(payload),         // Transfer disconnection closes the payload sender.
             }
             // No clock advancement is needed to release cancellation/disconnection.
             assert!(matches!(
@@ -319,14 +309,14 @@ mod tests {
         }
     }
 
-    /// Already-observed cancellation must not be lost when execute hands ownership back to run.
+    /// An already-cancelled token must not be lost when execute hands ownership back to run.
     #[tokio::test(start_paused = true)]
     async fn observed_cancel_releases_terminal() {
-        let (mut worker, _payload) = blocked_worker().await;
-        let (sender, mut cancel) = watch::channel(false);
-        sender.send(true).unwrap();
-        cancel.changed().await.unwrap();
-        // changed() has consumed this version, but the current true value still cancels delivery.
+        let (stream, _payload) = blocked_stream().await;
+        let mut worker = ExecWorker { stream };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        // The already cancelled state still cancels delivery.
         assert!(
             worker
                 .terminal(
@@ -334,110 +324,75 @@ mod tests {
                         code: Some(37),
                         signal: None
                     },
-                    &mut cancel
+                    &cancel
                 )
                 .await
                 .is_err()
         );
     }
 
-    /// A first cancellation during control fallback must not discard the already known terminal outcome.
+    /// A closed payload lane must hand the real terminal outcome to the control fallback.
     #[tokio::test]
-    async fn cancellation_during_fallback_retains_actual_error() {
+    async fn closed_payload_lane_falls_back_with_the_actual_error() {
         let (write, payload) = mpsc::channel(1);
         drop(payload);
-        let (sender, cancel) = watch::channel(false);
-        let (control, mut responses) = mpsc::channel(1);
-        control.send(Message::text("occupied")).await.unwrap();
-        let task = run(
-            RequestId::new(41),
-            ExecRequest {
-                argv: vec![],
-                cwd: None,
-                env: Default::default(),
-                timeout_ms: None,
-            },
-            write,
-            cancel,
-            control,
-            AgentId::from("terminal-test"),
-        );
-        tokio::pin!(task);
-        // Validation fails synchronously, and the closed payload lane installs a blocked control fallback.
-        assert!(poll!(&mut task).is_pending());
-        sender.send(true).unwrap();
-        // This is request cancellation, not registry teardown, so the acknowledgement must survive.
-        assert!(poll!(&mut task).is_pending());
-        responses.recv().await.unwrap();
-        task.await;
-        let Message::Text(text) = responses.recv().await.unwrap() else {
-            panic!("Expected terminal control response");
+        let registry = CancelRegistry::new(None);
+        let registration = registry.register(RequestId::new(41)).unwrap();
+        let invalid = ExecRequest {
+            argv: vec![],
+            cwd: None,
+            env: Default::default(),
+            timeout_ms: None,
+        };
+
+        let reply = run(
+            invalid,
+            StreamWriter::new(write, RequestId::new(41), StreamPayloadKind::RawFile),
+            registration,
+        )
+        .await;
+
+        let Reply::Fallback { result, abandon } = reply else {
+            panic!("undeliverable completion must fall back to the control lane");
         };
         // Preserve the real validation failure rather than losing completion or inventing Canceled.
         assert!(matches!(
-            serde_json::from_str::<redoor_protocol::wire::Message>(&text).unwrap(),
-            redoor_protocol::wire::Message::CommandResponse {
+            result,
+            CommandResult::Exec {
+                event: ExecEvent::Error { .. }
+            }
+        ));
+        // Only teardown of the generation may abandon the retained acknowledgement.
+        assert!(!abandon.is_cancelled());
+        registry.revoke_all();
+        assert!(abandon.is_cancelled());
+    }
+
+    /// A canceled request with a blocked payload lane is bounded and then falls back.
+    #[tokio::test(start_paused = true)]
+    async fn canceled_terminal_is_bounded_before_falling_back() {
+        let (stream, _payload) = blocked_stream().await;
+        let registry = CancelRegistry::new(None);
+        let registration = registry.register(RequestId::new(41)).unwrap();
+        registration.cancel();
+        let task = run(exit_request(), stream, registration);
+        tokio::pin!(task);
+
+        // An already canceled request takes the bounded terminal path without spawning a process.
+        assert!(poll!(&mut task).is_pending());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let std::task::Poll::Ready(reply) = poll!(&mut task) else {
+            panic!("canceled terminal delivery must be bounded");
+        };
+        // The fallback must name the cancellation so the router can close ownership.
+        assert!(matches!(
+            reply,
+            Reply::Fallback {
                 result: CommandResult::Exec {
-                    event: ExecEvent::Error { .. }
+                    event: ExecEvent::Canceled
                 },
                 ..
             }
         ));
-    }
-
-    /// Terminal acknowledgements remain retained under pressure until delivered or generation teardown.
-    #[tokio::test(start_paused = true)]
-    async fn teardown_releases_retained_fallback_on_blocked_lanes() {
-        let (worker, _payload) = blocked_worker().await;
-        let (_sender, cancel) = watch::channel(true);
-        let (control, mut responses) = mpsc::channel(1);
-        let task = run(
-            worker.request_id,
-            exit_request(),
-            worker.write,
-            cancel,
-            control,
-            AgentId::from("terminal-test"),
-        );
-        tokio::pin!(task);
-        // An already canceled request takes the bounded terminal path without spawning a process.
-        assert!(poll!(&mut task).is_pending());
-        tokio::time::advance(Duration::from_secs(6)).await;
-        // The independent fallback closes router ownership when terminal delivery is impossible.
-        assert!(poll!(&mut task).is_ready());
-        let Message::Text(text) = responses.recv().await.unwrap() else {
-            panic!("Expected control fallback");
-        };
-        // The fallback must name the affected execution, rather than abandoning server ownership.
-        assert!(
-            matches!(serde_json::from_str::<redoor_protocol::wire::Message>(&text).unwrap(), redoor_protocol::wire::Message::CommandResponse { request_id, result: redoor_protocol::wire::command::CommandResult::Exec { event: ExecEvent::Canceled }, .. } if request_id == RequestId::new(41))
-        );
-
-        let (worker, _payload) = blocked_worker().await;
-        let (sender, cancel) = watch::channel(true);
-        let (control, _responses) = mpsc::channel(1);
-        control.send(Message::text("occupied")).await.unwrap();
-        let task = run(
-            worker.request_id,
-            exit_request(),
-            worker.write,
-            cancel,
-            control,
-            AgentId::from("terminal-test"),
-        );
-        tokio::pin!(task);
-        // Saturating control as well exercises the second cleanup deadline.
-        assert!(poll!(&mut task).is_pending());
-        tokio::time::advance(Duration::from_secs(6)).await;
-        // Saturated control retains the actual acknowledgement rather than losing it to a deadline.
-        assert!(poll!(&mut task).is_pending());
-        tokio::time::advance(Duration::from_secs(6)).await;
-        assert!(poll!(&mut task).is_pending());
-        // Another request cancellation cannot discard the retained acknowledgement.
-        sender.send(true).unwrap();
-        assert!(poll!(&mut task).is_pending());
-        // Generation teardown clears the registry and closes the cancellation channel.
-        drop(sender);
-        assert!(poll!(&mut task).is_ready());
     }
 }
