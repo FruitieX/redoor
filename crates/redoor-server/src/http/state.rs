@@ -22,6 +22,8 @@ pub(crate) struct ServerState {
     pub(crate) router_ref: actors::router::RouterHandle,
     /// Typed one-shot agent commands with their deadlines and cancel-on-abandon behavior.
     pub(crate) agents: super::agent_client::AgentClient,
+    /// Starts copies and moves for REST and MCP alike.
+    pub(crate) transfers: super::services::transfer::TransferService,
     /// Shared registry of agent supervisors. The WebSocket session uses
     /// this to look up the supervisor for the agent it just registered
     /// and signal it when the connection goes stale.

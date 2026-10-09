@@ -12,6 +12,8 @@ mod copy;
 mod diffs;
 pub(crate) mod error;
 mod exec;
+#[cfg(test)]
+pub(crate) mod fake_agent;
 mod file_edit;
 mod files;
 mod git;
@@ -28,8 +30,8 @@ mod restart;
 mod retry_agent_start;
 pub(crate) mod routes;
 mod server_info;
+pub(crate) mod services;
 pub mod state;
-mod streaming;
 mod terminals;
 mod transfer_cancellation;
 mod transfer_progress;

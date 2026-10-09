@@ -1,4 +1,4 @@
-use crate::actors;
+use crate::actors::router::OutputStreamTracking;
 use axum::{Json, extract::State as AxumState};
 use redoor_protocol::{
     api::{
@@ -10,7 +10,7 @@ use redoor_protocol::{
 
 use super::{
     agent_client::Metadata, agent_helpers::require_absolute_path, error::ApiError,
-    state::ServerState, streaming::OutputCancelGuard,
+    services::output::OutputStream, state::ServerState,
 };
 
 /// Route: `POST /api/v1/diff`
@@ -70,63 +70,38 @@ async fn download_editable_file(
     endpoint: &DiffEndpoint,
     expected_size: u64,
 ) -> Result<String, ApiError> {
-    let mut chunk_receiver = state
-        .router_ref
-        .request(|reply| {
-            actors::router::RouterMsg::ExecuteStreamCommandRest(
-                actors::router::ExecuteStreamRequest {
-                    agent_id: endpoint.agent.clone(),
-                    command: Command::RawDownload {
-                        path: endpoint.path.clone(),
-                        range_start: None,
-                        range_end: None,
-                    },
-                    tracking: actors::router::OutputStreamTracking::Download {
-                        path: endpoint.path.clone(),
-                        total_bytes: expected_size,
-                        full_size: Some(expected_size),
-                        resume_offset: None,
-                    },
-                    reply,
-                },
-            )
-        })
-        .await??;
-    let mut cancel_guard = OutputCancelGuard::new(
-        state.router_ref.clone(),
-        endpoint.agent.clone(),
-        chunk_receiver.request_id(),
-    );
-
     let capacity = usize::try_from(expected_size)
         .map_err(|_| ApiError::bad_request("Editable file size is unsupported"))?;
-    let changed = || ApiError::bad_request("File changed while it was being prepared for diff");
-    let mut content = Vec::with_capacity(capacity);
-    let mut completed = false;
-    while let Some(chunk) = chunk_receiver.recv().await {
-        if chunk.is_error {
-            cancel_guard.disarm();
-            let message = if chunk.data.is_empty() {
-                format!("Failed to download {}", endpoint.path)
-            } else {
-                String::from_utf8_lossy(&chunk.data).into_owned()
-            };
-            return Err(ApiError::bad_request(message));
+    let mut stream = OutputStream::open(
+        &state.router_ref,
+        endpoint.agent.clone(),
+        Command::RawDownload {
+            path: endpoint.path.clone(),
+            range_start: None,
+            range_end: None,
+        },
+        OutputStreamTracking::Download {
+            path: endpoint.path.clone(),
+            total_bytes: expected_size,
+            full_size: Some(expected_size),
+            resume_offset: None,
+        },
+    )
+    .await?;
+    let read = stream.read_bounded(capacity).await.map_err(|message| {
+        if message.is_empty() {
+            ApiError::bad_request(format!("Failed to download {}", endpoint.path))
+        } else {
+            ApiError::bad_request(message)
         }
-        if content.len().saturating_add(chunk.data.len()) > capacity {
-            return Err(changed());
-        }
-        content.extend_from_slice(&chunk.data);
-        if chunk.is_last {
-            cancel_guard.disarm();
-            completed = true;
-            break;
-        }
+    })?;
+    // A grown, shrunk or truncated file no longer matches the metadata the diff was gated on.
+    if read.overflowed || !read.completed || read.data.len() != capacity {
+        return Err(ApiError::bad_request(
+            "File changed while it was being prepared for diff",
+        ));
     }
-    if !completed || content.len() != capacity {
-        return Err(changed());
-    }
-    String::from_utf8(content).map_err(|_| {
+    String::from_utf8(read.data).map_err(|_| {
         ApiError::bad_request("File is no longer editable because it is not valid UTF-8")
     })
 }

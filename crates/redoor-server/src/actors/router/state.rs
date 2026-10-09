@@ -194,6 +194,24 @@ pub enum CopyOperation {
     Move,
 }
 
+impl CopyOperation {
+    /// Lowercase name used in logs.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Move => "move",
+        }
+    }
+
+    /// Capitalized name used at the start of user-facing messages.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::Move => "Move",
+        }
+    }
+}
+
 #[derive(Default)]
 /// Stored transfer progress snapshots exposed to REST and UI readers.
 pub struct TransferProgressStore {

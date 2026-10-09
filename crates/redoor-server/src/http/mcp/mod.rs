@@ -6,7 +6,6 @@ mod error;
 mod operations;
 mod policy;
 mod schema;
-mod services;
 mod tools;
 mod transport;
 
@@ -34,7 +33,7 @@ use tower_http::{
 use super::{
     agent_helpers::AgentFilePath,
     machine_tokens::{MachinePrincipal, MachineTokenService},
-    raw::{RawQueryParams, RawUploadQueryParams},
+    raw::{RawQueryParams, upload::RawUploadQueryParams},
     state::ServerState,
 };
 use redoor_core::log;
@@ -202,7 +201,7 @@ async fn upload_file(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    super::raw::raw_agent_put_handler(
+    super::raw::upload::raw_agent_put_handler(
         Path(AgentFilePath {
             agent: device,
             path: Some(path),

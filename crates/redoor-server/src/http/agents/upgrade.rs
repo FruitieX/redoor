@@ -11,39 +11,16 @@ use redoor_protocol::{
         agents::{UpgradeAgentRequest, UpgradeAgentResponse},
     },
     ids::AgentId,
-    wire::{
-        command::{Command, CommandResult},
-        log::Level,
-    },
+    wire::{command::Command, log::Level},
 };
 
 use super::list_agent_snapshots;
 use crate::http::{
     agent_client::{GetAgentDetails, SelfExec},
     error::ApiError,
-    raw::{AgentUpload, AgentUploadStartError},
+    services::upload::{AgentUpload, UploadStart},
     state::ServerState,
 };
-
-/// Maps upload setup completion into the normal command/router error JSON contract.
-fn upgrade_upload_start_error(error: AgentUploadStartError) -> axum::response::Response {
-    match error {
-        AgentUploadStartError::Response(response) => response,
-        AgentUploadStartError::Finished(completion) => match *completion {
-            Ok(CommandResult::Error { kind, message }) => {
-                ApiError::Command { kind, message }.into_response()
-            }
-            Ok(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Unexpected early upgrade upload completion".to_string(),
-                }),
-            )
-                .into_response(),
-            Err(error) => ApiError::from(error).into_response(),
-        },
-    }
-}
 
 /// Maps binary selection failures to stable operator-facing upgrade responses.
 fn upgrade_binary_error_response(
@@ -90,29 +67,23 @@ async fn upload_upgrade_binary(
     agent_id: AgentId,
     source_path: &std::path::Path,
     destination_path: &str,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), ApiError> {
     use tokio::io::AsyncReadExt;
 
     let mut file = tokio::fs::File::open(source_path).await.map_err(|error| {
-        (
+        ApiError::status(
             StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("Failed to open upgrade binary: {error}"),
-            }),
+            format!("Failed to open upgrade binary: {error}"),
         )
-            .into_response()
     })?;
     let total_bytes = file
         .metadata()
         .await
         .map_err(|error| {
-            (
+            ApiError::status(
                 StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to inspect upgrade binary: {error}"),
-                }),
+                format!("Failed to inspect upgrade binary: {error}"),
             )
-                .into_response()
         })?
         .len();
     log!(
@@ -123,57 +94,43 @@ async fn upload_upgrade_binary(
         destination_path,
         total_bytes
     );
-    let mut upload = AgentUpload::start(
-        state,
+    let command = Command::RawUpload {
+        path: destination_path.to_string(),
+        on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
+        ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),
+    };
+    let upload = AgentUpload::start(
+        &state.router_ref,
         agent_id.clone(),
-        Command::RawUpload {
-            path: destination_path.to_string(),
-            on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
-            ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),
-        },
+        command,
         destination_path.to_string(),
         total_bytes,
     )
-    .await
-    .map_err(upgrade_upload_start_error)?;
-    let mut buffer = vec![0; redoor_protocol::wire::stream::CHUNK_SIZE];
-    loop {
-        let bytes_read = file.read(&mut buffer).await.map_err(|error| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to read upgrade binary: {error}"),
-                }),
-            )
-                .into_response()
-        })?;
-        if bytes_read == 0 {
-            break;
+    .await?;
+    if let UploadStart::Ready(mut upload) = upload {
+        let mut buffer = vec![0; redoor_protocol::wire::stream::CHUNK_SIZE];
+        loop {
+            let bytes_read = file.read(&mut buffer).await.map_err(|error| {
+                ApiError::status(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to read upgrade binary: {error}"),
+                )
+            })?;
+            if bytes_read == 0 {
+                break;
+            }
+            upload.send(&buffer[..bytes_read]).await?;
         }
-        upload.send(&buffer[..bytes_read]).await?;
+        upload.finish().await?;
     }
-    match upload.finish().await? {
-        (CommandResult::RawUpload, _) => {
-            log!(
-                Level::Info,
-                "Agent upgrade binary upload completed: agent_id={}, destination={}, bytes={}",
-                agent_id,
-                destination_path,
-                total_bytes
-            );
-            Ok(())
-        }
-        (CommandResult::Error { kind, message }, _) => {
-            Err(ApiError::Command { kind, message }.into_response())
-        }
-        _ => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Unexpected upgrade upload completion".to_string(),
-            }),
-        )
-            .into_response()),
-    }
+    log!(
+        Level::Info,
+        "Agent upgrade binary upload completed: agent_id={}, destination={}, bytes={}",
+        agent_id,
+        destination_path,
+        total_bytes
+    );
+    Ok(())
 }
 
 /// Route: `POST /api/v1/agents/{agent}/upgrade` installs and execs a selected release.
@@ -314,7 +271,7 @@ pub(crate) async fn upgrade_agent_handler(
         details.arch,
         source_path.display()
     );
-    if let Err(response) =
+    if let Err(error) =
         upload_upgrade_binary(&state, agent_id.clone(), &source_path, &details.exe_path).await
     {
         log!(
@@ -324,7 +281,7 @@ pub(crate) async fn upgrade_agent_handler(
             target_version,
             binary_source
         );
-        return response;
+        return error.into_response();
     }
     log!(
         Level::Info,

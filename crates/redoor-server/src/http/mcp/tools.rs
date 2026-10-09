@@ -1,30 +1,40 @@
 //! Schema-driven MCP device tool catalog and authorized dispatch.
 
-use crate::actors::router::RouterMsg;
+use crate::actors::router::{CopyOperation, OutputStreamTracking, RouterMsg};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use redoor_protocol::{
     api::{
         files::CreationOwnershipOptions,
         search::{CaseSensitivity, FindRequest, GrepRequest},
-        transfers::CopyExistingMode,
+        transfers::{CopyEndpoint, CopyExistingMode},
     },
     ids::{AgentId, RequestId, TransferId},
-    wire::exec::{ExecEvent, ExecRequest},
+    wire::{
+        command::Command,
+        exec::{ExecEvent, ExecRequest},
+    },
 };
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use super::{error::McpError, policy, schema::server_metadata, services};
+use super::{error::McpError, policy, schema::server_metadata};
 use crate::http::{
     agent_client::{
         ContentGrep, CreateDirectory, DeletePath, FileSearch, ListPath, Listing, Metadata,
     },
+    error::ApiError,
     machine_tokens::{MachinePrincipal, MachineScope},
+    services::{
+        output::OutputStream,
+        transfer::{CopySpec, StartedCopy},
+        upload::{AgentUpload, UploadStart},
+    },
     state::ServerState,
-    streaming::OutputCancelGuard,
 };
 
 const MAX_NAME_LENGTH: usize = 64;
+/// Keeps inline MCP reads and writes small; larger files use the streaming endpoints.
+const INLINE_FILE_LIMIT: usize = 64 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 
 /// A compact definition keeps annotations and schemas consistent with implemented dispatch.
@@ -408,18 +418,24 @@ async fn run_command(
                 id,
             )
         })?;
-    let (remote_id, receiver, terminal) =
-        match services::start_execution(state, &device, request).await {
-            Ok(value) => value,
-            Err(error) => {
-                let mut current = record.lock().await;
-                current.state = "failed".to_string();
-                current.terminal = Some(json!({"reason":"admission_failed","error":error}));
-                drop(current);
-                let _ = state.mcp.operations.update(&record).await;
-                return Err(op("Execution admission failed", id));
-            }
-        };
+    let (output, terminal) = match OutputStream::open_execution(
+        &state.router_ref,
+        AgentId::from(device.as_str()),
+        request,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            let mut current = record.lock().await;
+            current.state = "failed".to_string();
+            current.terminal = Some(json!({"reason":"admission_failed","error":error.to_string()}));
+            drop(current);
+            let _ = state.mcp.operations.update(&record).await;
+            return Err(op("Execution admission failed", id));
+        }
+    };
+    let remote_id = output.request_id();
     {
         let mut record = record.lock().await;
         record.remote_id = Some(remote_id.0);
@@ -432,18 +448,12 @@ async fn run_command(
         .await
         .map_err(|error| op(format!("Failed persisting execution: {error:#}"), id))?;
     let operation_id = record.lock().await.id;
-    let guard = OutputCancelGuard::new(
-        state.router_ref.clone(),
-        AgentId::from(record.lock().await.device_ids[0].as_str()),
-        remote_id,
-    );
     let task = drain_execution(
         state.mcp.operations.clone(),
         record.clone(),
-        receiver,
+        output,
         terminal,
         output_limit,
-        guard,
     );
     if background {
         tokio::spawn(task);
@@ -459,15 +469,14 @@ async fn run_command(
 async fn drain_execution(
     operations: super::operations::OperationRegistry,
     record: std::sync::Arc<tokio::sync::Mutex<super::operations::OperationRecord>>,
-    mut receiver: crate::actors::router::OutputReceiver,
+    mut output: OutputStream,
     mut terminal: tokio::sync::watch::Receiver<Option<ExecEvent>>,
     limit: usize,
-    mut guard: OutputCancelGuard,
 ) {
     let mut terminal_open = true;
     loop {
         tokio::select! {
-            chunk = receiver.recv() => match chunk {
+            chunk = output.recv() => match chunk {
                 Some(chunk) => {
                     let terminal_event = if chunk.is_last {
                         serde_json::from_slice::<ExecEvent>(&chunk.data).ok()
@@ -480,7 +489,7 @@ async fn drain_execution(
                     if chunk.is_error { record.lock().await.state = "failed".to_string(); }
                     if let Some(event) = terminal_event {
                         finish_execution(&operations, &record, event).await;
-                        guard.disarm();
+                        output.disarm();
                         return;
                     }
                 }
@@ -491,7 +500,7 @@ async fn drain_execution(
                     let event = { terminal.borrow_and_update().clone() };
                     if let Some(event) = event {
                         finish_execution(&operations, &record, event).await;
-                        guard.disarm();
+                        output.disarm();
                         return;
                     }
                     break;
@@ -505,7 +514,7 @@ async fn drain_execution(
                 let event = { terminal.borrow_and_update().clone() };
                 if let Some(event) = event {
                     finish_execution(&operations, &record, event).await;
-                    guard.disarm();
+                    output.disarm();
                     return;
                 }
             }
@@ -687,11 +696,11 @@ async fn cancel_operation(
         .await
         .map_err(|error| op(format!("Failed persisting cancellation: {error:#}"), id))?;
     let accepted = match (kind.as_str(), remote_id, device.as_deref()) {
-        ("command", Some(remote), Some(device)) => {
-            services::cancel_execution(state, device, RequestId::new(remote))
-                .await
-                .map_err(|error| op(error, id))?
-        }
+        ("command", Some(remote), Some(device)) => state
+            .agents
+            .cancel_execution(AgentId::from(device), RequestId::new(remote))
+            .await
+            .map_err(|error| op(error.to_string(), id))?,
         ("copy" | "move", Some(remote), _) => state
             .router_ref
             .request(|reply| RouterMsg::CancelPublicTransfer {
@@ -776,9 +785,31 @@ async fn read_file(
         .get("encoding")
         .and_then(Value::as_str)
         .unwrap_or("text");
-    let (bytes, more) = services::read_file(state, device, path, offset, limit)
+    let mut stream = OutputStream::open(
+        &state.router_ref,
+        AgentId::from(device),
+        Command::RawDownload {
+            path: path.to_string(),
+            range_start: Some(offset),
+            // One byte past the page tells whether more content follows.
+            range_end: Some(offset.saturating_add(limit as u64).saturating_add(1)),
+        },
+        OutputStreamTracking::Download {
+            path: path.to_string(),
+            total_bytes: limit as u64 + 1,
+            full_size: None,
+            resume_offset: Some(offset),
+        },
+    )
+    .await
+    .map_err(|error| op(error.to_string(), id))?;
+    let page = stream
+        .read_bounded(limit)
         .await
         .map_err(|error| op(error, id))?;
+    // Dropping the stream cancels the agent if it still streams the look-ahead byte.
+    drop(stream);
+    let (bytes, more) = (page.data, page.overflowed);
     let next_offset = offset + bytes.len() as u64;
     let content = match encoding {
         "base64" => STANDARD.encode(&bytes),
@@ -811,22 +842,44 @@ async fn write_file(
     } else {
         content.as_bytes().to_vec()
     };
-    if bytes.len() > services::INLINE_FILE_LIMIT {
+    if bytes.len() > INLINE_FILE_LIMIT {
         return Err(invalid(
             "Inline writes are limited to 65536 bytes; use prepare_file_upload",
             id,
         ));
     }
-    let written = services::write_file(
-        state,
-        device,
-        path,
-        &bytes,
-        conflict_mode(string(args, "on_existing", id)?, id)?,
-    )
-    .await
-    .map_err(|error| op(error, id))?;
+    let command = Command::RawUpload {
+        path: path.to_string(),
+        on_existing: conflict_mode(string(args, "on_existing", id)?, id)?,
+        ownership: CreationOwnershipOptions::default(),
+    };
+    let written = write_inline(state, device, path, command, &bytes)
+        .await
+        .map_err(|error| op(error.to_string(), id))?;
     Ok(json!({"path":path,"bytes_written":written}))
+}
+
+/// Writes bounded inline bytes through the shared streamed upload and returns the bytes written.
+async fn write_inline(
+    state: &ServerState,
+    device: &str,
+    path: &str,
+    command: Command,
+    bytes: &[u8],
+) -> Result<u64, ApiError> {
+    let upload = AgentUpload::start(
+        &state.router_ref,
+        AgentId::from(device),
+        command,
+        path.to_string(),
+        bytes.len() as u64,
+    )
+    .await?;
+    let UploadStart::Ready(mut upload) = upload else {
+        return Ok(0);
+    };
+    upload.send(bytes).await?;
+    upload.finish().await
 }
 
 /// Authorizes both endpoints before admitting copy or move work idempotently.
@@ -925,22 +978,35 @@ async fn transfer(
                 )
             })?;
     }
-    let (remote_id, terminal) = match services::start_transfer(
-        state,
-        source_device,
-        source_path,
-        destination_device,
-        destination_path,
-        mode,
-        is_move,
-    )
-    .await
-    {
-        Ok(value) => value,
+    let spec = CopySpec {
+        op: if is_move {
+            CopyOperation::Move
+        } else {
+            CopyOperation::Copy
+        },
+        source: CopyEndpoint {
+            agent: AgentId::from(source_device),
+            path: source_path.to_string(),
+        },
+        dest: CopyEndpoint {
+            agent: AgentId::from(destination_device),
+            path: destination_path.to_string(),
+        },
+        on_existing: mode,
+        observe_terminal: true,
+    };
+    let (remote_id, terminal) = match state.transfers.start_copy(spec).await {
+        Ok(StartedCopy {
+            transfer_id,
+            terminal: Some(terminal),
+        }) => (transfer_id.0, terminal),
+        Ok(StartedCopy { terminal: None, .. }) => {
+            return Err(op("Transfer admission lost its terminal observer", id));
+        }
         Err(error) => {
             let mut current = record.lock().await;
             current.state = "failed".to_string();
-            current.terminal = Some(json!({"reason":"admission_failed","error":error}));
+            current.terminal = Some(json!({"reason":"admission_failed","error":error.to_string()}));
             drop(current);
             let _ = state.mcp.operations.update(&record).await;
             // Keyed callers share the durable admission even when its remote start fails.

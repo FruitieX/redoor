@@ -1,9 +1,6 @@
 //! Dedicated non-PTY execution endpoint reuses stream routing and drop-triggered cancellation.
 
-use super::{error::ApiError, state::ServerState, streaming::OutputCancelGuard};
-use crate::actors::router::{
-    ExecuteStreamRequest, OutputReceiver, OutputStreamTracking, RouterMsg,
-};
+use super::{error::ApiError, services::output::OutputStream, state::ServerState};
 use axum::{
     Json,
     body::Body,
@@ -14,7 +11,7 @@ use axum::{
 use redoor_protocol::{
     api::exec::CancelExecutionResponse,
     ids::{AgentId, RequestId},
-    wire::{command::Command, exec::ExecRequest},
+    wire::exec::{ExecEvent, ExecRequest},
 };
 
 /// Cancels process output through its own resource while file-transfer history stays file-only.
@@ -45,45 +42,34 @@ pub(crate) async fn exec_handler(
     Json(request): Json<ExecRequest>,
 ) -> Result<Response, ApiError> {
     request.validate().map_err(ApiError::bad_request)?;
-    let agent_id = AgentId::from(agent);
-    let (terminal_sender, terminal_receiver) = tokio::sync::watch::channel(None);
-    let receiver = state
-        .router_ref
-        .request(|reply| {
-            RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
-                agent_id: agent_id.clone(),
-                command: Command::Exec { request },
-                tracking: OutputStreamTracking::Execution {
-                    terminal: terminal_sender.clone(),
-                },
-                reply,
-            })
-        })
-        .await??;
-    let id = receiver.request_id();
-    let guard = OutputCancelGuard::new(state.router_ref.clone(), agent_id, id);
-    drop(terminal_sender);
+    let (output, terminal) =
+        OutputStream::open_execution(&state.router_ref, AgentId::from(agent), request).await?;
+    let id = output.request_id();
     Ok(Response::builder()
         .header("Content-Type", "application/x-ndjson")
         .header("X-Redoor-Execution-Id", id.to_string())
-        .body(execution_body(receiver, terminal_receiver, guard))
+        .body(execution_body(output, terminal))
         .unwrap())
+}
+
+/// Serializes one terminal event as an NDJSON line.
+fn ndjson_line(event: &ExecEvent) -> bytes::Bytes {
+    let mut data = serde_json::to_vec(event).expect("execution events always serialize");
+    data.push(b'\n');
+    bytes::Bytes::from(data)
 }
 
 /// Drains already accepted payload before fallback completion so timeouts cannot erase trailing output.
 fn execution_body(
-    mut receiver: OutputReceiver,
-    mut terminal_receiver: tokio::sync::watch::Receiver<
-        Option<redoor_protocol::wire::exec::ExecEvent>,
-    >,
-    mut guard: OutputCancelGuard,
+    mut output: OutputStream,
+    mut terminal_receiver: tokio::sync::watch::Receiver<Option<ExecEvent>>,
 ) -> Body {
     let stream = async_stream::stream! {
         let mut terminal_open = true;
         loop {
             let chunk = tokio::select! {
                 biased;
-                chunk = receiver.recv() => Ok(chunk),
+                chunk = output.recv() => Ok(chunk),
                 result = terminal_receiver.changed(), if terminal_open => Err(result.is_ok()),
             };
             let chunk = match chunk {
@@ -93,10 +79,8 @@ fn execution_body(
                     let event = terminal_receiver.borrow_and_update().clone();
                     let Some(event) = event else { break; };
                     // Only agent terminal acknowledgements can describe process termination.
-                    guard.disarm();
-                    let mut data = serde_json::to_vec(&event).unwrap();
-                    data.push(b'\n');
-                    yield Ok(bytes::Bytes::from(data));
+                    output.disarm();
+                    yield Ok(ndjson_line(&event));
                     break;
                 }
             };
@@ -108,10 +92,8 @@ fn execution_body(
                 }
                 let event = terminal_receiver.borrow_and_update().clone();
                 if let Some(event) = event {
-                    guard.disarm();
-                    let mut data = serde_json::to_vec(&event).unwrap();
-                    data.push(b'\n');
-                    yield Ok(bytes::Bytes::from(data));
+                    output.disarm();
+                    yield Ok(ndjson_line(&event));
                 } else {
                     yield Err(std::io::Error::other("Execution stream ended before completion"));
                 }
@@ -121,7 +103,6 @@ fn execution_body(
                 yield Err(std::io::Error::other(String::from_utf8_lossy(&chunk.data).to_string()));
                 break;
             }
-            if chunk.is_last { guard.disarm(); }
             yield Ok(bytes::Bytes::from(chunk.data));
             if chunk.is_last { break; }
         }
@@ -169,8 +150,8 @@ mod tests {
             crate::terminal_registry::TerminalRegistry::new(),
             crate::log_registry::LogRegistry::new(),
         );
-        let guard = OutputCancelGuard::new(router, AgentId::from("test"), RequestId::new(1));
-        let bytes = axum::body::to_bytes(execution_body(receiver, terminal_receiver, guard), 4096)
+        let output = OutputStream::detached(router, AgentId::from("test"), receiver);
+        let bytes = axum::body::to_bytes(execution_body(output, terminal_receiver), 4096)
             .await
             .unwrap();
         let events: Vec<ExecEvent> = std::str::from_utf8(&bytes)

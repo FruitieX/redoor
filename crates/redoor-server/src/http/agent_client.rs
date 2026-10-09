@@ -178,14 +178,10 @@ impl Drop for PendingCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actors::router::{ConnectionStreams, RegisterAgentRequest, spawn_router};
-    use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
-    use axum::extract::ws::Message as WsMessage;
+    use crate::http::fake_agent::FakeAgent;
     use axum::http::StatusCode;
-    use redoor_protocol::ids::SocketId;
     use redoor_protocol::wire::ServerToAgent;
     use redoor_protocol::wire::command::CommandErrorKind;
-    use tokio::sync::mpsc;
 
     /// A restore (request cancel scope) with a test-sized deadline.
     struct QuickRestore;
@@ -236,90 +232,11 @@ mod tests {
         }
     }
 
-    /// A fake agent's control lanes, registered with a real router.
-    struct FakeAgent {
-        client: AgentClient,
-        agent_id: AgentId,
-        commands: mpsc::Receiver<WsMessage>,
-        priority: mpsc::Receiver<WsMessage>,
-    }
-
-    impl FakeAgent {
-        /// Registers one agent that never answers on its own.
-        async fn connect() -> Self {
-            let _ = redoor_core::logging::init(None).await;
-            let (router, _task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
-            let agent_id = AgentId::from("client-test");
-            let (commands_sender, commands) = mpsc::channel(8);
-            let (priority_sender, mut priority) = mpsc::channel(8);
-            router
-                .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
-                    agent_id: agent_id.clone(),
-                    agent_name: "client-test".to_string(),
-                    socket_id: SocketId::new(),
-                    outgoing_commands: commands_sender,
-                    outgoing_priority: priority_sender,
-                    os: "linux".to_string(),
-                    arch: "x86_64".to_string(),
-                    hostname: "host".to_string(),
-                    username: "user".to_string(),
-                    default_directory: "/tmp".to_string(),
-                    binary: redoor_core::identity::current_binary_identity(),
-                    supports_self_exec: false,
-                    supports_native_open: false,
-                    supports_trash: true,
-                    supports_move_to_trash: true,
-                    uid: None,
-                    is_root: false,
-                    watchdog: None,
-                    watchdog_attempt_generation: None,
-                    streams: ConnectionStreams::new(agent_id.clone(), false),
-                }))
-                .await
-                .unwrap();
-            // Skip the transfer-socket bootstrap so the lane only carries what the test sends.
-            assert!(priority.recv().await.is_some());
-            Self {
-                client: AgentClient::new(router),
-                agent_id,
-                commands,
-                priority,
-            }
-        }
-
-        /// Reads the next control frame of one lane.
-        async fn next(lane: &mut mpsc::Receiver<WsMessage>) -> ServerToAgent {
-            match lane.recv().await.expect("lane open") {
-                WsMessage::Text(text) => serde_json::from_str(&text).unwrap(),
-                other => panic!("unexpected frame: {other:?}"),
-            }
-        }
-
-        /// Answers the next queued command with `result`.
-        async fn answer(&mut self, result: CommandResult) {
-            let ServerToAgent::Command { request_id, .. } = Self::next(&mut self.commands).await
-            else {
-                panic!("expected a command");
-            };
-            self.client
-                .router
-                .send_async(RouterMsg::RouteResponse(
-                    crate::actors::router::RouteResponse {
-                        agent_id: self.agent_id.clone(),
-                        request_id,
-                        result,
-                    },
-                ))
-                .await
-                .unwrap();
-        }
-    }
-
     /// Typed agent failures and wrong result variants become the matching API errors.
     #[tokio::test]
     async fn extract_maps_agent_failures_and_protocol_mismatches() {
         let mut agent = FakeAgent::connect().await;
-        let client = agent.client.clone();
+        let client = AgentClient::new(agent.router.clone());
         let id = agent.agent_id.clone();
         let call = tokio::spawn(async move {
             client
@@ -342,7 +259,7 @@ mod tests {
         assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
         assert_eq!(error.to_string(), "No such file");
 
-        let client = agent.client.clone();
+        let client = AgentClient::new(agent.router.clone());
         let id = agent.agent_id.clone();
         let call = tokio::spawn(async move {
             client
@@ -367,20 +284,17 @@ mod tests {
     #[tokio::test]
     async fn timeout_cancels_request_scoped_command() {
         let mut agent = FakeAgent::connect().await;
-        let error = agent
-            .client
+        let client = AgentClient::new(agent.router.clone());
+        let error = client
             .call(&agent.agent_id, QuickRestore)
             .await
             .unwrap_err();
         // The caller learns the agent was too slow.
         assert!(matches!(error, ApiError::Timeout(_)));
-        let ServerToAgent::Command { request_id, .. } = FakeAgent::next(&mut agent.commands).await
-        else {
-            panic!("expected the restore command");
-        };
+        let (request_id, _) = agent.next_command().await;
         // The agent is told to stop exactly the abandoned request.
         assert!(matches!(
-            FakeAgent::next(&mut agent.priority).await,
+            agent.next_priority().await,
             ServerToAgent::CancelTransfer { request_id: canceled } if canceled == request_id
         ));
     }
@@ -389,18 +303,14 @@ mod tests {
     #[tokio::test]
     async fn timeout_forgets_connection_scoped_command() {
         let mut agent = FakeAgent::connect().await;
-        let error = agent
-            .client
-            .call(&agent.agent_id, QuickEcho)
-            .await
-            .unwrap_err();
+        let client = AgentClient::new(agent.router.clone());
+        let error = client.call(&agent.agent_id, QuickEcho).await.unwrap_err();
         // The deadline still bounds the caller.
         assert!(matches!(error, ApiError::Timeout(_)));
         // A follow-up command proves the router processed the abandonment first.
-        let client = agent.client.clone();
         let id = agent.agent_id.clone();
         let follow_up = tokio::spawn(async move { client.call(&id, ListAccounts).await });
-        let _echo = FakeAgent::next(&mut agent.commands).await;
+        let _echo = agent.next_command().await;
         agent
             .answer(CommandResult::error(CommandErrorKind::Internal, "done"))
             .await;

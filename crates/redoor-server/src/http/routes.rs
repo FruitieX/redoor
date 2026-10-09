@@ -31,7 +31,7 @@ use super::{
     },
     logs::server_logs_websocket_handler,
     moves::move_file_handler,
-    raw::{create_one_time_token_handler, raw_agent_handler, raw_agent_put_handler},
+    raw::{create_one_time_token_handler, raw_agent_handler, upload::raw_agent_put_handler},
     restart::restart_server_handler,
     retry_agent_start::retry_agent_start_handler,
     server_info::server_info_handler,

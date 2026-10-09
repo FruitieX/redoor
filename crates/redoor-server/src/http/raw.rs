@@ -1,4 +1,3 @@
-use crate::actors;
 use axum::{
     Json,
     body::Body,
@@ -17,16 +16,13 @@ use super::{
     agent_client::Metadata,
     agent_helpers::{AgentFilePath, absolute_path_from_url},
     error::ApiError,
+    services::output::OutputStream,
     state::ServerState,
-    streaming::OutputCancelGuard,
 };
+use crate::actors::router::OutputStreamTracking;
+use futures_util::StreamExt;
 
-mod upload;
-
-pub(crate) use upload::{
-    AgentUpload, AgentUploadStartError, RawUploadQueryParams, forward_request_body,
-    raw_agent_put_handler, required_content_length,
-};
+pub(crate) mod upload;
 
 /// Records the bytes one token-authorized HTTP body handed off, including partial bodies on drop.
 struct OneTimeDownloadProgress {
@@ -170,36 +166,24 @@ pub(crate) async fn raw_agent_handler(
             (None, None, StatusCode::OK, metadata.file_size, None)
         };
 
-    let response_receiver = state
-        .router_ref
-        .request(|reply| {
-            actors::router::RouterMsg::ExecuteStreamCommandRest(
-                actors::router::ExecuteStreamRequest {
-                    agent_id: agent_id.clone(),
-                    command: Command::RawDownload {
-                        path: path.clone(),
-                        range_start,
-                        range_end,
-                    },
-                    tracking: actors::router::OutputStreamTracking::Download {
-                        path: path.clone(),
-                        total_bytes: content_length,
-                        full_size: Some(metadata.file_size),
-                        resume_offset: range_start,
-                    },
-                    reply,
-                },
-            )
-        })
-        .await??;
-
-    let cancel_guard = OutputCancelGuard::new(
-        state.router_ref.clone(),
+    let mut output = OutputStream::open(
+        &state.router_ref,
         agent_id.clone(),
-        response_receiver.request_id(),
-    );
-
-    let one_time_progress = params.one_time_token.map(|token| OneTimeDownloadProgress {
+        Command::RawDownload {
+            path: path.clone(),
+            range_start,
+            range_end,
+        },
+        OutputStreamTracking::Download {
+            path: path.clone(),
+            total_bytes: content_length,
+            full_size: Some(metadata.file_size),
+            resume_offset: range_start,
+        },
+    )
+    .await?;
+    ensure_download_started(&mut output, &path).await?;
+    let mut one_time_progress = params.one_time_token.map(|token| OneTimeDownloadProgress {
         registry: state.one_time_token_registry.clone(),
         agent_id: agent_id.clone(),
         path: path.clone(),
@@ -208,9 +192,12 @@ pub(crate) async fn raw_agent_handler(
         next_offset: range_start.unwrap_or(0),
         file_size: metadata.file_size,
     });
-    let body_stream =
-        begin_download_body_stream(response_receiver, &path, one_time_progress, cancel_guard)
-            .await?;
+    // Credits each item as Axum accepts it; the progress records itself when the body drops.
+    let body_stream = output.inspect(move |item| {
+        if let (Ok(bytes), Some(progress)) = (item, one_time_progress.as_mut()) {
+            progress.record_bytes(bytes.len() as u64);
+        }
+    });
 
     let mut response_builder = Response::builder()
         .status(status_code)
@@ -254,43 +241,29 @@ async fn stream_directory_archive(
         ));
     }
 
-    let response_receiver = state
-        .router_ref
-        .request(|reply| {
-            actors::router::RouterMsg::ExecuteStreamCommandRest(
-                actors::router::ExecuteStreamRequest {
-                    agent_id: agent_id.clone(),
-                    command: Command::TarDownload {
-                        path: path.clone(),
-                        include_root: true,
-                    },
-                    tracking: actors::router::OutputStreamTracking::Download {
-                        path: path.clone(),
-                        // Archive length is unknown at start so the body can begin immediately
-                        // without Content-Length. A parallel metadata walk may publish a total
-                        // later; completion still promotes counted bytes if that walk is late.
-                        // Counts are plain tar bytes from the agent, before REST-edge gzip.
-                        total_bytes: 0,
-                        full_size: None,
-                        resume_offset: None,
-                    },
-                    reply,
-                },
-            )
-        })
-        .await??;
-
-    let cancel_guard = OutputCancelGuard::new(
-        state.router_ref.clone(),
-        agent_id.clone(),
-        response_receiver.request_id(),
-    );
-
-    let body_stream =
-        begin_download_body_stream(response_receiver, &path, None, cancel_guard).await?;
+    let mut output = OutputStream::open(
+        &state.router_ref,
+        agent_id,
+        Command::TarDownload {
+            path: path.clone(),
+            include_root: true,
+        },
+        OutputStreamTracking::Download {
+            path: path.clone(),
+            // Archive length is unknown at start so the body can begin immediately without
+            // Content-Length. A parallel metadata walk may publish a total later; completion
+            // still promotes counted bytes if that walk is late. Counts are plain tar bytes
+            // from the agent, before REST-edge gzip.
+            total_bytes: 0,
+            full_size: None,
+            resume_offset: None,
+        },
+    )
+    .await?;
+    ensure_download_started(&mut output, &path).await?;
 
     // Gzip only the HTTP body: agent still emits plain tar for reuse by copy uploads.
-    let tar_reader = tokio_util::io::StreamReader::new(body_stream);
+    let tar_reader = tokio_util::io::StreamReader::new(output);
     let gzip_reader = async_compression::tokio::bufread::GzipEncoder::new(tar_reader);
     let gzipped_stream = tokio_util::io::ReaderStream::new(gzip_reader);
 
@@ -315,86 +288,30 @@ async fn stream_directory_archive(
         .into_response())
 }
 
-/// Waits for the first agent chunk so immediate failures can still return JSON errors,
-/// then builds the HTTP body stream used by both raw file and directory tar downloads.
-async fn begin_download_body_stream(
-    mut response_receiver: actors::router::OutputReceiver,
-    path: &str,
-    mut one_time_progress: Option<OneTimeDownloadProgress>,
-    mut cancel_guard: OutputCancelGuard,
-) -> Result<impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + use<>, ApiError>
-{
-    let first_chunk = response_receiver
-        .recv()
+/// Waits for the first agent frame so an immediate failure can still be answered with a JSON
+/// error and a fitting status; once the body starts, failures can only abort the stream.
+async fn ensure_download_started(output: &mut OutputStream, path: &str) -> Result<(), ApiError> {
+    let first = output
+        .peek()
         .await
         .ok_or_else(|| ApiError::internal("No data received"))?;
-
-    if first_chunk.is_error {
-        cancel_guard.disarm();
-        let error_msg = if first_chunk.data.is_empty() {
-            format!("File error: {path}")
-        } else {
-            String::from_utf8_lossy(&first_chunk.data).to_string()
-        };
-
-        let status = if error_msg.contains("No such file") || error_msg.contains("not found") {
-            StatusCode::NOT_FOUND
-        } else if error_msg.contains("Permission denied") {
-            StatusCode::FORBIDDEN
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-
-        return Err(ApiError::status(status, error_msg));
+    if !first.is_error {
+        return Ok(());
     }
-
-    use async_stream::stream;
-
-    Ok(stream! {
-        // `first_chunk` was awaited before constructing the HTTP response so we could still
-        // return a normal JSON error response with an appropriate status code if the agent
-        // failed immediately. Once we start streaming the body, the headers and status code are
-        // already committed, so from this point forward we can only emit bytes or terminate the
-        // stream with an I/O error.
-        let mut pending_chunk = Some(first_chunk);
-        // An explicit transfer cancel stops the stream lease, which ends `recv` after any
-        // already queued frames.
-        while let Some(parsed) = match pending_chunk.take() {
-            Some(chunk) => Some(chunk),
-            None => response_receiver.recv().await,
-        } {
-            if parsed.is_error {
-                // A later chunk can only fail after the response has already started. Convert the
-                // agent error into a stream error so Axum/Hyper stops the body stream and the
-                // client sees the download fail instead of silently receiving truncated data.
-                let error_msg = if parsed.data.is_empty() {
-                    "File read error on agent".to_string()
-                } else {
-                    String::from_utf8_lossy(&parsed.data).to_string()
-                };
-                cancel_guard.disarm();
-                yield Err(std::io::Error::other(error_msg));
-                break;
-            }
-
-            let is_last = parsed.is_last;
-            if is_last {
-                cancel_guard.disarm();
-            }
-            let bytes = parsed.data.len() as u64;
-            // Empty chunks carry no payload, so skip them and wait for the next message.
-            if !parsed.data.is_empty() {
-                if let Some(progress) = one_time_progress.as_mut() {
-                    progress.record_bytes(bytes);
-                }
-                yield Ok(bytes::Bytes::from(parsed.data));
-            }
-            if is_last {
-                break;
-            }
-        }
-        // Reaching the end of the channel cleanly ends the HTTP body stream.
-    })
+    let message = if first.data.is_empty() {
+        format!("File error: {path}")
+    } else {
+        String::from_utf8_lossy(&first.data).into_owned()
+    };
+    // Download workers report I/O failures as text, so classify the common cases by message.
+    let status = if message.contains("No such file") || message.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if message.contains("Permission denied") {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    Err(ApiError::status(status, message))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/one-time-token/{*path}`
@@ -422,14 +339,12 @@ mod tests {
     use super::*;
     use crate::{
         actors::router::{
-            ConnectionStreams, ExecuteStreamRequest, RegisterAgentRequest,
-            RegisterTransferConnectionRequest, RouterMsg,
+            ConnectionStreams, RegisterAgentRequest, RegisterTransferConnectionRequest, RouterMsg,
         },
         log_registry::LogRegistry,
         terminal_registry::TerminalRegistry,
     };
     use futures_util::StreamExt;
-    use redoor_core::identity::current_binary_identity;
     use redoor_protocol::{
         api::transfers::TransferProgressState,
         ids::{ChunkIndex, SocketId},
@@ -449,7 +364,7 @@ mod tests {
     async fn body_drop_cancels_download_without_subsequent_chunk() {
         let _ = redoor_core::logging::init(None).await;
         let (router_ref, router_task) =
-            actors::router::spawn_router(TerminalRegistry::new(), LogRegistry::new());
+            crate::actors::router::spawn_router(TerminalRegistry::new(), LogRegistry::new());
         let agent_id = AgentId::from("body-drop-agent");
         let (text_sender, mut text_receiver) = mpsc::channel(64);
         let (priority_sender, mut priority_receiver) = mpsc::channel(16);
@@ -460,16 +375,16 @@ mod tests {
         router_ref
             .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
                 agent_id: agent_id.clone(),
-                agent_name: "body-drop-agent".to_string(),
+                agent_name: agent_id.to_string(),
                 socket_id: SocketId::new(),
                 outgoing_commands: text_sender,
                 outgoing_priority: priority_sender,
-                os: "macos".to_string(),
-                arch: "arm64".to_string(),
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
                 hostname: "host".to_string(),
                 username: "user".to_string(),
                 default_directory: "/tmp".to_string(),
-                binary: current_binary_identity(),
+                binary: redoor_core::identity::current_binary_identity(),
                 supports_self_exec: true,
                 supports_native_open: true,
                 supports_trash: true,
@@ -514,28 +429,24 @@ mod tests {
             .expect("transfer registration accepted");
 
         let path = "/tmp/stalled.bin".to_string();
-        let chunk_receiver = router_ref
-            .request(|reply| {
-                RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
-                    agent_id: agent_id.clone(),
-                    command: Command::RawDownload {
-                        path: path.clone(),
-                        range_start: None,
-                        range_end: None,
-                    },
-                    tracking: actors::router::OutputStreamTracking::Download {
-                        path: path.clone(),
-                        total_bytes: 2,
-                        full_size: Some(2),
-                        resume_offset: None,
-                    },
-                    reply,
-                })
-            })
-            .await
-            .expect("download start request completed")
-            .expect("download start accepted");
-        let request_id = chunk_receiver.request_id();
+        let output = OutputStream::open(
+            &router_ref,
+            agent_id.clone(),
+            Command::RawDownload {
+                path: path.clone(),
+                range_start: None,
+                range_end: None,
+            },
+            OutputStreamTracking::Download {
+                path: path.clone(),
+                total_bytes: 2,
+                full_size: Some(2),
+                resume_offset: None,
+            },
+        )
+        .await
+        .expect("download start accepted");
+        let request_id = output.request_id();
         let command_request_id = match text_receiver.recv().await.expect("download command queued")
         {
             axum::extract::ws::Message::Text(text) => {
@@ -566,12 +477,10 @@ mod tests {
                     .await
             }
         });
-        let cancel_guard = OutputCancelGuard::new(router_ref.clone(), agent_id.clone(), request_id);
-        let mut body = Box::pin(
-            begin_download_body_stream(chunk_receiver, &path, None, cancel_guard)
-                .await
-                .expect("first chunk starts body"),
-        );
+        let mut body = output;
+        ensure_download_started(&mut body, &path)
+            .await
+            .expect("first chunk starts body");
         let first_bytes = body
             .next()
             .await

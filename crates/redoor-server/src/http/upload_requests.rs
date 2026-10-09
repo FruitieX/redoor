@@ -41,7 +41,7 @@ impl UploadRequests {
     pub(crate) fn reserve(
         &self,
         headers: &HeaderMap,
-    ) -> Result<Option<UploadRequestGuard>, Box<Response>> {
+    ) -> Result<Option<UploadRequestGuard>, ApiError> {
         let Some(header) = headers.get("x-redoor-upload-request") else {
             return Ok(None);
         };
@@ -49,28 +49,10 @@ impl UploadRequests {
             .to_str()
             .ok()
             .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or_else(|| {
-                Box::new(
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ErrorResponse {
-                            error: "X-Redoor-Upload-Request must be a UUID".into(),
-                        }),
-                    )
-                        .into_response(),
-                )
-            })?;
+            .ok_or_else(|| ApiError::bad_request("X-Redoor-Upload-Request must be a UUID"))?;
         let mut requests = self.0.lock().unwrap_or_else(|error| error.into_inner());
         if requests.contains_key(&token) {
-            return Err(Box::new(
-                (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: "Upload request token already active".into(),
-                    }),
-                )
-                    .into_response(),
-            ));
+            return Err(ApiError::conflict("Upload request token already active"));
         }
         requests.insert(token, UploadRequestState::Starting { canceled: false });
         Ok(Some(UploadRequestGuard {
@@ -81,8 +63,18 @@ impl UploadRequests {
 }
 
 impl UploadRequestGuard {
+    /// Binds the token to its transfer, or rejects the body when the client canceled during
+    /// destination setup.
+    pub(crate) fn activate(&self, id: TransferId) -> Result<(), ApiError> {
+        if self.try_activate(id) {
+            Ok(())
+        } else {
+            Err(ApiError::conflict("Upload request canceled during setup"))
+        }
+    }
+
     /// Refuses body forwarding when interruption happened during destination setup.
-    pub(crate) fn activate(&self, id: TransferId) -> bool {
+    fn try_activate(&self, id: TransferId) -> bool {
         let mut requests = self
             .requests
             .0
@@ -190,7 +182,7 @@ mod tests {
         );
         let guard = requests.reserve(&headers).unwrap().unwrap();
         assert!(
-            guard.activate(TransferId::new(12)),
+            guard.try_activate(TransferId::new(12)),
             "a live reservation must bind the actual worker id"
         );
         assert!(
@@ -214,7 +206,7 @@ mod tests {
             .unwrap()
             .insert(token, UploadRequestState::Starting { canceled: true });
         assert!(
-            !guard.activate(TransferId::new(99)),
+            !guard.try_activate(TransferId::new(99)),
             "a cancellation during setup must not revive body forwarding when readiness arrives"
         );
         drop(guard);
