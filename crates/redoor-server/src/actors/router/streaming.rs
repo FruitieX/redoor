@@ -254,14 +254,11 @@ pub(crate) fn route_chunk(
             _ = stop.changed() => false,
             result = sink.send(chunk) => result.is_ok(),
         };
-        // A saturated mailbox must not strand the websocket reader's per-chunk barrier.
-        if let Err(error) = myself
+        // A saturated mailbox delays this completion; a stopped router drops the reply port,
+        // which releases the websocket reader's per-chunk barrier as an error.
+        let _ = myself
             .send_async(RouterMsg::FinishRoutedOutputChunk(route))
-            .await
-            && let RouterMsg::FinishRoutedOutputChunk(route) = error.0
-        {
-            let _ = route.reply.send(());
-        }
+            .await;
     });
 }
 

@@ -349,23 +349,18 @@ pub(crate) fn route_chunk(
 
         tokio::spawn(async move {
             let send_succeeded = transfer_connection.send_binary(payload).await;
-            let send_result =
-                myself.send(RouterMsg::FinishRoutedUploadChunk(FinishUploadChunkRoute {
+            // Waiting for capacity keeps the completion instead of dropping it on a full
+            // mailbox; a stopped router drops the reply, which the caller maps to a failure.
+            let _ = myself
+                .send_async(RouterMsg::FinishRoutedUploadChunk(FinishUploadChunkRoute {
                     agent_id,
                     request_id,
                     bytes,
                     is_error,
                     send_succeeded,
                     reply,
-                }));
-
-            if let Err(tokio::sync::mpsc::error::SendError(message)) = send_result
-                && let RouterMsg::FinishRoutedUploadChunk(route) = message
-            {
-                let _ = route.reply.send(Err(RouterError::RouterStopped {
-                    operation: "upload chunk forwarding",
-                }));
-            }
+                }))
+                .await;
         });
     } else {
         let error = RouterError::AgentNotFound {

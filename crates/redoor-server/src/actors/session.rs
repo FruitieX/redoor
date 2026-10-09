@@ -149,9 +149,11 @@ impl SessionRuntime {
                     );
                 }
 
-                let _ = self
+                // Registration installs the routing entry every later frame depends on, so a
+                // momentarily full mailbox must delay it rather than silently drop it.
+                if let Err(error) = self
                     .router_ref
-                    .send(RouterMsg::RegisterAgent(RegisterAgentRequest {
+                    .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
                         agent_id: agent_id.clone(),
                         agent_name,
                         socket_id: self.socket_id.clone(),
@@ -172,7 +174,17 @@ impl SessionRuntime {
                         is_root,
                         watchdog: self.watchdog.clone(),
                         watchdog_attempt_generation,
-                    }));
+                    }))
+                    .await
+                {
+                    redoor_core::log_failure!(
+                        Level::Error,
+                        "Failed to queue agent registration: agent_id={}, socket_id={}, error={}",
+                        agent_id,
+                        self.socket_id,
+                        error
+                    );
+                }
                 self.agent_id = Some(agent_id);
             }
             AgentToServer::AgentUnregister { agent_id } => {
@@ -265,14 +277,19 @@ impl SessionRuntime {
                 transferred_bytes,
                 total_bytes,
             } => {
-                let _ = self.router_ref.send(RouterMsg::TransferProgressUpdate(
-                    TransferProgressUpdateRequest {
-                        agent_id,
-                        request_id,
-                        transferred_bytes,
-                        total_bytes,
-                    },
-                ));
+                // Late archive totals and local copy progress arrive once or rarely, so waiting
+                // for mailbox capacity is cheap while dropping them would leave stale progress.
+                let _ = self
+                    .router_ref
+                    .send_async(RouterMsg::TransferProgressUpdate(
+                        TransferProgressUpdateRequest {
+                            agent_id,
+                            request_id,
+                            transferred_bytes,
+                            total_bytes,
+                        },
+                    ))
+                    .await;
             }
         }
     }

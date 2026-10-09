@@ -622,22 +622,20 @@ pub(crate) fn route_chunk(
         )
         .await;
 
-        let send_result = myself.send(RouterMsg::FinishRoutedCopyChunk(FinishCopyChunkRoute {
-            source_agent_id: agent_id,
-            public_request_id,
-            source_request_id,
-            dest_request_id,
-            next_chunk_index: chunk_index,
-            bytes,
-            send_succeeded,
-            reply,
-        }));
-
-        if let Err(tokio::sync::mpsc::error::SendError(message)) = send_result
-            && let RouterMsg::FinishRoutedCopyChunk(route) = message
-        {
-            let _ = route.reply.send(());
-        }
+        // A dropped completion would desynchronize the destination chunk index and progress,
+        // so wait for mailbox capacity; a stopped router drops the reply and ends the reader.
+        let _ = myself
+            .send_async(RouterMsg::FinishRoutedCopyChunk(FinishCopyChunkRoute {
+                source_agent_id: agent_id,
+                public_request_id,
+                source_request_id,
+                dest_request_id,
+                next_chunk_index: chunk_index,
+                bytes,
+                send_succeeded,
+                reply,
+            }))
+            .await;
     });
 }
 

@@ -97,10 +97,15 @@ pub(super) async fn read_file(
     }
     if bytes.len() > limit {
         bytes.truncate(limit);
-        let _ = state.router_ref.send(RouterMsg::CancelTransfer {
-            agent_id,
-            request_id,
-        });
+        // The agent keeps streaming until it hears the cancel, so it must not be lost to a
+        // momentarily full router mailbox.
+        let _ = state
+            .router_ref
+            .send_async(RouterMsg::CancelTransfer {
+                agent_id,
+                request_id,
+            })
+            .await;
         Ok((bytes, true))
     } else {
         Ok((bytes, false))

@@ -46,21 +46,24 @@ impl RouterHandle {
         Self { sender }
     }
 
-    /// Queues one fire-and-forget router message.
-    #[allow(clippy::result_large_err)]
-    pub fn send(&self, message: RouterMsg) -> Result<(), mpsc::error::SendError<RouterMsg>> {
+    /// Queues one router message without waiting, for synchronous contexts only.
+    ///
+    /// A full mailbox is reported as [`RouterSendError::Full`] instead of being folded into the
+    /// shutdown error, so callers cannot mistake dropped work for a stopped router. Async
+    /// contexts must use [`RouterHandle::send_async`], which waits for capacity instead.
+    pub fn send(&self, message: RouterMsg) -> Result<(), RouterSendError> {
         self.sender.try_send(message).map_err(|error| match error {
-            mpsc::error::TrySendError::Closed(message)
-            | mpsc::error::TrySendError::Full(message) => mpsc::error::SendError(message),
+            mpsc::error::TrySendError::Full(_) => RouterSendError::Full,
+            mpsc::error::TrySendError::Closed(_) => RouterSendError::Stopped,
         })
     }
 
     /// Queues one router message, waiting for mailbox capacity when necessary.
-    pub async fn send_async(
-        &self,
-        message: RouterMsg,
-    ) -> Result<(), mpsc::error::SendError<RouterMsg>> {
-        self.sender.send(message).await
+    pub async fn send_async(&self, message: RouterMsg) -> Result<(), RouterSendError> {
+        self.sender
+            .send(message)
+            .await
+            .map_err(|_| RouterSendError::Stopped)
     }
 
     /// Runs one request/reply interaction against the router task with a timeout.
@@ -103,6 +106,17 @@ impl RouterHandle {
             .map_err(|_| RouterCallError::RouterStopped)?;
         reply_rx.await.map_err(|_| RouterCallError::RouterStopped)
     }
+}
+
+/// Why a router message was not queued; a full mailbox must never look like a stopped router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RouterSendError {
+    /// The bounded mailbox had no capacity for a non-waiting send; the message was not queued.
+    #[error("router mailbox is full")]
+    Full,
+    /// The router task has stopped and will never process the message.
+    #[error("router has stopped")]
+    Stopped,
 }
 
 /// Distinguishes request timeouts from router shutdown so callers can report the failure cause.
@@ -406,6 +420,32 @@ mod tests {
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::{Duration, timeout};
     use uuid::Uuid;
+
+    /// A full mailbox and a stopped router are different failures and must stay distinguishable.
+    #[tokio::test]
+    async fn send_distinguishes_full_mailbox_from_stopped_router() {
+        let (sender, receiver) = mpsc::channel(1);
+        let handle = RouterHandle::new(sender);
+        handle
+            .send(RouterMsg::CheckPendingUiRefresh)
+            .expect("first message fits the mailbox");
+        // Saturation must not be reported as shutdown, or callers would drop live work silently.
+        assert_eq!(
+            handle.send(RouterMsg::CheckPendingUiRefresh),
+            Err(RouterSendError::Full)
+        );
+        drop(receiver);
+        // Only a closed mailbox means the router can never process the message.
+        assert_eq!(
+            handle.send(RouterMsg::CheckPendingUiRefresh),
+            Err(RouterSendError::Stopped)
+        );
+        // Waiting sends report the same typed shutdown error.
+        assert_eq!(
+            handle.send_async(RouterMsg::CheckPendingUiRefresh).await,
+            Err(RouterSendError::Stopped)
+        );
+    }
 
     #[tokio::test]
     async fn slow_upload_send_does_not_block_unrelated_router_work() {
