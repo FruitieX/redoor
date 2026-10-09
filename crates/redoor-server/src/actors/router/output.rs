@@ -384,28 +384,9 @@ mod tests {
             let (commands, command_receiver) = mpsc::channel(1);
             let (priority, priority_receiver) = mpsc::channel(1);
             let streams = ConnectionStreams::new(agent.clone(), credit);
-            let mut connection = AgentConnection::from_register_request(RegisterAgentRequest {
-                agent_id: agent.clone(),
-                agent_name: "test".into(),
-                socket_id: SocketId::new(),
-                outgoing_commands: commands,
-                outgoing_priority: priority,
-                os: "linux".into(),
-                arch: "test".into(),
-                hostname: "test".into(),
-                username: "test".into(),
-                default_directory: "/tmp".into(),
-                binary: redoor_core::identity::current_binary_identity(),
-                supports_self_exec: false,
-                supports_native_open: false,
-                supports_trash: false,
-                supports_move_to_trash: false,
-                uid: None,
-                is_root: false,
-                watchdog: None,
-                watchdog_attempt_generation: None,
-                streams: streams.clone(),
-            });
+            let mut connection = AgentConnection::from_register_request(
+                RegisterAgentRequest::for_test(&agent, commands, priority, streams.clone()),
+            );
             let (binary, _binary_receiver) = mpsc::channel(1);
             connection.transfer = Some(super::super::state::TransferConnection {
                 socket_id: SocketId::new(),

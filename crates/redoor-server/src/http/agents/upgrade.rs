@@ -16,7 +16,7 @@ use redoor_protocol::{
 
 use super::list_agent_snapshots;
 use crate::http::{
-    agent_client::{GetAgentDetails, SelfExec},
+    agent_client::SelfExec,
     error::ApiError,
     services::upload::{AgentUpload, UploadStart},
     state::ServerState,
@@ -173,7 +173,7 @@ pub(crate) async fn upgrade_agent_handler(
         )
             .into_response();
     }
-    let details = match state.agents.call(&agent_id, GetAgentDetails).await {
+    let details = match state.agents.agent_details(&agent_id).await {
         Ok(details) => details,
         Err(error) => return error.into_response(),
     };

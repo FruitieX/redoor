@@ -32,18 +32,8 @@ impl AgentConnection {
             transfer_token: uuid::Uuid::new_v4().to_string(),
             transfer: None,
             connected_at: UnixTimestampSeconds::new(jiff::Timestamp::now().as_second()),
-            os: request.os,
-            arch: request.arch,
-            hostname: request.hostname,
-            username: request.username,
-            default_directory: request.default_directory,
-            binary: request.binary,
-            supports_self_exec: request.supports_self_exec,
-            supports_native_open: request.supports_native_open,
-            supports_trash: request.supports_trash,
-            supports_move_to_trash: request.supports_move_to_trash,
-            uid: request.uid,
-            is_root: request.is_root,
+            identity: request.identity,
+            capabilities: request.capabilities,
             streams: request.streams,
         }
     }
@@ -154,29 +144,15 @@ impl RouterState {
             .agents
             .known_by_id
             .entry(agent_id.clone())
-            .or_insert_with(|| KnownAgent {
-                id: agent_id.clone(),
-                name: connection.agent_name.clone(),
-                default_directory: None,
-                managed: false,
-                configuration_editable: false,
-                ssh_target: None,
-                status: AgentConnectionStatus::Disconnected,
-                connected_at: None,
-                last_seen_at: None,
-                connection_issue: None,
-                provisioning_status: Vec::new(),
-                socket_id: None,
-                binary: None,
-                supports_self_exec: false,
-                supports_native_open: false,
-                supports_trash: false,
-                supports_move_to_trash: false,
-                uid: None,
-                is_root: false,
+            .or_insert_with(|| {
+                KnownAgent::unregistered(
+                    agent_id.clone(),
+                    None,
+                    AgentConnectionStatus::Disconnected,
+                )
             });
         known.name = connection.agent_name.clone();
-        known.default_directory = Some(connection.default_directory.clone());
+        known.default_directory = Some(connection.identity.default_directory.clone());
         // Control is live, but transfer usability still depends on the async payload handshake.
         // Leave Starting/Disconnected (or any non-Connected state) until register_transfer promotes.
         if known.status == AgentConnectionStatus::Connected {
@@ -189,13 +165,8 @@ impl RouterState {
         known.connected_at = Some(connection.connected_at);
         known.connection_issue = None;
         known.socket_id = Some(connection.socket_id.clone());
-        known.binary = Some(connection.binary.clone());
-        known.supports_self_exec = connection.supports_self_exec;
-        known.supports_native_open = connection.supports_native_open;
-        known.supports_trash = connection.supports_trash;
-        known.supports_move_to_trash = connection.supports_move_to_trash;
-        known.uid = connection.uid;
-        known.is_root = connection.is_root;
+        known.identity = Some(connection.identity.clone());
+        known.capabilities = connection.capabilities;
         self.agents.by_id.insert(agent_id, connection);
         self.notify_agents_changed();
 
@@ -460,30 +431,15 @@ impl RouterState {
     /// Adds a configured stopped record before its dormant supervisor can be controlled.
     pub(crate) fn register_managed(&mut self, request: RegisterManagedAgentRequest) {
         let id = request.agent_id;
-        self.agents.known_by_id.insert(
+        let mut known = KnownAgent::unregistered(
             id.clone(),
-            KnownAgent {
-                id: id.clone(),
-                name: id.to_string(),
-                default_directory: request.default_directory,
-                managed: true,
-                configuration_editable: request.configuration_editable,
-                ssh_target: request.ssh_target,
-                status: AgentConnectionStatus::Stopped,
-                connected_at: None,
-                last_seen_at: None,
-                connection_issue: None,
-                provisioning_status: Vec::new(),
-                socket_id: None,
-                binary: None,
-                supports_self_exec: false,
-                supports_native_open: false,
-                supports_trash: false,
-                supports_move_to_trash: false,
-                uid: None,
-                is_root: false,
-            },
+            request.default_directory,
+            AgentConnectionStatus::Stopped,
         );
+        known.managed = true;
+        known.configuration_editable = request.configuration_editable;
+        known.ssh_target = request.ssh_target;
+        self.agents.known_by_id.insert(id, known);
         self.notify_agents_changed();
         let _ = request.reply.send(());
     }
@@ -586,13 +542,8 @@ impl RouterState {
                 last_seen_at: info.last_seen_at,
                 connection_issue: info.connection_issue.clone(),
                 provisioning_status: info.provisioning_status.clone(),
-                binary: info.binary.clone(),
-                supports_self_exec: info.supports_self_exec,
-                supports_native_open: info.supports_native_open,
-                supports_trash: info.supports_trash,
-                supports_move_to_trash: info.supports_move_to_trash,
-                uid: info.uid,
-                is_root: info.is_root,
+                identity: info.identity.clone(),
+                capabilities: info.capabilities,
             })
             .collect()
     }
@@ -672,38 +623,14 @@ impl RouterState {
     }
 
     /// Delivers a one-shot command's result to its REST caller.
-    ///
-    /// Registration owns the connection-scoped identity fields, so agent details are
-    /// rewritten from the router's authoritative registry snapshot.
     pub(crate) fn finish_command(
         &mut self,
         flow_id: super::flows::FlowId,
         response: RouteResponse,
     ) {
-        let Some(Flow::Command(command)) = self.flows.remove(flow_id) else {
-            return;
-        };
-        let result = match (response.result, self.agents.by_id.get(&command.agent_id)) {
-            (CommandResult::GetAgentDetails(mut details), Some(connection)) => {
-                details.id = command.agent_id.clone();
-                details.name = connection.agent_name.clone();
-                details.cwd = connection.default_directory.clone();
-                details.connected_at = connection.connected_at;
-                details.os = connection.os.clone();
-                details.arch = connection.arch.clone();
-                details.hostname = connection.hostname.clone();
-                details.username = connection.username.clone();
-                details.binary = connection.binary.clone();
-                // Registration is the process-stable identity used by list gating.
-                if let Some(uid) = connection.uid {
-                    details.uid = uid;
-                }
-                details.is_root = connection.is_root;
-                CommandResult::GetAgentDetails(details)
-            }
-            (result, _) => result,
-        };
-        let _ = command.reply.send(result);
+        if let Some(Flow::Command(command)) = self.flows.remove(flow_id) {
+            let _ = command.reply.send(response.result);
+        }
     }
 
     /// Queues only the log bootstrap secret on the existing control connection.
@@ -770,28 +697,12 @@ mod tests {
     fn insert_control(state: &mut RouterState, agent_id: &str) -> String {
         let (command_sender, _command_receiver) = mpsc::channel(64);
         let (priority_sender, _priority_receiver) = mpsc::channel(16);
-        let request = RegisterAgentRequest {
-            agent_id: AgentId::from(agent_id),
-            agent_name: agent_id.to_string(),
-            socket_id: redoor_protocol::ids::SocketId::new(),
-            outgoing_commands: command_sender,
-            outgoing_priority: priority_sender,
-            os: "linux".to_string(),
-            arch: "x86_64".to_string(),
-            hostname: "host".to_string(),
-            username: "user".to_string(),
-            default_directory: "/tmp".to_string(),
-            binary: redoor_core::identity::current_binary_identity(),
-            supports_self_exec: true,
-            supports_native_open: true,
-            supports_trash: true,
-            supports_move_to_trash: true,
-            uid: Some(1000),
-            is_root: false,
-            watchdog: None,
-            watchdog_attempt_generation: None,
-            streams: super::super::streams::ConnectionStreams::new(AgentId::from(agent_id), false),
-        };
+        let request = RegisterAgentRequest::for_test(
+            &AgentId::from(agent_id),
+            command_sender,
+            priority_sender,
+            super::super::streams::ConnectionStreams::new(AgentId::from(agent_id), false),
+        );
         state.commit_registration(request);
         state.agents.by_id[&AgentId::from(agent_id)]
             .transfer_token
@@ -1107,28 +1018,12 @@ mod tests {
         let agent_id = AgentId::from("bounded-agent");
         let (command_sender, mut command_receiver) = mpsc::channel(1);
         let (priority_sender, mut priority_receiver) = mpsc::channel(1);
-        state.commit_registration(RegisterAgentRequest {
-            agent_id: agent_id.clone(),
-            agent_name: agent_id.to_string(),
-            socket_id: redoor_protocol::ids::SocketId::new(),
-            outgoing_commands: command_sender,
-            outgoing_priority: priority_sender,
-            os: "linux".to_string(),
-            arch: "x86_64".to_string(),
-            hostname: "host".to_string(),
-            username: "user".to_string(),
-            default_directory: "/tmp".to_string(),
-            binary: redoor_core::identity::current_binary_identity(),
-            supports_self_exec: true,
-            supports_native_open: true,
-            supports_trash: true,
-            supports_move_to_trash: true,
-            uid: Some(1000),
-            is_root: false,
-            watchdog: None,
-            watchdog_attempt_generation: None,
-            streams: super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
-        });
+        state.commit_registration(RegisterAgentRequest::for_test(
+            &agent_id,
+            command_sender,
+            priority_sender,
+            super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
+        ));
         // Remove the lifecycle bootstrap so the reserved lane is available for cancellation.
         assert!(matches!(
             priority_receiver.recv().await,

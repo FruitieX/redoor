@@ -4,13 +4,14 @@ pub mod command;
 pub mod exec;
 pub mod log;
 pub mod policy;
+pub mod registration;
 pub mod stream;
 pub mod terminal;
 pub mod transfer;
 
-use crate::identity::BinaryIdentity;
 use crate::ids::{AgentId, RequestId};
 use command::{Command, CommandResult};
+use registration::{AgentCapabilities, AgentIdentity};
 use serde::{Deserialize, Serialize};
 
 /// Control-socket frames sent by the server to an agent.
@@ -128,39 +129,14 @@ pub enum AgentToServer {
     AgentRegister {
         agent_id: AgentId,
         agent_name: String,
-        os: String,
-        arch: String,
-        hostname: String,
-        username: String,
-        /// Immutable absolute directory opened when the UI selects this agent.
-        cwd: String,
         /// Shared secret proving this agent was started with server credentials.
         token: String,
-        /// Compile-time identity of the connecting agent binary.
-        binary: BinaryIdentity,
-        /// Whether this agent understands the replacement-path self-exec command.
-        #[serde(default)]
-        supports_self_exec: bool,
-        /// Whether this agent can launch filesystem paths in a graphical desktop.
-        #[serde(default)]
-        supports_native_open: bool,
-        /// Whether this agent implements the platform-neutral trash command contract.
-        #[serde(default)]
-        supports_trash: bool,
-        /// Whether this agent can move filesystem entries to its platform trash.
-        #[serde(default)]
-        supports_move_to_trash: bool,
-        /// Effective UID captured at connect so chmod gating does not depend on `$USER`.
-        #[serde(default)]
-        uid: Option<u32>,
-        /// Root is derived from `Uid::effective()`, never from username, so systemd `User=` is correct.
-        #[serde(default)]
-        is_root: bool,
-        /// Whether this agent implements per-stream credit in both transfer directions.
-        ///
-        /// Optional so older agents and protocol fixtures keep the uncredited behavior.
-        #[serde(default)]
-        supports_stream_credit: bool,
+        /// Platform, account and binary; flattened so the JSON keeps its flat field names.
+        #[serde(flatten)]
+        identity: AgentIdentity,
+        /// Optional features; flattened, and each flag defaults to off for older agents.
+        #[serde(flatten)]
+        capabilities: AgentCapabilities,
     },
 
     /// Optional explicit teardown signal from an agent asking the router to
@@ -354,10 +330,39 @@ mod tests {
         assert!(matches!(
             register,
             AgentToServer::AgentRegister {
-                supports_stream_credit: false,
+                capabilities: AgentCapabilities {
+                    supports_stream_credit: false,
+                    ..
+                },
                 ..
             }
         ));
+    }
+
+    /// Verifies flattening keeps the flat registration JSON that agents and fixtures send.
+    #[test]
+    fn registration_round_trips_its_flat_json() {
+        let json = r#"{"type":"agent_register","agent_id":"a","agent_name":"n","token":"t","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/home/u","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"},"uid":1000,"is_root":false,"supports_self_exec":true,"supports_native_open":false,"supports_trash":true,"supports_move_to_trash":false,"supports_stream_credit":true}"#;
+        let register: AgentToServer = serde_json::from_str(json).unwrap();
+        let AgentToServer::AgentRegister {
+            identity,
+            capabilities,
+            ..
+        } = &register
+        else {
+            panic!("expected a registration");
+        };
+        // Flat wire fields land in the nested values, including the renamed directory.
+        assert_eq!(identity.default_directory, "/home/u");
+        assert_eq!(identity.uid, Some(1000));
+        assert!(capabilities.supports_trash && capabilities.supports_stream_credit);
+        // Serializing yields the same flat object, so agents of either version interoperate.
+        assert_eq!(
+            serde_json::to_value(&register).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        // Older agents that only advertised inventory support can still move to trash.
+        assert!(capabilities.normalized().supports_move_to_trash);
     }
 
     /// Verifies unknown command variants still expose their request id.

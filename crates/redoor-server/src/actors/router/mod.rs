@@ -388,28 +388,12 @@ mod tests {
         let streams = ConnectionStreams::new(agent_id.clone(), true);
 
         router_ref
-            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
-                agent_id: agent_id.clone(),
-                agent_name: "agent-1".to_string(),
-                socket_id: SocketId::from(Uuid::from_u128(1)),
-                outgoing_commands: text_tx,
-                outgoing_priority: priority_tx,
-                os: "macos".to_string(),
-                arch: "arm64".to_string(),
-                hostname: "host".to_string(),
-                username: "user".to_string(),
-                default_directory: "/tmp".to_string(),
-                binary: redoor_core::identity::current_binary_identity(),
-                supports_self_exec: true,
-                supports_native_open: true,
-                supports_trash: true,
-                supports_move_to_trash: true,
-                uid: Some(1000),
-                is_root: false,
-                watchdog: None,
-                watchdog_attempt_generation: None,
-                streams: streams.clone(),
-            }))
+            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
+                &agent_id,
+                text_tx,
+                priority_tx,
+                streams.clone(),
+            )))
             .await
             .expect("agent registered");
 
@@ -519,6 +503,14 @@ mod tests {
         .expect("agent list should not wait for blocked binary send")
         .expect("agent list rpc succeeded");
 
+        // The retained identity is the one this session registered.
+        assert_eq!(
+            list_agents[0]
+                .identity
+                .as_ref()
+                .map(|identity| identity.default_directory.as_str()),
+            Some("/tmp")
+        );
         // Returning promptly proves the router stayed responsive while one upload chunk was
         // still waiting for binary backpressure. The list snapshot must carry the immutable
         // default so tabs need no details request.
@@ -537,13 +529,14 @@ mod tests {
                 last_seen_at: None,
                 connection_issue: None,
                 provisioning_status: Vec::new(),
-                binary: Some(redoor_core::identity::current_binary_identity()),
-                supports_self_exec: true,
-                supports_native_open: true,
-                supports_trash: true,
-                supports_move_to_trash: true,
-                uid: Some(1000),
-                is_root: false,
+                identity: list_agents[0].identity.clone(),
+                capabilities: redoor_protocol::wire::registration::AgentCapabilities {
+                    supports_self_exec: true,
+                    supports_native_open: true,
+                    supports_trash: true,
+                    supports_move_to_trash: true,
+                    supports_stream_credit: true,
+                },
             }]
         );
 

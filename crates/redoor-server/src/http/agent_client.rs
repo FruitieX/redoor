@@ -13,6 +13,7 @@ use super::error::ApiError;
 use crate::actors::router::{AgentListEntry, ExecuteCommandRequest, RouterHandle, RouterMsg};
 use redoor_core::log;
 use redoor_protocol::{
+    api::agents::AgentDetailsResponse,
     ids::{AgentId, RequestId},
     wire::{
         command::{Command, CommandResult},
@@ -69,6 +70,23 @@ impl AgentClient {
             CommandResult::Error { kind, message } => Err(ApiError::Command { kind, message }),
             result => C::extract(result),
         }
+    }
+
+    /// Agent-reported runtime details with the registration-owned fields (name, directory,
+    /// platform, binary, account) taken from the router inventory, which is authoritative.
+    pub(crate) async fn agent_details(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<AgentDetailsResponse, ApiError> {
+        let mut details = self.call(agent_id, GetAgentDetails).await?;
+        let entry = self
+            .inventory()
+            .await?
+            .into_iter()
+            .find(|entry| &entry.id == agent_id)
+            .ok_or_else(|| ApiError::not_found(format!("Agent not found: {agent_id}")))?;
+        entry.apply_registration(&mut details);
+        Ok(details)
     }
 
     /// Retained inventory of every agent seen by this server, in router order.

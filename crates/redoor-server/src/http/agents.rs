@@ -17,11 +17,7 @@ use redoor_protocol::{
     ids::AgentId,
 };
 
-use super::{
-    agent_client::{GetAgentDetails, Restart},
-    error::ApiError,
-    state::ServerState,
-};
+use super::{agent_client::Restart, error::ApiError, state::ServerState};
 
 mod accounts;
 mod chmod;
@@ -52,27 +48,7 @@ pub(super) async fn list_agent_snapshots(
         .inventory()
         .await?
         .into_iter()
-        .map(|agent| AgentInfoResponse {
-            id: agent.id,
-            name: agent.name,
-            cwd: agent.default_directory,
-            managed: agent.managed,
-            configuration_editable: agent.configuration_editable,
-            ssh_target: agent.ssh_target,
-            status: agent.status,
-            connected_at: agent.connected_at,
-            connection_id: agent.connection_id,
-            last_seen_at: agent.last_seen_at,
-            connection_issue: agent.connection_issue,
-            provisioning_status: agent.provisioning_status,
-            binary: agent.binary,
-            supports_self_exec: agent.supports_self_exec,
-            supports_native_open: agent.supports_native_open,
-            supports_move_to_trash: agent.supports_move_to_trash,
-            supports_trash: agent.supports_trash,
-            uid: agent.uid,
-            is_root: agent.is_root,
-        })
+        .map(AgentInfoResponse::from)
         .collect::<Vec<_>>();
     agents.sort_by(|left, right| {
         left.name
@@ -278,7 +254,7 @@ pub(crate) async fn get_agent_details_handler(
 ) -> Result<Json<AgentDetailsResponse>, ApiError> {
     let details = state
         .agents
-        .call(&AgentId::from(agent.as_str()), GetAgentDetails)
+        .agent_details(&AgentId::from(agent.as_str()))
         .await?;
     if details.name.is_empty() {
         return Err(ApiError::not_found(format!("Agent not found: {agent}")));

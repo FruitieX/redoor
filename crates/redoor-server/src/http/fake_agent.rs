@@ -36,28 +36,12 @@ impl FakeAgent {
         let (transfer_sender, transfer) = mpsc::channel(16);
         let streams = ConnectionStreams::new(agent_id.clone(), false);
         router
-            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
-                agent_id: agent_id.clone(),
-                agent_name: agent_id.to_string(),
-                socket_id: SocketId::new(),
-                outgoing_commands: commands_sender,
-                outgoing_priority: priority_sender,
-                os: "linux".to_string(),
-                arch: "x86_64".to_string(),
-                hostname: "host".to_string(),
-                username: "user".to_string(),
-                default_directory: "/tmp".to_string(),
-                binary: redoor_core::identity::current_binary_identity(),
-                supports_self_exec: true,
-                supports_native_open: true,
-                supports_trash: true,
-                supports_move_to_trash: true,
-                uid: Some(1000),
-                is_root: false,
-                watchdog: None,
-                watchdog_attempt_generation: None,
-                streams: streams.clone(),
-            }))
+            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
+                &agent_id,
+                commands_sender,
+                priority_sender,
+                streams.clone(),
+            )))
             .await
             .unwrap();
         let ServerToAgent::TransferSocketOpen { token, .. } = Self::next(&mut priority).await

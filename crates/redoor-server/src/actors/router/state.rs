@@ -8,8 +8,10 @@ use redoor_protocol::wire::policy::UploadKind;
 use redoor_protocol::wire::stream::StreamPayloadKind;
 use redoor_protocol::{
     api::{agents::AgentConnectionStatus, transfers::TransferProgressEntry},
-    identity::BinaryIdentity,
-    wire::command::{Command, CommandResult},
+    wire::{
+        command::{Command, CommandResult},
+        registration::{AgentCapabilities, AgentIdentity},
+    },
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -44,30 +46,10 @@ pub struct AgentConnection {
     pub transfer: Option<TransferConnection>,
     /// Registration timestamp stored by the router.
     pub connected_at: UnixTimestampSeconds,
-    /// Operating system string reported at registration time.
-    pub os: String,
-    /// CPU architecture string reported at registration time.
-    pub arch: String,
-    /// Hostname reported at registration time.
-    pub hostname: String,
-    /// Username reported at registration time.
-    pub username: String,
-    /// Immutable absolute directory selected at agent startup for UI navigation.
-    pub default_directory: String,
-    /// Compile-time identity reported by the agent at registration.
-    pub binary: BinaryIdentity,
-    /// Whether destructive upgrade may safely send the replacement-path self-exec command.
-    pub supports_self_exec: bool,
-    /// Whether this connection can launch paths in a graphical desktop.
-    pub supports_native_open: bool,
-    /// Whether this connection implements trash commands.
-    pub supports_trash: bool,
-    /// Whether this connection can move entries to platform trash.
-    pub supports_move_to_trash: bool,
-    /// Effective UID reported at registration for chmod owner comparisons.
-    pub uid: Option<u32>,
-    /// Whether this connection's effective UID is root.
-    pub is_root: bool,
+    /// Platform, account, start directory and binary announced by this session.
+    pub identity: AgentIdentity,
+    /// Optional protocol features announced by this session.
+    pub capabilities: AgentCapabilities,
     /// Payload stream routing shared with the control session and the transfer socket.
     pub streams: ConnectionStreams,
 }
@@ -99,20 +81,36 @@ pub struct KnownAgent {
     pub provisioning_status: Vec<redoor_protocol::api::agents::ProvisioningStatusMessage>,
     /// Guards the inventory against stale socket teardown.
     pub socket_id: Option<SocketId>,
-    /// Last registered binary identity, retained after disconnect for list warnings.
-    pub binary: Option<BinaryIdentity>,
-    /// Last advertised support for replacement-path self-exec.
-    pub supports_self_exec: bool,
-    /// Last advertised access to a graphical desktop path launcher.
-    pub supports_native_open: bool,
-    /// Last advertised platform trash support.
-    pub supports_trash: bool,
-    /// Last advertised support for moving entries to platform trash.
-    pub supports_move_to_trash: bool,
-    /// Last advertised effective UID, retained after disconnect like other capabilities.
-    pub uid: Option<u32>,
-    /// Last advertised root identity, retained after disconnect like other capabilities.
-    pub is_root: bool,
+    /// Last registered identity, retained after disconnect for list warnings and gating.
+    pub identity: Option<AgentIdentity>,
+    /// Last advertised capabilities, retained after disconnect like the identity.
+    pub capabilities: AgentCapabilities,
+}
+
+impl KnownAgent {
+    /// A retained record for an agent that has never registered in this server process.
+    pub(crate) fn unregistered(
+        id: AgentId,
+        default_directory: Option<String>,
+        status: AgentConnectionStatus,
+    ) -> Self {
+        Self {
+            name: id.to_string(),
+            id,
+            default_directory,
+            managed: false,
+            configuration_editable: false,
+            ssh_target: None,
+            status,
+            connected_at: None,
+            last_seen_at: None,
+            connection_issue: None,
+            provisioning_status: Vec::new(),
+            socket_id: None,
+            identity: None,
+            capabilities: AgentCapabilities::default(),
+        }
+    }
 }
 
 #[derive(Default)]

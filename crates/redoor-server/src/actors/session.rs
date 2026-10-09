@@ -81,20 +81,9 @@ impl SessionRuntime {
             AgentToServer::AgentRegister {
                 agent_id,
                 agent_name,
-                os,
-                arch,
-                hostname,
-                username,
-                cwd,
                 token,
-                binary,
-                supports_self_exec,
-                supports_native_open,
-                supports_trash,
-                supports_move_to_trash,
-                uid,
-                is_root,
-                supports_stream_credit,
+                identity,
+                capabilities,
             } => {
                 // Reject impostors before name takeover: an unauthenticated client
                 // that only knows an agent name must not replace a live connection.
@@ -153,7 +142,9 @@ impl SessionRuntime {
                     );
                 }
 
-                let streams = ConnectionStreams::new(agent_id.clone(), supports_stream_credit);
+                let capabilities = capabilities.normalized();
+                let streams =
+                    ConnectionStreams::new(agent_id.clone(), capabilities.supports_stream_credit);
                 self.streams = Some(streams.clone());
                 // Registration installs the routing entry every later frame depends on, so a
                 // momentarily full mailbox must delay it rather than silently drop it.
@@ -165,19 +156,8 @@ impl SessionRuntime {
                         socket_id: self.socket_id.clone(),
                         outgoing_commands: self.outgoing_commands.clone(),
                         outgoing_priority: self.outgoing_priority.clone(),
-                        os,
-                        arch,
-                        hostname,
-                        username,
-                        default_directory: cwd,
-                        binary,
-                        supports_self_exec,
-                        supports_native_open,
-                        supports_trash,
-                        // Full inventory support from older agents already implies moving support.
-                        supports_move_to_trash: supports_move_to_trash || supports_trash,
-                        uid,
-                        is_root,
+                        identity,
+                        capabilities,
                         watchdog: self.watchdog.clone(),
                         watchdog_attempt_generation,
                         streams,

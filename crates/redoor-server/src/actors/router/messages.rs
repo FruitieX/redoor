@@ -8,10 +8,14 @@ use redoor_protocol::wire::log::LogStreamId;
 use redoor_protocol::wire::terminal::{TerminalId, TerminalSize};
 use redoor_protocol::{
     api::{
-        agents::AgentConnectionStatus, transfers::TransferProgressListResponse, ui_events::UiEvent,
+        agents::{AgentConnectionStatus, AgentDetailsResponse, AgentInfoResponse},
+        transfers::TransferProgressListResponse,
+        ui_events::UiEvent,
     },
-    identity::BinaryIdentity,
-    wire::command::{Command, CommandResult},
+    wire::{
+        command::{Command, CommandResult},
+        registration::{AgentCapabilities, AgentIdentity},
+    },
 };
 
 /// One-shot reply port used by router request/reply messages.
@@ -38,30 +42,10 @@ pub struct RegisterAgentRequest {
     pub outgoing_commands: tokio::sync::mpsc::Sender<WsMessage>,
     /// Reserved lane that keeps lifecycle and cancellation frames independent of command load.
     pub outgoing_priority: tokio::sync::mpsc::Sender<WsMessage>,
-    /// Operating system string reported by the agent.
-    pub os: String,
-    /// CPU architecture string reported by the agent.
-    pub arch: String,
-    /// Hostname reported by the agent.
-    pub hostname: String,
-    /// Username reported by the agent.
-    pub username: String,
-    /// Immutable absolute directory the UI opens for this agent.
-    pub default_directory: String,
-    /// Compile-time identity of the connecting agent binary.
-    pub binary: BinaryIdentity,
-    /// Advertises support for replacing the executable through `SelfExec`.
-    pub supports_self_exec: bool,
-    /// Advertises access to a graphical desktop and platform path launcher.
-    pub supports_native_open: bool,
-    /// Advertises platform trash support for REST capability gating.
-    pub supports_trash: bool,
-    /// Advertises move-to-trash support independently of inventory and restore.
-    pub supports_move_to_trash: bool,
-    /// Effective UID from registration so inventory can gate chmod without a details request.
-    pub uid: Option<u32>,
-    /// Whether the registered process's effective UID is root.
-    pub is_root: bool,
+    /// Platform, account, start directory and binary announced at registration.
+    pub identity: AgentIdentity,
+    /// Optional protocol features announced at registration.
+    pub capabilities: AgentCapabilities,
     /// Lets the router reject a managed registration whose shutdown won after socket parsing.
     pub watchdog: Option<crate::watchdog::WatchdogHandle>,
     /// Fences router commit against retry invalidating the parsed registration.
@@ -97,20 +81,65 @@ pub struct AgentListEntry {
     pub connection_issue: Option<String>,
     /// Sticky SSH start steps copied from the supervisor snapshot.
     pub provisioning_status: Vec<redoor_protocol::api::agents::ProvisioningStatusMessage>,
-    /// Binary identity from the latest registration when one has occurred.
-    pub binary: Option<BinaryIdentity>,
-    /// Latest registration's explicit support for replacement-path self-exec.
-    pub supports_self_exec: bool,
-    /// Latest registration's access to a graphical desktop path launcher.
-    pub supports_native_open: bool,
-    /// Latest registration's platform trash support.
-    pub supports_trash: bool,
-    /// Latest registration's support for moving entries to platform trash.
-    pub supports_move_to_trash: bool,
-    /// Latest registration's effective UID; absent until first connect or for older agents.
-    pub uid: Option<u32>,
-    /// Latest registration's root identity; false until first connect.
-    pub is_root: bool,
+    /// Identity from the latest registration; absent until the agent first connects.
+    pub identity: Option<AgentIdentity>,
+    /// Capabilities from the latest registration; all off until the agent first connects.
+    pub capabilities: AgentCapabilities,
+}
+
+impl AgentListEntry {
+    /// Overwrites the registration-owned fields of agent-reported details.
+    ///
+    /// The control session's registration is the process-stable identity that list gating and
+    /// routing already use, so details must agree with it rather than with a second report.
+    pub(crate) fn apply_registration(&self, details: &mut AgentDetailsResponse) {
+        details.id = self.id.clone();
+        details.name = self.name.clone();
+        if let Some(connected_at) = self.connected_at {
+            details.connected_at = connected_at;
+        }
+        let Some(identity) = &self.identity else {
+            return;
+        };
+        details.cwd = identity.default_directory.clone();
+        details.os = identity.os.clone();
+        details.arch = identity.arch.clone();
+        details.hostname = identity.hostname.clone();
+        details.username = identity.username.clone();
+        details.binary = identity.binary.clone();
+        if let Some(uid) = identity.uid {
+            details.uid = uid;
+        }
+        details.is_root = identity.is_root;
+    }
+}
+
+impl From<AgentListEntry> for AgentInfoResponse {
+    /// Projects one inventory row onto the flat REST shape clients and bindings rely on.
+    fn from(agent: AgentListEntry) -> Self {
+        let identity = agent.identity;
+        Self {
+            id: agent.id,
+            name: agent.name,
+            cwd: agent.default_directory,
+            managed: agent.managed,
+            configuration_editable: agent.configuration_editable,
+            ssh_target: agent.ssh_target,
+            status: agent.status,
+            connected_at: agent.connected_at,
+            connection_id: agent.connection_id,
+            last_seen_at: agent.last_seen_at,
+            connection_issue: agent.connection_issue,
+            provisioning_status: agent.provisioning_status,
+            uid: identity.as_ref().and_then(|identity| identity.uid),
+            is_root: identity.as_ref().is_some_and(|identity| identity.is_root),
+            binary: identity.map(|identity| identity.binary),
+            supports_self_exec: agent.capabilities.supports_self_exec,
+            supports_native_open: agent.capabilities.supports_native_open,
+            supports_move_to_trash: agent.capabilities.supports_move_to_trash,
+            supports_trash: agent.capabilities.supports_trash,
+        }
+    }
 }
 
 /// Registers a configured entry before any process can be started.
@@ -430,4 +459,125 @@ pub enum RouterMsg {
     /// throttled UI refreshes.
     CheckPendingUiRefresh,
     Shutdown,
+}
+
+#[cfg(test)]
+impl RegisterAgentRequest {
+    /// A plain registration for router and HTTP unit tests; capabilities are all on except
+    /// stream credit, which follows the given stream tables.
+    pub(crate) fn for_test(
+        agent_id: &AgentId,
+        outgoing_commands: tokio::sync::mpsc::Sender<WsMessage>,
+        outgoing_priority: tokio::sync::mpsc::Sender<WsMessage>,
+        streams: ConnectionStreams,
+    ) -> Self {
+        Self {
+            agent_id: agent_id.clone(),
+            agent_name: agent_id.to_string(),
+            socket_id: SocketId::new(),
+            outgoing_commands,
+            outgoing_priority,
+            identity: AgentIdentity {
+                os: "linux".to_string(),
+                arch: "x86_64".to_string(),
+                hostname: "host".to_string(),
+                username: "user".to_string(),
+                default_directory: "/tmp".to_string(),
+                binary: redoor_core::identity::current_binary_identity(),
+                uid: Some(1000),
+                is_root: false,
+            },
+            capabilities: AgentCapabilities {
+                supports_self_exec: true,
+                supports_native_open: true,
+                supports_trash: true,
+                supports_move_to_trash: true,
+                supports_stream_credit: streams.credit(),
+            },
+            watchdog: None,
+            watchdog_attempt_generation: None,
+            streams,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redoor_protocol::api::agents::MountPoint;
+
+    /// An inventory row of a connected agent.
+    fn entry() -> AgentListEntry {
+        let registration = RegisterAgentRequest::for_test(
+            &AgentId::from("a"),
+            tokio::sync::mpsc::channel(1).0,
+            tokio::sync::mpsc::channel(1).0,
+            ConnectionStreams::new(AgentId::from("a"), true),
+        );
+        AgentListEntry {
+            id: AgentId::from("a"),
+            name: "a".to_string(),
+            default_directory: Some("/tmp".to_string()),
+            managed: false,
+            configuration_editable: false,
+            ssh_target: None,
+            status: AgentConnectionStatus::Connected,
+            connected_at: Some(UnixTimestampSeconds::new(7)),
+            connection_id: None,
+            last_seen_at: None,
+            connection_issue: None,
+            provisioning_status: Vec::new(),
+            identity: Some(registration.identity),
+            capabilities: registration.capabilities,
+        }
+    }
+
+    /// The REST projection stays flat and carries every identity and capability field.
+    #[test]
+    fn rest_projection_flattens_identity_and_capabilities() {
+        let info = AgentInfoResponse::from(entry());
+        // Identity fields reach the flat REST shape the UI and bindings expect.
+        assert_eq!(info.uid, Some(1000));
+        assert!(!info.is_root);
+        assert!(info.binary.is_some());
+        // Capability gates the UI uses survive the projection.
+        assert!(info.supports_trash && info.supports_move_to_trash && info.supports_self_exec);
+        // The JSON keeps the established flat field names, with no nested objects.
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["supports_native_open"], true);
+        assert_eq!(json["uid"], 1000);
+        assert!(json.get("identity").is_none() && json.get("capabilities").is_none());
+
+        let mut never_connected = entry();
+        never_connected.identity = None;
+        never_connected.capabilities = AgentCapabilities::default();
+        let info = AgentInfoResponse::from(never_connected);
+        // Agents that never registered expose no identity and no capabilities.
+        assert!(info.binary.is_none() && info.uid.is_none() && !info.supports_trash);
+    }
+
+    /// Agent-reported details are overridden by the registration the router trusts.
+    #[test]
+    fn registration_overrides_reported_details() {
+        let mut details: AgentDetailsResponse = serde_json::from_value(serde_json::json!({
+            "id": "other", "name": "", "pid": 1, "cwd": "/wrong", "config_path": "",
+            "exe_path": "/bin/redoor", "load_average_one": 0.0, "load_average_five": 0.0,
+            "load_average_fifteen": 0.0, "system_uptime": 1, "os": "?", "arch": "?",
+            "hostname": "?", "external_ip": null, "username": "?", "connected_at": 0,
+            "binary": serde_json::to_value(redoor_core::identity::current_binary_identity()).unwrap(),
+            "mount_points": [], "uid": 0, "is_root": true,
+        }))
+        .unwrap();
+        entry().apply_registration(&mut details);
+        // Identity comes from the registration, not from the second self-report.
+        assert_eq!(details.name, "a");
+        assert_eq!(details.cwd, "/tmp");
+        assert_eq!(details.os, "linux");
+        assert_eq!(details.uid, 1000);
+        assert!(!details.is_root);
+        assert_eq!(details.connected_at, UnixTimestampSeconds::new(7));
+        // Runtime-only fields stay as the agent reported them.
+        assert_eq!(details.exe_path, "/bin/redoor");
+        assert!(details.mount_points.iter().all(MountPoint::is_visible));
+    }
 }

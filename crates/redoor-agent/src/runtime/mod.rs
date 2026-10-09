@@ -17,6 +17,7 @@ use dispatch::{DispatchLink, Dispatcher};
 use futures_util::StreamExt;
 use links::{ControlLink, TransferLink};
 use redoor_core::{log, log_error};
+use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
     ids::AgentId,
     wire::{
@@ -766,26 +767,30 @@ impl AgentRuntime {
         let register = AgentToServer::AgentRegister {
             agent_id: self.profile.agent_id.clone(),
             agent_name: self.profile.agent_name.clone(),
-            os: host.os,
-            arch: host.arch,
-            hostname: host.hostname,
-            username: host.username,
-            cwd: self.profile.default_directory.clone(),
             token: self.profile.token.clone(),
-            // Lets the server compare agent builds against itself without a round-trip command.
-            binary: redoor_core::identity::current_binary_identity(),
-            // Upgrade safety depends on the server knowing this command is implemented.
-            supports_self_exec: true,
-            // Reuse startup GUI detection so headless agents never advertise the action.
-            supports_native_open: self.notification.desktop_environment.is_some(),
-            // Prevents newer servers from dispatching unknown commands to unsupported agents.
-            supports_trash: trash.supports_inventory,
-            // macOS supports the native move without Redoor inventory or restore support.
-            supports_move_to_trash: trash.supports_move,
-            uid: Some(host.uid),
-            is_root: host.is_root,
-            // Lets the server isolate streams sharing the transfer socket with per-stream credit.
-            supports_stream_credit: true,
+            identity: AgentIdentity {
+                os: host.os,
+                arch: host.arch,
+                hostname: host.hostname,
+                username: host.username,
+                default_directory: self.profile.default_directory.clone(),
+                // Lets the server compare agent builds against itself without a round-trip command.
+                binary: redoor_core::identity::current_binary_identity(),
+                uid: Some(host.uid),
+                is_root: host.is_root,
+            },
+            capabilities: AgentCapabilities {
+                // Upgrade safety depends on the server knowing this command is implemented.
+                supports_self_exec: true,
+                // Reuse startup GUI detection so headless agents never advertise the action.
+                supports_native_open: self.notification.desktop_environment.is_some(),
+                // Prevents newer servers from dispatching unknown commands to unsupported agents.
+                supports_trash: trash.supports_inventory,
+                // macOS supports the native move without Redoor inventory or restore support.
+                supports_move_to_trash: trash.supports_move,
+                // Lets the server isolate streams sharing the transfer socket with per-stream credit.
+                supports_stream_credit: true,
+            },
         };
         // Do not log the message body: it includes the agent token secret.
         log!(
