@@ -460,9 +460,18 @@ impl AgentRuntime {
     /// Handles one typed server frame; the match is exhaustive so new frames cannot be dropped.
     async fn handle_server_frame(&mut self, handle: AgentHandle, frame: ServerToAgent) {
         match frame {
-            ServerToAgent::TransferSocketOpen { token } => {
+            ServerToAgent::TransferSocketOpen {
+                token,
+                stream_credit,
+            } => {
+                self.control.confirm_stream_credit(stream_credit);
                 self.begin_transfer_connection(handle, token);
             }
+            ServerToAgent::StreamCredit { request_id, frames } => self
+                .dispatcher
+                .services()
+                .output_credits
+                .grant(request_id, frames),
             ServerToAgent::Command {
                 request_id,
                 command,
@@ -476,6 +485,7 @@ impl AgentRuntime {
                     control,
                     transfer: self.transfer.sender(),
                     scope: self.control.scope(),
+                    stream_credit: self.control.stream_credit(),
                 };
                 self.dispatcher
                     .dispatch(request_id, command, link, &mut self.sessions)
@@ -774,6 +784,8 @@ impl AgentRuntime {
             supports_move_to_trash: trash.supports_move,
             uid: Some(host.uid),
             is_root: host.is_root,
+            // Lets the server isolate streams sharing the transfer socket with per-stream credit.
+            supports_stream_credit: true,
         };
         // Do not log the message body: it includes the agent token secret.
         log!(

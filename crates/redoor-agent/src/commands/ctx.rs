@@ -3,7 +3,11 @@
 use crate::errors::AgentCommandError;
 use crate::runtime::cancel::Registration;
 use crate::runtime::responder::Responder;
-use crate::transfers::{copy::CopyContext, stream::StreamWriter, upload::UploadRoutes};
+use crate::transfers::{
+    copy::CopyContext,
+    stream::{OutputCredits, StreamWriter},
+    upload::UploadRoutes,
+};
 use crate::trash::Trash;
 use redoor_protocol::{
     ids::RequestId,
@@ -29,6 +33,8 @@ pub(crate) struct AgentServices {
     pub(crate) grep_slots: Arc<Semaphore>,
     /// Routes inbound upload chunks and publication decisions to their workers.
     pub(crate) upload_routes: UploadRoutes,
+    /// Routes server credit grants to the output stream writers waiting for them.
+    pub(crate) output_credits: OutputCredits,
 }
 
 impl AgentServices {
@@ -38,6 +44,7 @@ impl AgentServices {
             trash,
             grep_slots: Arc::new(Semaphore::new(CONTENT_GREP_SLOTS)),
             upload_routes: UploadRoutes::default(),
+            output_credits: OutputCredits::default(),
         }
     }
 }
@@ -58,6 +65,8 @@ pub(crate) struct CommandCtx {
     pub(crate) transfer: Option<mpsc::Sender<WsMessage>>,
     /// Shared long-lived facilities.
     pub(crate) services: AgentServices,
+    /// Whether the server confirmed per-stream credit for this control connection.
+    pub(crate) stream_credit: bool,
 }
 
 impl CommandCtx {
@@ -79,11 +88,17 @@ impl CommandCtx {
     ) -> Result<OutputLane, AgentCommandError> {
         let request_id = self.responder.request_id();
         match (self.transfer, self.registration) {
-            (Some(transfer), Some(registration)) => Ok(OutputLane {
-                stream: StreamWriter::new(transfer, request_id, payload_kind),
-                registration,
-                responder: self.responder,
-            }),
+            (Some(transfer), Some(registration)) => {
+                let mut stream = StreamWriter::new(transfer, request_id, payload_kind);
+                if self.stream_credit {
+                    stream = stream.with_credit(self.services.output_credits.register(request_id));
+                }
+                Ok(OutputLane {
+                    stream,
+                    registration,
+                    responder: self.responder,
+                })
+            }
             _ => Err(AgentCommandError::new(
                 CommandErrorKind::Internal,
                 "Output command was dispatched without a transfer connection",
@@ -107,6 +122,7 @@ impl CommandCtx {
                 registration: None,
                 transfer: None,
                 services: AgentServices::new(Trash::unsupported()),
+                stream_credit: false,
             },
             frames,
         )

@@ -34,6 +34,8 @@ pub(crate) struct DispatchLink<'a> {
     pub(crate) transfer: Option<&'a mpsc::Sender<WsMessage>>,
     /// Cancelled when the control connection ends.
     pub(crate) scope: &'a CancellationToken,
+    /// Whether the server confirmed per-stream credit for this control connection.
+    pub(crate) stream_credit: bool,
 }
 
 /// Owns every running command of the current control connection.
@@ -121,6 +123,7 @@ impl Dispatcher {
             registration,
             transfer,
             services: self.services.clone(),
+            stream_credit: link.stream_credit,
         };
         let task = Self::execute(command, policy, ctx, self.exclusive.clone());
         if is_upload {
@@ -288,6 +291,7 @@ mod tests {
                 control: &self.control,
                 transfer: self.transfer.as_ref(),
                 scope: &self.scope,
+                stream_credit: false,
             };
             self.dispatcher
                 .dispatch(

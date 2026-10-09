@@ -8,6 +8,7 @@ use crate::commands::ctx::{CommandCtx, Reply};
 use crate::errors::AgentCommandError;
 use crate::runtime::responder::{ControlSender, Responder};
 use redoor_core::log;
+use redoor_core::stream_credit::CreditLedger;
 use redoor_protocol::{
     ids::{AgentId, RequestId},
     wire::{
@@ -26,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 
 /// Bounded per-upload chunk queue between the transfer socket reader and the worker.
 const CHUNK_QUEUE_CAPACITY: usize = 8;
+// A credited sender may have the full window plus the terminal frame queued at once.
+const _: () =
+    assert!(CHUNK_QUEUE_CAPACITY >= redoor_protocol::wire::stream::STREAM_CREDIT_QUEUE_FRAMES);
 /// Upper bound on waiting for the router's publication decision.
 const PUBLICATION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -176,11 +180,17 @@ impl UploadDriver {
             Err(error) => return Reply::Result(error.into()),
         };
         let request_id = self.ctx.responder.request_id();
-        let (route, mut chunks) = self.ctx.services.upload_routes.open(request_id, &self.path);
+        let credited = self.ctx.stream_credit;
+        let (route, mut chunks) = self
+            .ctx
+            .services
+            .upload_routes
+            .open(request_id, &self.path, credited);
         // Readiness is sent only after the route exists so no chunk can arrive unroutable.
         let _ = self.ctx.responder.transfer_ready().await;
 
         let mut bytes_written = 0_u64;
+        let mut ledger = CreditLedger::default();
         let stop = loop {
             let chunk = match Self::next_event::<S>(&mut chunks, &self.ctx.cancel).await {
                 UploadEvent::Canceled => break UploadStop::Canceled,
@@ -196,11 +206,17 @@ impl UploadDriver {
                 break UploadStop::Failed(error);
             }
             let is_last = chunk.is_last;
+            let consumed_credit = chunk.consumes_credit();
             let length = chunk.data.len() as u64;
             match sink.write(chunk.data, &self.ctx.cancel).await {
                 Ok(()) => bytes_written = bytes_written.saturating_add(length),
                 Err(SinkError::Canceled) => break UploadStop::Canceled,
                 Err(SinkError::Failed(error)) => break UploadStop::Failed(error),
+            }
+            // Credit returns only after staging, so a slow destination throttles just this
+            // upload's sender instead of the shared transfer socket.
+            if credited && let Some(frames) = ledger.drained(consumed_credit) {
+                let _ = self.ctx.responder.stream_credit(frames).await;
             }
             if is_last {
                 let gate = PublicationGate::new(
@@ -308,6 +324,8 @@ struct UploadRoute {
     serial: u64,
     path: String,
     chunks: mpsc::Sender<StreamChunk>,
+    /// Credited routes are never awaited by the socket reader; the server's credit bounds them.
+    credited: bool,
 }
 
 /// Shared routing tables guarded together so clearing them is atomic.
@@ -336,10 +354,14 @@ impl UploadRoutes {
     }
 
     /// Registers a chunk route for `request_id`; the guard removes it on drop.
+    ///
+    /// `credited` routes rely on the server honoring per-stream credit, which is what lets the
+    /// transfer reader enqueue without ever waiting on this worker.
     pub(crate) fn open(
         &self,
         request_id: RequestId,
         path: &str,
+        credited: bool,
     ) -> (RouteGuard, mpsc::Receiver<StreamChunk>) {
         let (chunks, receiver) = mpsc::channel(CHUNK_QUEUE_CAPACITY);
         let mut table = self.table();
@@ -351,6 +373,7 @@ impl UploadRoutes {
                 serial,
                 path: path.to_string(),
                 chunks,
+                credited,
             },
         );
         (
@@ -363,7 +386,12 @@ impl UploadRoutes {
         )
     }
 
-    /// Delivers one binary frame to its upload worker, waiting for queue capacity.
+    /// Delivers one binary frame to its upload worker.
+    ///
+    /// Credited routes are filled with `try_send`: the server never has more than the window
+    /// plus the terminal frame outstanding, so a full queue is a protocol violation that fails
+    /// only this upload while the reader keeps serving every other stream. Uncredited routes
+    /// (older servers) wait for queue capacity, which backpressures the whole socket.
     pub(crate) async fn route_frame(
         &self,
         bytes: &[u8],
@@ -382,15 +410,37 @@ impl UploadRoutes {
             }
         };
         let request_id = chunk.request_id;
-        let route = self
-            .table()
-            .routes
-            .get(&request_id)
-            .map(|route| (route.serial, route.path.clone(), route.chunks.clone()));
-        let Some((serial, path, chunks)) = route else {
+        let route = self.table().routes.get(&request_id).map(|route| {
+            (
+                route.serial,
+                route.path.clone(),
+                route.chunks.clone(),
+                route.credited,
+            )
+        });
+        let Some((serial, path, chunks, credited)) = route else {
             return;
         };
-        if chunks.send(chunk).await.is_ok() {
+        let delivered = if credited {
+            match chunks.try_send(chunk) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    log!(
+                        Level::Warning,
+                        "Upload exceeded its flow-control credit: request_id={}, path={}",
+                        request_id,
+                        path
+                    );
+                    // Unrouting closes the worker's queue; it fails with its own response.
+                    self.remove(request_id, serial);
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            }
+        } else {
+            chunks.send(chunk).await.is_ok()
+        };
+        if delivered {
             return;
         }
         log!(
@@ -669,5 +719,43 @@ mod tests {
         // Success releases both registrations before the response is sent.
         assert!(!harness.registry.contains(&RequestId::new(5)));
         assert!(matches!(result, CommandResult::RawUpload));
+    }
+
+    /// A credited route never makes the reader wait: overflow unroutes only that upload.
+    #[tokio::test]
+    async fn credited_route_overflow_fails_only_that_upload() {
+        redoor_core::logging::init(None).await.unwrap();
+        let routes = UploadRoutes::default();
+        let (control, _control_frames) = mpsc::channel(1);
+        let agent = AgentId::from("test-agent");
+        let (_guard, mut chunks) = routes.open(RequestId::new(5), "/stalled", true);
+        let (_other_guard, mut other_chunks) = routes.open(RequestId::new(6), "/other", true);
+        for _ in 0..CHUNK_QUEUE_CAPACITY {
+            routes
+                .route_frame(&frame(StreamPayloadKind::RawFile, false), &control, &agent)
+                .await;
+        }
+        // The queue is full and the worker is stalled; this frame exceeds any honest credit.
+        routes
+            .route_frame(&frame(StreamPayloadKind::RawFile, false), &control, &agent)
+            .await;
+        // The violating upload is unrouted so its worker fails instead of the socket stalling.
+        assert!(!routes.contains(RequestId::new(5)));
+        let mut queued = 0;
+        while chunks.recv().await.is_some() {
+            queued += 1;
+        }
+        // Frames accepted before the violation are still delivered, then the queue closes.
+        assert_eq!(queued, CHUNK_QUEUE_CAPACITY);
+        let mut other = StreamChunk::from_bytes(&frame(StreamPayloadKind::RawFile, false)).unwrap();
+        other.request_id = RequestId::new(6);
+        routes
+            .route_frame(&other.to_bytes(), &control, &agent)
+            .await;
+        // An unrelated upload on the same socket keeps receiving frames.
+        assert_eq!(
+            other_chunks.recv().await.map(|chunk| chunk.request_id),
+            Some(RequestId::new(6))
+        );
     }
 }

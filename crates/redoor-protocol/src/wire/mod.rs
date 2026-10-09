@@ -24,7 +24,24 @@ pub enum ServerToAgent {
     /// Instructs the authoritative control session to establish its persistent
     /// payload socket with a secret that stale sessions cannot reuse.
     #[serde(rename = "transfer_socket_open")]
-    TransferSocketOpen { token: String },
+    TransferSocketOpen {
+        token: String,
+        /// Confirms per-stream credit for this control session.
+        ///
+        /// Sent only to agents that advertised `supports_stream_credit`, so both directions
+        /// switch to credit together; absent (older servers) means the agent keeps the
+        /// uncredited behavior where only socket backpressure limits a stream.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stream_credit: bool,
+    },
+
+    /// Returns flow-control credit for one agent-to-server stream (download or exec output).
+    ///
+    /// The agent's per-stream writer may have at most the granted number of non-terminal
+    /// frames in flight, so one slow consumer stalls only its own stream instead of the shared
+    /// transfer socket. Sent on the priority lane as the server-side consumer drains frames.
+    #[serde(rename = "stream_credit")]
+    StreamCredit { request_id: RequestId, frames: u32 },
 
     /// Sent by the router to start a request on an agent.
     ///
@@ -139,6 +156,11 @@ pub enum AgentToServer {
         /// Root is derived from `Uid::effective()`, never from username, so systemd `User=` is correct.
         #[serde(default)]
         is_root: bool,
+        /// Whether this agent implements per-stream credit in both transfer directions.
+        ///
+        /// Optional so older agents and protocol fixtures keep the uncredited behavior.
+        #[serde(default)]
+        supports_stream_credit: bool,
     },
 
     /// Optional explicit teardown signal from an agent asking the router to
@@ -185,6 +207,12 @@ pub enum AgentToServer {
         agent_id: AgentId,
         request_id: RequestId,
     },
+
+    /// Returns flow-control credit for one server-to-agent stream (upload, edit or copy
+    /// destination) as the agent's worker stages frames, so a slow destination stalls only
+    /// its own stream. Only sent when the server confirmed `stream_credit`.
+    #[serde(rename = "stream_credit")]
+    StreamCredit { request_id: RequestId, frames: u32 },
 }
 
 #[cfg(test)]
@@ -198,8 +226,23 @@ mod tests {
             (
                 ServerToAgent::TransferSocketOpen {
                     token: "t".to_string(),
+                    stream_credit: false,
                 },
                 r#"{"type":"transfer_socket_open","token":"t"}"#,
+            ),
+            (
+                ServerToAgent::TransferSocketOpen {
+                    token: "t".to_string(),
+                    stream_credit: true,
+                },
+                r#"{"type":"transfer_socket_open","token":"t","stream_credit":true}"#,
+            ),
+            (
+                ServerToAgent::StreamCredit {
+                    request_id: RequestId::new(4),
+                    frames: 2,
+                },
+                r#"{"type":"stream_credit","request_id":4,"frames":2}"#,
             ),
             (
                 ServerToAgent::Command {
@@ -276,11 +319,45 @@ mod tests {
                 },
                 r#"{"type":"upload_publication_request","agent_id":"a","request_id":5}"#,
             ),
+            (
+                AgentToServer::StreamCredit {
+                    request_id: RequestId::new(6),
+                    frames: 2,
+                },
+                r#"{"type":"stream_credit","request_id":6,"frames":2}"#,
+            ),
         ];
         for (frame, expected) in frames {
             // The server and fake agents decode these exact tags and field names.
             assert_eq!(serde_json::to_string(&frame).unwrap(), expected);
         }
+    }
+
+    /// Verifies older peers that omit the credit fields keep the uncredited protocol.
+    #[test]
+    fn credit_negotiation_fields_default_to_disabled() {
+        let open: ServerToAgent =
+            serde_json::from_str(r#"{"type":"transfer_socket_open","token":"t"}"#).unwrap();
+        // An older server never confirms credit, so a new agent must not wait for grants.
+        assert!(matches!(
+            open,
+            ServerToAgent::TransferSocketOpen {
+                stream_credit: false,
+                ..
+            }
+        ));
+        let register: AgentToServer = serde_json::from_str(
+            r#"{"type":"agent_register","agent_id":"a","agent_name":"a","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/","token":"t","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"}}"#,
+        )
+        .unwrap();
+        // Fake agents in the integration tests register without the capability field.
+        assert!(matches!(
+            register,
+            AgentToServer::AgentRegister {
+                supports_stream_credit: false,
+                ..
+            }
+        ));
     }
 
     /// Verifies unknown command variants still expose their request id.

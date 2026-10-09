@@ -91,6 +91,7 @@ impl SessionRuntime {
                 supports_move_to_trash,
                 uid,
                 is_root,
+                supports_stream_credit: _,
             } => {
                 // Reject impostors before name takeover: an unauthenticated client
                 // that only knows an agent name must not replace a live connection.
@@ -270,6 +271,15 @@ impl SessionRuntime {
                         })
                         .await;
                 }
+            }
+            AgentToServer::StreamCredit { request_id, .. } => {
+                // Only sent after the server confirmed credit, which this build never does.
+                log!(
+                    Level::Debug,
+                    "Ignoring unrequested stream credit: socket_id={}, request_id={}",
+                    self.socket_id,
+                    request_id
+                );
             }
             AgentToServer::TransferProgressUpdate {
                 agent_id,

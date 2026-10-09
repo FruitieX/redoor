@@ -644,7 +644,7 @@ mod tests {
                 match serde_json::from_str::<ServerToAgent>(&text)
                     .expect("valid transfer bootstrap")
                 {
-                    ServerToAgent::TransferSocketOpen { token } => token,
+                    ServerToAgent::TransferSocketOpen { token, .. } => token,
                     other => panic!("unexpected bootstrap message: {other:?}"),
                 }
             }

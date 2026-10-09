@@ -486,7 +486,7 @@ mod tests {
                 match serde_json::from_str::<redoor_protocol::wire::ServerToAgent>(&text)
                     .expect("transfer bootstrap is valid control JSON")
                 {
-                    redoor_protocol::wire::ServerToAgent::TransferSocketOpen { token } => token,
+                    redoor_protocol::wire::ServerToAgent::TransferSocketOpen { token, .. } => token,
                     other => panic!("unexpected control message: {other:?}"),
                 }
             }

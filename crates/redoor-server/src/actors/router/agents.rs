@@ -208,6 +208,9 @@ fn commit_registration(state: &mut RouterState, request: RegisterAgentRequest) {
 
     if let Ok(message) = serde_json::to_string(&ServerToAgent::TransferSocketOpen {
         token: transfer_token,
+        // Credit is confirmed only once the router can grant it; until then agents keep the
+        // uncredited behavior even when they advertise support.
+        stream_credit: false,
     }) {
         let _ = transfer_open_sender.try_send(WsMessage::Text(message.into()));
     }

@@ -215,6 +215,15 @@ impl Responder {
         .await
     }
 
+    /// Returns per-stream credit for an upload after its worker staged the drained frames.
+    pub(crate) async fn stream_credit(&self, frames: u32) -> Result<(), ControlClosed> {
+        self.send(OutboundFrame::message(AgentToServer::StreamCredit {
+            request_id: self.request_id,
+            frames,
+        }))
+        .await
+    }
+
     /// Creates a responder whose frames are captured by the returned receiver.
     #[cfg(test)]
     pub(crate) fn recording(
