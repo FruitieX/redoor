@@ -1,17 +1,21 @@
 use super::RouterError;
-use super::cleanup;
+use super::cleanup::AgentLoss;
+use super::flows::{CommandFlow, Flow};
 use super::messages::{
     AgentListEntry, ApplyManagedLifecycleRequest, ExecuteCommandRequest, OpenAgentLogStreamRequest,
     OpenTerminalRequest, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterTransferConnectionRequest, UnregisterManagedAgentRequest,
+    RegisterTransferConnectionRequest, RouteResponse, UnregisterManagedAgentRequest,
 };
 use super::state::{AgentConnection, KnownAgent, RouterState, TransferConnection};
-use super::ui;
+use super::streams::AgentLink;
 use axum::extract::ws::Message as WsMessage;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
-use redoor_protocol::{ids::AgentId, wire::ServerToAgent};
+use redoor_protocol::{
+    ids::{AgentId, SocketId, UnixTimestampSeconds},
+    wire::ServerToAgent,
+};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -26,9 +30,7 @@ impl AgentConnection {
             outgoing_priority: request.outgoing_priority,
             transfer_token: uuid::Uuid::new_v4().to_string(),
             transfer: None,
-            connected_at: redoor_protocol::ids::UnixTimestampSeconds::new(
-                jiff::Timestamp::now().as_second(),
-            ),
+            connected_at: UnixTimestampSeconds::new(jiff::Timestamp::now().as_second()),
             os: request.os,
             arch: request.arch,
             hostname: request.hostname,
@@ -41,7 +43,19 @@ impl AgentConnection {
             supports_move_to_trash: request.supports_move_to_trash,
             uid: request.uid,
             is_root: request.is_root,
+            streams: request.streams,
         }
+    }
+
+    /// Lanes a stream of this connection uses without going through the router.
+    pub(crate) fn link(&self) -> AgentLink {
+        AgentLink::new(
+            self.outgoing_priority.clone(),
+            self.transfer
+                .as_ref()
+                .map(|transfer| transfer.outgoing_binary.clone()),
+            self.streams.credit(),
+        )
     }
 
     /// Serializes and admits one ordinary command or bootstrap onto the bounded lane.
@@ -102,27 +116,6 @@ impl AgentConnection {
     }
 }
 
-impl TransferConnection {
-    /// Queues one binary frame while preserving bounded payload backpressure.
-    pub(crate) async fn send_binary(&self, bytes: Vec<u8>) -> bool {
-        if self
-            .outgoing_binary
-            .send(WsMessage::Binary(bytes.into()))
-            .await
-            .is_err()
-        {
-            log!(
-                Level::Warning,
-                "Failed to queue transfer message: socket_id={}",
-                self.socket_id
-            );
-            false
-        } else {
-            true
-        }
-    }
-}
-
 /// Compares transfer tokens in constant time so rejection timing does not reveal token contents.
 fn transfer_tokens_match(left: &str, right: &str) -> bool {
     let left_digest = Sha256::digest(left.as_bytes());
@@ -130,217 +123,250 @@ fn transfer_tokens_match(left: &str, right: &str) -> bool {
     bool::from(left_digest.ct_eq(&right_digest))
 }
 
-/// Commits live routing and retained inventory together after lifecycle admission.
-///
-/// Public status stays non-Connected until the payload socket attaches so clients
-/// that gate on `Connected` do not start transfers during the normal handshake window.
-fn commit_registration(state: &mut RouterState, request: RegisterAgentRequest) {
-    log!(
-        Level::Info,
-        "Agent registered: agent_id={}, agent_name={}, socket_id={}",
-        request.agent_id,
-        request.agent_name,
-        request.socket_id
-    );
-    let agent_id = request.agent_id.clone();
-    let connection = AgentConnection::from_register_request(request);
-    let connected_at = connection.connected_at;
-    let socket_id = connection.socket_id.clone();
-    let name = connection.agent_name.clone();
-    let default_directory = connection.default_directory.clone();
-    let binary = connection.binary.clone();
-    let supports_self_exec = connection.supports_self_exec;
-    let supports_native_open = connection.supports_native_open;
-    let supports_trash = connection.supports_trash;
-    let supports_move_to_trash = connection.supports_move_to_trash;
-    let uid = connection.uid;
-    let is_root = connection.is_root;
-    let transfer_token = connection.transfer_token.clone();
-    let transfer_open_sender = connection.outgoing_priority.clone();
-    state.agents.by_id.insert(agent_id.clone(), connection);
-    let known = state
-        .agents
-        .known_by_id
-        .entry(agent_id.clone())
-        .or_insert_with(|| KnownAgent {
-            id: agent_id,
-            name: name.clone(),
-            default_directory: None,
-            managed: false,
-            configuration_editable: false,
-            ssh_target: None,
-            status: AgentConnectionStatus::Disconnected,
-            connected_at: None,
-            last_seen_at: None,
-            connection_issue: None,
-            provisioning_status: Vec::new(),
-            socket_id: None,
-            binary: None,
-            supports_self_exec: false,
-            supports_native_open: false,
-            supports_trash: false,
-            supports_move_to_trash: false,
-            uid: None,
-            is_root: false,
-        });
-    known.name = name;
-    known.default_directory = Some(default_directory);
-    // Control is live, but transfer usability still depends on the async payload handshake.
-    // Leave Starting/Disconnected (or any non-Connected state) until register_transfer promotes.
-    if known.status == AgentConnectionStatus::Connected {
-        known.status = if known.managed {
-            AgentConnectionStatus::Starting
-        } else {
-            AgentConnectionStatus::Disconnected
-        };
-    }
-    known.connected_at = Some(connected_at);
-    known.connection_issue = None;
-    known.socket_id = Some(socket_id);
-    known.binary = Some(binary);
-    known.supports_self_exec = supports_self_exec;
-    known.supports_native_open = supports_native_open;
-    known.supports_trash = supports_trash;
-    known.supports_move_to_trash = supports_move_to_trash;
-    known.uid = uid;
-    known.is_root = is_root;
-    ui::notify_agents_changed(state);
-
-    if let Ok(message) = serde_json::to_string(&ServerToAgent::TransferSocketOpen {
-        token: transfer_token,
-        // Credit is confirmed only once the router can grant it; until then agents keep the
-        // uncredited behavior even when they advertise support.
-        stream_credit: false,
-    }) {
-        let _ = transfer_open_sender.try_send(WsMessage::Text(message.into()));
-    }
+/// Current wall-clock second, used for inventory timestamps.
+fn now() -> UnixTimestampSeconds {
+    UnixTimestampSeconds::new(jiff::Timestamp::now().as_second())
 }
 
-/// Marks inventory fully ready only after both control and payload sockets are live.
-fn mark_agent_transfer_ready(state: &mut RouterState, agent_id: &AgentId) {
-    let Some(known) = state.agents.known_by_id.get_mut(agent_id) else {
-        return;
-    };
-    if known.status == AgentConnectionStatus::Connected {
-        return;
-    }
-    known.status = AgentConnectionStatus::Connected;
-    known.connection_issue = None;
-    ui::notify_agents_changed(state);
-}
-
-/// Registers a connected agent, replacing any existing connection that
-/// already owns the same agent name.
-///
-/// When the SSH tunnel drops without a clean TCP close, the server may not
-/// detect the old session's disconnect for a long time. Rejecting the new
-/// connection in that window would make the agent permanently unreachable
-/// until the TCP timeout fires. Instead, the new connection takes over the
-/// name and the old session is cleaned up. The stale session's later
-/// `UnregisterAgent` is ignored because its `socket_id` will not match.
-pub(crate) async fn register(state: &mut RouterState, request: RegisterAgentRequest) {
-    // Token validation happens in the session layer before this message is
-    // enqueued, so name takeover here is only reachable with a valid agent_token.
-    let existing_agent_id = state
-        .agents
-        .by_id
-        .iter()
-        .find(|(_, info)| info.agent_name == request.agent_name)
-        .map(|(id, _)| id.clone());
-
-    if let Some(old_agent_id) = existing_agent_id {
+impl RouterState {
+    /// Commits live routing and retained inventory together after lifecycle admission.
+    ///
+    /// Public status stays non-Connected until the payload socket attaches so clients
+    /// that gate on `Connected` do not start transfers during the normal handshake window.
+    fn commit_registration(&mut self, request: RegisterAgentRequest) {
         log!(
-            Level::Warning,
-            "Replacing stale agent connection: agent_name={}, old_agent_id={}, new_agent_id={}",
-            request.agent_name,
-            old_agent_id,
-            request.agent_id
-        );
-
-        if let Some(old_connection) = state.agents.by_id.remove(&old_agent_id) {
-            old_connection.shutdown_transfer();
-            if let Some(known) = state.agents.known_by_id.get_mut(&old_agent_id) {
-                known.last_seen_at = Some(redoor_protocol::ids::UnixTimestampSeconds::new(
-                    jiff::Timestamp::now().as_second(),
-                ));
-                known.connected_at = None;
-                known.socket_id = None;
-            }
-            // Notify the old session so its agent process exits promptly
-            // instead of lingering as a zombie.
-            let _ = old_connection.send_priority_message(ServerToAgent::Error {
-                message: "Connection replaced by a new agent with the same name".to_string(),
-            });
-        }
-
-        // Clean up any in-flight transfers or pending REST requests that
-        // belonged to the old connection before the new one takes over.
-        cleanup::cleanup_agent_requests(state, &old_agent_id).await;
-        state.terminal_registry.remove_agent_pending(&old_agent_id);
-        state.log_registry.remove_agent(&old_agent_id);
-    }
-
-    let agent_id = request.agent_id.clone();
-    let rejection_sender = request.outgoing_priority.clone();
-    let watchdog = request.watchdog.clone();
-    let watchdog_attempt_generation = request.watchdog_attempt_generation;
-    let accepted = match watchdog.as_ref() {
-        Some(watchdog) => watchdog_attempt_generation.is_some_and(|attempt_generation| {
-            watchdog
-                .while_current_attempt(attempt_generation, || commit_registration(state, request))
-                .is_some()
-        }),
-        None => {
-            commit_registration(state, request);
-            true
-        }
-    };
-    if !accepted {
-        let rejection = serde_json::to_string(&ServerToAgent::Error {
-            message: "Managed agent is intentionally stopped".to_string(),
-        });
-        if let Ok(rejection) = rejection {
-            let _ = rejection_sender.try_send(WsMessage::Text(rejection.into()));
-        }
-        log!(
-            Level::Warning,
-            "Ignoring managed registration that lost a shutdown race: agent_id={}",
-            agent_id
-        );
-    }
-}
-
-/// Authenticates and installs a payload socket under the current control session.
-///
-/// When a broken transfer socket reconnects before the server processes the old
-/// socket's unregister, replacement must fail in-flight payload work first.
-/// Otherwise the delayed unregister is ignored as stale while the agent has
-/// already dropped the old workers, leaving HTTP requests stuck forever.
-///
-/// Registration is cancellation-aware: if the socket handler timed out and
-/// dropped the reply receiver, we must not install its already-dead senders.
-/// A timed-out handler never reaches unregister, so committing would leave a
-/// zombie transfer lane until some later socket replaces it.
-pub(crate) async fn register_transfer(
-    state: &mut RouterState,
-    request: RegisterTransferConnectionRequest,
-) {
-    // Bail before mutating router state when the caller already gave up
-    // (request timeout dropped the reply). Otherwise a late-queued message
-    // would evict a live payload socket and install dead channels.
-    if request.reply.is_closed() {
-        log!(
-            Level::Warning,
-            "Ignoring cancelled transfer registration: agent_id={}, socket_id={}",
+            Level::Info,
+            "Agent registered: agent_id={}, agent_name={}, socket_id={}",
             request.agent_id,
+            request.agent_name,
             request.socket_id
         );
-        let _ = request.shutdown.send(true);
-        return;
+        let agent_id = request.agent_id.clone();
+        let connection = AgentConnection::from_register_request(request);
+        let transfer_open = ServerToAgent::TransferSocketOpen {
+            token: connection.transfer_token.clone(),
+            // Confirms credit only to agents that advertised it, so both ends switch together.
+            stream_credit: connection.streams.credit(),
+        };
+        let transfer_open_sender = connection.outgoing_priority.clone();
+        let known = self
+            .agents
+            .known_by_id
+            .entry(agent_id.clone())
+            .or_insert_with(|| KnownAgent {
+                id: agent_id.clone(),
+                name: connection.agent_name.clone(),
+                default_directory: None,
+                managed: false,
+                configuration_editable: false,
+                ssh_target: None,
+                status: AgentConnectionStatus::Disconnected,
+                connected_at: None,
+                last_seen_at: None,
+                connection_issue: None,
+                provisioning_status: Vec::new(),
+                socket_id: None,
+                binary: None,
+                supports_self_exec: false,
+                supports_native_open: false,
+                supports_trash: false,
+                supports_move_to_trash: false,
+                uid: None,
+                is_root: false,
+            });
+        known.name = connection.agent_name.clone();
+        known.default_directory = Some(connection.default_directory.clone());
+        // Control is live, but transfer usability still depends on the async payload handshake.
+        // Leave Starting/Disconnected (or any non-Connected state) until register_transfer promotes.
+        if known.status == AgentConnectionStatus::Connected {
+            known.status = if known.managed {
+                AgentConnectionStatus::Starting
+            } else {
+                AgentConnectionStatus::Disconnected
+            };
+        }
+        known.connected_at = Some(connection.connected_at);
+        known.connection_issue = None;
+        known.socket_id = Some(connection.socket_id.clone());
+        known.binary = Some(connection.binary.clone());
+        known.supports_self_exec = connection.supports_self_exec;
+        known.supports_native_open = connection.supports_native_open;
+        known.supports_trash = connection.supports_trash;
+        known.supports_move_to_trash = connection.supports_move_to_trash;
+        known.uid = connection.uid;
+        known.is_root = connection.is_root;
+        self.agents.by_id.insert(agent_id, connection);
+        self.notify_agents_changed();
+
+        if let Ok(message) = serde_json::to_string(&transfer_open) {
+            let _ = transfer_open_sender.try_send(WsMessage::Text(message.into()));
+        }
     }
 
-    let previous = {
-        let Some(connection) = state.agents.by_id.get_mut(&request.agent_id) else {
+    /// Marks inventory fully ready only after both control and payload sockets are live.
+    fn mark_agent_transfer_ready(&mut self, agent_id: &AgentId) {
+        let Some(known) = self.agents.known_by_id.get_mut(agent_id) else {
+            return;
+        };
+        if known.status == AgentConnectionStatus::Connected {
+            return;
+        }
+        known.status = AgentConnectionStatus::Connected;
+        known.connection_issue = None;
+        self.notify_agents_changed();
+    }
+
+    /// Ends an evicted control session and fails everything that depended on it.
+    ///
+    /// `notice` is sent on the old session's priority lane so a replaced agent process exits
+    /// promptly instead of lingering as a zombie.
+    fn release_connection(&mut self, connection: AgentConnection, notice: Option<&str>) {
+        connection.shutdown_transfer();
+        if let Some(message) = notice {
+            let _ = connection.send_priority_message(ServerToAgent::Error {
+                message: message.to_string(),
+            });
+        }
+        let agent_id = connection.agent_id.clone();
+        self.fail_agent_flows(&agent_id, AgentLoss::Control);
+        connection.streams.clear();
+        self.terminal_registry.remove_agent_pending(&agent_id);
+        self.log_registry.remove_agent(&agent_id);
+    }
+
+    /// Records in the inventory that an agent's authoritative connection ended.
+    fn forget_connection(&mut self, agent_id: &AgentId) {
+        if let Some(known) = self.agents.known_by_id.get_mut(agent_id) {
+            known.last_seen_at = Some(now());
+            known.connected_at = None;
+            known.socket_id = None;
+        }
+    }
+
+    /// Registers a connected agent, replacing any existing connection with the same name.
+    ///
+    /// When the SSH tunnel drops without a clean TCP close, the server may not detect the old
+    /// session's disconnect for a long time. Rejecting the new connection in that window would
+    /// make the agent permanently unreachable until the TCP timeout fires. Instead, the new
+    /// connection takes over the name and the old session is cleaned up. The stale session's
+    /// later `UnregisterAgent` is ignored because its `socket_id` will not match.
+    pub(crate) fn register_agent(&mut self, request: RegisterAgentRequest) {
+        // Token validation happens in the session layer before this message is enqueued, so
+        // name takeover here is only reachable with a valid agent_token.
+        let existing_agent_id = self
+            .agents
+            .by_id
+            .iter()
+            .find(|(_, info)| info.agent_name == request.agent_name)
+            .map(|(id, _)| id.clone());
+        if let Some(old_agent_id) = existing_agent_id {
+            log!(
+                Level::Warning,
+                "Replacing stale agent connection: agent_name={}, old_agent_id={}, new_agent_id={}",
+                request.agent_name,
+                old_agent_id,
+                request.agent_id
+            );
+            if let Some(old_connection) = self.agents.by_id.remove(&old_agent_id) {
+                self.forget_connection(&old_agent_id);
+                self.release_connection(
+                    old_connection,
+                    Some("Connection replaced by a new agent with the same name"),
+                );
+            }
+        }
+
+        let agent_id = request.agent_id.clone();
+        let rejection_sender = request.outgoing_priority.clone();
+        let accepted = match request.watchdog.clone() {
+            Some(watchdog) => {
+                request
+                    .watchdog_attempt_generation
+                    .is_some_and(|attempt_generation| {
+                        watchdog
+                            .while_current_attempt(attempt_generation, || {
+                                self.commit_registration(request)
+                            })
+                            .is_some()
+                    })
+            }
+            None => {
+                self.commit_registration(request);
+                true
+            }
+        };
+        if !accepted {
+            let rejection = serde_json::to_string(&ServerToAgent::Error {
+                message: "Managed agent is intentionally stopped".to_string(),
+            });
+            if let Ok(rejection) = rejection {
+                let _ = rejection_sender.try_send(WsMessage::Text(rejection.into()));
+            }
+            log!(
+                Level::Warning,
+                "Ignoring managed registration that lost a shutdown race: agent_id={}",
+                agent_id
+            );
+        }
+    }
+
+    /// Removes an agent whose control session ended, unless a newer session replaced it.
+    pub(crate) fn unregister_agent(&mut self, agent_id: AgentId, socket_id: SocketId) {
+        // A replacement shares the agent id, so only the matching session may evict the entry.
+        let is_current = self
+            .agents
+            .by_id
+            .get(&agent_id)
+            .is_some_and(|connection| connection.socket_id == socket_id);
+        if !is_current {
+            log!(
+                Level::Debug,
+                "Ignoring stale unregister: agent_id={}, socket_id={}",
+                agent_id,
+                socket_id
+            );
+            return;
+        }
+        log!(Level::Info, "Agent unregistered: agent_id={}", agent_id);
+        let Some(connection) = self.agents.by_id.remove(&agent_id) else {
+            return;
+        };
+        if let Some(known) = self.agents.known_by_id.get_mut(&agent_id) {
+            known.connected_at = None;
+            known.last_seen_at = Some(now());
+            known.socket_id = None;
+            known.status = if known.managed {
+                AgentConnectionStatus::Starting
+            } else {
+                AgentConnectionStatus::Disconnected
+            };
+        }
+        self.notify_agents_changed();
+        self.release_connection(connection, None);
+    }
+
+    /// Authenticates and installs a payload socket under the current control session.
+    ///
+    /// When a broken transfer socket reconnects before the server processes the old socket's
+    /// unregister, replacement must fail in-flight payload work first. Otherwise the delayed
+    /// unregister is ignored as stale while the agent has already dropped the old workers,
+    /// leaving HTTP requests stuck forever.
+    ///
+    /// Registration is cancellation-aware: if the socket handler timed out and dropped the
+    /// reply receiver, its already-dead senders must not be installed. A timed-out handler
+    /// never reaches unregister, so committing would leave a zombie transfer lane.
+    pub(crate) fn register_transfer(&mut self, request: RegisterTransferConnectionRequest) {
+        if request.reply.is_closed() {
+            log!(
+                Level::Warning,
+                "Ignoring cancelled transfer registration: agent_id={}, socket_id={}",
+                request.agent_id,
+                request.socket_id
+            );
+            let _ = request.shutdown.send(true);
+            return;
+        }
+        let Some(connection) = self.agents.by_id.get_mut(&request.agent_id) else {
             let _ = request
                 .reply
                 .send(Err(RouterError::TransferAuthenticationFailed));
@@ -352,370 +378,343 @@ pub(crate) async fn register_transfer(
                 .send(Err(RouterError::TransferAuthenticationFailed));
             return;
         }
-        // Evict the old payload lane before installing the replacement so
-        // cleanup cannot race with new traffic on the incoming socket.
-        connection.transfer.take()
-    };
-
-    if let Some(previous) = previous {
-        let _ = previous.shutdown.send(true);
+        // Evict the old payload lane before installing the replacement so cleanup cannot race
+        // with new traffic on the incoming socket.
+        if let Some(previous) = connection.transfer.take() {
+            let _ = previous.shutdown.send(true);
+            log!(
+                Level::Info,
+                "Transfer socket replaced: agent_id={}, old_socket_id={}, socket_id={}",
+                request.agent_id,
+                previous.socket_id,
+                request.socket_id
+            );
+            // The agent already cleared workers tied to the old socket, and the old socket's
+            // unregister will be ignored as stale, so its flows must fail here.
+            self.lose_transfer(
+                &request.agent_id,
+                format!("Transfer connection replaced: {}", request.agent_id),
+            );
+        }
+        let Some(connection) = self.agents.by_id.get_mut(&request.agent_id) else {
+            let _ = request.shutdown.send(true);
+            let _ = request
+                .reply
+                .send(Err(RouterError::TransferAuthenticationFailed));
+            return;
+        };
+        connection.transfer = Some(TransferConnection {
+            socket_id: request.socket_id.clone(),
+            outgoing_binary: request.outgoing_binary,
+            shutdown: request.shutdown,
+        });
+        let streams = connection.streams.clone();
         log!(
             Level::Info,
-            "Transfer socket replaced: agent_id={}, old_socket_id={}, socket_id={}",
-            request.agent_id,
-            previous.socket_id,
-            request.socket_id
-        );
-        // Fail downloads/uploads/remote copies before the new socket is
-        // authoritative. Stale unregister for the old socket_id is ignored, and
-        // the agent already cleared workers tied to that generation.
-        cleanup::cleanup_agent_transfer_requests(
-            state,
-            &request.agent_id,
-            format!("Transfer connection replaced: {}", request.agent_id),
-        )
-        .await;
-    }
-
-    // Re-check after awaits: the socket task may have timed out while we
-    // cleaned up the previous generation.
-    if request.reply.is_closed() {
-        log!(
-            Level::Warning,
-            "Aborting transfer registration after caller cancelled: agent_id={}, socket_id={}",
+            "Transfer socket registered: agent_id={}, socket_id={}",
             request.agent_id,
             request.socket_id
         );
-        let _ = request.shutdown.send(true);
-        return;
+        // Promote only here so Connected means transfers can succeed, not merely control is up.
+        self.mark_agent_transfer_ready(&request.agent_id);
+        let _ = request.reply.send(Ok(streams));
     }
 
-    let Some(connection) = state.agents.by_id.get_mut(&request.agent_id) else {
-        // Control session disappeared during replacement cleanup.
-        let _ = request.shutdown.send(true);
-        let _ = request
-            .reply
-            .send(Err(RouterError::TransferAuthenticationFailed));
-        return;
-    };
-    connection.transfer = Some(TransferConnection {
-        socket_id: request.socket_id.clone(),
-        outgoing_binary: request.outgoing_binary,
-        shutdown: request.shutdown,
-    });
-    log!(
-        Level::Info,
-        "Transfer socket registered: agent_id={}, socket_id={}",
-        request.agent_id,
-        request.socket_id
-    );
-    // Promote only here so Connected means transfers can succeed, not merely control is up.
-    mark_agent_transfer_ready(state, &request.agent_id);
-    let _ = request.reply.send(Ok(()));
-}
+    /// Fails payload flows of an agent whose transfer socket is gone and resets its streams.
+    fn lose_transfer(&mut self, agent_id: &AgentId, reason: String) {
+        self.fail_agent_flows(agent_id, AgentLoss::Transfer(reason));
+        if let Some(connection) = self.agents.by_id.get(agent_id) {
+            connection.streams.clear();
+        }
+    }
 
-/// Clears only the matching payload socket so stale teardown cannot evict a replacement.
-pub(crate) async fn unregister_transfer(
-    state: &mut RouterState,
-    agent_id: AgentId,
-    socket_id: redoor_protocol::ids::SocketId,
-) {
-    let is_current = state
-        .agents
-        .by_id
-        .get(&agent_id)
-        .and_then(|connection| connection.transfer.as_ref())
-        .is_some_and(|transfer| transfer.socket_id == socket_id);
-    if !is_current {
+    /// Clears only the matching payload socket so stale teardown cannot evict a replacement.
+    pub(crate) fn unregister_transfer(&mut self, agent_id: AgentId, socket_id: SocketId) {
+        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
+            return;
+        };
+        if connection
+            .transfer
+            .as_ref()
+            .is_none_or(|transfer| transfer.socket_id != socket_id)
+        {
+            log!(
+                Level::Debug,
+                "Ignoring stale transfer unregister: agent_id={}, socket_id={}",
+                agent_id,
+                socket_id
+            );
+            return;
+        }
+        connection.transfer = None;
         log!(
-            Level::Debug,
-            "Ignoring stale transfer unregister: agent_id={}, socket_id={}",
+            Level::Info,
+            "Transfer socket unregistered: agent_id={}, socket_id={}",
             agent_id,
             socket_id
         );
-        return;
+        self.lose_transfer(&agent_id, format!("Transfer connection lost: {agent_id}"));
     }
 
-    if let Some(connection) = state.agents.by_id.get_mut(&agent_id) {
-        connection.transfer = None;
+    /// Adds a configured stopped record before its dormant supervisor can be controlled.
+    pub(crate) fn register_managed(&mut self, request: RegisterManagedAgentRequest) {
+        let id = request.agent_id;
+        self.agents.known_by_id.insert(
+            id.clone(),
+            KnownAgent {
+                id: id.clone(),
+                name: id.to_string(),
+                default_directory: request.default_directory,
+                managed: true,
+                configuration_editable: request.configuration_editable,
+                ssh_target: request.ssh_target,
+                status: AgentConnectionStatus::Stopped,
+                connected_at: None,
+                last_seen_at: None,
+                connection_issue: None,
+                provisioning_status: Vec::new(),
+                socket_id: None,
+                binary: None,
+                supports_self_exec: false,
+                supports_native_open: false,
+                supports_trash: false,
+                supports_move_to_trash: false,
+                uid: None,
+                is_root: false,
+            },
+        );
+        self.notify_agents_changed();
+        let _ = request.reply.send(());
     }
-    log!(
-        Level::Info,
-        "Transfer socket unregistered: agent_id={}, socket_id={}",
-        agent_id,
-        socket_id
-    );
-    cleanup::cleanup_agent_transfer_requests(
-        state,
-        &agent_id,
-        format!("Transfer connection lost: {}", agent_id),
-    )
-    .await;
-}
 
-/// Adds a configured stopped record before its dormant supervisor can be controlled.
-pub(crate) fn register_managed(state: &mut RouterState, request: RegisterManagedAgentRequest) {
-    let id = request.agent_id;
-    state.agents.known_by_id.insert(
-        id.clone(),
-        KnownAgent {
-            id: id.clone(),
-            name: id.to_string(),
-            default_directory: request.default_directory,
-            managed: true,
-            configuration_editable: request.configuration_editable,
-            ssh_target: request.ssh_target,
-            status: AgentConnectionStatus::Stopped,
-            connected_at: None,
-            last_seen_at: None,
-            connection_issue: None,
-            provisioning_status: Vec::new(),
-            socket_id: None,
-            binary: None,
-            supports_self_exec: false,
-            supports_native_open: false,
-            supports_trash: false,
-            supports_move_to_trash: false,
-            uid: None,
-            is_root: false,
-        },
-    );
-    ui::notify_agents_changed(state);
-    let _ = request.reply.send(());
-}
-
-/// Removes all retained state for a managed agent whose supervisor is already dormant.
-pub(crate) async fn unregister_managed(
-    state: &mut RouterState,
-    request: UnregisterManagedAgentRequest,
-) {
-    if let Some(connection) = state.agents.by_id.remove(&request.agent_id) {
-        connection.shutdown_transfer();
-    }
-    state.agents.known_by_id.remove(&request.agent_id);
-    cleanup::cleanup_agent_requests(state, &request.agent_id).await;
-    state
-        .terminal_registry
-        .remove_agent_pending(&request.agent_id);
-    state.log_registry.remove_agent(&request.agent_id);
-    ui::notify_agents_changed(state);
-    let _ = request.reply.send(());
-}
-
-/// Projects supervisor changes into retained inventory without touching streaming lanes.
-pub(crate) async fn apply_managed_lifecycle(
-    state: &mut RouterState,
-    request: ApplyManagedLifecycleRequest,
-) {
-    let ApplyManagedLifecycleRequest {
-        agent_id,
-        snapshot,
-        evict_existing,
-        reply,
-    } = request;
-    let Some(managed) = state
-        .agents
-        .known_by_id
-        .get(&agent_id)
-        .map(|known| known.managed)
-    else {
-        if let Some(reply) = reply {
-            let _ = reply.send(());
+    /// Removes all retained state for a managed agent whose supervisor is already dormant.
+    pub(crate) fn unregister_managed(&mut self, request: UnregisterManagedAgentRequest) {
+        self.agents.known_by_id.remove(&request.agent_id);
+        if let Some(connection) = self.agents.by_id.remove(&request.agent_id) {
+            self.release_connection(connection, None);
         }
-        return;
-    };
-    if !managed {
-        if let Some(reply) = reply {
-            let _ = reply.send(());
-        }
-        return;
+        self.notify_agents_changed();
+        let _ = request.reply.send(());
     }
 
-    if evict_existing && let Some(connection) = state.agents.by_id.remove(&agent_id) {
-        connection.shutdown_transfer();
-        if let Some(known) = state.agents.known_by_id.get_mut(&agent_id) {
-            known.last_seen_at = Some(redoor_protocol::ids::UnixTimestampSeconds::new(
-                jiff::Timestamp::now().as_second(),
-            ));
-            known.connected_at = None;
-            known.socket_id = None;
+    /// Projects supervisor changes into retained inventory without touching streaming lanes.
+    pub(crate) fn apply_managed_lifecycle(&mut self, request: ApplyManagedLifecycleRequest) {
+        let ApplyManagedLifecycleRequest {
+            agent_id,
+            snapshot,
+            evict_existing,
+            reply,
+        } = request;
+        let managed = self
+            .agents
+            .known_by_id
+            .get(&agent_id)
+            .is_some_and(|known| known.managed);
+        if !managed {
+            if let Some(reply) = reply {
+                let _ = reply.send(());
+            }
+            return;
         }
-        let _ = connection.send_priority_message(redoor_protocol::wire::ServerToAgent::Error {
-            message: "Managed agent startup was retried".to_string(),
-        });
-        cleanup::cleanup_agent_requests(state, &agent_id).await;
-        state.terminal_registry.remove_agent_pending(&agent_id);
-        state.log_registry.remove_agent(&agent_id);
-    }
 
-    let known = state
-        .agents
-        .known_by_id
-        .get_mut(&agent_id)
-        .expect("managed agent disappeared during lifecycle projection");
+        if evict_existing && let Some(connection) = self.agents.by_id.remove(&agent_id) {
+            self.forget_connection(&agent_id);
+            self.release_connection(connection, Some("Managed agent startup was retried"));
+        }
 
-    let live_connection = state.agents.by_id.get(&agent_id);
-    let live_socket = live_connection.map(|connection| connection.socket_id.clone());
-    let transfer_ready = live_connection
-        .and_then(|connection| connection.transfer.as_ref())
-        .is_some();
-    if live_socket.is_some() && snapshot.status != AgentConnectionStatus::Stopped {
-        // Watchdog learns about control registration first; do not advertise Connected
-        // until the payload socket is installed. Once Connected, transfer loss must not demote.
-        if transfer_ready || known.status == AgentConnectionStatus::Connected {
-            known.status = AgentConnectionStatus::Connected;
-        } else if snapshot.status == AgentConnectionStatus::Connected {
-            known.status = AgentConnectionStatus::Starting;
+        let live_connection = self.agents.by_id.get(&agent_id);
+        let live_socket = live_connection.map(|connection| connection.socket_id.clone());
+        let transfer_ready = live_connection
+            .and_then(|connection| connection.transfer.as_ref())
+            .is_some();
+        let known = self
+            .agents
+            .known_by_id
+            .get_mut(&agent_id)
+            .expect("managed agent disappeared during lifecycle projection");
+        if live_socket.is_some() && snapshot.status != AgentConnectionStatus::Stopped {
+            // Watchdog learns about control registration first; do not advertise Connected
+            // until the payload socket is installed. Once Connected, transfer loss must not demote.
+            if transfer_ready || known.status == AgentConnectionStatus::Connected {
+                known.status = AgentConnectionStatus::Connected;
+            } else if snapshot.status == AgentConnectionStatus::Connected {
+                known.status = AgentConnectionStatus::Starting;
+            } else {
+                known.status = snapshot.status.clone();
+            }
+            known.connection_issue = snapshot.connection_issue;
+            known.provisioning_status = snapshot.provisioning_status.clone();
         } else {
             known.status = snapshot.status.clone();
+            known.connection_issue = snapshot.connection_issue;
+            known.provisioning_status = snapshot.provisioning_status;
+            known.socket_id = snapshot.socket_id;
+            if known.status != AgentConnectionStatus::Connected {
+                known.connected_at = None;
+            }
         }
-        known.connection_issue = snapshot.connection_issue;
-        known.provisioning_status = snapshot.provisioning_status.clone();
-    } else {
-        known.status = snapshot.status.clone();
-        known.connection_issue = snapshot.connection_issue;
-        known.provisioning_status = snapshot.provisioning_status;
-        known.socket_id = snapshot.socket_id;
-        if known.status != AgentConnectionStatus::Connected {
-            known.connected_at = None;
+
+        if known.status == AgentConnectionStatus::Stopped
+            && let Some(connection) = self.agents.by_id.remove(&agent_id)
+        {
+            known.last_seen_at = Some(now());
+            known.socket_id = None;
+            self.release_connection(connection, Some("Managed agent was shut down"));
+        }
+        self.notify_agents_changed();
+        if let Some(reply) = reply {
+            let _ = reply.send(());
         }
     }
 
-    if known.status == AgentConnectionStatus::Stopped
-        && let Some(connection) = state.agents.by_id.remove(&agent_id)
-    {
-        connection.shutdown_transfer();
-        known.last_seen_at = Some(redoor_protocol::ids::UnixTimestampSeconds::new(
-            jiff::Timestamp::now().as_second(),
-        ));
-        known.socket_id = None;
-        let _ = connection.send_priority_message(redoor_protocol::wire::ServerToAgent::Error {
-            message: "Managed agent was shut down".to_string(),
-        });
-        cleanup::cleanup_agent_requests(state, &agent_id).await;
-        state.terminal_registry.remove_agent_pending(&agent_id);
-        state.log_registry.remove_agent(&agent_id);
+    /// Projects every retained inventory entry for deterministic REST sorting.
+    pub(crate) fn list_agents(&self) -> Vec<AgentListEntry> {
+        self.agents
+            .known_by_id
+            .values()
+            .map(|info| AgentListEntry {
+                id: info.id.clone(),
+                name: info.name.clone(),
+                default_directory: info.default_directory.clone(),
+                managed: info.managed,
+                configuration_editable: info.configuration_editable,
+                ssh_target: info.ssh_target.clone(),
+                status: info.status.clone(),
+                connected_at: info.connected_at,
+                connection_id: info.socket_id.clone(),
+                last_seen_at: info.last_seen_at,
+                connection_issue: info.connection_issue.clone(),
+                provisioning_status: info.provisioning_status.clone(),
+                binary: info.binary.clone(),
+                supports_self_exec: info.supports_self_exec,
+                supports_native_open: info.supports_native_open,
+                supports_trash: info.supports_trash,
+                supports_move_to_trash: info.supports_move_to_trash,
+                uid: info.uid,
+                is_root: info.is_root,
+            })
+            .collect()
     }
-    ui::notify_agents_changed(state);
-    if let Some(reply) = reply {
-        let _ = reply.send(());
-    }
-}
 
-/// Projects every retained inventory entry for deterministic REST sorting.
-pub(crate) fn list_agents(state: &RouterState) -> Vec<AgentListEntry> {
-    state
-        .agents
-        .known_by_id
-        .values()
-        .map(|info| AgentListEntry {
-            id: info.id.clone(),
-            name: info.name.clone(),
-            default_directory: info.default_directory.clone(),
-            managed: info.managed,
-            configuration_editable: info.configuration_editable,
-            ssh_target: info.ssh_target.clone(),
-            status: info.status.clone(),
-            connected_at: info.connected_at,
-            connection_id: info.socket_id.clone(),
-            last_seen_at: info.last_seen_at,
-            connection_issue: info.connection_issue.clone(),
-            provisioning_status: info.provisioning_status.clone(),
-            binary: info.binary.clone(),
-            supports_self_exec: info.supports_self_exec,
-            supports_native_open: info.supports_native_open,
-            supports_trash: info.supports_trash,
-            supports_move_to_trash: info.supports_move_to_trash,
-            uid: info.uid,
-            is_root: info.is_root,
-        })
-        .collect()
-}
-
-/// Allocates an internal request id and routes a one-shot command to an agent.
-pub(crate) fn execute_command_rest(state: &mut RouterState, request: ExecuteCommandRequest) {
-    if request.reply.is_closed() {
-        return;
-    }
-    state
-        .pending_rest
-        .by_request_id
-        .retain(|_, (reply, _)| !reply.is_closed());
-    let request_id = state.next_id();
-
-    log!(
-        Level::Trace,
-        "Routing REST command: agent_id={}, request_id={}, command={:?}",
-        request.agent_id,
-        request_id,
-        request.command
-    );
-    if let Some(agent_connection) = state.agents.by_id.get(&request.agent_id) {
+    /// Allocates an internal request id and routes a one-shot command to an agent.
+    pub(crate) fn execute_command_rest(&mut self, request: ExecuteCommandRequest) {
+        if request.reply.is_closed() {
+            return;
+        }
+        let request_id = self.next_id();
+        log!(
+            Level::Trace,
+            "Routing REST command: agent_id={}, request_id={}, command={:?}",
+            request.agent_id,
+            request_id,
+            request.command
+        );
+        let Some(agent_connection) = self.agents.by_id.get(&request.agent_id) else {
+            let _ = request.reply.send(CommandResult::error(
+                redoor_protocol::wire::command::CommandErrorKind::NotFound,
+                format!("Agent not found: {}", request.agent_id),
+            ));
+            return;
+        };
         if agent_connection.send_message(ServerToAgent::Command {
             agent_id: request.agent_id.clone(),
             request_id,
             command: request.command,
         }) {
-            state
-                .pending_rest
-                .by_request_id
-                .insert(request_id, (request.reply, request.agent_id.clone()));
+            self.flows.insert(
+                request_id,
+                Flow::Command(CommandFlow {
+                    request_id,
+                    agent_id: request.agent_id,
+                    reply: request.reply,
+                }),
+            );
         } else {
             let _ = request.reply.send(CommandResult::error(
                 redoor_protocol::wire::command::CommandErrorKind::ServiceUnavailable,
                 format!("Agent control queue is full: {}", request.agent_id),
             ));
         }
-    } else {
-        let _ = request.reply.send(CommandResult::error(
-            redoor_protocol::wire::command::CommandErrorKind::NotFound,
-            format!("Agent not found: {}", request.agent_id),
-        ));
     }
-}
 
-/// Queues only the log bootstrap secret on the existing control connection.
-pub(crate) fn open_log_stream(state: &RouterState, request: OpenAgentLogStreamRequest) {
-    let result = match state.agents.by_id.get(&request.agent_id) {
-        Some(connection)
-            if connection.send_message(ServerToAgent::LogStreamOpen {
-                log_stream_id: request.log_stream_id.clone(),
-                token: request.token.clone(),
-            }) =>
-        {
-            Ok(())
-        }
-        Some(_) => Err(RouterError::ControlQueueFull {
-            agent_id: request.agent_id.to_string(),
-        }),
-        None => Err(RouterError::AgentNotFound {
-            agent_id: request.agent_id.to_string(),
-        }),
-    };
-    let _ = request.reply.send(result);
-}
+    /// Delivers a one-shot command's result to its REST caller.
+    ///
+    /// Registration owns the connection-scoped identity fields, so agent details are
+    /// rewritten from the router's authoritative registry snapshot.
+    pub(crate) fn finish_command(
+        &mut self,
+        flow_id: super::flows::FlowId,
+        response: RouteResponse,
+    ) {
+        let Some(Flow::Command(command)) = self.flows.remove(flow_id) else {
+            return;
+        };
+        let result = match (response.result, self.agents.by_id.get(&command.agent_id)) {
+            (CommandResult::GetAgentDetails(mut details), Some(connection)) => {
+                details.id = command.agent_id.clone();
+                details.name = connection.agent_name.clone();
+                details.cwd = connection.default_directory.clone();
+                details.connected_at = connection.connected_at;
+                details.os = connection.os.clone();
+                details.arch = connection.arch.clone();
+                details.hostname = connection.hostname.clone();
+                details.username = connection.username.clone();
+                details.binary = connection.binary.clone();
+                // Registration is the process-stable identity used by list gating.
+                if let Some(uid) = connection.uid {
+                    details.uid = uid;
+                }
+                details.is_root = connection.is_root;
+                CommandResult::GetAgentDetails(details)
+            }
+            (result, _) => result,
+        };
+        let _ = command.reply.send(result);
+    }
 
-/// Queues only the terminal bootstrap secret on the existing control connection.
-pub(crate) fn open_terminal(state: &RouterState, request: OpenTerminalRequest) {
-    let result = match state.agents.by_id.get(&request.agent_id) {
-        Some(connection)
-            if connection.send_message(ServerToAgent::TerminalOpen {
-                terminal_id: request.terminal_id.clone(),
-                token: request.token.clone(),
-                size: request.size,
-                cwd: request.cwd.clone(),
-            }) =>
-        {
-            Ok(())
-        }
-        Some(_) => Err(RouterError::ControlQueueFull {
-            agent_id: request.agent_id.to_string(),
-        }),
-        None => Err(RouterError::AgentNotFound {
-            agent_id: request.agent_id.to_string(),
-        }),
-    };
-    let _ = request.reply.send(result);
+    /// Queues only the log bootstrap secret on the existing control connection.
+    pub(crate) fn open_log_stream(&self, request: OpenAgentLogStreamRequest) {
+        let result = match self.agents.by_id.get(&request.agent_id) {
+            Some(connection)
+                if connection.send_message(ServerToAgent::LogStreamOpen {
+                    log_stream_id: request.log_stream_id.clone(),
+                    token: request.token.clone(),
+                }) =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(RouterError::ControlQueueFull {
+                agent_id: request.agent_id.to_string(),
+            }),
+            None => Err(RouterError::AgentNotFound {
+                agent_id: request.agent_id.to_string(),
+            }),
+        };
+        let _ = request.reply.send(result);
+    }
+
+    /// Queues only the terminal bootstrap secret on the existing control connection.
+    pub(crate) fn open_terminal(&self, request: OpenTerminalRequest) {
+        let result = match self.agents.by_id.get(&request.agent_id) {
+            Some(connection)
+                if connection.send_message(ServerToAgent::TerminalOpen {
+                    terminal_id: request.terminal_id.clone(),
+                    token: request.token.clone(),
+                    size: request.size,
+                    cwd: request.cwd.clone(),
+                }) =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(RouterError::ControlQueueFull {
+                agent_id: request.agent_id.to_string(),
+            }),
+            None => Err(RouterError::AgentNotFound {
+                agent_id: request.agent_id.to_string(),
+            }),
+        };
+        let _ = request.reply.send(result);
+    }
 }
 
 #[cfg(test)]
@@ -757,8 +756,9 @@ mod tests {
             is_root: false,
             watchdog: None,
             watchdog_attempt_generation: None,
+            streams: super::super::streams::ConnectionStreams::new(AgentId::from(agent_id), false),
         };
-        commit_registration(state, request);
+        state.commit_registration(request);
         state.agents.by_id[&AgentId::from(agent_id)]
             .transfer_token
             .clone()
@@ -771,38 +771,31 @@ mod tests {
         let mut state = test_state();
         let agent_id = AgentId::from("managed-retry");
         let (register_reply, register_receiver) = oneshot::channel();
-        register_managed(
-            &mut state,
-            RegisterManagedAgentRequest {
-                agent_id: agent_id.clone(),
-                default_directory: Some("/tmp".to_string()),
-                configuration_editable: true,
-                ssh_target: None,
-                reply: register_reply,
-            },
-        );
+        state.register_managed(RegisterManagedAgentRequest {
+            agent_id: agent_id.clone(),
+            default_directory: Some("/tmp".to_string()),
+            configuration_editable: true,
+            ssh_target: None,
+            reply: register_reply,
+        });
         register_receiver
             .await
             .expect("managed inventory registration acknowledged");
         insert_control(&mut state, "managed-retry");
 
-        apply_managed_lifecycle(
-            &mut state,
-            ApplyManagedLifecycleRequest {
-                agent_id: agent_id.clone(),
-                snapshot: crate::watchdog::WatchdogSnapshot {
-                    attempt_generation: 2,
-                    desired_running: true,
-                    status: AgentConnectionStatus::Starting,
-                    connection_issue: None,
-                    provisioning_status: Vec::new(),
-                    socket_id: None,
-                },
-                evict_existing: true,
-                reply: None,
+        state.apply_managed_lifecycle(ApplyManagedLifecycleRequest {
+            agent_id: agent_id.clone(),
+            snapshot: crate::watchdog::WatchdogSnapshot {
+                attempt_generation: 2,
+                desired_running: true,
+                status: AgentConnectionStatus::Starting,
+                connection_issue: None,
+                provisioning_status: Vec::new(),
+                socket_id: None,
             },
-        )
-        .await;
+            evict_existing: true,
+            reply: None,
+        });
 
         // REST success must not leave a dead socket available for routing or redirect.
         assert!(!state.agents.by_id.contains_key(&agent_id));
@@ -821,7 +814,7 @@ mod tests {
         socket_id: redoor_protocol::ids::SocketId,
     ) -> (
         RegisterTransferConnectionRequest,
-        oneshot::Receiver<Result<(), RouterError>>,
+        oneshot::Receiver<Result<super::super::streams::ConnectionStreams, RouterError>>,
         watch::Receiver<bool>,
     ) {
         let (binary_sender, _binary_receiver) = mpsc::channel(1);
@@ -860,8 +853,8 @@ mod tests {
 
         let socket_id = redoor_protocol::ids::SocketId::new();
         let (request, reply, _shutdown) = transfer_request("agent", token, socket_id);
-        register_transfer(&mut state, request).await;
-        assert_eq!(reply.await.expect("transfer reply delivered"), Ok(()));
+        state.register_transfer(request);
+        assert!(reply.await.expect("transfer reply delivered").is_ok());
         // Connected is reserved for the moment both sockets can serve work.
         assert_eq!(
             state.agents.known_by_id[&AgentId::from("agent")].status,
@@ -883,12 +876,12 @@ mod tests {
         let first_socket = redoor_protocol::ids::SocketId::new();
         let (wrong_request, wrong_reply, _wrong_shutdown) =
             transfer_request("agent", "wrong-token".to_string(), first_socket.clone());
-        register_transfer(&mut state, wrong_request).await;
+        state.register_transfer(wrong_request);
         // Rejecting a wrong token proves stale or unauthenticated processes cannot attach.
-        assert_eq!(
+        assert!(matches!(
             wrong_reply.await.expect("wrong-token reply delivered"),
             Err(RouterError::TransferAuthenticationFailed)
-        );
+        ));
         // A failed attempt must leave the valid token usable rather than consuming it.
         assert!(
             state.agents.by_id[&AgentId::from("agent")]
@@ -898,20 +891,20 @@ mod tests {
 
         let (first_request, first_reply, first_shutdown) =
             transfer_request("agent", token.clone(), first_socket.clone());
-        register_transfer(&mut state, first_request).await;
+        state.register_transfer(first_request);
         // The current session token must install the payload connection successfully.
-        assert_eq!(first_reply.await.expect("first reply delivered"), Ok(()));
+        assert!(first_reply.await.expect("first reply delivered").is_ok());
 
         let replacement_socket = redoor_protocol::ids::SocketId::new();
         let (replacement_request, replacement_reply, _replacement_shutdown) =
             transfer_request("agent", token, replacement_socket.clone());
-        register_transfer(&mut state, replacement_request).await;
+        state.register_transfer(replacement_request);
         // Replacement is acknowledged only after router state owns the new socket.
-        assert_eq!(
+        assert!(
             replacement_reply
                 .await
-                .expect("replacement reply delivered"),
-            Ok(())
+                .expect("replacement reply delivered")
+                .is_ok()
         );
         // Replacing the socket must promptly stop both halves of the old connection.
         assert!(*first_shutdown.borrow());
@@ -934,56 +927,67 @@ mod tests {
         let first_socket = redoor_protocol::ids::SocketId::new();
         let (first_request, first_reply, _first_shutdown) =
             transfer_request("agent", token.clone(), first_socket);
-        register_transfer(&mut state, first_request).await;
-        assert_eq!(first_reply.await.expect("first reply delivered"), Ok(()));
+        state.register_transfer(first_request);
+        assert!(first_reply.await.expect("first reply delivered").is_ok());
 
         let download_id = state.next_id();
-        let (chunk_sender, _chunk_receiver) = mpsc::channel(1);
-        state.streams.outputs.insert(
+        let upload_id = state.next_id();
+        let connection = &state.agents.by_id[&AgentId::from("agent")];
+        let link = connection.link();
+        let download = super::super::streams::StreamLease::new(download_id, link.clone(), 0);
+        let mut download_receiver = connection.streams.open_inbound(download.clone());
+        state.flows.insert(
             download_id,
-            super::super::state::DirectOutputStream {
+            Flow::Output(super::super::flows::OutputFlow {
+                request_id: download_id,
                 agent_id: AgentId::from("agent"),
-                rest_cancel_sender: None,
-                owner: super::super::state::OutputOwner::Download {
+                kind: super::super::flows::OutputKind::Download {
                     progress_id: download_id.as_transfer_id(),
-                    sink: Some(chunk_sender),
+                    base_bytes: 0,
                 },
-                canceled_by_rest: false,
-                cancellation_delivery: None,
-                forwarding_stop: tokio::sync::watch::channel(false).0,
-            },
+                lease: download,
+                phase: super::super::flows::OutputPhase::Streaming,
+            }),
         );
 
-        let upload_id = state.next_id();
         let (completion_sender, completion_receiver) = oneshot::channel();
-        let (ready_sender, _ready_receiver) = oneshot::channel();
-        state.streams.uploads.insert(
+        state.flows.insert(
             upload_id,
-            super::super::state::DirectUpload {
+            Flow::Upload(super::super::flows::UploadFlow {
+                request_id: upload_id,
                 agent_id: AgentId::from("agent"),
-                completion_sender: Some(completion_sender),
-                ready_sender: Some(ready_sender),
-                ready: true,
-                canceled_by_rest: false,
-                explicitly_canceled: false,
                 kind: redoor_protocol::wire::policy::UploadKind::RawUpload,
-            },
+                phase: super::super::flows::UploadPhase::Streaming,
+                completion: Some(completion_sender),
+                ready: None,
+                stream: super::super::streams::OutboundStream::new(
+                    super::super::streams::StreamLease::new(upload_id, link, 0),
+                    None,
+                ),
+            }),
         );
 
         let replacement_socket = redoor_protocol::ids::SocketId::new();
         let (replacement_request, replacement_reply, _replacement_shutdown) =
             transfer_request("agent", token, replacement_socket);
-        register_transfer(&mut state, replacement_request).await;
-        assert_eq!(
+        state.register_transfer(replacement_request);
+        assert!(
             replacement_reply
                 .await
-                .expect("replacement reply delivered"),
-            Ok(())
+                .expect("replacement reply delivered")
+                .is_ok()
         );
 
         // Stale unregister is ignored after replacement, so cleanup must happen here.
-        assert!(state.streams.outputs.is_empty());
-        assert!(state.streams.uploads.is_empty());
+        assert!(state.flows.id_for(download_id).is_none());
+        assert!(state.flows.id_for(upload_id).is_none());
+        // The download consumer observes the lost payload path as an error, not a clean end.
+        assert!(
+            download_receiver
+                .recv()
+                .await
+                .is_some_and(|chunk| chunk.is_error)
+        );
         // Waiting HTTP upload clients must observe the lost payload path.
         assert!(matches!(
             completion_receiver
@@ -1002,8 +1006,8 @@ mod tests {
         let live_socket = redoor_protocol::ids::SocketId::new();
         let (live_request, live_reply, _live_shutdown) =
             transfer_request("agent", token.clone(), live_socket.clone());
-        register_transfer(&mut state, live_request).await;
-        assert_eq!(live_reply.await.expect("live reply delivered"), Ok(()));
+        state.register_transfer(live_request);
+        assert!(live_reply.await.expect("live reply delivered").is_ok());
 
         let cancelled_socket = redoor_protocol::ids::SocketId::new();
         let (cancelled_request, cancelled_reply, cancelled_shutdown) =
@@ -1011,7 +1015,7 @@ mod tests {
         // Dropping the reply models the socket handler's request timeout path,
         // which exits without ever sending UnregisterTransferConnection.
         drop(cancelled_reply);
-        register_transfer(&mut state, cancelled_request).await;
+        state.register_transfer(cancelled_request);
 
         // The live payload lane must survive; installing dead senders would
         // admit transfers against a socket task that already exited.
@@ -1034,25 +1038,23 @@ mod tests {
         let unknown_socket = redoor_protocol::ids::SocketId::new();
         let (unknown_request, unknown_reply, _unknown_shutdown) =
             transfer_request("missing", "unknown-token".to_string(), unknown_socket);
-        register_transfer(&mut state, unknown_request).await;
+        state.register_transfer(unknown_request);
         // Unknown identities use the same generic rejection as bad tokens to avoid disclosure.
-        assert_eq!(
+        assert!(matches!(
             unknown_reply.await.expect("unknown reply delivered"),
             Err(RouterError::TransferAuthenticationFailed)
-        );
+        ));
 
         let token = insert_control(&mut state, "agent");
         let current_socket = redoor_protocol::ids::SocketId::new();
         let (request, reply, _shutdown) = transfer_request("agent", token, current_socket.clone());
-        register_transfer(&mut state, request).await;
+        state.register_transfer(request);
         // Setup must succeed before exercising stale teardown behavior.
-        assert_eq!(reply.await.expect("registration reply delivered"), Ok(()));
-        unregister_transfer(
-            &mut state,
+        assert!(reply.await.expect("registration reply delivered").is_ok());
+        state.unregister_transfer(
             AgentId::from("agent"),
             redoor_protocol::ids::SocketId::new(),
-        )
-        .await;
+        );
         // An unrelated socket id must not clear the authoritative transfer connection.
         assert_eq!(
             state.agents.by_id[&AgentId::from("agent")]
@@ -1071,30 +1073,28 @@ mod tests {
         let agent_id = AgentId::from("bounded-agent");
         let (command_sender, mut command_receiver) = mpsc::channel(1);
         let (priority_sender, mut priority_receiver) = mpsc::channel(1);
-        commit_registration(
-            &mut state,
-            RegisterAgentRequest {
-                agent_id: agent_id.clone(),
-                agent_name: agent_id.to_string(),
-                socket_id: redoor_protocol::ids::SocketId::new(),
-                outgoing_commands: command_sender,
-                outgoing_priority: priority_sender,
-                os: "linux".to_string(),
-                arch: "x86_64".to_string(),
-                hostname: "host".to_string(),
-                username: "user".to_string(),
-                default_directory: "/tmp".to_string(),
-                binary: redoor_core::identity::current_binary_identity(),
-                supports_self_exec: true,
-                supports_native_open: true,
-                supports_trash: true,
-                supports_move_to_trash: true,
-                uid: Some(1000),
-                is_root: false,
-                watchdog: None,
-                watchdog_attempt_generation: None,
-            },
-        );
+        state.commit_registration(RegisterAgentRequest {
+            agent_id: agent_id.clone(),
+            agent_name: agent_id.to_string(),
+            socket_id: redoor_protocol::ids::SocketId::new(),
+            outgoing_commands: command_sender,
+            outgoing_priority: priority_sender,
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            hostname: "host".to_string(),
+            username: "user".to_string(),
+            default_directory: "/tmp".to_string(),
+            binary: redoor_core::identity::current_binary_identity(),
+            supports_self_exec: true,
+            supports_native_open: true,
+            supports_trash: true,
+            supports_move_to_trash: true,
+            uid: Some(1000),
+            is_root: false,
+            watchdog: None,
+            watchdog_attempt_generation: None,
+            streams: super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
+        });
         // Remove the lifecycle bootstrap so the reserved lane is available for cancellation.
         assert!(matches!(
             priority_receiver.recv().await,
@@ -1102,29 +1102,26 @@ mod tests {
         ));
 
         let (first_reply, first_receiver) = oneshot::channel();
-        execute_command_rest(
-            &mut state,
-            ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: redoor_protocol::wire::command::Command::GetAgentDetails,
-                reply: first_reply,
-            },
-        );
+        state.execute_command_rest(ExecuteCommandRequest {
+            agent_id: agent_id.clone(),
+            command: redoor_protocol::wire::command::Command::GetAgentDetails,
+            reply: first_reply,
+        });
         // The admitted command owns exactly one pending reply while its frame fills the lane.
-        assert_eq!(state.pending_rest.by_request_id.len(), 1);
+        assert_eq!(state.flows.len(), 1);
         drop(first_receiver);
 
         let (overload_reply, overload_receiver) = oneshot::channel();
-        execute_command_rest(
-            &mut state,
-            ExecuteCommandRequest {
-                agent_id: agent_id.clone(),
-                command: redoor_protocol::wire::command::Command::GetAgentDetails,
-                reply: overload_reply,
-            },
-        );
-        // Closed timed-out callers are pruned and rejected commands never enter pending state.
-        assert!(state.pending_rest.by_request_id.is_empty());
+        state.execute_command_rest(ExecuteCommandRequest {
+            agent_id: agent_id.clone(),
+            command: redoor_protocol::wire::command::Command::GetAgentDetails,
+            reply: overload_reply,
+        });
+        // Rejected commands never enter pending state, and the periodic tick prunes the
+        // timed-out caller's reply port.
+        assert_eq!(state.flows.len(), 1);
+        state.flows.prune_abandoned_commands();
+        assert_eq!(state.flows.len(), 0);
         assert!(matches!(
             overload_receiver.await.expect("overload reply delivered"),
             CommandResult::Error {

@@ -1,5 +1,5 @@
 use crate::actors::router::{
-    RegisterTransferConnectionRequest, RouteStreamChunkRequest, RouterHandle, RouterMsg,
+    ConnectionStreams, RegisterTransferConnectionRequest, RouterHandle, RouterMsg,
 };
 use axum::{
     extract::{
@@ -22,7 +22,7 @@ use redoor_protocol::{
         },
     },
 };
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 
 use super::state::ServerState;
 
@@ -58,7 +58,7 @@ async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
             })
         })
         .await;
-    if !matches!(registration, Ok(Ok(()))) {
+    let Ok(Ok(streams)) = registration else {
         log!(
             Level::Warning,
             "Transfer socket authentication rejected: socket_id={}",
@@ -66,7 +66,7 @@ async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
         );
         let _ = socket.send(WsMessage::Close(None)).await;
         return;
-    }
+    };
 
     log!(
         Level::Info,
@@ -78,7 +78,7 @@ async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
     let mut reader_shutdown = shutdown_receiver.clone();
     let mut writer_shutdown = shutdown_receiver;
     tokio::select! {
-        _ = read_transfer_frames(&mut reader, &router, &agent_id, &socket_id, &mut reader_shutdown) => {}
+        _ = read_transfer_frames(&mut reader, &router, &streams, &socket_id, &mut reader_shutdown) => {}
         _ = write_transfer_frames(&mut writer, &mut binary_receiver, &mut writer_shutdown) => {}
     }
 
@@ -130,11 +130,15 @@ async fn authenticate_transfer_socket(
     }
 }
 
-/// Routes binary frames one-at-a-time so downstream bounded queues backpressure only this socket.
+/// Hands binary frames straight to their streams' consumers.
+///
+/// Payload never passes through the router: only a stream's terminal frame is reported to
+/// it. For agents with per-stream credit the reader never waits on a consumer, so a stalled
+/// HTTP client or copy destination cannot freeze the other streams sharing this socket.
 async fn read_transfer_frames(
     reader: &mut futures_util::stream::SplitStream<WebSocket>,
     router: &RouterHandle,
-    agent_id: &AgentId,
+    streams: &ConnectionStreams,
     socket_id: &SocketId,
     shutdown: &mut watch::Receiver<bool>,
 ) {
@@ -151,16 +155,11 @@ async fn read_transfer_frames(
                 let Ok(chunk) = StreamChunk::from_bytes(&bytes) else {
                     break;
                 };
-                let (reply, received) = oneshot::channel();
-                if router
-                    .send_async(RouterMsg::RouteStreamChunk(RouteStreamChunkRequest {
-                        agent_id: agent_id.clone(),
-                        chunk,
-                        reply,
-                    }))
-                    .await
-                    .is_err()
-                    || received.await.is_err()
+                if let Some(end) = streams.deliver(chunk).await
+                    && router
+                        .send_async(RouterMsg::InboundStreamEnded(end))
+                        .await
+                        .is_err()
                 {
                     break;
                 }
@@ -170,8 +169,7 @@ async fn read_transfer_frames(
             WsMessage::Text(_) => {
                 log!(
                     Level::Warning,
-                    "Text frame on transfer socket: agent_id={}, socket_id={}",
-                    agent_id,
+                    "Text frame on transfer socket: socket_id={}",
                     socket_id
                 );
                 break;

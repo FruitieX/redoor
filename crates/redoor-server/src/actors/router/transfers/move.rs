@@ -1,291 +1,124 @@
-use super::super::progress;
-use super::super::state::{CopyContentKind, CopyExecution, CopyOperation, RouterState};
-use super::copy::{acknowledge_remote_cancel, cleanup_copy_tracking};
+//! The phase that turns a cross-agent copy into a move: deleting the verified source.
+
+use super::super::flows::{CopyPhase, Flow, FlowId};
+use super::super::state::{CopyContentKind, RouterState};
+use super::copy::CopyRelease;
 use redoor_core::log;
-use redoor_protocol::wire::command::{Command, CommandResult, MoveSourceIdentity};
+use redoor_protocol::wire::ServerToAgent;
+use redoor_protocol::wire::command::{Command, CommandResult};
 use redoor_protocol::wire::log::Level;
-use redoor_protocol::{
-    ids::{AgentId, RequestId, TransferId},
-    wire::ServerToAgent,
-};
 
-/// Builds the agent-local command while the copy module supplies only shared transport startup.
-pub(super) fn local_command(request: &super::super::messages::StartCopyRequest) -> Command {
-    Command::LocalMove {
-        source_path: request.source_path.clone(),
-        dest_path: request.dest_path.clone(),
-        source_is_directory: request.content_kind == CopyContentKind::TarDirectory,
-        expected_identity: request
-            .source_identity
-            .clone()
-            .expect("move requests must carry the source identity captured at preflight"),
-        on_existing: request.on_existing,
-    }
-}
-
-/// Handles completion phases that are specific to logical move transfers.
-pub(crate) fn finish_transfer(
-    state: &mut RouterState,
-    agent_id: AgentId,
-    request_id: RequestId,
-    result: CommandResult,
-) -> bool {
-    let Some(public_request_id) = state.copies.public_id_for_internal(request_id) else {
-        return false;
-    };
-    let Some(move_request) = state.copies.by_public_id.get(&public_request_id) else {
-        return false;
-    };
-    if move_request.operation != CopyOperation::Move {
-        return false;
-    }
-
-    let is_expected_completion = match &move_request.execution {
-        CopyExecution::RemoteStream {
-            dest_request_id, ..
-        } => *dest_request_id == request_id && move_request.dest_agent_id == agent_id,
-        CopyExecution::LocalAgent {
-            agent_id: expected_agent_id,
-            request_id: expected_request_id,
-        }
-        | CopyExecution::DeletingMoveSource {
-            agent_id: expected_agent_id,
-            request_id: expected_request_id,
-        } => *expected_request_id == request_id && expected_agent_id == &agent_id,
-    };
-    if !is_expected_completion {
-        return false;
-    }
-
-    let deleting_source = matches!(
-        move_request.execution,
-        CopyExecution::DeletingMoveSource { .. }
-    );
-    let destination_completed = matches!(
-        move_request.execution,
-        CopyExecution::RemoteStream { dest_request_id, .. } if dest_request_id == request_id
-    ) && move_request.content_kind.completion_matches(&result);
-    if destination_completed {
-        if matches!(
-            state
-                .progress
-                .entries
-                .get(&public_request_id)
-                .map(|entry| &entry.state),
-            Some(redoor_protocol::api::transfers::TransferProgressState::Canceling)
-        ) {
-            log!(
-                Level::Debug,
-                "Smart move destination completed while canceling; preserving source: public_request_id={}, agent_id={}, request_id={}",
-                public_request_id,
-                agent_id,
-                request_id
-            );
-            // Cancellation before source deletion preserves the source even if destination publication won.
-            acknowledge_remote_cancel(state, public_request_id, request_id);
-            return true;
-        }
-        let source_agent_id = move_request.source_agent_id.clone();
-        let source_path = move_request.source_path.clone();
-        let source_identity = move_request
-            .source_identity
-            .clone()
-            .expect("remote moves must retain their source identity");
-        let final_total_bytes =
-            final_total_bytes(state, public_request_id, move_request.content_kind);
-        log!(
-            Level::Debug,
-            "Smart move destination published; starting source deletion: public_request_id={}, source_agent_id={}, source_path={}, source_identity={:?}, final_total_bytes={:?}",
-            public_request_id,
-            source_agent_id,
-            source_path,
-            source_identity,
-            final_total_bytes
-        );
-        begin_source_deletion(
-            state,
-            public_request_id,
-            source_agent_id,
-            source_path,
-            source_identity,
-            final_total_bytes,
-        );
-        return true;
-    }
-
-    match result {
-        CommandResult::Error { message, .. } => {
-            log!(
-                Level::Debug,
-                "Smart move command failed: public_request_id={}, agent_id={}, request_id={}, deleting_source={}, message={}",
-                public_request_id,
-                agent_id,
-                request_id,
-                deleting_source,
-                message
-            );
-            if matches!(
-                state
-                    .progress
-                    .entries
-                    .get(&public_request_id)
-                    .map(|entry| &entry.state),
-                Some(redoor_protocol::api::transfers::TransferProgressState::Canceling)
-            ) {
-                match move_request.execution {
-                    CopyExecution::RemoteStream { .. } => {
-                        acknowledge_remote_cancel(state, public_request_id, request_id);
-                        return true;
-                    }
-                    CopyExecution::LocalAgent { .. } => {
-                        progress::mark_transfer_canceled(state, public_request_id);
-                    }
-                    CopyExecution::DeletingMoveSource { .. } => unreachable!(),
-                }
-            } else {
-                progress::mark_transfer_errored(state, public_request_id, message);
-            }
-        }
-        CommandResult::RawDelete if deleting_source => {
-            log!(
-                Level::Debug,
-                "Smart move source deletion completed: public_request_id={}, agent_id={}, request_id={}",
-                public_request_id,
-                agent_id,
-                request_id
-            );
-            progress::mark_copy_transfer_completed(state, public_request_id, None);
-        }
-        CommandResult::LocalMove { atomic } => {
-            log!(
-                Level::Debug,
-                "Smart move local completion: public_request_id={}, agent_id={}, request_id={}, atomic={}",
-                public_request_id,
-                agent_id,
-                request_id,
-                atomic
-            );
-            if let Some(entry) = state.progress.entries.get_mut(&public_request_id) {
-                // Copy/delete and cross-agent completions never take this arm, so they stay false.
-                entry.atomic = atomic;
-            }
-            let total_bytes =
-                final_total_bytes(state, public_request_id, move_request.content_kind);
-            progress::mark_copy_transfer_completed(state, public_request_id, total_bytes);
-        }
-        other => {
-            log!(
-                Level::Warning,
-                "Unexpected move completion response: agent_id={}, request_id={}, result={:?}",
-                agent_id,
-                request_id,
-                other
-            );
-            progress::mark_transfer_errored(
-                state,
-                public_request_id,
-                "Unexpected move completion response".to_string(),
-            );
-        }
-    }
-
-    cleanup_copy_tracking(state, public_request_id);
-    true
-}
-
-/// Uses observed stream bytes as the final size for directory moves whose tar size was unknown.
-fn final_total_bytes(
-    state: &RouterState,
-    public_request_id: TransferId,
-    content_kind: CopyContentKind,
-) -> Option<u64> {
-    match content_kind {
-        CopyContentKind::TarDirectory => progress::transferred_bytes(state, public_request_id),
-        CopyContentKind::RawFile => None,
-    }
-}
-
-/// Replaces streaming bookkeeping with one control command that deletes the copied source.
-fn begin_source_deletion(
-    state: &mut RouterState,
-    public_request_id: TransferId,
-    source_agent_id: AgentId,
-    source_path: String,
-    source_identity: MoveSourceIdentity,
-    final_total_bytes: Option<u64>,
-) {
-    let delete_request_id = state.next_id();
-    if let Some(move_request) = state.copies.by_public_id.get_mut(&public_request_id) {
-        if let CopyExecution::RemoteStream {
-            source_request_id,
-            dest_request_id,
-            ..
-        } = move_request.execution
-        {
-            state
-                .copies
-                .public_id_by_internal_request
-                .remove(&source_request_id);
-            state
-                .copies
-                .public_id_by_internal_request
-                .remove(&dest_request_id);
-            state.streams.outputs.remove(&source_request_id);
-            state.streams.uploads.remove(&dest_request_id);
-        }
-        move_request.execution = CopyExecution::DeletingMoveSource {
-            agent_id: source_agent_id.clone(),
-            request_id: delete_request_id,
+impl RouterState {
+    /// Replaces the finished streams of a published remote move with one control command that
+    /// deletes the source, which is the destructive commit phase and cannot be canceled.
+    pub(crate) fn begin_source_deletion(&mut self, flow_id: FlowId) {
+        let delete_id = self.next_id();
+        let previous = self.flows.request_ids(flow_id);
+        let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
+            return;
         };
-    }
-    if let Some(entry) = state.progress.entries.get_mut(&public_request_id) {
-        // Source deletion is the destructive commit phase and cannot be interrupted safely.
-        entry.cancelable = false;
-    }
-    state
-        .copies
-        .public_id_by_internal_request
-        .insert(delete_request_id, public_request_id);
-    if let Some(total_bytes) = final_total_bytes
-        && let Some(entry) = state.progress.entries.get_mut(&public_request_id)
-    {
-        entry.total_bytes = total_bytes;
-    }
-    log!(
-        Level::Debug,
-        "Smart move queuing source deletion: public_request_id={}, source_agent_id={}, delete_request_id={}, source_path={}, source_identity={:?}",
-        public_request_id,
-        source_agent_id,
-        delete_request_id,
-        source_path,
-        source_identity
-    );
-    let command_queued = state
-        .agents
-        .by_id
-        .get(&source_agent_id)
-        .is_some_and(|source_agent| {
-            source_agent.send_message(ServerToAgent::Command {
-                agent_id: source_agent_id.clone(),
-                request_id: delete_request_id,
-                command: Command::DeleteMoveSource {
-                    path: source_path,
-                    expected_identity: source_identity,
-                },
-            })
-        });
-    if !command_queued {
+        let Some(delete) = &flow.then else {
+            return;
+        };
+        let command = Command::DeleteMoveSource {
+            path: delete.path.clone(),
+            expected_identity: delete.identity.clone(),
+        };
+        let source_agent_id = flow.source_agent_id.clone();
+        let progress_id = flow.progress_id;
+        let content_kind = flow.content_kind;
+        let finished = std::mem::replace(
+            &mut flow.phase,
+            CopyPhase::DeletingSource {
+                request_id: delete_id,
+            },
+        );
+        let dest_agent_id = flow.dest_agent_id.clone();
+        self.flows.reindex(flow_id, &previous);
+        if let CopyPhase::Remote(remote) = &finished {
+            // Both streams finished; only their router-side state remains to release.
+            self.release_remote_copy(&source_agent_id, &dest_agent_id, remote, CopyRelease::Quiet);
+        }
+        // Tar moves have no known size up front; the forwarded bytes are the total.
+        let final_total = match content_kind {
+            CopyContentKind::TarDirectory => self.transferred_bytes(progress_id),
+            CopyContentKind::RawFile => None,
+        };
+        if let Some(entry) = self.progress.entries.get_mut(&progress_id) {
+            entry.cancelable = false;
+            if let Some(total) = final_total {
+                entry.total_bytes = total;
+            }
+        }
         log!(
             Level::Debug,
-            "Smart move source deletion not queued; source agent unavailable: public_request_id={}, source_agent_id={}",
-            public_request_id,
-            source_agent_id
+            "Smart move queuing source deletion: public_request_id={}, source_agent_id={}, delete_request_id={}, command={:?}",
+            progress_id,
+            source_agent_id,
+            delete_id,
+            command
         );
-        progress::mark_transfer_errored(
-            state,
-            public_request_id,
-            "Source agent unavailable before move deletion".to_string(),
-        );
-        cleanup_copy_tracking(state, public_request_id);
+        let queued = self
+            .agents
+            .by_id
+            .get(&source_agent_id)
+            .is_some_and(|source| {
+                source.send_message(ServerToAgent::Command {
+                    agent_id: source_agent_id.clone(),
+                    request_id: delete_id,
+                    command,
+                })
+            });
+        if !queued {
+            log!(
+                Level::Debug,
+                "Smart move source deletion not queued; source agent unavailable: public_request_id={}, source_agent_id={}",
+                progress_id,
+                source_agent_id
+            );
+            self.flows.remove(flow_id);
+            self.mark_transfer_errored(
+                progress_id,
+                "Source agent unavailable before move deletion".to_string(),
+            );
+        }
+    }
+
+    /// Completes a move once its source deletion finished.
+    pub(crate) fn finish_source_deletion(&mut self, flow_id: FlowId, result: CommandResult) {
+        let Some(Flow::Copy(flow)) = self.flows.remove(flow_id) else {
+            return;
+        };
+        match result {
+            CommandResult::RawDelete => {
+                log!(
+                    Level::Debug,
+                    "Smart move source deletion completed: public_request_id={}",
+                    flow.progress_id
+                );
+                self.mark_copy_transfer_completed(flow.progress_id, None);
+            }
+            CommandResult::Error { message, .. } => {
+                log!(
+                    Level::Debug,
+                    "Smart move source deletion failed: public_request_id={}, message={}",
+                    flow.progress_id,
+                    message
+                );
+                self.mark_transfer_errored(flow.progress_id, message);
+            }
+            other => {
+                log!(
+                    Level::Warning,
+                    "Unexpected move completion response: public_request_id={}, result={:?}",
+                    flow.progress_id,
+                    other
+                );
+                self.mark_transfer_errored(
+                    flow.progress_id,
+                    "Unexpected move completion response".to_string(),
+                );
+            }
+        }
     }
 }

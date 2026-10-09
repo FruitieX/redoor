@@ -1,10 +1,19 @@
+//! The router actor: the single owner of agent registrations and in-flight work.
+//!
+//! The router admits work, tracks each flow's lifecycle and handles cancellation and agent
+//! loss. Payload bytes never pass through it: they flow over the data path in [`streams`],
+//! and only terminal events come back. Every handler is synchronous, so one slow peer can
+//! never make the mailbox wait (enforced crate-wide by `clippy::unused_async`).
+
 mod agents;
 mod cleanup;
 mod error;
+mod flows;
 mod messages;
+mod output;
 mod progress;
 mod state;
-mod streaming;
+mod streams;
 mod transfers;
 mod ui;
 
@@ -12,26 +21,27 @@ pub use error::RouterError;
 pub use messages::{
     ApplyManagedLifecycleRequest, CancelPublicTransferError, CommitDirectUploadRequest,
     ExecuteCommandRequest, ExecuteStreamRequest, OpenAgentLogStreamRequest, OpenTerminalRequest,
-    OutputStreamTracking, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterTransferConnectionRequest, RegisterUiSubscriberRequest, RouteResponse,
-    RouteStreamChunkRequest, RouteTransferReadyRequest, RouterMsg, SendStreamChunkRequest,
-    StartCopyRequest, StartUploadRequest, TransferProgressUpdateRequest,
-    UnregisterManagedAgentRequest, UploadStartOutcome,
+    OutboundFailure, OutboundFailureReason, OutputStreamTracking, RegisterAgentRequest,
+    RegisterManagedAgentRequest, RegisterTransferConnectionRequest, RegisterUiSubscriberRequest,
+    RouteResponse, RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest,
+    TransferProgressUpdateRequest, UnregisterManagedAgentRequest, UploadStartOutcome,
 };
 pub use state::CopyContentKind;
 pub use state::CopyOperation;
+pub use streams::{ConnectionStreams, OutboundError, OutboundStream, OutputReceiver};
 
 use crate::log_registry::LogRegistry;
 use crate::terminal_registry::TerminalRegistry;
+use flows::Flow;
 use redoor_core::log;
-use redoor_protocol::ids::RequestId;
-use redoor_protocol::wire::command::CommandResult;
+use redoor_protocol::ids::UnixTimestampSeconds;
 use redoor_protocol::wire::log::Level;
-use state::{CopyExecution, CopyRegistry, RouterState};
+use state::RouterState;
+use streams::StreamEnd;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, error::Elapsed};
 
-/// The router mailbox stays explicit so call paths can choose bounded or unbounded behavior.
+/// Control-plane messages only; payload frames never use this mailbox.
 const ROUTER_MAILBOX_CAPACITY: usize = 1024;
 
 /// Shared sender used to interact with the single-owner router task.
@@ -72,6 +82,7 @@ impl RouterHandle {
     /// deliver the reply for this request. The closure packages that sender into the
     /// appropriate `RouterMsg` variant together with any request-specific payload, which
     /// keeps the caller from having to construct and manage the reply channel manually.
+    /// A reply the router still owns after a timeout is pruned by its periodic tick.
     pub async fn request<T, F>(&self, timeout_ms: u64, build: F) -> Result<T, RouterCallError>
     where
         T: Send + 'static,
@@ -85,12 +96,7 @@ impl RouterHandle {
         match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(RouterCallError::RouterStopped),
-            Err(error) => {
-                // The router may already own command reply state. A best-effort
-                // follow-up makes cleanup prompt; every router event also prunes.
-                let _ = self.send(RouterMsg::PruneClosedPendingRest);
-                Err(RouterCallError::TimedOut(error))
-            }
+            Err(error) => Err(RouterCallError::TimedOut(error)),
         }
     }
 
@@ -138,272 +144,156 @@ pub fn spawn_router(
         terminal_registry,
         log_registry,
     );
-    let task_handle = tokio::spawn(state.run(receiver, router_handle.clone()));
+    let task_handle = tokio::spawn(state.run(receiver));
     (router_handle, task_handle)
 }
 
-impl CopyRegistry {
-    /// Checks whether an inbound stream chunk belongs to a remote copy flow.
-    fn is_remote_copy_stream(&self, request_id: RequestId) -> bool {
-        self.public_id_for_internal(request_id)
-            .and_then(|public_request_id| self.by_public_id.get(&public_request_id))
-            .map(|copy_request| {
-                matches!(copy_request.execution, CopyExecution::RemoteStream { .. })
-            })
-            .unwrap_or(false)
-    }
-}
-
 impl RouterState {
-    /// Routes a final agent command response to one-shot, copy, or upload handlers.
+    /// Routes an agent's final command response to the flow that owns its request id.
     fn route_response(&mut self, response: RouteResponse) {
-        self.pending_rest
-            .by_request_id
-            .retain(|_, (reply, _)| !reply.is_closed());
-        if let Some((reply, stored_agent_id)) =
-            self.pending_rest.by_request_id.remove(&response.request_id)
+        let Some(flow_id) = self.flows.id_for(response.request_id) else {
+            log!(
+                Level::Warning,
+                "No pending response found for request_id={}",
+                response.request_id
+            );
+            return;
+        };
+        match self.flows.get(flow_id) {
+            Some(Flow::Command(_)) => self.finish_command(flow_id, response),
+            Some(Flow::Output(_)) => self.finish_output_response(flow_id, response),
+            Some(Flow::Upload(_)) => {
+                // Terminal transitions record the bytes the data path counted so far.
+                self.sync_progress();
+                self.finish_upload_response(flow_id, response);
+            }
+            Some(Flow::Copy(_)) => {
+                self.sync_progress();
+                self.finish_copy_response(flow_id, response);
+            }
+            None => {}
+        }
+    }
+
+    /// Settles an inbound stream whose terminal frame the transfer reader saw.
+    fn route_stream_end(&mut self, end: StreamEnd) {
+        let Some(flow_id) = self.flows.id_for(end.request_id) else {
+            return;
+        };
+        self.sync_progress();
+        match self.flows.get(flow_id) {
+            Some(Flow::Output(_)) => self.finish_output_stream(flow_id, end),
+            Some(Flow::Copy(_)) => self.finish_copy_source(flow_id, end),
+            Some(Flow::Command(_) | Flow::Upload(_)) | None => {}
+        }
+    }
+
+    /// Applies an agent's progress report to the download or local copy it belongs to.
+    fn route_progress_update(&mut self, request: TransferProgressUpdateRequest) {
+        let Some(flow_id) = self.flows.id_for(request.request_id) else {
+            return;
+        };
+        match self.flows.get(flow_id) {
+            // Downloads publish a discovered tar total; byte counts come from the data path.
+            Some(Flow::Output(_)) => {
+                self.update_download_total(flow_id, &request.agent_id, request.total_bytes)
+            }
+            Some(Flow::Copy(_)) => self.update_copy_progress(flow_id, request),
+            Some(Flow::Command(_) | Flow::Upload(_)) | None => {}
+        }
+    }
+
+    /// Periodic maintenance: prunes abandoned replies, publishes progress counted by the data
+    /// path (throttled as UI refreshes), expires history and releases trailing refreshes.
+    fn tick(&mut self) {
+        self.flows.prune_abandoned_commands();
+        if self.sync_progress() {
+            self.notify_transfer_refresh();
+        }
+        if self
+            .progress
+            .prune_history_if_due(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ))
         {
-            let result_to_send = match (&response.result, self.agents.by_id.get(&stored_agent_id)) {
-                (CommandResult::GetAgentDetails(details), Some(agent_connection)) => {
-                    // Registration owns the connection-scoped identity fields, so the
-                    // router rewrites them from its authoritative registry snapshot.
-                    let mut details = details.clone();
-                    details.id = stored_agent_id.clone();
-                    details.name = agent_connection.agent_name.clone();
-                    details.cwd = agent_connection.default_directory.clone();
-                    details.connected_at = agent_connection.connected_at;
-                    details.os = agent_connection.os.clone();
-                    details.arch = agent_connection.arch.clone();
-                    details.hostname = agent_connection.hostname.clone();
-                    details.username = agent_connection.username.clone();
-                    details.binary = agent_connection.binary.clone();
-                    // Registration is the process-stable identity used by list gating.
-                    if let Some(uid) = agent_connection.uid {
-                        details.uid = uid;
-                    }
-                    details.is_root = agent_connection.is_root;
-                    CommandResult::GetAgentDetails(details)
-                }
-                _ => response.result.clone(),
-            };
-
-            let _ = reply.send(result_to_send);
-            return;
+            self.notify_transfer_refresh();
         }
+        self.check_pending_refresh();
+    }
 
-        if transfers::r#move::finish_transfer(
-            self,
-            response.agent_id.clone(),
-            response.request_id,
-            response.result.clone(),
-        ) {
-            return;
+    /// Handles one message; every handler is synchronous so the mailbox never waits on a peer.
+    fn handle(&mut self, message: RouterMsg) {
+        match message {
+            RouterMsg::RegisterAgent(request) => self.register_agent(request),
+            RouterMsg::RegisterTransferConnection(request) => self.register_transfer(request),
+            RouterMsg::UnregisterTransferConnection {
+                agent_id,
+                socket_id,
+            } => self.unregister_transfer(agent_id, socket_id),
+            RouterMsg::RegisterManagedAgent(request) => self.register_managed(request),
+            RouterMsg::UnregisterManagedAgent(request) => self.unregister_managed(request),
+            RouterMsg::ApplyManagedLifecycle(request) => self.apply_managed_lifecycle(request),
+            RouterMsg::UnregisterAgent {
+                agent_id,
+                socket_id,
+            } => self.unregister_agent(agent_id, socket_id),
+            RouterMsg::RouteResponse(response) => self.route_response(response),
+            RouterMsg::RouteTransferReady(request) => {
+                self.mark_transfer_ready(request.agent_id, request.request_id)
+            }
+            RouterMsg::GetAgentList { reply } => {
+                let _ = reply.send(self.list_agents());
+            }
+            RouterMsg::GetTransferProgress { reply } => {
+                self.sync_progress();
+                let _ = reply.send(self.list_transfer_progress());
+            }
+            RouterMsg::RegisterUiSubscriber(request) => self.register_subscriber(request),
+            RouterMsg::UnregisterUiSubscriber { subscriber_id } => {
+                self.unregister_subscriber(&subscriber_id)
+            }
+            RouterMsg::ExecuteCommandRest(request) => self.execute_command_rest(request),
+            RouterMsg::InboundStreamEnded(end) => self.route_stream_end(end),
+            RouterMsg::OutboundStreamFailed(failure) => self.fail_outbound_stream(failure),
+            RouterMsg::ExecuteStreamCommandRest(request) => self.start_output(request),
+            RouterMsg::StartUploadStreamRest(request) => self.start_upload(request),
+            RouterMsg::CommitDirectUpload(request) => self.commit_edit(request),
+            RouterMsg::BeginUploadPublication {
+                agent_id,
+                request_id,
+            } => self.begin_upload_publication(agent_id, request_id),
+            RouterMsg::CancelTransfer {
+                agent_id,
+                request_id,
+            } => self.cancel_transfer(request_id, agent_id),
+            RouterMsg::CancelPublicTransfer { transfer_id, reply } => {
+                let _ = reply.send(self.cancel_public_transfer(transfer_id));
+            }
+            RouterMsg::CancelExecution {
+                agent_id,
+                request_id,
+                reply,
+            } => {
+                let _ = reply.send(self.cancel_execution(request_id, agent_id));
+            }
+            RouterMsg::StartCopyRest(request) => self.start_copy(request),
+            RouterMsg::TransferProgressUpdate(request) => self.route_progress_update(request),
+            RouterMsg::OpenTerminal(request) => self.open_terminal(request),
+            RouterMsg::OpenAgentLogStream(request) => self.open_log_stream(request),
+            RouterMsg::CheckPendingUiRefresh => self.tick(),
+            RouterMsg::Shutdown => {}
         }
-
-        if transfers::copy::finish_transfer(
-            self,
-            response.agent_id.clone(),
-            response.request_id,
-            response.result.clone(),
-        ) {
-            return;
-        }
-
-        if streaming::finish_response(self, &response) {
-            return;
-        }
-
-        transfers::upload::finish_transfer(
-            self,
-            response.agent_id,
-            response.request_id,
-            response.result,
-        );
     }
 
     /// Runs the router event loop so all correlated routing state stays single-owner.
-    async fn run(mut self, mut receiver: mpsc::Receiver<RouterMsg>, router_handle: RouterHandle) {
+    async fn run(mut self, mut receiver: mpsc::Receiver<RouterMsg>) {
         log!(Level::Info, "Router task started");
-
         while let Some(message) = receiver.recv().await {
-            self.pending_rest
-                .by_request_id
-                .retain(|_, (reply, _)| !reply.is_closed());
-            match message {
-                RouterMsg::RegisterAgent(request) => {
-                    agents::register(&mut self, request).await;
-                }
-                RouterMsg::RegisterTransferConnection(request) => {
-                    agents::register_transfer(&mut self, request).await;
-                }
-                RouterMsg::UnregisterTransferConnection {
-                    agent_id,
-                    socket_id,
-                } => {
-                    agents::unregister_transfer(&mut self, agent_id, socket_id).await;
-                }
-                RouterMsg::RegisterManagedAgent(request) => {
-                    agents::register_managed(&mut self, request);
-                }
-                RouterMsg::UnregisterManagedAgent(request) => {
-                    agents::unregister_managed(&mut self, request).await;
-                }
-                RouterMsg::ApplyManagedLifecycle(request) => {
-                    agents::apply_managed_lifecycle(&mut self, request).await;
-                }
-                RouterMsg::UnregisterAgent {
-                    agent_id,
-                    socket_id,
-                } => {
-                    // Only remove the entry if the socket_id matches the current
-                    // connection. When a new agent replaces a stale one, the old
-                    // session's eventual shutdown would otherwise evict the new
-                    // connection simply because both share the same agent_id.
-                    let is_current = self
-                        .agents
-                        .by_id
-                        .get(&agent_id)
-                        .map(|conn| conn.socket_id == socket_id)
-                        .unwrap_or(false);
-
-                    if is_current {
-                        log!(Level::Info, "Agent unregistered: agent_id={}", agent_id);
-                        if let Some(connection) = self.agents.by_id.remove(&agent_id) {
-                            connection.shutdown_transfer();
-                        }
-                        if let Some(known) = self.agents.known_by_id.get_mut(&agent_id) {
-                            known.connected_at = None;
-                            known.last_seen_at = Some(redoor_protocol::ids::UnixTimestampSeconds::new(
-                                jiff::Timestamp::now().as_second(),
-                            ));
-                            known.socket_id = None;
-                            known.status = if known.managed {
-                                redoor_protocol::api::agents::AgentConnectionStatus::Starting
-                            } else {
-                                redoor_protocol::api::agents::AgentConnectionStatus::Disconnected
-                            };
-                        }
-                        ui::notify_agents_changed(&mut self);
-                        cleanup::cleanup_agent_requests(&mut self, &agent_id).await;
-                        self.terminal_registry.remove_agent_pending(&agent_id);
-                        self.log_registry.remove_agent(&agent_id);
-                    } else {
-                        log!(
-                            Level::Debug,
-                            "Ignoring stale unregister: agent_id={}, socket_id={}",
-                            agent_id,
-                            socket_id
-                        );
-                    }
-                }
-                RouterMsg::RouteResponse(response) => {
-                    self.route_response(response);
-                }
-                RouterMsg::RouteTransferReady(request) => {
-                    transfers::upload::mark_ready(&mut self, request.agent_id, request.request_id);
-                }
-                RouterMsg::GetAgentList { reply } => {
-                    let _ = reply.send(agents::list_agents(&self));
-                }
-                RouterMsg::GetTransferProgress { reply } => {
-                    let _ = reply.send(progress::list_transfer_progress(&self));
-                }
-                RouterMsg::RegisterUiSubscriber(request) => {
-                    ui::register_subscriber(&mut self, request);
-                }
-                RouterMsg::UnregisterUiSubscriber { subscriber_id } => {
-                    ui::unregister_subscriber(&mut self, &subscriber_id);
-                }
-                RouterMsg::PruneClosedPendingRest => {}
-                RouterMsg::ExecuteCommandRest(request) => {
-                    agents::execute_command_rest(&mut self, request);
-                }
-                RouterMsg::RouteStreamChunk(request) => {
-                    if self.streams.outputs.get(&request.chunk.request_id).is_some_and(|stream| {
-                        matches!(stream.owner, state::OutputOwner::CopySource { copy_id }
-                            if self.copies.public_id_for_internal(request.chunk.request_id) == Some(copy_id))
-                    }) && self.copies.is_remote_copy_stream(request.chunk.request_id) {
-                        transfers::copy::route_chunk(&mut self, &router_handle, request);
-                    } else {
-                        streaming::route_chunk(&mut self, &router_handle, request);
-                    }
-                }
-                RouterMsg::FinishRoutedOutputChunk(route) => {
-                    streaming::finish_routed_chunk(&mut self, &route);
-                    let _ = route.reply.send(());
-                }
-                RouterMsg::FinishRoutedUploadChunk(route) => {
-                    let result = transfers::upload::finish_routed_chunk(&mut self, &route);
-                    let _ = route.reply.send(result);
-                }
-                RouterMsg::FinishRoutedCopyChunk(route) => {
-                    transfers::copy::finish_routed_chunk(&mut self, &route);
-                    let _ = route.reply.send(());
-                }
-                RouterMsg::ExecuteStreamCommandRest(request) => {
-                    streaming::start(&mut self, request);
-                }
-                RouterMsg::StartUploadStreamRest(request) => {
-                    transfers::upload::start(&mut self, request);
-                }
-                RouterMsg::SendStreamChunkToAgent(request) => {
-                    transfers::upload::route_chunk(&mut self, &router_handle, request);
-                }
-                RouterMsg::CommitDirectUpload(request) => {
-                    transfers::upload::commit(&mut self, &router_handle, request);
-                }
-                RouterMsg::BeginUploadPublication {
-                    agent_id,
-                    request_id,
-                } => {
-                    transfers::upload::begin_publication(&mut self, agent_id, request_id);
-                }
-                RouterMsg::CancelTransfer {
-                    agent_id,
-                    request_id,
-                } => {
-                    cleanup::cancel_transfer(&mut self, request_id, agent_id);
-                }
-                RouterMsg::CancelPublicTransfer { transfer_id, reply } => {
-                    let _ = reply.send(cleanup::cancel_public_transfer(&mut self, transfer_id));
-                }
-                RouterMsg::CancelExecution {
-                    agent_id,
-                    request_id,
-                    reply,
-                } => {
-                    let _ = reply.send(cleanup::cancel_execution(&mut self, request_id, agent_id));
-                }
-                RouterMsg::StartCopyRest(request) => {
-                    transfers::copy::start(&mut self, request);
-                }
-                RouterMsg::TransferProgressUpdate(request) => {
-                    // Downloads publish a discovered tar total on this message;
-                    // copies still overwrite both counts through their own path.
-                    if !transfers::download::update_progress(&mut self, &request) {
-                        transfers::copy::update_progress(&mut self, request);
-                    }
-                }
-                RouterMsg::OpenTerminal(request) => {
-                    agents::open_terminal(&self, request);
-                }
-                RouterMsg::OpenAgentLogStream(request) => {
-                    agents::open_log_stream(&self, request);
-                }
-                RouterMsg::CheckPendingUiRefresh => {
-                    if self.progress.prune_history_if_due(redoor_protocol::ids::UnixTimestampSeconds::new(
-                        jiff::Timestamp::now().as_second(),
-                    )) {
-                        ui::notify_transfer_refresh(&mut self);
-                    }
-                    ui::check_pending_refresh(&mut self);
-                }
-                RouterMsg::Shutdown => {
-                    break;
-                }
+            if matches!(message, RouterMsg::Shutdown) {
+                break;
             }
+            self.handle(message);
         }
-
         self.ui.refresh_check_task.abort();
         log!(Level::Info, "Router task stopped");
     }
@@ -414,9 +304,12 @@ mod tests {
     use super::*;
     use crate::actors::router::messages::AgentListEntry;
     use axum::extract::ws::Message as WsMessage;
-    use redoor_protocol::ids::{AgentId, SocketId};
+    use redoor_protocol::ids::{AgentId, ChunkIndex, RequestId, SocketId};
     use redoor_protocol::wire::command::{Command, CommandResult};
-    use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
+    use redoor_protocol::wire::exec::{ExecEvent, ExecRequest};
+    use redoor_protocol::wire::stream::{
+        STREAM_CREDIT_WINDOW_FRAMES, StreamChunk, StreamPayloadKind,
+    };
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::{Duration, timeout};
     use uuid::Uuid;
@@ -447,6 +340,30 @@ mod tests {
         );
     }
 
+    /// Reads the next control frame queued for the fake agent.
+    async fn next_control(
+        lane: &mut mpsc::Receiver<WsMessage>,
+    ) -> redoor_protocol::wire::ServerToAgent {
+        match lane.recv().await.expect("control frame queued") {
+            WsMessage::Text(text) => {
+                serde_json::from_str(&text).expect("control frame is valid server JSON")
+            }
+            other => panic!("unexpected websocket frame: {other:?}"),
+        }
+    }
+
+    /// Builds one agent frame for an inbound stream.
+    fn agent_frame(request_id: RequestId, is_last: bool, data: Vec<u8>) -> StreamChunk {
+        StreamChunk {
+            request_id,
+            chunk_index: ChunkIndex::new(0),
+            is_last,
+            is_error: false,
+            payload_kind: StreamPayloadKind::RawFile,
+            data,
+        }
+    }
+
     #[tokio::test]
     async fn slow_upload_send_does_not_block_unrelated_router_work() {
         redoor_core::logging::init(None).await.unwrap();
@@ -456,10 +373,13 @@ mod tests {
         let (text_tx, mut text_rx) = mpsc::channel::<WsMessage>(64);
         let (priority_tx, mut priority_rx) = mpsc::channel::<WsMessage>(16);
         let (binary_tx, mut binary_rx) = mpsc::channel::<WsMessage>(1);
+        let agent_id = AgentId::from("agent-1");
+        // A credit-capable agent, so the reader never waits on any stream's consumer.
+        let streams = ConnectionStreams::new(agent_id.clone(), true);
 
         router_ref
-            .send(RouterMsg::RegisterAgent(RegisterAgentRequest {
-                agent_id: AgentId::from("agent-1"),
+            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
+                agent_id: agent_id.clone(),
                 agent_name: "agent-1".to_string(),
                 socket_id: SocketId::from(Uuid::from_u128(1)),
                 outgoing_commands: text_tx,
@@ -478,25 +398,27 @@ mod tests {
                 is_root: false,
                 watchdog: None,
                 watchdog_attempt_generation: None,
+                streams: streams.clone(),
             }))
+            .await
             .expect("agent registered");
 
-        let transfer_token = match priority_rx.recv().await.expect("transfer bootstrap queued") {
-            WsMessage::Text(text) => {
-                match serde_json::from_str::<redoor_protocol::wire::ServerToAgent>(&text)
-                    .expect("transfer bootstrap is valid control JSON")
-                {
-                    redoor_protocol::wire::ServerToAgent::TransferSocketOpen { token, .. } => token,
-                    other => panic!("unexpected control message: {other:?}"),
-                }
+        let transfer_token = match next_control(&mut priority_rx).await {
+            redoor_protocol::wire::ServerToAgent::TransferSocketOpen {
+                token,
+                stream_credit,
+            } => {
+                // The advertised capability is confirmed so both directions use credit.
+                assert!(stream_credit);
+                token
             }
-            other => panic!("unexpected websocket frame: {other:?}"),
+            other => panic!("unexpected control message: {other:?}"),
         };
         let (transfer_shutdown, _transfer_shutdown_rx) = watch::channel(false);
         router_ref
             .request(1_000, |reply| {
                 RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                    agent_id: AgentId::from("agent-1"),
+                    agent_id: agent_id.clone(),
                     token: transfer_token,
                     socket_id: SocketId::from(Uuid::from_u128(2)),
                     outgoing_binary: binary_tx,
@@ -528,27 +450,20 @@ mod tests {
                 })
                 .await
         });
-        let request_id = match text_rx.recv().await.expect("upload command queued") {
-            WsMessage::Text(text) => {
-                match serde_json::from_str::<redoor_protocol::wire::ServerToAgent>(&text)
-                    .expect("upload command is valid control JSON")
-                {
-                    redoor_protocol::wire::ServerToAgent::Command { request_id, .. } => request_id,
-                    other => panic!("unexpected control message: {other:?}"),
-                }
-            }
-            other => panic!("unexpected websocket frame: {other:?}"),
+        let request_id = match next_control(&mut text_rx).await {
+            redoor_protocol::wire::ServerToAgent::Command { request_id, .. } => request_id,
+            other => panic!("unexpected control message: {other:?}"),
         };
-        let started_request_id = upload_start
+        let upload = upload_start
             .await
             .expect("upload start task joined")
             .expect("upload start rpc succeeded")
             .expect("upload start accepted");
         // Request id is available before readiness so cancel can be armed early.
-        assert_eq!(started_request_id, request_id);
+        assert_eq!(upload.request_id(), request_id);
         router_ref
             .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
-                agent_id: AgentId::from("agent-1"),
+                agent_id: agent_id.clone(),
                 request_id,
             }))
             .await
@@ -564,57 +479,29 @@ mod tests {
             }
         };
 
-        // Holding the first queued binary frame keeps the bounded lane full so the
-        // second forwarded chunk must wait in the background task instead of the router.
-        let first_chunk = StreamChunk {
+        // Holding the first queued binary frame keeps the bounded lane full so the second
+        // chunk must wait in its producer, which never involves the router.
+        let upload_frame = |index, data| StreamChunk {
             request_id,
-            chunk_index: redoor_protocol::ids::ChunkIndex::new(0),
+            chunk_index: ChunkIndex::new(index),
             is_last: false,
             is_error: false,
             payload_kind: StreamPayloadKind::RawFile,
-            data: vec![1, 2, 3, 4],
+            data,
         };
-        router_ref
-            .request(1_000, |reply| {
-                RouterMsg::SendStreamChunkToAgent(SendStreamChunkRequest {
-                    agent_id: AgentId::from("agent-1"),
-                    request_id,
-                    chunk: first_chunk,
-                    reply,
-                })
-            })
+        upload
+            .send(upload_frame(0, vec![1, 2, 3, 4]))
             .await
-            .expect("first chunk rpc succeeded")
             .expect("first chunk accepted");
-
-        let second_chunk = StreamChunk {
-            request_id,
-            chunk_index: redoor_protocol::ids::ChunkIndex::new(1),
-            is_last: false,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data: vec![5, 6, 7, 8],
-        };
-
-        let router_ref_for_chunk = router_ref.clone();
-        let blocked_chunk = tokio::spawn(async move {
-            router_ref_for_chunk
-                .request(5_000, |reply| {
-                    RouterMsg::SendStreamChunkToAgent(SendStreamChunkRequest {
-                        agent_id: AgentId::from("agent-1"),
-                        request_id,
-                        chunk: second_chunk,
-                        reply,
-                    })
-                })
-                .await
+        let blocked_chunk = tokio::spawn({
+            let upload = upload.clone();
+            let frame = upload_frame(1, vec![5, 6, 7, 8]);
+            async move { upload.send(frame).await }
         });
-
         tokio::task::yield_now().await;
 
-        let router_ref_for_list = router_ref.clone();
-        let list_agents = timeout(Duration::from_millis(250), async move {
-            router_ref_for_list
+        let list_agents = timeout(Duration::from_millis(250), async {
+            router_ref
                 .request(1_000, |reply| RouterMsg::GetAgentList { reply })
                 .await
         })
@@ -622,13 +509,13 @@ mod tests {
         .expect("agent list should not wait for blocked binary send")
         .expect("agent list rpc succeeded");
 
-        // Returning promptly here proves the router event loop stayed responsive
-        // even though one upload chunk was still waiting for binary backpressure.
-        // The list snapshot must carry the immutable default so tabs need no details request.
+        // Returning promptly proves the router stayed responsive while one upload chunk was
+        // still waiting for binary backpressure. The list snapshot must carry the immutable
+        // default so tabs need no details request.
         assert_eq!(
             list_agents,
             vec![AgentListEntry {
-                id: AgentId::from("agent-1"),
+                id: agent_id.clone(),
                 name: "agent-1".to_string(),
                 default_directory: Some("/tmp".to_string()),
                 managed: false,
@@ -650,6 +537,78 @@ mod tests {
             }]
         );
 
+        // A download whose consumer never reads must not stall other streams of this agent.
+        let _stalled_download = router_ref
+            .request(1_000, |reply| {
+                RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
+                    agent_id: agent_id.clone(),
+                    command: Command::RawDownload {
+                        path: "/tmp/big.bin".to_string(),
+                        range_start: None,
+                        range_end: None,
+                    },
+                    tracking: OutputStreamTracking::Download {
+                        path: "/tmp/big.bin".to_string(),
+                        total_bytes: 1 << 30,
+                        full_size: Some(1 << 30),
+                        resume_offset: None,
+                    },
+                    reply,
+                })
+            })
+            .await
+            .expect("download admission rpc succeeded")
+            .expect("download admitted");
+        let download_id = match next_control(&mut text_rx).await {
+            redoor_protocol::wire::ServerToAgent::Command { request_id, .. } => request_id,
+            other => panic!("unexpected control message: {other:?}"),
+        };
+        let (terminal, _terminal_rx) = watch::channel(None);
+        let mut exec_output = router_ref
+            .request(1_000, |reply| {
+                RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
+                    agent_id: agent_id.clone(),
+                    command: Command::Exec {
+                        request: ExecRequest {
+                            argv: vec!["true".into()],
+                            cwd: None,
+                            env: Default::default(),
+                            timeout_ms: None,
+                        },
+                    },
+                    tracking: OutputStreamTracking::Execution { terminal },
+                    reply,
+                })
+            })
+            .await
+            .expect("exec admission rpc succeeded")
+            .expect("exec admitted");
+        let _ = next_control(&mut text_rx).await;
+        for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
+            // The transfer reader hands frames to the stalled download without waiting.
+            let routed = timeout(
+                Duration::from_millis(250),
+                streams.deliver(agent_frame(download_id, false, vec![0; 1024])),
+            )
+            .await
+            .expect("a stalled consumer must not block the transfer reader");
+            assert!(routed.is_none());
+        }
+        let exec_event = serde_json::to_vec(&ExecEvent::Exit {
+            code: Some(0),
+            signal: None,
+        })
+        .unwrap();
+        timeout(
+            Duration::from_millis(250),
+            streams.deliver(agent_frame(exec_output.request_id(), true, exec_event)),
+        )
+        .await
+        .expect("exec output must not queue behind the stalled download")
+        .expect("exec terminal frame is reported to the router");
+        // The exec consumer receives its output although the download consumer never read.
+        assert!(exec_output.recv().await.is_some_and(|chunk| chunk.is_last));
+
         let first_frame = binary_rx.recv().await.expect("first binary frame queued");
         assert!(
             matches!(first_frame, WsMessage::Binary(_)),
@@ -659,8 +618,7 @@ mod tests {
         let blocked_result = timeout(Duration::from_secs(1), blocked_chunk)
             .await
             .expect("second chunk should complete after freeing binary capacity")
-            .expect("second chunk task joined")
-            .expect("second chunk rpc succeeded");
+            .expect("second chunk task joined");
         assert!(
             blocked_result.is_ok(),
             "the queued upload chunk should still succeed once the binary lane has capacity again"
@@ -669,11 +627,11 @@ mod tests {
         let (commit_reply, commit_response) = oneshot::channel();
         router_ref
             .send_async(RouterMsg::CommitDirectUpload(CommitDirectUploadRequest {
-                agent_id: AgentId::from("agent-1"),
+                agent_id: agent_id.clone(),
                 request_id,
                 chunk: StreamChunk {
                     request_id,
-                    chunk_index: redoor_protocol::ids::ChunkIndex::new(2),
+                    chunk_index: ChunkIndex::new(2),
                     is_last: true,
                     is_error: false,
                     payload_kind: StreamPayloadKind::RawFile,
@@ -702,6 +660,8 @@ mod tests {
         ));
         // Terminal ownership must disable cancellation before the blocked binary send completes.
         assert!(!live_edit.cancelable);
+        // Bytes accepted by the agent's lane are reported without any per-chunk router message.
+        assert_eq!(live_edit.transferred_bytes, 8);
 
         let second_frame = binary_rx.recv().await.expect("second binary frame queued");
         // Draining the held data frame gives the router-owned terminal send lane capacity.
@@ -719,7 +679,7 @@ mod tests {
 
         router_ref
             .send_async(RouterMsg::RouteResponse(RouteResponse {
-                agent_id: AgentId::from("agent-1"),
+                agent_id: agent_id.clone(),
                 request_id,
                 result: CommandResult::EditFile,
             }))
@@ -746,7 +706,8 @@ mod tests {
         ));
 
         router_ref
-            .send(RouterMsg::Shutdown)
+            .send_async(RouterMsg::Shutdown)
+            .await
             .expect("router shutdown queued");
         router_task.await.expect("router task joined");
     }

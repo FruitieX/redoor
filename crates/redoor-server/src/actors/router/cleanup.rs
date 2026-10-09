@@ -1,509 +1,325 @@
+//! Cancellation of flows and the cleanup that follows losing an agent's sockets.
+
 use super::RouterError;
-use super::progress;
-use super::state::{CopyExecution, RouterState};
-use super::transfers::copy;
-use super::ui;
+use super::flows::{Flow, FlowId, OutputKind, OutputPhase, UploadPhase};
+use super::messages::CancelPublicTransferError;
+use super::state::RouterState;
+use super::transfers::copy::CopyRelease;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::{
     api::transfers::{CancelTransferResponse, CancelTransferStatus, TransferProgressState},
-    wire::command::{CommandErrorKind, CommandResult},
-};
-use redoor_protocol::{
-    ids::{AgentId, TransferId},
-    wire::ServerToAgent,
+    ids::{AgentId, RequestId, TransferId},
+    wire::{
+        ServerToAgent,
+        command::{CommandErrorKind, CommandResult},
+    },
 };
 
-/// Preserves an accepted cancellation when disconnect teardown releases the remaining ownership.
-fn settle_disconnected_transfer(state: &mut RouterState, transfer_id: TransferId, reason: String) {
-    if matches!(
-        state
+/// Which of an agent's sockets went away, deciding which flows cannot continue.
+pub(crate) enum AgentLoss {
+    /// The control session ended: every flow involving the agent fails.
+    Control,
+    /// Only the transfer socket ended: flows that move payload bytes fail with this reason,
+    /// control-only work (commands, local copies) continues.
+    Transfer(String),
+}
+
+impl RouterState {
+    /// Resolves a public transfer id and admits its cancellation on the priority lanes.
+    pub(crate) fn cancel_public_transfer(
+        &mut self,
+        transfer_id: TransferId,
+    ) -> Result<CancelTransferResponse, CancelPublicTransferError> {
+        self.sync_progress();
+        let entry = self
             .progress
             .entries
             .get(&transfer_id)
-            .map(|entry| &entry.state),
-        Some(TransferProgressState::Canceling)
-    ) {
-        progress::mark_transfer_canceled(state, transfer_id);
-    } else {
-        progress::mark_transfer_errored(state, transfer_id, reason);
-    }
-}
-
-/// Resolves a public transfer id, publishes canceling state, and uses only priority control lanes.
-pub(crate) fn cancel_public_transfer(
-    state: &mut RouterState,
-    transfer_id: TransferId,
-) -> Result<CancelTransferResponse, super::messages::CancelPublicTransferError> {
-    let progress_entry = state
-        .progress
-        .entries
-        .get(&transfer_id)
-        .ok_or(super::messages::CancelPublicTransferError::NotFound)?;
-    match progress_entry.state {
-        TransferProgressState::Canceling => {
-            return Ok(CancelTransferResponse {
-                transfer_id,
-                status: CancelTransferStatus::AlreadyCanceling,
-            });
-        }
-        TransferProgressState::Canceled => {
-            return Ok(CancelTransferResponse {
-                transfer_id,
-                status: CancelTransferStatus::AlreadyCanceled,
-            });
-        }
-        TransferProgressState::Active if progress_entry.cancelable => {}
-        TransferProgressState::Active
-        | TransferProgressState::Errored
-        | TransferProgressState::Completed => {
-            return Err(super::messages::CancelPublicTransferError::NotCancelable);
-        }
-    }
-
-    // Direct downloads must admit cleanup before changing history or stopping the HTTP body.
-    let download_id = state
-        .streams
-        .outputs
-        .iter()
-        .find_map(|(request_id, stream)| {
-            (stream.owner.download_id() == Some(transfer_id)).then_some(*request_id)
-        });
-    if let Some(request_id) = download_id {
-        let download = state.streams.outputs.get_mut(&request_id).unwrap();
-        let connection = state.agents.by_id.get(&download.agent_id).ok_or_else(|| {
-            super::messages::CancelPublicTransferError::Delivery(RouterError::AgentNotFound {
-                agent_id: download.agent_id.to_string(),
-            })
-        })?;
-        download
-            .request_cancel(connection, request_id)
-            .map_err(super::messages::CancelPublicTransferError::Delivery)?;
-        if let Some(sender) = download.rest_cancel_sender.take() {
-            let _ = sender.send(true);
-        }
-        progress::mark_transfer_canceling(state, transfer_id);
-        return Ok(CancelTransferResponse {
-            transfer_id,
-            status: CancelTransferStatus::Accepted,
-        });
-    }
-
-    progress::mark_transfer_canceling(state, transfer_id);
-
-    if let Some(copy_request) = state.copies.by_public_id.get_mut(&transfer_id) {
-        let controls = match copy_request.execution {
-            CopyExecution::RemoteStream {
-                source_request_id,
-                dest_request_id,
-                ..
-            } => {
-                let mut controls = vec![(copy_request.dest_agent_id.clone(), dest_request_id)];
-                if copy_request.pending_source_command.is_some() {
-                    // No source worker exists yet, so cancellation itself is its cleanup acknowledgement.
-                    copy_request.pending_source_command.take();
-                    copy_request.source_cancel_acknowledged = true;
-                } else {
-                    controls.push((copy_request.source_agent_id.clone(), source_request_id));
-                }
-                controls
-            }
-            CopyExecution::LocalAgent {
-                ref agent_id,
-                request_id,
-            } => vec![(agent_id.clone(), request_id)],
-            CopyExecution::DeletingMoveSource { .. } => {
-                return Err(super::messages::CancelPublicTransferError::NotCancelable);
+            .ok_or(CancelPublicTransferError::NotFound)?;
+        let status = match entry.state {
+            TransferProgressState::Canceling => Some(CancelTransferStatus::AlreadyCanceling),
+            TransferProgressState::Canceled => Some(CancelTransferStatus::AlreadyCanceled),
+            TransferProgressState::Active if entry.cancelable => None,
+            TransferProgressState::Active
+            | TransferProgressState::Errored
+            | TransferProgressState::Completed => {
+                return Err(CancelPublicTransferError::NotCancelable);
             }
         };
-        for (agent_id, request_id) in controls {
-            if let Some(connection) = state.agents.by_id.get(&agent_id)
-                && !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
-            {
-                // Falling back to the command lane is slower but must not lose accepted cleanup.
-                connection.send_message(ServerToAgent::CancelTransfer { request_id });
+        if let Some(status) = status {
+            return Ok(CancelTransferResponse {
+                transfer_id,
+                status,
+            });
+        }
+        match self
+            .flows
+            .find_by_progress(transfer_id)
+            .and_then(|id| self.flows.get(id).map(|flow| (id, flow)))
+        {
+            Some((flow_id, Flow::Output(_))) => {
+                // Downloads admit remote cleanup before changing history or stopping the body,
+                // so a failed admission stays retryable.
+                self.request_output_cancel(flow_id)
+                    .map_err(CancelPublicTransferError::Delivery)?;
+                self.mark_transfer_canceling(transfer_id);
+            }
+            Some((flow_id, Flow::Copy(_))) => {
+                self.cancel_copy(flow_id)?;
+                self.mark_transfer_canceling(transfer_id);
+            }
+            Some((flow_id, Flow::Upload(_))) => {
+                self.mark_transfer_canceling(transfer_id);
+                self.cancel_upload(flow_id, true);
+            }
+            Some((_, Flow::Command(_))) | None => {
+                // An active row without live ownership can only be a just-completed race.
+                self.mark_transfer_canceling(transfer_id);
+                self.mark_transfer_canceled(transfer_id);
             }
         }
-        return Ok(CancelTransferResponse {
+        Ok(CancelTransferResponse {
             transfer_id,
             status: CancelTransferStatus::Accepted,
-        });
+        })
     }
 
-    let request_id = redoor_protocol::ids::RequestId::new(transfer_id.0);
-    if let Some(upload) = state.streams.uploads.get_mut(&request_id) {
-        upload.canceled_by_rest = true;
-        upload.explicitly_canceled = true;
-        let agent_id = upload.agent_id.clone();
-        if let Some(sender) = upload.completion_sender.take() {
-            let _ = sender.send(Err(RouterError::ClientCanceledUpload));
+    /// Cancels an upload; explicit cancels also answer the waiting HTTP producer right away.
+    fn cancel_upload(&mut self, flow_id: FlowId, explicit: bool) {
+        let Some(Flow::Upload(upload)) = self.flows.get_mut(flow_id) else {
+            return;
+        };
+        if matches!(upload.phase, UploadPhase::Canceling { .. }) {
+            return;
         }
-        if let Some(sender) = upload.ready_sender.take() {
-            let _ = sender.send(Err(RouterError::ClientCanceledUpload));
+        upload.phase = UploadPhase::Canceling { explicit };
+        upload.stream.lease().stop();
+        if explicit {
+            if let Some(sender) = upload.completion.take() {
+                let _ = sender.send(Err(RouterError::ClientCanceledUpload));
+            }
+            if let Some(sender) = upload.ready.take() {
+                let _ = sender.send(Err(RouterError::ClientCanceledUpload));
+            }
         }
-        if let Some(connection) = state.agents.by_id.get(&agent_id)
-            && !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
+        let (agent_id, request_id) = (upload.agent_id.clone(), upload.request_id);
+        let Some(connection) = self.agents.by_id.get(&agent_id) else {
+            return;
+        };
+        log!(
+            Level::Info,
+            "Sending upload cancel to agent: agent_id={}, request_id={}",
+            agent_id,
+            request_id
+        );
+        if !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
+            && explicit
         {
+            // An accepted user cancel must not be lost to a momentarily full priority lane.
             connection.send_message(ServerToAgent::CancelTransfer { request_id });
         }
-        return Ok(CancelTransferResponse {
-            transfer_id,
-            status: CancelTransferStatus::Accepted,
-        });
     }
 
-    // An active row without live ownership can only be a just-completed race.
-    progress::mark_transfer_canceled(state, transfer_id);
-    Ok(CancelTransferResponse {
-        transfer_id,
-        status: CancelTransferStatus::Accepted,
-    })
-}
-
-/// Uses live stream ownership to validate and deliver execution cancellation.
-pub(crate) fn cancel_execution(
-    state: &mut RouterState,
-    request_id: redoor_protocol::ids::RequestId,
-    agent_id: AgentId,
-) -> Result<bool, RouterError> {
-    let Some(stream) = state.streams.outputs.get_mut(&request_id) else {
-        return Ok(false);
-    };
-    if stream.agent_id != agent_id
-        || !matches!(stream.owner, super::state::OutputOwner::Execution { .. })
-    {
-        return Ok(false);
+    /// Cancels an execution through its own resource, independently of file history.
+    pub(crate) fn cancel_execution(
+        &mut self,
+        request_id: RequestId,
+        agent_id: AgentId,
+    ) -> Result<bool, RouterError> {
+        let Some(flow_id) = self.flows.id_for(request_id) else {
+            return Ok(false);
+        };
+        let Some(Flow::Output(flow)) = self.flows.get(flow_id) else {
+            return Ok(false);
+        };
+        if flow.agent_id != agent_id || !matches!(flow.kind, OutputKind::Execution { .. }) {
+            return Ok(false);
+        }
+        self.request_output_cancel(flow_id)?;
+        Ok(true)
     }
-    if stream.canceled_by_rest {
-        return Ok(true);
-    }
-    let connection =
-        state
-            .agents
-            .by_id
-            .get(&agent_id)
-            .ok_or_else(|| RouterError::ControlQueueFull {
-                agent_id: agent_id.to_string(),
-            })?;
-    stream.request_cancel(connection, request_id)?;
-    Ok(true)
-}
 
-/// Cleans up all router-owned state associated with a disconnected agent.
-pub(crate) async fn cleanup_agent_requests(state: &mut RouterState, agent_id: &AgentId) {
-    let orphaned_oneshot: Vec<_> = state
-        .pending_rest
-        .by_request_id
-        .iter()
-        .filter(|(_, (_, pending_agent_id))| pending_agent_id == agent_id)
-        .map(|(request_id, _)| *request_id)
-        .collect();
-
-    for request_id in &orphaned_oneshot {
-        if let Some((reply, _)) = state.pending_rest.by_request_id.remove(request_id) {
+    /// Cancels a download or upload whose HTTP side went away (body dropped, producer gone).
+    ///
+    /// Copies are canceled only through their public id because both agents must settle.
+    pub(crate) fn cancel_transfer(&mut self, request_id: RequestId, agent_id: AgentId) {
+        let Some(flow_id) = self.flows.id_for(request_id) else {
             log!(
                 Level::Warning,
-                "Cleaning up orphaned pending response: request_id={}, agent_id={}",
-                request_id,
-                agent_id
+                "Transfer not found for cancel request: request_id={}",
+                request_id
             );
-            let _ = reply.send(CommandResult::error(
-                CommandErrorKind::Internal,
-                format!("Agent disconnected: {}", agent_id),
-            ));
-        }
-    }
-
-    let orphaned_copy_ids: Vec<_> = state
-        .copies
-        .by_public_id
-        .iter()
-        .filter(|(_, copy_request)| match &copy_request.execution {
-            CopyExecution::RemoteStream { .. } => {
-                &copy_request.source_agent_id == agent_id || &copy_request.dest_agent_id == agent_id
-            }
-            CopyExecution::LocalAgent {
-                agent_id: local_agent_id,
-                ..
-            } => local_agent_id == agent_id,
-            CopyExecution::DeletingMoveSource {
-                agent_id: source_agent_id,
-                ..
-            } => source_agent_id == agent_id,
-        })
-        .map(|(request_id, _)| *request_id)
-        .collect();
-
-    for request_id in &orphaned_copy_ids {
-        let _ = copy::abort_copy_upload(
-            state,
-            *request_id,
-            format!("Agent disconnected: {}", agent_id),
-        );
-        settle_disconnected_transfer(
-            state,
-            *request_id,
-            format!("Agent disconnected: {}", agent_id),
-        );
-        copy::cleanup_copy_tracking(state, *request_id);
-    }
-
-    let orphaned_downloads: Vec<_> = state
-        .streams
-        .outputs
-        .iter()
-        .filter(|(_, transfer)| &transfer.agent_id == agent_id)
-        .map(|(request_id, _)| *request_id)
-        .collect();
-    let orphaned_uploads: Vec<_> = state
-        .streams
-        .uploads
-        .iter()
-        .filter(|(_, transfer)| &transfer.agent_id == agent_id)
-        .map(|(request_id, _)| *request_id)
-        .collect();
-
-    for request_id in &orphaned_downloads {
-        if let Some(transfer) = state.streams.outputs.remove(request_id) {
-            let disconnect_message = format!("Agent disconnected: {}", agent_id);
-            if let Some(progress_id) = transfer.owner.download_id() {
-                settle_disconnected_transfer(state, progress_id, disconnect_message);
-            }
+            return;
+        };
+        let (owner, canceling, progress_id) = match self.flows.get(flow_id) {
+            Some(Flow::Output(flow)) => (
+                flow.agent_id.clone(),
+                matches!(flow.phase, OutputPhase::Canceling { .. }),
+                match flow.kind {
+                    OutputKind::Download { progress_id, .. } => Some(progress_id),
+                    OutputKind::Execution { .. } => None,
+                },
+            ),
+            Some(Flow::Upload(flow)) => (
+                flow.agent_id.clone(),
+                matches!(flow.phase, UploadPhase::Canceling { .. }),
+                Some(request_id.as_transfer_id()),
+            ),
+            Some(Flow::Copy(_) | Flow::Command(_)) | None => return,
+        };
+        if owner != agent_id {
             log!(
                 Level::Warning,
-                "Cleaning up orphaned download stream: request_id={}, agent_id={}",
+                "Transfer cancel agent mismatch: request_id={}, expected_agent_id={}, actual_agent_id={}",
                 request_id,
+                owner,
                 agent_id
             );
+            return;
+        }
+        if canceling {
+            return;
+        }
+        // Capture the bytes the consumer really received before the row stops tracking them,
+        // so a client retry can resume from the right offset.
+        self.sync_progress();
+        match self.flows.get(flow_id) {
+            Some(Flow::Output(_)) => {
+                if self.request_output_cancel(flow_id).is_err() {
+                    return;
+                }
+                // The client already stopped consuming, so the download ends now.
+                if let Some(progress_id) = progress_id {
+                    self.mark_transfer_errored(
+                        progress_id,
+                        "Download canceled by client".to_string(),
+                    );
+                }
+            }
+            Some(Flow::Upload(_)) => {
+                // Settle now even though the agent's cleanup acknowledgement arrives later.
+                if let Some(progress_id) = progress_id {
+                    self.mark_transfer_errored(
+                        progress_id,
+                        "Upload stream canceled by client".to_string(),
+                    );
+                }
+                self.cancel_upload(flow_id, false);
+            }
+            _ => {}
         }
     }
 
-    for request_id in &orphaned_uploads {
-        if let Some(transfer) = state.streams.uploads.remove(request_id) {
-            let disconnect_message = format!("Agent disconnected: {}", agent_id);
-            settle_disconnected_transfer(
-                state,
-                request_id.as_transfer_id(),
-                disconnect_message.clone(),
-            );
+    /// Fails every flow that cannot continue without the lost socket, in one pass over the
+    /// flow table, and settles each one exactly once.
+    pub(crate) fn fail_agent_flows(&mut self, agent_id: &AgentId, loss: AgentLoss) {
+        self.sync_progress();
+        let lost = match &loss {
+            AgentLoss::Control => self.flows.extract_if(|flow| flow.involves(agent_id)),
+            AgentLoss::Transfer(_) => self
+                .flows
+                .extract_if(|flow| flow.needs_transfer_of(agent_id)),
+        };
+        if lost.is_empty() {
+            return;
+        }
+        let reason = match &loss {
+            AgentLoss::Control => format!("Agent disconnected: {agent_id}"),
+            AgentLoss::Transfer(reason) => reason.clone(),
+        };
+        let mut transfers = 0usize;
+        for (_, flow) in lost {
+            if !matches!(flow, Flow::Command(_)) {
+                transfers += 1;
+            }
+            self.settle_lost_flow(agent_id, flow, &reason, &loss);
+        }
+        if transfers > 0 {
             log!(
                 Level::Warning,
-                "Cleaning up orphaned upload stream: request_id={}, agent_id={}",
-                request_id,
-                agent_id
+                "Agent loss cleanup: agent_id={}, transfers={}, reason={}",
+                agent_id,
+                transfers,
+                reason
             );
-            if let Some(sender) = transfer.completion_sender {
-                let _ = sender.send(Err(RouterError::AgentNotFound {
-                    agent_id: agent_id.to_string(),
-                }));
-            }
-            if let Some(sender) = transfer.ready_sender {
-                let _ = sender.send(Err(RouterError::AgentNotFound {
-                    agent_id: agent_id.to_string(),
-                }));
-            }
+            self.notify_transfer_refresh();
         }
     }
 
-    if !orphaned_downloads.is_empty()
-        || !orphaned_uploads.is_empty()
-        || !orphaned_copy_ids.is_empty()
-    {
-        ui::notify_transfer_refresh(state);
-    }
-}
-
-/// Fails only flows that require payload transport while preserving control-plane work.
-pub(crate) async fn cleanup_agent_transfer_requests(
-    state: &mut RouterState,
-    agent_id: &AgentId,
-    reason: String,
-) {
-    let remote_copy_ids: Vec<_> = state
-        .copies
-        .by_public_id
-        .iter()
-        .filter(|(_, request)| {
-            matches!(request.execution, CopyExecution::RemoteStream { .. })
-                && (&request.source_agent_id == agent_id || &request.dest_agent_id == agent_id)
-        })
-        .map(|(request_id, _)| *request_id)
-        .collect();
-
-    for public_request_id in &remote_copy_ids {
-        let copy_sides = state
-            .copies
-            .by_public_id
-            .get(public_request_id)
-            .and_then(|request| match request.execution {
-                CopyExecution::RemoteStream {
-                    source_request_id, ..
-                } => Some((
-                    request.source_agent_id.clone(),
-                    request.dest_agent_id.clone(),
-                    source_request_id,
-                )),
-                CopyExecution::LocalAgent { .. } | CopyExecution::DeletingMoveSource { .. } => None,
-            });
-        if let Some((source_agent_id, dest_agent_id, source_request_id)) = copy_sides {
-            if &source_agent_id == agent_id {
-                let _ = copy::abort_copy_upload(state, *public_request_id, reason.clone());
-            }
-            if &dest_agent_id == agent_id
-                && let Some(source) = state.agents.by_id.get(&source_agent_id)
-            {
-                source.send_priority_message(ServerToAgent::CancelTransfer {
-                    request_id: source_request_id,
-                });
-            }
-        }
-        settle_disconnected_transfer(state, *public_request_id, reason.clone());
-        copy::cleanup_copy_tracking(state, *public_request_id);
-    }
-
-    let download_ids: Vec<_> = state
-        .streams
-        .outputs
-        .iter()
-        .filter(|(_, transfer)| &transfer.agent_id == agent_id)
-        .map(|(request_id, _)| *request_id)
-        .collect();
-    for request_id in &download_ids {
-        if let Some(transfer) = state.streams.outputs.remove(request_id)
-            && let Some(progress_id) = transfer.owner.download_id()
-        {
-            settle_disconnected_transfer(state, progress_id, reason.clone());
-        }
-    }
-
-    let upload_ids: Vec<_> = state
-        .streams
-        .uploads
-        .iter()
-        .filter(|(_, transfer)| &transfer.agent_id == agent_id)
-        .map(|(request_id, _)| *request_id)
-        .collect();
-    for request_id in &upload_ids {
-        if let Some(transfer) = state.streams.uploads.remove(request_id) {
-            settle_disconnected_transfer(state, request_id.as_transfer_id(), reason.clone());
-            if let Some(sender) = transfer.completion_sender {
-                let _ = sender.send(Err(RouterError::TransferConnectionUnavailable {
-                    agent_id: agent_id.to_string(),
-                }));
-            }
-            if let Some(sender) = transfer.ready_sender {
-                let _ = sender.send(Err(RouterError::TransferConnectionUnavailable {
-                    agent_id: agent_id.to_string(),
-                }));
-            }
-        }
-    }
-
-    if !remote_copy_ids.is_empty() || !download_ids.is_empty() || !upload_ids.is_empty() {
-        log!(
-            Level::Warning,
-            "Transfer connection cleanup: agent_id={}, downloads={}, uploads={}, copies={}",
-            agent_id,
-            download_ids.len(),
-            upload_ids.len(),
-            remote_copy_ids.len()
-        );
-        ui::notify_transfer_refresh(state);
-    }
-}
-
-/// Marks a direct upload or download as canceled by REST and forwards cancel.
-///
-/// This is used both for explicit REST-side cancellation and implicit request
-/// teardown such as a disconnected upload or download client.
-pub(crate) fn cancel_transfer(
-    state: &mut RouterState,
-    request_id: redoor_protocol::ids::RequestId,
-    agent_id: AgentId,
-) {
-    match state.streams.outputs.get_mut(&request_id) {
-        Some(transfer) => {
-            if transfer.agent_id != agent_id {
+    /// Settles one flow removed because its agent went away.
+    fn settle_lost_flow(&mut self, agent_id: &AgentId, flow: Flow, reason: &str, loss: &AgentLoss) {
+        match flow {
+            Flow::Command(command) => {
                 log!(
                     Level::Warning,
-                    "Transfer cancel agent mismatch: request_id={}, expected_agent_id={}, actual_agent_id={}",
-                    request_id,
-                    transfer.agent_id,
+                    "Cleaning up orphaned pending response: request_id={}, agent_id={}",
+                    command.request_id,
                     agent_id
                 );
-                return;
+                let _ = command.reply.send(CommandResult::error(
+                    CommandErrorKind::Internal,
+                    format!("Agent disconnected: {agent_id}"),
+                ));
             }
-
-            // Copy cancellation must settle both agents through the public copy operation.
-            if matches!(transfer.owner, super::state::OutputOwner::CopySource { .. }) {
-                return;
-            }
-
-            if transfer.canceled_by_rest {
-                return;
-            }
-
-            let Some(connection) = state.agents.by_id.get(&agent_id) else {
-                return;
-            };
-            if transfer.request_cancel(connection, request_id).is_err() {
-                return;
-            }
-            let progress_id = transfer.owner.download_id();
-            // Downloads report cancellation immediately because the client has
-            // already stopped consuming the stream at this point.
-            if let Some(progress_id) = progress_id {
-                progress::mark_transfer_errored(
-                    state,
-                    progress_id,
-                    "Download canceled by client".to_string(),
-                );
-            }
-        }
-        None => match state.streams.uploads.get_mut(&request_id) {
-            Some(transfer) => {
-                if transfer.agent_id != agent_id {
-                    log!(
-                        Level::Warning,
-                        "Transfer cancel agent mismatch: request_id={}, expected_agent_id={}, actual_agent_id={}",
-                        request_id,
-                        transfer.agent_id,
-                        agent_id
-                    );
-                    return;
-                }
-
-                if transfer.canceled_by_rest {
-                    return;
-                }
-
-                transfer.canceled_by_rest = true;
-                // Uploads follow the same rule: once the HTTP request is gone,
-                // progress should settle into a terminal canceled state even if
-                // the agent's cleanup ack arrives slightly later.
-                progress::mark_transfer_errored(
-                    state,
-                    request_id.as_transfer_id(),
-                    "Upload stream canceled by client".to_string(),
-                );
-                if let Some(agent_connection) = state.agents.by_id.get(&agent_id) {
-                    log!(
-                        Level::Info,
-                        "Sending upload cancel to agent: agent_id={}, request_id={}",
-                        agent_id,
-                        request_id
-                    );
-                    agent_connection
-                        .send_priority_message(ServerToAgent::CancelTransfer { request_id });
-                }
-            }
-            None => {
+            Flow::Output(output) => {
                 log!(
                     Level::Warning,
-                    "Transfer not found for cancel request: request_id={}",
-                    request_id
+                    "Cleaning up orphaned output stream: request_id={}, agent_id={}",
+                    output.request_id,
+                    agent_id
                 );
+                if let Some(connection) = self.agents.by_id.get(&output.agent_id) {
+                    connection.streams.close_inbound(output.request_id);
+                }
+                output.lease.fail(reason.to_string());
+                if let OutputKind::Download { progress_id, .. } = output.kind {
+                    self.settle_lost_transfer(progress_id, reason);
+                }
             }
-        },
+            Flow::Upload(mut upload) => {
+                log!(
+                    Level::Warning,
+                    "Cleaning up orphaned upload stream: request_id={}, agent_id={}",
+                    upload.request_id,
+                    agent_id
+                );
+                self.release_upload(&upload);
+                self.settle_lost_transfer(upload.request_id.as_transfer_id(), reason);
+                let error = match loss {
+                    AgentLoss::Control => RouterError::AgentNotFound {
+                        agent_id: agent_id.to_string(),
+                    },
+                    AgentLoss::Transfer(_) => RouterError::TransferConnectionUnavailable {
+                        agent_id: agent_id.to_string(),
+                    },
+                };
+                if let Some(sender) = upload.completion.take() {
+                    let _ = sender.send(Err(error.clone()));
+                }
+                if let Some(sender) = upload.ready.take() {
+                    let _ = sender.send(Err(error));
+                }
+            }
+            Flow::Copy(copy) => {
+                self.release_copy(&copy, CopyRelease::Fail(reason));
+                self.settle_lost_transfer(copy.progress_id, reason);
+            }
+        }
+    }
+
+    /// Preserves an accepted cancellation when teardown releases the remaining ownership.
+    fn settle_lost_transfer(&mut self, transfer_id: TransferId, reason: &str) {
+        if matches!(
+            self.progress
+                .entries
+                .get(&transfer_id)
+                .map(|entry| &entry.state),
+            Some(TransferProgressState::Canceling)
+        ) {
+            self.mark_transfer_canceled(transfer_id);
+        } else {
+            self.mark_transfer_errored(transfer_id, reason.to_string());
+        }
     }
 }

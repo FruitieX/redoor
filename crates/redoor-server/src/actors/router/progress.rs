@@ -1,6 +1,4 @@
-use super::RouterError;
-use super::state::{DirectUpload, RouterState, TransferProgressStore};
-use super::ui;
+use super::state::{RouterState, TransferProgressStore};
 use redoor_protocol::api::transfers::{
     CopyEndpoint, TransferDirection, TransferProgressEntry, TransferProgressListResponse,
     TransferProgressState,
@@ -122,14 +120,7 @@ pub(crate) struct UploadStartContext {
     pub(crate) path: String,
     /// Expected total byte count for the transfer.
     pub(crate) total_bytes: u64,
-    /// Final completion channel for the upload result.
-    pub(crate) completion_sender: tokio::sync::oneshot::Sender<
-        Result<redoor_protocol::wire::command::CommandResult, RouterError>,
-    >,
-    /// Readiness acknowledgement held until the destination worker is ready.
-    pub(crate) ready_sender:
-        tokio::sync::oneshot::Sender<Result<super::messages::UploadStartOutcome, RouterError>>,
-    /// Controls completion matching and the public transfer direction.
+    /// Controls the public transfer direction.
     pub(crate) kind: UploadKind,
 }
 
@@ -151,55 +142,82 @@ pub(crate) struct CopyStartContext {
     pub(crate) direction: TransferDirection,
 }
 
-/// Records file progress without taking ownership of the underlying output transport.
-pub(crate) fn record_download_start(
-    state: &mut RouterState,
-    context: DownloadStartContext,
-) -> TransferId {
-    let transfer_id = context.request_id.as_transfer_id();
-    let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
-    let restart_offset = context
-        .full_size
-        .map(|_| context.resume_offset.unwrap_or(0));
-    let resumed_transfer_id = restart_offset.and_then(|restart_offset| {
-        let full_size = context.full_size?;
-        state
-            .progress
-            .entries
-            .values()
-            .filter(|entry| {
-                entry.agent_id == context.agent_id
-                    && entry.path == context.path
-                    && matches!(entry.direction, TransferDirection::Download)
-                    && matches!(entry.state, TransferProgressState::Errored)
-                    && entry.error.as_deref() == Some("Download canceled by client")
-                    && entry.total_bytes == full_size
-                    && entry.ended_at.is_some_and(|ended_at| {
-                        now.0.saturating_sub(ended_at.0) <= DOWNLOAD_RESUME_WINDOW_SECONDS
-                    })
-                    && (context.resume_offset.is_none()
-                        || (entry.transferred_bytes >= restart_offset
-                            && entry.transferred_bytes - restart_offset
-                                <= redoor_protocol::wire::stream::MAX_TRANSFER_FRAME_PAYLOAD_BYTES
-                                    as u64))
-            })
-            .max_by_key(|entry| entry.request_id)
-            .map(|entry| entry.request_id)
-    });
-    let progress_id = resumed_transfer_id.unwrap_or(transfer_id);
+impl RouterState {
+    /// Records file progress without taking ownership of the underlying output transport.
+    pub(crate) fn record_download_start(&mut self, context: DownloadStartContext) -> TransferId {
+        let transfer_id = context.request_id.as_transfer_id();
+        let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
+        let restart_offset = context
+            .full_size
+            .map(|_| context.resume_offset.unwrap_or(0));
+        let resumed_transfer_id = restart_offset.and_then(|restart_offset| {
+            let full_size = context.full_size?;
+            self
+                .progress
+                .entries
+                .values()
+                .filter(|entry| {
+                    entry.agent_id == context.agent_id
+                        && entry.path == context.path
+                        && matches!(entry.direction, TransferDirection::Download)
+                        && matches!(entry.state, TransferProgressState::Errored)
+                        && entry.error.as_deref() == Some("Download canceled by client")
+                        && entry.total_bytes == full_size
+                        && entry.ended_at.is_some_and(|ended_at| {
+                            now.0.saturating_sub(ended_at.0) <= DOWNLOAD_RESUME_WINDOW_SECONDS
+                        })
+                        && (context.resume_offset.is_none()
+                            || (entry.transferred_bytes >= restart_offset
+                                && entry.transferred_bytes - restart_offset
+                                    <= redoor_protocol::wire::stream::MAX_TRANSFER_FRAME_PAYLOAD_BYTES
+                                        as u64))
+                })
+                .max_by_key(|entry| entry.request_id)
+                .map(|entry| entry.request_id)
+        });
+        let progress_id = resumed_transfer_id.unwrap_or(transfer_id);
 
-    if let Some(restart_offset) = restart_offset
-        && let Some(progress) =
-            resumed_transfer_id.and_then(|progress_id| state.progress.entries.get_mut(&progress_id))
-    {
-        // A client retry may restart the full request or overlap one queued frame with a range.
-        progress.transferred_bytes = restart_offset;
-        progress.state = TransferProgressState::Active;
-        progress.cancelable = true;
-        progress.ended_at = None;
-        progress.error = None;
-    } else {
-        state.progress.entries.insert(
+        if let Some(restart_offset) = restart_offset
+            && let Some(progress) = resumed_transfer_id
+                .and_then(|progress_id| self.progress.entries.get_mut(&progress_id))
+        {
+            // A client retry may restart the full request or overlap one queued frame with a range.
+            progress.transferred_bytes = restart_offset;
+            progress.state = TransferProgressState::Active;
+            progress.cancelable = true;
+            progress.ended_at = None;
+            progress.error = None;
+        } else {
+            self.progress.entries.insert(
+                transfer_id,
+                TransferProgressEntry {
+                    request_id: transfer_id,
+                    agent_id: context.agent_id.clone(),
+                    path: context.path,
+                    source: None,
+                    dest: None,
+                    direction: TransferDirection::Download,
+                    total_bytes: context.total_bytes,
+                    transferred_bytes: 0,
+                    started_at: now,
+                    ended_at: None,
+                    state: TransferProgressState::Active,
+                    cancelable: true,
+                    error: None,
+                    atomic: false,
+                },
+            );
+        }
+        // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
+        self.notify_transfer_refresh_immediately();
+        progress_id
+    }
+
+    /// Creates a progress entry for a newly started upload.
+    pub(crate) fn record_upload_start(&mut self, context: UploadStartContext) {
+        let transfer_id = context.request_id.as_transfer_id();
+        let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
+        self.progress.entries.insert(
             transfer_id,
             TransferProgressEntry {
                 request_id: transfer_id,
@@ -207,7 +225,7 @@ pub(crate) fn record_download_start(
                 path: context.path,
                 source: None,
                 dest: None,
-                direction: TransferDirection::Download,
+                direction: context.kind.direction(),
                 total_bytes: context.total_bytes,
                 transferred_bytes: 0,
                 started_at: now,
@@ -218,304 +236,251 @@ pub(crate) fn record_download_start(
                 atomic: false,
             },
         );
-    }
-    // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
-    ui::notify_transfer_refresh_immediately(state);
-    progress_id
-}
-
-/// Creates a progress entry and direct-upload state for a newly started upload.
-pub(crate) fn record_upload_start(state: &mut RouterState, context: UploadStartContext) {
-    let transfer_id = context.request_id.as_transfer_id();
-    let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
-    state.progress.entries.insert(
-        transfer_id,
-        TransferProgressEntry {
-            request_id: transfer_id,
-            agent_id: context.agent_id.clone(),
-            path: context.path,
-            source: None,
-            dest: None,
-            direction: context.kind.direction(),
-            total_bytes: context.total_bytes,
-            transferred_bytes: 0,
-            started_at: now,
-            ended_at: None,
-            state: TransferProgressState::Active,
-            cancelable: true,
-            error: None,
-            atomic: false,
-        },
-    );
-    state.streams.uploads.insert(
-        context.request_id,
-        DirectUpload {
-            agent_id: context.agent_id,
-            completion_sender: Some(context.completion_sender),
-            ready_sender: Some(context.ready_sender),
-            ready: false,
-            canceled_by_rest: false,
-            explicitly_canceled: false,
-            kind: context.kind,
-        },
-    );
-    // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
-    ui::notify_transfer_refresh_immediately(state);
-}
-
-/// Creates a progress entry for a newly started logical copy transfer.
-pub(crate) fn record_copy_start(state: &mut RouterState, context: CopyStartContext) {
-    let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
-    state.progress.entries.insert(
-        context.request_id,
-        TransferProgressEntry {
-            request_id: context.request_id,
-            agent_id: context.dest_agent_id.clone(),
-            path: context.dest_path.clone(),
-            source: Some(CopyEndpoint {
-                agent: context.source_agent_id,
-                path: context.source_path,
-            }),
-            dest: Some(CopyEndpoint {
-                agent: context.dest_agent_id,
-                path: context.dest_path,
-            }),
-            direction: context.direction,
-            total_bytes: context.total_bytes,
-            transferred_bytes: 0,
-            started_at: now,
-            ended_at: None,
-            state: TransferProgressState::Active,
-            cancelable: true,
-            error: None,
-            atomic: false,
-        },
-    );
-    // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
-    ui::notify_transfer_refresh_immediately(state);
-}
-
-/// Adds transferred bytes to an existing progress entry and clears stale errors.
-pub(crate) fn increment_bytes(state: &mut RouterState, transfer_id: TransferId, bytes: u64) {
-    let mut updated = false;
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        progress.transferred_bytes = progress.transferred_bytes.saturating_add(bytes);
-        progress.error = None;
-        updated = true;
-    }
-    if updated {
-        ui::notify_transfer_refresh(state);
-    }
-}
-
-/// Replaces copy progress counts with the latest agent-reported values.
-pub(crate) fn set_copy_progress(
-    state: &mut RouterState,
-    transfer_id: TransferId,
-    transferred_bytes: u64,
-    total_bytes: Option<u64>,
-) {
-    let mut updated = false;
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        progress.transferred_bytes = transferred_bytes;
-        if let Some(total_bytes) = total_bytes {
-            progress.total_bytes = total_bytes;
-        }
-        progress.error = None;
-        updated = true;
+        // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
+        self.notify_transfer_refresh_immediately();
     }
 
-    if updated {
-        ui::notify_transfer_refresh(state);
-    }
-}
-
-/// Records a later-discovered download total without rewriting counted bytes.
-///
-/// Directory archives start with `total_bytes=0` and learn the tar size from a
-/// metadata walk. Chunk `increment_bytes` remains the source of transferred counts.
-pub(crate) fn set_download_total(
-    state: &mut RouterState,
-    transfer_id: TransferId,
-    total_bytes: u64,
-) {
-    let mut updated = false;
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        if !matches!(progress.direction, TransferDirection::Download) {
-            return;
-        }
-        if !matches!(progress.state, TransferProgressState::Active) {
-            return;
-        }
-        progress.total_bytes = total_bytes;
-        state.progress.predicted_download_totals.insert(transfer_id);
-        updated = true;
-    }
-    if updated {
-        ui::notify_transfer_refresh(state);
-    }
-}
-
-/// Marks a transfer as completed and aligns transferred/total byte counts.
-///
-/// Unknown totals promote the counted stream size so the row does not reset to
-/// zero. Known-size files still snap transferred to the planned total. A later
-/// directory prediction that disagrees keeps the counted tar bytes so completed
-/// UI does not display a stale archive estimate.
-pub(crate) fn mark_transfer_completed(state: &mut RouterState, transfer_id: TransferId) {
-    let mut updated = false;
-    let mut routes_changed = false;
-    let had_predicted_download_total = state
-        .progress
-        .predicted_download_totals
-        .remove(&transfer_id);
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        progress.state = TransferProgressState::Completed;
-        progress.cancelable = false;
-        if progress.total_bytes == 0
-            || (had_predicted_download_total && progress.transferred_bytes != progress.total_bytes)
-        {
-            progress.total_bytes = progress.transferred_bytes;
-        } else {
-            progress.transferred_bytes = progress.total_bytes;
-        }
-        progress.ended_at = Some(UnixTimestampSeconds::new(
-            jiff::Timestamp::now().as_second(),
-        ));
-        progress.error = None;
-        updated = true;
-        routes_changed = matches!(
-            progress.direction,
-            TransferDirection::Upload | TransferDirection::Edit
+    /// Creates a progress entry for a newly started logical copy transfer.
+    pub(crate) fn record_copy_start(&mut self, context: CopyStartContext) {
+        let now = UnixTimestampSeconds::new(jiff::Timestamp::now().as_second());
+        self.progress.entries.insert(
+            context.request_id,
+            TransferProgressEntry {
+                request_id: context.request_id,
+                agent_id: context.dest_agent_id.clone(),
+                path: context.dest_path.clone(),
+                source: Some(CopyEndpoint {
+                    agent: context.source_agent_id,
+                    path: context.source_path,
+                }),
+                dest: Some(CopyEndpoint {
+                    agent: context.dest_agent_id,
+                    path: context.dest_path,
+                }),
+                direction: context.direction,
+                total_bytes: context.total_bytes,
+                transferred_bytes: 0,
+                started_at: now,
+                ended_at: None,
+                state: TransferProgressState::Active,
+                cancelable: true,
+                error: None,
+                atomic: false,
+            },
         );
+        // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
+        self.notify_transfer_refresh_immediately();
     }
-    if updated {
-        state
-            .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(
-                jiff::Timestamp::now().as_second(),
-            ));
-        ui::notify_transfer_refresh_immediately(state);
-        if routes_changed {
-            ui::notify_routes_changed(state);
+
+    /// Copies the byte counts of live data paths into their history rows.
+    ///
+    /// Chunks no longer pass through the router, so progress is pulled from the stream
+    /// leases when it is read (REST listing), before terminal transitions, and on the
+    /// periodic tick that drives UI refreshes. Returns whether any row changed.
+    pub(crate) fn sync_progress(&mut self) -> bool {
+        let mut changed = false;
+        for (id, bytes) in self.flows.live_progress() {
+            if let Some(entry) = self.progress.entries.get_mut(&id)
+                && matches!(entry.state, TransferProgressState::Active)
+                && entry.transferred_bytes != bytes
+            {
+                entry.transferred_bytes = bytes;
+                entry.error = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Replaces copy progress counts with the latest agent-reported values.
+    pub(crate) fn set_copy_progress(
+        &mut self,
+        transfer_id: TransferId,
+        transferred_bytes: u64,
+        total_bytes: Option<u64>,
+    ) {
+        let mut updated = false;
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            progress.transferred_bytes = transferred_bytes;
+            if let Some(total_bytes) = total_bytes {
+                progress.total_bytes = total_bytes;
+            }
+            progress.error = None;
+            updated = true;
+        }
+
+        if updated {
+            self.notify_transfer_refresh();
         }
     }
-}
 
-/// Marks a copy as completed, optionally updating its final total byte count first.
-pub(crate) fn mark_copy_transfer_completed(
-    state: &mut RouterState,
-    transfer_id: TransferId,
-    total_bytes: Option<u64>,
-) {
-    let mut updated = false;
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        if let Some(total_bytes) = total_bytes {
+    /// Records a later-discovered download total without rewriting counted bytes.
+    ///
+    /// Directory archives start with `total_bytes=0` and learn the tar size from a
+    /// metadata walk. Chunk `increment_bytes` remains the source of transferred counts.
+    pub(crate) fn set_download_total(&mut self, transfer_id: TransferId, total_bytes: u64) {
+        let mut updated = false;
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            if !matches!(progress.direction, TransferDirection::Download) {
+                return;
+            }
+            if !matches!(progress.state, TransferProgressState::Active) {
+                return;
+            }
             progress.total_bytes = total_bytes;
+            self.progress.predicted_download_totals.insert(transfer_id);
+            updated = true;
         }
-        progress.state = TransferProgressState::Completed;
-        progress.cancelable = false;
-        progress.transferred_bytes = progress.total_bytes;
-        progress.ended_at = Some(UnixTimestampSeconds::new(
-            jiff::Timestamp::now().as_second(),
-        ));
-        progress.error = None;
-        updated = true;
-    }
-    if updated {
-        state
-            .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(
-                jiff::Timestamp::now().as_second(),
-            ));
-        ui::notify_transfer_refresh_immediately(state);
-        ui::notify_routes_changed(state);
-    }
-}
-
-/// Marks a transfer as failed and stores the surfaced error message.
-pub(crate) fn mark_transfer_errored(
-    state: &mut RouterState,
-    transfer_id: TransferId,
-    error_message: String,
-) {
-    let mut updated = false;
-    let mut routes_changed = false;
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        // An edit becomes non-cancelable immediately before terminal delivery authorizes rewrite.
-        routes_changed =
-            matches!(progress.direction, TransferDirection::Edit) && !progress.cancelable;
-        progress.state = TransferProgressState::Errored;
-        progress.cancelable = false;
-        progress.ended_at = Some(UnixTimestampSeconds::new(
-            jiff::Timestamp::now().as_second(),
-        ));
-        progress.error = Some(error_message);
-        state
-            .progress
-            .predicted_download_totals
-            .remove(&transfer_id);
-        updated = true;
-    }
-    if updated {
-        state
-            .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(
-                jiff::Timestamp::now().as_second(),
-            ));
-        ui::notify_transfer_refresh_immediately(state);
-        if routes_changed {
-            ui::notify_routes_changed(state);
+        if updated {
+            self.notify_transfer_refresh();
         }
     }
-}
 
-/// Publishes cancellation intent before control messages are sent to transfer workers.
-pub(crate) fn mark_transfer_canceling(state: &mut RouterState, transfer_id: TransferId) {
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        progress.state = TransferProgressState::Canceling;
-        progress.cancelable = false;
-        progress.error = None;
-        ui::notify_transfer_refresh_immediately(state);
-    }
-}
-
-/// Settles an acknowledged cancellation without discarding partial byte progress.
-pub(crate) fn mark_transfer_canceled(state: &mut RouterState, transfer_id: TransferId) {
-    if let Some(progress) = state.progress.entries.get_mut(&transfer_id) {
-        progress.state = TransferProgressState::Canceled;
-        progress.cancelable = false;
-        progress.ended_at = Some(UnixTimestampSeconds::new(
-            jiff::Timestamp::now().as_second(),
-        ));
-        progress.error = None;
-        state
-            .progress
-            .predicted_download_totals
-            .remove(&transfer_id);
-        state
-            .progress
-            .prune_terminal_history(UnixTimestampSeconds::new(
+    /// Marks a transfer as completed and aligns transferred/total byte counts.
+    ///
+    /// Unknown totals promote the counted stream size so the row does not reset to
+    /// zero. Known-size files still snap transferred to the planned total. A later
+    /// directory prediction that disagrees keeps the counted tar bytes so completed
+    /// UI does not display a stale archive estimate.
+    pub(crate) fn mark_transfer_completed(&mut self, transfer_id: TransferId) {
+        let mut updated = false;
+        let mut routes_changed = false;
+        let had_predicted_download_total =
+            self.progress.predicted_download_totals.remove(&transfer_id);
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            progress.state = TransferProgressState::Completed;
+            progress.cancelable = false;
+            if progress.total_bytes == 0
+                || (had_predicted_download_total
+                    && progress.transferred_bytes != progress.total_bytes)
+            {
+                progress.total_bytes = progress.transferred_bytes;
+            } else {
+                progress.transferred_bytes = progress.total_bytes;
+            }
+            progress.ended_at = Some(UnixTimestampSeconds::new(
                 jiff::Timestamp::now().as_second(),
             ));
-        ui::notify_transfer_refresh_immediately(state);
+            progress.error = None;
+            updated = true;
+            routes_changed = matches!(
+                progress.direction,
+                TransferDirection::Upload | TransferDirection::Edit
+            );
+        }
+        if updated {
+            self.progress
+                .prune_terminal_history(UnixTimestampSeconds::new(
+                    jiff::Timestamp::now().as_second(),
+                ));
+            self.notify_transfer_refresh_immediately();
+            if routes_changed {
+                self.notify_routes_changed();
+            }
+        }
     }
-}
 
-/// Reads the currently recorded transferred byte count for one progress entry.
-pub(crate) fn transferred_bytes(state: &RouterState, transfer_id: TransferId) -> Option<u64> {
-    state
-        .progress
-        .entries
-        .get(&transfer_id)
-        .map(|progress| progress.transferred_bytes)
-}
+    /// Marks a copy as completed, optionally updating its final total byte count first.
+    pub(crate) fn mark_copy_transfer_completed(
+        &mut self,
+        transfer_id: TransferId,
+        total_bytes: Option<u64>,
+    ) {
+        let mut updated = false;
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            if let Some(total_bytes) = total_bytes {
+                progress.total_bytes = total_bytes;
+            }
+            progress.state = TransferProgressState::Completed;
+            progress.cancelable = false;
+            progress.transferred_bytes = progress.total_bytes;
+            progress.ended_at = Some(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
+            progress.error = None;
+            updated = true;
+        }
+        if updated {
+            self.progress
+                .prune_terminal_history(UnixTimestampSeconds::new(
+                    jiff::Timestamp::now().as_second(),
+                ));
+            self.notify_transfer_refresh_immediately();
+            self.notify_routes_changed();
+        }
+    }
 
-/// Returns all progress entries sorted newest-first for REST and UI consumers.
-pub(crate) fn list_transfer_progress(state: &RouterState) -> TransferProgressListResponse {
-    let mut transfers: Vec<_> = state.progress.entries.values().cloned().collect();
-    transfers.sort_by_key(|transfer| std::cmp::Reverse(transfer.request_id));
-    TransferProgressListResponse { transfers }
+    /// Marks a transfer as failed and stores the surfaced error message.
+    pub(crate) fn mark_transfer_errored(&mut self, transfer_id: TransferId, error_message: String) {
+        let mut updated = false;
+        let mut routes_changed = false;
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            // An edit becomes non-cancelable immediately before terminal delivery authorizes rewrite.
+            routes_changed =
+                matches!(progress.direction, TransferDirection::Edit) && !progress.cancelable;
+            progress.state = TransferProgressState::Errored;
+            progress.cancelable = false;
+            progress.ended_at = Some(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
+            progress.error = Some(error_message);
+            self.progress.predicted_download_totals.remove(&transfer_id);
+            updated = true;
+        }
+        if updated {
+            self.progress
+                .prune_terminal_history(UnixTimestampSeconds::new(
+                    jiff::Timestamp::now().as_second(),
+                ));
+            self.notify_transfer_refresh_immediately();
+            if routes_changed {
+                self.notify_routes_changed();
+            }
+        }
+    }
+
+    /// Publishes cancellation intent before control messages are sent to transfer workers.
+    pub(crate) fn mark_transfer_canceling(&mut self, transfer_id: TransferId) {
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            progress.state = TransferProgressState::Canceling;
+            progress.cancelable = false;
+            progress.error = None;
+            self.notify_transfer_refresh_immediately();
+        }
+    }
+
+    /// Settles an acknowledged cancellation without discarding partial byte progress.
+    pub(crate) fn mark_transfer_canceled(&mut self, transfer_id: TransferId) {
+        if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
+            progress.state = TransferProgressState::Canceled;
+            progress.cancelable = false;
+            progress.ended_at = Some(UnixTimestampSeconds::new(
+                jiff::Timestamp::now().as_second(),
+            ));
+            progress.error = None;
+            self.progress.predicted_download_totals.remove(&transfer_id);
+            self.progress
+                .prune_terminal_history(UnixTimestampSeconds::new(
+                    jiff::Timestamp::now().as_second(),
+                ));
+            self.notify_transfer_refresh_immediately();
+        }
+    }
+
+    /// Reads the currently recorded transferred byte count for one progress entry.
+    pub(crate) fn transferred_bytes(&self, transfer_id: TransferId) -> Option<u64> {
+        self.progress
+            .entries
+            .get(&transfer_id)
+            .map(|progress| progress.transferred_bytes)
+    }
+
+    /// Returns all progress entries sorted newest-first for REST and UI consumers.
+    pub(crate) fn list_transfer_progress(&self) -> TransferProgressListResponse {
+        let mut transfers: Vec<_> = self.progress.entries.values().cloned().collect();
+        transfers.sort_by_key(|transfer| std::cmp::Reverse(transfer.request_id));
+        TransferProgressListResponse { transfers }
+    }
 }
 
 #[cfg(test)]
@@ -700,17 +665,14 @@ mod tests {
             .progress
             .prune_terminal_history(UnixTimestampSeconds::new(now));
 
-        let progress_id = record_download_start(
-            &mut state,
-            DownloadStartContext {
-                request_id: RequestId::new(2000),
-                agent_id: AgentId::from("agent-1"),
-                path: "/tmp/archive".to_string(),
-                total_bytes: 2048,
-                full_size: Some(4096),
-                resume_offset: Some(2048),
-            },
-        );
+        let progress_id = state.record_download_start(DownloadStartContext {
+            request_id: RequestId::new(2000),
+            agent_id: AgentId::from("agent-1"),
+            path: "/tmp/archive".to_string(),
+            total_bytes: 2048,
+            full_size: Some(4096),
+            resume_offset: Some(2048),
+        });
         assert_eq!(
             progress_id,
             TransferId::new(1501),
@@ -745,18 +707,15 @@ mod tests {
         state.ui.refresh_pending = true;
         state.ui.last_refresh_sent_at = Some(Instant::now());
 
-        record_copy_start(
-            &mut state,
-            CopyStartContext {
-                request_id: TransferId::new(8),
-                source_agent_id: AgentId::from("agent-1"),
-                source_path: "/tmp/source.bin".to_string(),
-                dest_agent_id: AgentId::from("agent-2"),
-                dest_path: "/tmp/destination.bin".to_string(),
-                total_bytes: 16,
-                direction: TransferDirection::Copy,
-            },
-        );
+        state.record_copy_start(CopyStartContext {
+            request_id: TransferId::new(8),
+            source_agent_id: AgentId::from("agent-1"),
+            source_path: "/tmp/source.bin".to_string(),
+            dest_agent_id: AgentId::from("agent-2"),
+            dest_path: "/tmp/destination.bin".to_string(),
+            total_bytes: 16,
+            direction: TransferDirection::Copy,
+        });
 
         let start_event = ui_rx
             .recv()
@@ -785,7 +744,7 @@ mod tests {
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         state.ui.subscribers.insert("ui-1".to_string(), ui_tx);
 
-        ui::notify_agents_changed(&mut state);
+        state.notify_agents_changed();
 
         let agent_event = ui_rx
             .recv()
@@ -800,7 +759,7 @@ mod tests {
             "agent events should not delay the next transfer progress event"
         );
 
-        ui::notify_transfer_refresh(&mut state);
+        state.notify_transfer_refresh();
         let transfer_event = ui_rx
             .recv()
             .await
@@ -845,7 +804,7 @@ mod tests {
             },
         );
 
-        ui::notify_transfer_refresh(&mut state);
+        state.notify_transfer_refresh();
         let first_event = ui_rx
             .recv()
             .await
@@ -858,7 +817,7 @@ mod tests {
         state.ui.refresh_pending = true;
         state.ui.last_refresh_sent_at = Some(Instant::now());
 
-        mark_transfer_completed(&mut state, transfer_id);
+        state.mark_transfer_completed(transfer_id);
 
         let terminal_event = ui_rx
             .recv()
@@ -925,7 +884,7 @@ mod tests {
             },
         );
 
-        mark_transfer_completed(&mut state, transfer_id);
+        state.mark_transfer_completed(transfer_id);
 
         // Completion must immediately refresh transfer state before route consumers reload data.
         assert!(matches!(
@@ -969,11 +928,7 @@ mod tests {
             },
         );
 
-        mark_transfer_errored(
-            &mut state,
-            transfer_id,
-            "commit failed after truncation".to_string(),
-        );
+        state.mark_transfer_errored(transfer_id, "commit failed after truncation".to_string());
 
         // Error state remains immediately visible in the persistent transfer UI.
         assert!(matches!(
@@ -1025,7 +980,7 @@ mod tests {
             download_progress_entry(transfer_id, 0, 4096, TransferProgressState::Active),
         );
 
-        set_download_total(&mut state, transfer_id, 8192);
+        state.set_download_total(transfer_id, 8192);
 
         let progress = state
             .progress
@@ -1058,7 +1013,7 @@ mod tests {
             download_progress_entry(transfer_id, 2048, 2048, TransferProgressState::Completed),
         );
 
-        set_download_total(&mut state, transfer_id, 9999);
+        state.set_download_total(transfer_id, 9999);
 
         let progress = state
             .progress
@@ -1090,9 +1045,9 @@ mod tests {
             transfer_id,
             download_progress_entry(transfer_id, 0, 4096, TransferProgressState::Active),
         );
-        set_download_total(&mut state, transfer_id, 5000);
+        state.set_download_total(transfer_id, 5000);
 
-        mark_transfer_completed(&mut state, transfer_id);
+        state.mark_transfer_completed(transfer_id);
 
         let progress = state
             .progress

@@ -1,7 +1,9 @@
 //! Dedicated non-PTY execution endpoint reuses stream routing and drop-triggered cancellation.
 
 use super::{responses::router_error_response, state::ServerState, streaming::OutputCancelGuard};
-use crate::actors::router::{ExecuteStreamRequest, OutputStreamTracking, RouterMsg};
+use crate::actors::router::{
+    ExecuteStreamRequest, OutputReceiver, OutputStreamTracking, RouterMsg,
+};
 use axum::{
     Json,
     body::Body,
@@ -65,9 +67,8 @@ pub(crate) async fn exec_handler(
         return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
     }
     let agent_id = AgentId::from(agent);
-    let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let (terminal_sender, terminal_receiver) = tokio::sync::watch::channel(None);
-    let id = match state
+    let receiver = match state
         .router_ref
         .request(30_000, |reply| {
             RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
@@ -77,13 +78,11 @@ pub(crate) async fn exec_handler(
                     terminal: terminal_sender.clone(),
                 },
                 reply,
-                chunk_sender: sender,
-                rest_cancel_sender: None,
             })
         })
         .await
     {
-        Ok(Ok(id)) => id,
+        Ok(Ok(receiver)) => receiver,
         Ok(Err(error)) => return router_error_response(error),
         Err(error) => {
             return (
@@ -95,6 +94,7 @@ pub(crate) async fn exec_handler(
                 .into_response();
         }
     };
+    let id = receiver.request_id();
     let guard = OutputCancelGuard::new(state.router_ref.clone(), agent_id, id);
     drop(terminal_sender);
     Response::builder()
@@ -106,7 +106,7 @@ pub(crate) async fn exec_handler(
 
 /// Drains already accepted payload before fallback completion so timeouts cannot erase trailing output.
 fn execution_body(
-    mut receiver: tokio::sync::mpsc::Receiver<redoor_protocol::wire::stream::StreamChunk>,
+    mut receiver: OutputReceiver,
     mut terminal_receiver: tokio::sync::watch::Receiver<
         Option<redoor_protocol::wire::exec::ExecEvent>,
     >,
@@ -166,7 +166,7 @@ fn execution_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actors::router::spawn_router;
+    use crate::actors::router::{ConnectionStreams, spawn_router};
     use redoor_protocol::{
         ids::ChunkIndex,
         wire::{
@@ -178,25 +178,27 @@ mod tests {
     /// A slow HTTP consumer can have buffered output when the independent fallback arrives.
     #[tokio::test]
     async fn fallback_drains_buffered_output_before_single_terminal_event() {
-        let (sink, receiver) = tokio::sync::mpsc::channel(1);
+        let streams = ConnectionStreams::new(AgentId::from("test"), false);
+        let receiver = streams.open_detached(RequestId::new(1));
         let output = ExecEvent::Stdout {
             data: b"trailing output".to_vec(),
         };
         let mut data = serde_json::to_vec(&output).unwrap();
         data.push(b'\n');
-        sink.send(StreamChunk {
-            request_id: RequestId::new(1),
-            chunk_index: ChunkIndex::new(0),
-            is_last: false,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data,
-        })
-        .await
-        .unwrap();
+        streams
+            .deliver(StreamChunk {
+                request_id: RequestId::new(1),
+                chunk_index: ChunkIndex::new(0),
+                is_last: false,
+                is_error: false,
+                payload_kind: StreamPayloadKind::RawFile,
+                data,
+            })
+            .await;
         let (terminal, terminal_receiver) = tokio::sync::watch::channel(None);
         terminal.send_replace(Some(ExecEvent::TimedOut));
-        drop(sink);
+        // The router's fallback closes the stream without a terminal frame.
+        streams.close_inbound(RequestId::new(1));
         let (router, task) = spawn_router(
             crate::terminal_registry::TerminalRegistry::new(),
             crate::log_registry::LogRegistry::new(),

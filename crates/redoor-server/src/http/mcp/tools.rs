@@ -455,7 +455,7 @@ async fn run_command(
 async fn drain_execution(
     operations: super::operations::OperationRegistry,
     record: std::sync::Arc<tokio::sync::Mutex<super::operations::OperationRecord>>,
-    mut receiver: tokio::sync::mpsc::Receiver<redoor_protocol::wire::stream::StreamChunk>,
+    mut receiver: crate::actors::router::OutputReceiver,
     mut terminal: tokio::sync::watch::Receiver<Option<ExecEvent>>,
     limit: usize,
     mut guard: OutputCancelGuard,

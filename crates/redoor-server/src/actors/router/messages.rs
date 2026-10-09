@@ -1,10 +1,9 @@
 use super::RouterError;
 use super::state::CopyContentKind;
+use super::streams::{ConnectionStreams, OutboundStream, OutputReceiver, StreamEnd};
 use crate::watchdog::WatchdogSnapshot;
 use axum::extract::ws::Message as WsMessage;
-use redoor_protocol::ids::{
-    AgentId, ChunkIndex, RequestId, SocketId, TransferId, UnixTimestampSeconds,
-};
+use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
 use redoor_protocol::wire::log::LogStreamId;
 use redoor_protocol::wire::terminal::{TerminalId, TerminalSize};
 use redoor_protocol::{
@@ -67,6 +66,8 @@ pub struct RegisterAgentRequest {
     pub watchdog: Option<crate::watchdog::WatchdogHandle>,
     /// Fences router commit against retry invalidating the parsed registration.
     pub watchdog_attempt_generation: Option<u64>,
+    /// Payload stream tables of this control session, created with the negotiated credit mode.
+    pub streams: ConnectionStreams,
 }
 
 /// Retained inventory projection used by REST, tabs, and management controls.
@@ -158,8 +159,9 @@ pub struct RegisterTransferConnectionRequest {
     pub outgoing_binary: tokio::sync::mpsc::Sender<WsMessage>,
     /// Stops an older or control-orphaned transfer task promptly.
     pub shutdown: tokio::sync::watch::Sender<bool>,
-    /// Confirms that router state owns the connection before payload is accepted.
-    pub reply: RouterReply<Result<(), RouterError>>,
+    /// Confirms that router state owns the connection before payload is accepted, and hands
+    /// the socket the stream tables its reader delivers frames into.
+    pub reply: RouterReply<Result<ConnectionStreams, RouterError>>,
 }
 
 /// Confirms destination upload setup before payload producers are allowed to run.
@@ -198,74 +200,6 @@ pub struct ExecuteCommandRequest {
     pub reply: RouterReply<CommandResult>,
 }
 
-/// Routes one inbound streaming chunk from an agent into the matching transfer flow.
-pub struct RouteStreamChunkRequest {
-    /// Agent that sent the chunk.
-    pub agent_id: AgentId,
-    /// Parsed stream chunk received from the websocket binary lane.
-    pub chunk: redoor_protocol::wire::stream::StreamChunk,
-    /// Reply port used to acknowledge chunk handling back to the session actor.
-    pub reply: RouterReply<()>,
-}
-
-/// Completes bounded output forwarding after the REST receiver accepts it.
-pub struct FinishOutputChunkRoute {
-    /// Preserves an agent terminal acknowledgement when cancellation races an already-forwarding frame.
-    pub execution_terminal: Option<redoor_protocol::wire::exec::ExecEvent>,
-    /// Agent that produced the output chunk.
-    pub agent_id: AgentId,
-    /// Internal request id for the file or execution stream.
-    pub request_id: RequestId,
-    /// Chunk index used for completion logging.
-    pub chunk_index: ChunkIndex,
-    /// Whether this chunk terminates the stream successfully.
-    pub is_last: bool,
-    /// Number of payload bytes accepted by the REST-facing stream.
-    pub bytes: u64,
-    /// Surfaced error if the incoming chunk represented an error frame.
-    pub error_message: Option<String>,
-    /// Whether the bounded send to the REST consumer succeeded.
-    pub send_succeeded: bool,
-    /// Reply port that must be completed only after downstream acceptance is known.
-    pub reply: RouterReply<()>,
-}
-
-/// Completes one bounded direct-upload chunk forward after the agent binary lane accepts it.
-pub struct FinishUploadChunkRoute {
-    /// Agent that should receive the upload chunk.
-    pub agent_id: AgentId,
-    /// Internal transfer request id for the direct upload.
-    pub request_id: RequestId,
-    /// Number of payload bytes in the forwarded chunk.
-    pub bytes: u64,
-    /// Whether the forwarded chunk was an error frame.
-    pub is_error: bool,
-    /// Whether the bounded send to the agent succeeded.
-    pub send_succeeded: bool,
-    /// Reply port that completes the REST-side chunk handoff.
-    pub reply: RouterReply<Result<(), RouterError>>,
-}
-
-/// Completes one remote-copy chunk forward after all derived destination frames are queued.
-pub struct FinishCopyChunkRoute {
-    /// Source agent that originally sent the copy chunk.
-    pub source_agent_id: AgentId,
-    /// Public transfer id exposed for the logical copy operation.
-    pub public_request_id: TransferId,
-    /// Internal request id for the source-side download stream.
-    pub source_request_id: RequestId,
-    /// Internal request id for the destination-side upload stream.
-    pub dest_request_id: RequestId,
-    /// Next chunk index to use when reframing future destination chunks.
-    pub next_chunk_index: ChunkIndex,
-    /// Number of source payload bytes accounted for by this chunk.
-    pub bytes: u64,
-    /// Whether all derived destination frames were queued successfully.
-    pub send_succeeded: bool,
-    /// Reply port that acknowledges the source chunk back to the session actor.
-    pub reply: RouterReply<()>,
-}
-
 /// Starts agent-to-REST output transport with explicit resource-specific tracking.
 pub struct ExecuteStreamRequest {
     /// Target agent producing file bytes or execution events.
@@ -274,12 +208,9 @@ pub struct ExecuteStreamRequest {
     pub command: Command,
     /// File progress is independent of transport; execution has no filesystem resource.
     pub tracking: OutputStreamTracking,
-    /// Reply port that returns the allocated request id so the consumer can cancel on drop.
-    pub reply: RouterReply<Result<RequestId, RouterError>>,
-    /// Bounded sink that receives streamed chunks for the REST caller.
-    pub chunk_sender: tokio::sync::mpsc::Sender<redoor_protocol::wire::stream::StreamChunk>,
-    /// Explicit user cancellation closes the REST body independently of payload backpressure.
-    pub rest_cancel_sender: Option<tokio::sync::watch::Sender<bool>>,
+    /// Returns the stream's consumer, which reads frames without involving the router and
+    /// carries the request id the caller needs to cancel on drop.
+    pub reply: RouterReply<Result<OutputReceiver, RouterError>>,
 }
 
 /// Keeps filesystem progress metadata out of non-file output streams.
@@ -329,20 +260,9 @@ pub struct StartUploadRequest {
     /// Kept separate from `reply` so HTTP can arm cancel with the request id
     /// before blocking on this barrier.
     pub ready_sender: tokio::sync::oneshot::Sender<Result<UploadStartOutcome, RouterError>>,
-    /// Immediate reply with the allocated request id (or start rejection).
-    pub reply: RouterReply<Result<RequestId, RouterError>>,
-}
-
-/// Forwards one upload chunk from the REST layer to the target agent.
-pub struct SendStreamChunkRequest {
-    /// Agent that should receive the chunk.
-    pub agent_id: AgentId,
-    /// Internal request id of the active upload stream.
-    pub request_id: RequestId,
-    /// Chunk payload to forward over the websocket binary lane.
-    pub chunk: redoor_protocol::wire::stream::StreamChunk,
-    /// Reply port that completes once downstream acceptance is known.
-    pub reply: RouterReply<Result<(), RouterError>>,
+    /// Immediate reply with the stream producer (or start rejection); the producer carries
+    /// the request id so the caller can arm cancellation before the readiness barrier.
+    pub reply: RouterReply<Result<OutboundStream, RouterError>>,
 }
 
 /// Transfers terminal edit delivery to the router while publishing the commit boundary.
@@ -397,6 +317,26 @@ pub struct TransferProgressUpdateRequest {
     pub total_bytes: Option<u64>,
 }
 
+/// Why a server-to-agent stream stopped on the producer side.
+#[derive(Debug)]
+pub enum OutboundFailureReason {
+    /// The agent's transfer lane closed while frames were still being sent.
+    LaneClosed,
+    /// The producer aborted the stream with an error frame (for example a body that exceeded
+    /// its declared length).
+    ProducerAborted(String),
+}
+
+/// Terminal event of a server-to-agent stream observed by its producer.
+pub struct OutboundFailure {
+    /// Agent receiving the stream.
+    pub agent_id: AgentId,
+    /// Stream that failed.
+    pub request_id: RequestId,
+    /// What went wrong.
+    pub reason: OutboundFailureReason,
+}
+
 /// Requests a connected agent to establish one dedicated terminal socket.
 pub struct OpenTerminalRequest {
     pub agent_id: AgentId,
@@ -446,13 +386,11 @@ pub enum RouterMsg {
     UnregisterUiSubscriber {
         subscriber_id: String,
     },
-    /// Removes command reply ports whose REST callers have already timed out or disconnected.
-    PruneClosedPendingRest,
     ExecuteCommandRest(ExecuteCommandRequest),
-    RouteStreamChunk(RouteStreamChunkRequest),
-    FinishRoutedOutputChunk(FinishOutputChunkRoute),
-    FinishRoutedUploadChunk(FinishUploadChunkRoute),
-    FinishRoutedCopyChunk(FinishCopyChunkRoute),
+    /// The transfer reader saw an inbound stream's terminal frame (or a credit violation).
+    InboundStreamEnded(StreamEnd),
+    /// A producer could not finish a server-to-agent stream.
+    OutboundStreamFailed(OutboundFailure),
     ExecuteStreamCommandRest(ExecuteStreamRequest),
     /// Cancels only an execution owned by the specified agent, independently of file progress.
     CancelExecution {
@@ -461,7 +399,6 @@ pub enum RouterMsg {
         reply: RouterReply<Result<bool, RouterError>>,
     },
     StartUploadStreamRest(StartUploadRequest),
-    SendStreamChunkToAgent(SendStreamChunkRequest),
     CommitDirectUpload(CommitDirectUploadRequest),
     /// Serializes staged publication with public cancellation before filesystem mutation.
     BeginUploadPublication {
@@ -485,6 +422,8 @@ pub enum RouterMsg {
     TransferProgressUpdate(TransferProgressUpdateRequest),
     OpenTerminal(OpenTerminalRequest),
     OpenAgentLogStream(OpenAgentLogStreamRequest),
+    /// Periodic tick: prunes abandoned replies, publishes stream progress and releases
+    /// throttled UI refreshes.
     CheckPendingUiRefresh,
     Shutdown,
 }

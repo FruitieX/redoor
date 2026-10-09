@@ -125,10 +125,7 @@ async fn download_editable_file(
     endpoint: &DiffEndpoint,
     expected_size: u64,
 ) -> Result<String, axum::response::Response> {
-    let (chunk_sender, mut chunk_receiver) =
-        tokio::sync::mpsc::channel::<redoor_protocol::wire::stream::StreamChunk>(1);
-
-    let request_id = match state
+    let mut chunk_receiver = match state
         .router_ref
         .request(30000, |reply| {
             actors::router::RouterMsg::ExecuteStreamCommandRest(
@@ -146,14 +143,12 @@ async fn download_editable_file(
                         resume_offset: None,
                     },
                     reply,
-                    chunk_sender,
-                    rest_cancel_sender: None,
                 },
             )
         })
         .await
     {
-        Ok(Ok(request_id)) => request_id,
+        Ok(Ok(receiver)) => receiver,
         Ok(Err(error)) => return Err(router_error_response(error)),
         Err(error) => {
             return Err(internal_error_response(&format!(
@@ -161,8 +156,11 @@ async fn download_editable_file(
             )));
         }
     };
-    let mut cancel_guard =
-        OutputCancelGuard::new(state.router_ref.clone(), endpoint.agent.clone(), request_id);
+    let mut cancel_guard = OutputCancelGuard::new(
+        state.router_ref.clone(),
+        endpoint.agent.clone(),
+        chunk_receiver.request_id(),
+    );
 
     let capacity = match usize::try_from(expected_size) {
         Ok(capacity) => capacity,

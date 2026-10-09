@@ -3,7 +3,8 @@
 use crate::{
     actors,
     actors::router::{
-        ExecuteCommandRequest, ExecuteStreamRequest, OutputStreamTracking, RouterMsg,
+        ExecuteCommandRequest, ExecuteStreamRequest, OutputReceiver, OutputStreamTracking,
+        RouterMsg,
     },
 };
 use redoor_protocol::{
@@ -57,10 +58,8 @@ pub(super) async fn read_file(
 ) -> Result<(Vec<u8>, bool), String> {
     let limit = limit.min(INLINE_FILE_LIMIT);
     let end = offset.saturating_add(limit as u64);
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let (cancel_sender, _cancel_receiver) = tokio::sync::watch::channel(false);
     let agent_id = AgentId::from(device_id);
-    let request_id = state
+    let mut receiver = state
         .router_ref
         .request(30_000, |reply| {
             RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
@@ -77,13 +76,12 @@ pub(super) async fn read_file(
                     resume_offset: Some(offset),
                 },
                 reply,
-                chunk_sender: sender,
-                rest_cancel_sender: Some(cancel_sender),
             })
         })
         .await
         .map_err(|error| format!("Read admission failed: {error:?}"))?
         .map_err(|error| format!("Read rejected: {error:?}"))?;
+    let request_id = receiver.request_id();
     let mut bytes = Vec::with_capacity(limit.min(8192));
     while let Some(chunk) = receiver.recv().await {
         if chunk.is_error {
@@ -169,15 +167,14 @@ pub(super) async fn start_execution(
 ) -> Result<
     (
         RequestId,
-        tokio::sync::mpsc::Receiver<redoor_protocol::wire::stream::StreamChunk>,
+        OutputReceiver,
         tokio::sync::watch::Receiver<Option<redoor_protocol::wire::exec::ExecEvent>>,
     ),
     String,
 > {
-    let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let (terminal_sender, terminal_receiver) = tokio::sync::watch::channel(None);
     let agent_id = AgentId::from(device_id);
-    let id = state
+    let receiver = state
         .router_ref
         .request(30_000, |reply| {
             RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
@@ -187,15 +184,13 @@ pub(super) async fn start_execution(
                     terminal: terminal_sender.clone(),
                 },
                 reply,
-                chunk_sender: sender,
-                rest_cancel_sender: None,
             })
         })
         .await
         .map_err(|error| format!("Execution admission failed: {error:?}"))?
         .map_err(|error| format!("Execution rejected: {error:?}"))?;
     drop(terminal_sender);
-    Ok((id, receiver, terminal_receiver))
+    Ok((receiver.request_id(), receiver, terminal_receiver))
 }
 
 /// Cancels an admitted execution while leaving acknowledgement to the terminal lane.

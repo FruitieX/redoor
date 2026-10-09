@@ -1,12 +1,11 @@
-use super::RouterError;
+use super::flows::FlowTable;
+use super::streams::ConnectionStreams;
 use crate::log_registry::LogRegistry;
 use crate::terminal_registry::TerminalRegistry;
 use axum::extract::ws::Message as WsMessage;
-use redoor_protocol::ids::{
-    AgentId, ChunkIndex, RequestId, SocketId, TransferId, UnixTimestampSeconds,
-};
+use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
 use redoor_protocol::wire::policy::UploadKind;
-use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
+use redoor_protocol::wire::stream::StreamPayloadKind;
 use redoor_protocol::{
     api::{agents::AgentConnectionStatus, transfers::TransferProgressEntry},
     identity::BinaryIdentity,
@@ -69,6 +68,8 @@ pub struct AgentConnection {
     pub uid: Option<u32>,
     /// Whether this connection's effective UID is root.
     pub is_root: bool,
+    /// Payload stream routing shared with the control session and the transfer socket.
+    pub streams: ConnectionStreams,
 }
 
 /// Retained UI inventory record for an agent seen during this server process.
@@ -123,108 +124,7 @@ pub struct AgentRegistry {
     pub(crate) known_by_id: HashMap<AgentId, KnownAgent>,
 }
 
-#[derive(Default)]
-/// Pending one-shot REST replies waiting for a final command response.
-pub struct PendingRestReplies {
-    /// Reply ports plus owning agent ids keyed by internal request id.
-    pub(crate) by_request_id:
-        HashMap<RequestId, (tokio::sync::oneshot::Sender<CommandResult>, AgentId)>,
-}
-
-/// Transport ownership for agent-to-REST output, independent of file progress.
-pub struct DirectOutputStream {
-    /// Distinguishes execution cancellation from file-transfer cancellation.
-    pub(crate) owner: OutputOwner,
-    /// Agent currently producing this stream.
-    pub(crate) agent_id: AgentId,
-    /// Stops a live REST body before waiting for the agent's cleanup acknowledgement.
-    pub(crate) rest_cancel_sender: Option<tokio::sync::watch::Sender<bool>>,
-    /// Accepted cleanup intent suppresses duplicate forwarding while ownership waits for acknowledgement.
-    pub(crate) canceled_by_rest: bool,
-    /// Retains a pending priority enqueue without blocking the router or duplicating retries.
-    pub(crate) cancellation_delivery: Option<tokio::task::JoinHandle<()>>,
-    /// Releases an in-flight bounded send so the transfer reader can receive the terminal acknowledgement.
-    pub(crate) forwarding_stop: tokio::sync::watch::Sender<bool>,
-}
-
-/// Associates each output resource with its delivery sink and completion tracking.
-pub(crate) enum OutputOwner {
-    Download {
-        progress_id: TransferId,
-        sink: Option<tokio::sync::mpsc::Sender<StreamChunk>>,
-    },
-    Execution {
-        sink: Option<tokio::sync::mpsc::Sender<StreamChunk>>,
-        terminal: tokio::sync::watch::Sender<Option<redoor_protocol::wire::exec::ExecEvent>>,
-    },
-    CopySource {
-        copy_id: TransferId,
-    },
-}
-
-impl OutputOwner {
-    /// Only direct downloads own independent file history, including resumed ids.
-    pub(crate) fn download_id(&self) -> Option<TransferId> {
-        match self {
-            Self::Download { progress_id, .. } => Some(*progress_id),
-            Self::Execution { .. } | Self::CopySource { .. } => None,
-        }
-    }
-
-    /// Returns REST sinks only; copy sources deliver through the destination agent's socket.
-    pub(crate) fn sink_mut(
-        &mut self,
-    ) -> Option<&mut Option<tokio::sync::mpsc::Sender<StreamChunk>>> {
-        match self {
-            Self::Download { sink, .. } | Self::Execution { sink, .. } => Some(sink),
-            Self::CopySource { .. } => None,
-        }
-    }
-}
-
-impl Drop for DirectOutputStream {
-    /// Completion or disconnect invalidates any cancellation still waiting for lane capacity.
-    fn drop(&mut self) {
-        if let Some(task) = self.cancellation_delivery.take() {
-            task.abort();
-        }
-    }
-}
-
-/// State tracked for one direct upload stream flowing from REST to agent.
-pub struct DirectUpload {
-    /// Agent currently receiving this upload.
-    pub(crate) agent_id: AgentId,
-    /// Optional final-result channel for REST uploads that expect completion.
-    pub(crate) completion_sender:
-        Option<tokio::sync::oneshot::Sender<Result<CommandResult, RouterError>>>,
-    /// Delays the HTTP body producer until the upload worker exists on the other socket.
-    ///
-    /// When setup fails before readiness, this carries `UploadStartOutcome::Finished`
-    /// so the HTTP layer can reuse the completion status mapping instead of a generic 500.
-    /// Dropped receivers mean the HTTP caller is gone and the upload must be canceled.
-    pub(crate) ready_sender: Option<
-        tokio::sync::oneshot::Sender<Result<super::messages::UploadStartOutcome, RouterError>>,
-    >,
-    /// Records the cross-socket setup barrier for routing and diagnostics.
-    pub(crate) ready: bool,
-    /// Whether the REST side has already requested cancellation.
-    pub(crate) canceled_by_rest: bool,
-    /// Distinguishes an explicit user action from an implicit disconnected HTTP producer.
-    pub(crate) explicitly_canceled: bool,
-    /// Defines public progress semantics and the only accepted successful result.
-    pub(crate) kind: UploadKind,
-}
-
-#[derive(Default)]
-/// Active transport streams keyed by internal request id, independent of public file history.
-pub struct StreamTransferRegistry {
-    /// Agent-to-REST output includes file bytes and process events.
-    pub(crate) outputs: HashMap<RequestId, DirectOutputStream>,
-    /// Direct upload streams keyed by the router-generated request id.
-    pub(crate) uploads: HashMap<RequestId, DirectUpload>,
-}
-
+/// Whether a copy streams one file or a directory archive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyContentKind {
     RawFile,
@@ -275,27 +175,16 @@ impl CopyContentKind {
 
     /// Checks whether a final command result matches this copy mode.
     pub(crate) fn completion_matches(self, result: &CommandResult) -> bool {
+        self.upload_kind().completion_matches(result)
+    }
+
+    /// Upload semantics of the destination side of a remote copy.
+    pub(crate) fn upload_kind(self) -> UploadKind {
         match self {
-            Self::RawFile => matches!(result, CommandResult::RawUpload),
-            Self::TarDirectory => matches!(result, CommandResult::TarUpload),
+            Self::RawFile => UploadKind::RawUpload,
+            Self::TarDirectory => UploadKind::TarUpload,
         }
     }
-}
-
-pub(crate) enum CopyExecution {
-    RemoteStream {
-        source_request_id: RequestId,
-        dest_request_id: RequestId,
-        next_chunk_index: ChunkIndex,
-    },
-    LocalAgent {
-        agent_id: AgentId,
-        request_id: RequestId,
-    },
-    DeletingMoveSource {
-        agent_id: AgentId,
-        request_id: RequestId,
-    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,46 +192,6 @@ pub(crate) enum CopyExecution {
 pub enum CopyOperation {
     Copy,
     Move,
-}
-
-/// Bookkeeping for one logical copy request managed by the router.
-pub(crate) struct CopyRequest {
-    /// Agent providing the source contents.
-    pub(crate) source_agent_id: AgentId,
-    /// Agent receiving the copied contents.
-    pub(crate) dest_agent_id: AgentId,
-    /// Execution mode and internal request ids for this copy.
-    pub(crate) execution: CopyExecution,
-    /// Streaming/content mode for command and payload validation.
-    pub(crate) content_kind: CopyContentKind,
-    /// Defers source production until the destination upload worker acknowledges readiness.
-    pub(crate) pending_source_command: Option<Command>,
-    /// Determines whether destination completion is final or must be followed by source deletion.
-    pub(crate) operation: CopyOperation,
-    /// Source path retained for deletion after a remote move publishes its destination.
-    pub(crate) source_path: String,
-    /// Filesystem identity that must still match before move-source deletion.
-    pub(crate) source_identity: Option<redoor_protocol::wire::command::MoveSourceIdentity>,
-    /// Records source cleanup while an explicit remote cancellation is settling.
-    pub(crate) source_cancel_acknowledged: bool,
-    /// Records destination cleanup while an explicit remote cancellation is settling.
-    pub(crate) dest_cancel_acknowledged: bool,
-}
-
-#[derive(Default)]
-/// Copy transfer lookups keyed by public ids and internal per-agent request ids.
-pub struct CopyRegistry {
-    /// Logical copy requests keyed by the public transfer id.
-    pub(crate) by_public_id: HashMap<TransferId, CopyRequest>,
-    /// Reverse lookup from internal per-agent request id to public transfer id.
-    pub(crate) public_id_by_internal_request: HashMap<RequestId, TransferId>,
-}
-
-impl CopyRegistry {
-    /// Looks up the public copy id associated with one internal request id.
-    pub(crate) fn public_id_for_internal(&self, request_id: RequestId) -> Option<TransferId> {
-        self.public_id_by_internal_request.get(&request_id).copied()
-    }
 }
 
 #[derive(Default)]
@@ -385,12 +234,8 @@ pub struct RouterState {
     pub(crate) log_registry: LogRegistry,
     /// Connected-agent registry used for all routing decisions.
     pub(crate) agents: AgentRegistry,
-    /// Pending one-shot REST replies awaiting final agent responses.
-    pub(crate) pending_rest: PendingRestReplies,
-    /// Active direct upload and download stream state.
-    pub(crate) streams: StreamTransferRegistry,
-    /// Copy-specific bookkeeping and internal/public id mappings.
-    pub(crate) copies: CopyRegistry,
+    /// Every in-flight command, stream, upload and copy.
+    pub(crate) flows: FlowTable,
     /// Transfer progress entries exposed to REST and UI consumers.
     pub(crate) progress: TransferProgressStore,
     /// UI refresh throttling and subscriber fanout state.
@@ -410,9 +255,7 @@ impl RouterState {
             terminal_registry,
             log_registry,
             agents: AgentRegistry::default(),
-            pending_rest: PendingRestReplies::default(),
-            streams: StreamTransferRegistry::default(),
-            copies: CopyRegistry::default(),
+            flows: FlowTable::default(),
             progress: TransferProgressStore::default(),
             ui: UiState {
                 subscribers: HashMap::new(),

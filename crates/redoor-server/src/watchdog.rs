@@ -545,7 +545,7 @@ async fn run_started_cycle(
         tokio::select! {
             result = &mut spawn_future => break result,
             command = commands.recv() => {
-                match handle_pre_spawn_command(watchdog, command).await {
+                match handle_pre_spawn_command(watchdog, command) {
                     CommandAction::Continue => {}
                     action => return CycleResult { action, was_connected: false },
                 }
@@ -584,7 +584,7 @@ async fn run_started_cycle(
 }
 
 /// Reduces command handling during preparation to an explicit continue/stop decision.
-async fn handle_pre_spawn_command(
+fn handle_pre_spawn_command(
     watchdog: &WatchdogHandle,
     command: Option<SupervisorCommand>,
 ) -> CommandAction {

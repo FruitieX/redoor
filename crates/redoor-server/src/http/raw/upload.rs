@@ -80,6 +80,8 @@ pub(crate) struct AgentUpload {
     bytes_written: u64,
     /// Lets owning HTTP handlers correlate cancellation without scanning shared progress paths.
     pub(crate) request_id: RequestId,
+    /// Writes frames straight onto the agent's transfer lane, spending per-stream credit.
+    stream: actors::router::OutboundStream,
     chunk_index: ChunkIndex,
     completion_receiver:
         tokio::sync::oneshot::Receiver<Result<CommandResult, actors::router::RouterError>>,
@@ -159,7 +161,7 @@ impl AgentUpload {
         let is_tar = upload_kind == Some(redoor_protocol::wire::policy::UploadKind::TarUpload);
         let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
         let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
-        let request_id = match state
+        let stream = match state
             .router_ref
             .request(30000, |reply| {
                 actors::router::RouterMsg::StartUploadStreamRest(
@@ -176,7 +178,7 @@ impl AgentUpload {
             })
             .await
         {
-            Ok(Ok(request_id)) => request_id,
+            Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
                 return Err(AgentUploadStartError::Response(router_error_response(
                     error,
@@ -194,6 +196,7 @@ impl AgentUpload {
                 ));
             }
         };
+        let request_id = stream.request_id();
         let mut cancel_guard =
             UploadCancelGuard::new(state.router_ref.clone(), agent_id.clone(), request_id);
         match tokio::time::timeout(std::time::Duration::from_millis(30000), ready_receiver).await {
@@ -239,6 +242,7 @@ impl AgentUpload {
             total_bytes,
             bytes_written: 0,
             request_id,
+            stream,
             chunk_index: ChunkIndex::new(0),
             completion_receiver,
             cancel_guard,
@@ -257,15 +261,28 @@ impl AgentUpload {
                 self.total_bytes,
                 self.bytes_written
             );
-            let result = forward_split_stream_chunk(
-                &self.state,
-                &self.agent_id,
-                &mut self.chunk_index,
-                StreamChunkFrameRequest::new(self.request_id, message.as_bytes()).is_error(true),
-            )
-            .await;
+            let result = self
+                .forward(
+                    StreamChunkFrameRequest::new(self.request_id, message.as_bytes())
+                        .is_error(true),
+                )
+                .await;
             self.cancel_guard.disarm();
             result?;
+            // The error frame bypasses the router, so tell it why the transfer failed.
+            let _ = self
+                .state
+                .router_ref
+                .send_async(actors::router::RouterMsg::OutboundStreamFailed(
+                    actors::router::OutboundFailure {
+                        agent_id: self.agent_id.clone(),
+                        request_id: self.request_id,
+                        reason: actors::router::OutboundFailureReason::ProducerAborted(
+                            message.clone(),
+                        ),
+                    },
+                ))
+                .await;
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse { error: message }),
@@ -273,15 +290,46 @@ impl AgentUpload {
                 .into_response());
         }
         let payload_kind = self.payload_kind();
-        forward_split_stream_chunk(
-            &self.state,
-            &self.agent_id,
-            &mut self.chunk_index,
+        self.forward(
             StreamChunkFrameRequest::new(self.request_id, data)
                 .payload_kind(payload_kind)
                 .is_last(false),
         )
         .await
+    }
+
+    /// Reframes one producer payload and sends it directly to the agent, never through the
+    /// router; only a lost lane is reported to the router as a terminal event.
+    async fn forward(&mut self, request: StreamChunkFrameRequest<'_>) -> Result<(), Response> {
+        match self
+            .stream
+            .send_frames(&mut self.chunk_index, request)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(actors::router::OutboundError::Stopped) => Err(router_error_response(
+                actors::router::RouterError::ClientCanceledUpload,
+            )),
+            Err(actors::router::OutboundError::LaneClosed) => {
+                let _ = self
+                    .state
+                    .router_ref
+                    .send_async(actors::router::RouterMsg::OutboundStreamFailed(
+                        actors::router::OutboundFailure {
+                            agent_id: self.agent_id.clone(),
+                            request_id: self.request_id,
+                            reason: actors::router::OutboundFailureReason::LaneClosed,
+                        },
+                    ))
+                    .await;
+                Err(router_error_response(
+                    actors::router::RouterError::UploadForwardFailed {
+                        agent_id: self.agent_id.to_string(),
+                        request_id: self.request_id.to_string(),
+                    },
+                ))
+            }
+        }
     }
 
     /// Hands edit terminal ownership to the router, then awaits destination completion.
@@ -304,10 +352,7 @@ impl AgentUpload {
             self.commit_edit().await?;
         } else {
             let payload_kind = self.payload_kind();
-            forward_split_stream_chunk(
-                &self.state,
-                &self.agent_id,
-                &mut self.chunk_index,
+            self.forward(
                 StreamChunkFrameRequest::new(self.request_id, &[]).payload_kind(payload_kind),
             )
             .await?;
@@ -451,66 +496,6 @@ impl Drop for UploadCancelGuard {
             }
         });
     }
-}
-
-/// Reframes one upload-side payload into bounded transfer chunks and forwards
-/// them to the destination agent in order.
-async fn forward_split_stream_chunk(
-    state: &ServerState,
-    agent_id: &AgentId,
-    chunk_index: &mut ChunkIndex,
-    request: StreamChunkFrameRequest<'_>,
-) -> Result<(), Response> {
-    let is_error = request.is_error_flag();
-    let is_last = request.is_last_flag();
-    let mut frames = redoor_protocol::wire::stream::StreamChunkFrames::new(
-        request.starting_chunk_index(*chunk_index),
-    );
-
-    while let Some(chunk) = frames.next() {
-        let next_chunk_index = frames.next_chunk_index();
-        match state
-            .router_ref
-            .request(30000, |reply| {
-                actors::router::RouterMsg::SendStreamChunkToAgent(
-                    actors::router::SendStreamChunkRequest {
-                        agent_id: agent_id.clone(),
-                        request_id: chunk.request_id,
-                        chunk,
-                        reply,
-                    },
-                )
-            })
-            .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                *chunk_index = next_chunk_index;
-                return Err(router_error_response(error));
-            }
-            Err(error) => {
-                *chunk_index = next_chunk_index;
-                let action = if is_last {
-                    "final upload chunk"
-                } else if is_error {
-                    "upload abort chunk"
-                } else {
-                    "upload chunk"
-                };
-
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to forward {}: {:?}", action, error),
-                    }),
-                )
-                    .into_response());
-            }
-        }
-    }
-
-    *chunk_index = frames.next_chunk_index();
-    Ok(())
 }
 
 /// Route: `PUT /api/v1/agents/{agent}/raw/{*path}`

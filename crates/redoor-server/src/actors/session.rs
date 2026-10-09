@@ -1,6 +1,6 @@
 use crate::actors::router::{
-    RegisterAgentRequest, RouteResponse, RouteTransferReadyRequest, RouterHandle, RouterMsg,
-    TransferProgressUpdateRequest,
+    ConnectionStreams, RegisterAgentRequest, RouteResponse, RouteTransferReadyRequest,
+    RouterHandle, RouterMsg, TransferProgressUpdateRequest,
 };
 use crate::watchdog::{WatchdogHandle, WatchdogRegistry};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
@@ -65,6 +65,9 @@ struct SessionRuntime {
     watchdog: Option<WatchdogHandle>,
     /// Expected top-level `agent_token`; registration without this secret is rejected.
     agent_token: String,
+    /// Payload stream tables of the registered session; credit the agent returns for
+    /// server-to-agent streams is applied here directly, never through the router mailbox.
+    streams: Option<ConnectionStreams>,
 }
 
 impl SessionRuntime {
@@ -91,7 +94,7 @@ impl SessionRuntime {
                 supports_move_to_trash,
                 uid,
                 is_root,
-                supports_stream_credit: _,
+                supports_stream_credit,
             } => {
                 // Reject impostors before name takeover: an unauthenticated client
                 // that only knows an agent name must not replace a live connection.
@@ -150,6 +153,8 @@ impl SessionRuntime {
                     );
                 }
 
+                let streams = ConnectionStreams::new(agent_id.clone(), supports_stream_credit);
+                self.streams = Some(streams.clone());
                 // Registration installs the routing entry every later frame depends on, so a
                 // momentarily full mailbox must delay it rather than silently drop it.
                 if let Err(error) = self
@@ -175,6 +180,7 @@ impl SessionRuntime {
                         is_root,
                         watchdog: self.watchdog.clone(),
                         watchdog_attempt_generation,
+                        streams,
                     }))
                     .await
                 {
@@ -272,14 +278,10 @@ impl SessionRuntime {
                         .await;
                 }
             }
-            AgentToServer::StreamCredit { request_id, .. } => {
-                // Only sent after the server confirmed credit, which this build never does.
-                log!(
-                    Level::Debug,
-                    "Ignoring unrequested stream credit: socket_id={}, request_id={}",
-                    self.socket_id,
-                    request_id
-                );
+            AgentToServer::StreamCredit { request_id, frames } => {
+                if let Some(streams) = &self.streams {
+                    streams.grant_outbound(request_id, frames);
+                }
             }
             AgentToServer::TransferProgressUpdate {
                 agent_id,
@@ -390,6 +392,7 @@ pub async fn handle_websocket(
         outgoing_priority: tx_out_priority,
         watchdog: None,
         agent_token,
+        streams: None,
     };
 
     log!(Level::Info, "Session started: socket_id={}", socket_id);
@@ -530,6 +533,7 @@ mod tests {
             outgoing_priority,
             watchdog: None,
             agent_token: "token".to_string(),
+            streams: None,
         };
         let watchdog_registry = WatchdogRegistry::new();
         let response = runtime.handle_control_message(
@@ -579,6 +583,7 @@ mod tests {
             outgoing_priority,
             watchdog: None,
             agent_token: "token".to_string(),
+            streams: None,
         };
 
         let shutdown_task = tokio::spawn(runtime.shutdown());
