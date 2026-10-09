@@ -31,6 +31,14 @@ const STARTUP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_EXIT_DIAGNOSTIC_BYTES: u64 = 8 * 1024;
 /// Supervisor mailbox size; senders wait (rather than grow memory) while a child is reaped.
 const SUPERVISOR_COMMAND_CAPACITY: usize = 16;
+/// Longest a lifecycle request waits for a mailbox slot. HTTP handlers call the watchdog
+/// while holding the configuration lock, so a wedged supervisor must surface as a busy error
+/// instead of stalling every lifecycle and configuration route behind that lock.
+const COMMAND_RESERVE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an exited child's stderr may stay open before its diagnostic is given up. A
+/// `ProxyCommand` grandchild can inherit the pipe and keep it open long after the child
+/// died, and the supervisor must not stop processing commands while it waits.
+const CHILD_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Why one spawn attempt produced no child.
 ///
@@ -76,6 +84,12 @@ pub enum WatchdogError {
     /// Another supervisor already owns this name.
     #[error("Watchdog key already registered: key={key}")]
     AlreadyRegistered {
+        /// Supervisor key (effective agent name).
+        key: String,
+    },
+    /// The supervisor did not accept the request in time (it is busy reaping or wedged).
+    #[error("Watchdog supervisor is busy: {key}")]
+    Busy {
         /// Supervisor key (effective agent name).
         key: String,
     },
@@ -234,13 +248,35 @@ impl WatchdogHandle {
     ///
     /// Reserving before taking the snapshot lock lets the generation bump and the send
     /// happen atomically under that (synchronous) lock.
+    /// The wait is bounded by `COMMAND_RESERVE_TIMEOUT` so callers holding locks recover.
     async fn reserve(&self) -> Result<mpsc::Permit<'_, SupervisorCommand>, WatchdogError> {
-        self.commands
-            .reserve()
-            .await
-            .map_err(|_| WatchdogError::SupervisorStopped {
+        match tokio::time::timeout(COMMAND_RESERVE_TIMEOUT, self.commands.reserve()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) => Err(WatchdogError::SupervisorStopped {
                 key: self.key.clone(),
-            })
+            }),
+            Err(_) => Err(WatchdogError::Busy {
+                key: self.key.clone(),
+            }),
+        }
+    }
+
+    /// Delivers a socket event without making the caller wait for the supervisor.
+    ///
+    /// Socket teardown and stale detection run on websocket session tasks; blocking them on a
+    /// busy supervisor would delay the router unregister of that session. When the mailbox is
+    /// full the event is handed to a task that waits for capacity, so it is still delivered
+    /// (the supervisor ignores events of sockets that are no longer current).
+    fn notify(&self, command: SupervisorCommand) {
+        match self.commands.try_send(command) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                let commands = self.commands.clone();
+                tokio::spawn(async move {
+                    let _ = commands.send(command).await;
+                });
+            }
+        }
     }
 
     /// Requests desired-running and immediately publishes an optimistic starting state.
@@ -321,11 +357,8 @@ impl WatchdogHandle {
     }
 
     /// Reports socket teardown while letting the supervisor ignore stale generations.
-    pub async fn mark_disconnected(&self, socket_id: SocketId) {
-        let _ = self
-            .commands
-            .send(SupervisorCommand::Disconnected(socket_id))
-            .await;
+    pub fn mark_disconnected(&self, socket_id: SocketId) {
+        self.notify(SupervisorCommand::Disconnected(socket_id));
     }
 
     /// Runs a registration commit while shutdown is unable to revoke desired-running.
@@ -347,11 +380,8 @@ impl WatchdogHandle {
     }
 
     /// Requests restart only if the stale WebSocket is still the current generation.
-    pub async fn signal_stale(&self, socket_id: SocketId) {
-        let _ = self
-            .commands
-            .send(SupervisorCommand::Stale(socket_id))
-            .await;
+    pub fn signal_stale(&self, socket_id: SocketId) {
+        self.notify(SupervisorCommand::Stale(socket_id));
     }
 
     /// Mutates the live snapshot under one lock so progress reports cannot drop sibling fields.
@@ -448,8 +478,9 @@ impl WatchdogRegistry {
     /// Removes a dormant supervisor after callers verify it has no running intent.
     ///
     /// The map entry is removed under the registry lock; the `Remove` command is sent
-    /// afterwards because waiting for mailbox space must not hold a std mutex.
-    pub async fn remove_stopped(&self, key: &str) -> Result<(), WatchdogError> {
+    /// afterwards (deferred to a task when the mailbox is full) because waiting for mailbox
+    /// space must neither hold a std mutex nor stall the configuration route calling this.
+    pub fn remove_stopped(&self, key: &str) -> Result<(), WatchdogError> {
         let handle = {
             let mut map = self.inner.lock().expect("watchdog registry poisoned");
             let Some(handle) = map.get(key) else {
@@ -462,7 +493,7 @@ impl WatchdogRegistry {
             map.remove(key)
         };
         if let Some(handle) = handle {
-            let _ = handle.commands.send(SupervisorCommand::Remove).await;
+            handle.notify(SupervisorCommand::Remove);
         }
         Ok(())
     }
@@ -723,7 +754,7 @@ async fn wait_for_child(
     loop {
         tokio::select! {
             status = child.wait() => {
-                let stderr = read_child_diagnostic(stderr_reader).await;
+                let stderr = read_child_diagnostic(stderr_reader, CHILD_DIAGNOSTIC_TIMEOUT).await;
                 let issue = format_exit_issue(
                     status,
                     diagnostic_log,
@@ -1002,13 +1033,27 @@ async fn format_exit_issue(
 }
 
 /// Resolves a completed stderr reader without replacing the process status on read failure.
+///
+/// The read waits for EOF, which a surviving grandchild holding the pipe can postpone
+/// indefinitely, so it is bounded by `timeout`; the caller then falls back to the configured
+/// diagnostic log.
 async fn read_child_diagnostic(
     reader: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
+    timeout: Duration,
 ) -> Option<Vec<u8>> {
-    match reader?.await {
-        Ok(Ok(output)) => Some(output),
-        Ok(Err(error)) => Some(format!("Failed to read process output: {error}").into_bytes()),
-        Err(error) => Some(format!("Process output task failed: {error}").into_bytes()),
+    let mut reader = reader?;
+    match tokio::time::timeout(timeout, &mut reader).await {
+        Ok(Ok(Ok(output))) => Some(output),
+        Ok(Ok(Err(error))) => Some(format!("Failed to read process output: {error}").into_bytes()),
+        Ok(Err(error)) => Some(format!("Process output task failed: {error}").into_bytes()),
+        Err(_) => {
+            reader.abort();
+            log!(
+                Level::Warning,
+                "Process output stayed open after exit; skipping its diagnostic"
+            );
+            None
+        }
     }
 }
 
@@ -1108,16 +1153,10 @@ mod tests {
         );
 
         // The first removal must drop the handle so replacement can register the same key.
-        registry
-            .remove_stopped("removed")
-            .await
-            .expect("first remove");
+        registry.remove_stopped("removed").expect("first remove");
         assert!(registry.lookup("removed").is_none());
         // A retry after a partial persist-then-remove must not fail just because the handle is gone.
-        registry
-            .remove_stopped("removed")
-            .await
-            .expect("retry remove");
+        registry.remove_stopped("removed").expect("retry remove");
     }
 
     #[tokio::test]
@@ -1468,7 +1507,7 @@ mod tests {
         assert!(handle.mark_connected(old_socket.clone()).await.is_some());
         assert!(handle.mark_connected(new_socket.clone()).await.is_some());
         wait_until(|| handle.snapshot().socket_id.as_ref() == Some(&new_socket)).await;
-        handle.mark_disconnected(old_socket).await;
+        handle.mark_disconnected(old_socket);
         assert!(handle.mark_connected(fence_socket.clone()).await.is_some());
         wait_until(|| {
             snapshots
@@ -1550,7 +1589,7 @@ mod tests {
         );
         wait_until(|| handle.snapshot().socket_id.as_ref() == Some(&replacement_socket)).await;
 
-        handle.signal_stale(old_socket).await;
+        handle.signal_stale(old_socket);
         // This connection acts as a queue fence after the stale event without pre-checking state.
         assert!(handle.mark_connected(fence_socket.clone()).await.is_some());
         wait_until(|| handle.snapshot().socket_id.as_ref() == Some(&fence_socket)).await;
@@ -1560,7 +1599,7 @@ mod tests {
         // Ignoring an old generation must not publish a misleading lifecycle issue.
         assert_eq!(handle.snapshot().connection_issue, None);
 
-        handle.signal_stale(fence_socket).await;
+        handle.signal_stale(fence_socket);
         wait_until(|| {
             handle.snapshot().connection_issue.as_deref() == Some("Agent connection went stale")
         })
@@ -1646,27 +1685,54 @@ mod tests {
     /// A full supervisor mailbox makes lifecycle events wait instead of growing memory or
     /// silently dropping a disconnect the supervisor must see.
     #[tokio::test]
-    async fn full_mailbox_backpressures_instead_of_dropping() {
+    async fn full_mailbox_defers_socket_events_instead_of_dropping() {
         let registry = WatchdogRegistry::new();
         let (handle, mut commands) = registry.register("busy".into(), callback()).unwrap();
         for _ in 0..SUPERVISOR_COMMAND_CAPACITY {
-            handle.mark_disconnected(SocketId::new()).await;
+            handle.mark_disconnected(SocketId::new());
         }
-        let blocked_socket = SocketId::new();
-        let mut blocked = std::pin::pin!(handle.mark_disconnected(blocked_socket.clone()));
-        // The bounded mailbox is full, so the next event must wait for the supervisor.
-        assert!(futures_util::poll!(&mut blocked).is_pending());
+        let deferred_socket = SocketId::new();
+        // The mailbox is full, yet the session reporting teardown must not wait for it.
+        handle.mark_disconnected(deferred_socket.clone());
         commands.recv().await.expect("a queued command");
-        blocked.await;
         let mut last = None;
-        while let Ok(command) = commands.try_recv() {
-            last = Some(command);
+        while last.is_none()
+            || !matches!(&last, Some(SupervisorCommand::Disconnected(socket)) if *socket == deferred_socket)
+        {
+            last = Some(commands.recv().await.expect("deferred event delivered"));
         }
-        // Once space frees up the waiting event is delivered, last and intact.
+        // Once space frees up the deferred event is delivered intact.
         assert!(matches!(
             last,
-            Some(SupervisorCommand::Disconnected(socket)) if socket == blocked_socket
+            Some(SupervisorCommand::Disconnected(socket)) if socket == deferred_socket
         ));
+    }
+
+    /// Lifecycle requests give up with a busy error instead of hanging the HTTP handlers (and
+    /// the configuration lock they hold) behind a wedged supervisor.
+    #[tokio::test(start_paused = true)]
+    async fn full_mailbox_bounds_lifecycle_requests() {
+        let registry = WatchdogRegistry::new();
+        let (handle, _commands) = registry.register("wedged".into(), callback()).unwrap();
+        for _ in 0..SUPERVISOR_COMMAND_CAPACITY {
+            handle.mark_disconnected(SocketId::new());
+        }
+        // Paused time auto-advances to the reserve deadline while nothing drains the mailbox.
+        assert!(matches!(
+            handle.start().await,
+            Err(WatchdogError::Busy { key }) if key == "wedged"
+        ));
+    }
+
+    /// A stderr pipe kept open by a surviving grandchild must not stall the supervisor.
+    #[tokio::test(start_paused = true)]
+    async fn child_diagnostic_read_is_bounded() {
+        let reader = tokio::spawn(std::future::pending::<std::io::Result<Vec<u8>>>());
+        // Paused time advances to the deadline; the diagnostic is skipped, not awaited forever.
+        assert_eq!(
+            read_child_diagnostic(Some(reader), CHILD_DIAGNOSTIC_TIMEOUT).await,
+            None
+        );
     }
 
     /// Spawn failures keep their class for logs but show only the transport text in the UI.

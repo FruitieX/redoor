@@ -369,20 +369,20 @@ impl ServerRuntime {
     /// Serves HTTP until the restart route fires, then stops every managed child.
     ///
     /// Exec preserves process memory rather than dropping Rust values, so children are
-    /// stopped and reaped here; the new process recreates the inventory dormant.
+    /// stopped and reaped here; the new process recreates the inventory dormant. A failed
+    /// serve stops them too, so an erroring server never leaves SSH agents orphaned.
     async fn serve_until_restart(self) -> Result<()> {
         let shutdown = self.shutdown;
-        axum::serve(
+        let served = axum::serve(
             self.listener,
             self.app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async {
             shutdown.await.ok();
         })
-        .await
-        .context("HTTP server failed")?;
+        .await;
         self.watchdogs.shutdown_all().await;
-        Ok(())
+        served.context("HTTP server failed")
     }
 }
 

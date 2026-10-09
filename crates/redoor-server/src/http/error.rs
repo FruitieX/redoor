@@ -101,6 +101,7 @@ impl From<crate::watchdog::WatchdogError> for ApiError {
     fn from(error: crate::watchdog::WatchdogError) -> Self {
         let status = match error {
             crate::watchdog::WatchdogError::StillRunning => StatusCode::CONFLICT,
+            crate::watchdog::WatchdogError::Busy { .. } => StatusCode::SERVICE_UNAVAILABLE,
             crate::watchdog::WatchdogError::SupervisorStopped { .. }
             | crate::watchdog::WatchdogError::AcknowledgementDropped { .. }
             | crate::watchdog::WatchdogError::AlreadyRegistered { .. } => {

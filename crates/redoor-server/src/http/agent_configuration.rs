@@ -290,7 +290,7 @@ impl ManagedAgentKind {
 
 /// Removes the dormant supervisor and retained router inventory together.
 async fn unregister_runtime_agent(state: &ServerState, agent_id: &str) -> Result<(), ApiError> {
-    state.watchdog_registry.remove_stopped(agent_id).await?;
+    state.watchdog_registry.remove_stopped(agent_id)?;
     state
         .router_ref
         .request(|reply| {
