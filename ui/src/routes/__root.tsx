@@ -876,8 +876,7 @@ function getTransferSummary(transfers: TransferProgressEntry[]) {
             "canceled",
         ],
     ]
-        .filter(([count]) => count !== 0)
-        .map(([count, label]) => `${count} ${label}`)
+        .flatMap(([count, label]) => (count !== 0 ? [`${count} ${label}`] : []))
         .join(", ");
 }
 

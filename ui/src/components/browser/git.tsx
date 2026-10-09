@@ -32,43 +32,47 @@ export function groupGitStatusEntries(entries: GitStatusEntry[]) {
         (entry) => entry.conflict_state === null,
     );
 
-    const conflicts: GitStatusItem[] = entries
-        .filter((entry) => entry.conflict_state !== null)
-        .map((entry) => ({ entry, state: "conflicted" }));
+    const conflicts = entries.flatMap<GitStatusItem>((entry) =>
+        entry.conflict_state !== null ? [{ entry, state: "conflicted" }] : [],
+    );
 
-    const untracked: GitStatusItem[] = ordinaryEntries
-        .filter(
-            (entry) =>
-                entry.index_state === "unmodified" &&
-                entry.worktree_state === "added",
-        )
-        .map((entry) => ({ entry, state: "untracked" }));
+    const untracked = ordinaryEntries.flatMap<GitStatusItem>((entry) =>
+        entry.index_state === "unmodified" && entry.worktree_state === "added"
+            ? [{ entry, state: "untracked" }]
+            : [],
+    );
 
-    const staged: GitStatusItem[] = ordinaryEntries
-        .filter((entry) => entry.index_state !== "unmodified")
-        .map((entry) => ({ entry, state: entry.index_state }));
+    const staged = ordinaryEntries.flatMap<GitStatusItem>((entry) =>
+        entry.index_state !== "unmodified"
+            ? [{ entry, state: entry.index_state }]
+            : [],
+    );
 
-    const unstaged: GitStatusItem[] = ordinaryEntries
-        .filter(
-            (entry) =>
-                entry.worktree_state !== "unmodified" &&
-                !untracked.some((item) => item.entry.path === entry.path),
-        )
-        .map((entry) => ({ entry, state: entry.worktree_state }));
+    const unstaged = ordinaryEntries.flatMap<GitStatusItem>((entry) =>
+        entry.worktree_state !== "unmodified" &&
+        !untracked.some((item) => item.entry.path === entry.path)
+            ? [{ entry, state: entry.worktree_state }]
+            : [],
+    );
 
     const seenPaths = new Set<string>();
 
-    const diffEntries = [...conflicts, ...staged, ...unstaged, ...untracked]
-        .map((item) => item.entry)
-        .filter((entry) => {
-            if (seenPaths.has(entry.path)) {
-                return false;
-            }
+    const diffEntries = [
+        ...conflicts,
+        ...staged,
+        ...unstaged,
+        ...untracked,
+    ].flatMap((item) => {
+        const entry = item.entry;
 
-            seenPaths.add(entry.path);
+        if (seenPaths.has(entry.path)) {
+            return [];
+        }
 
-            return true;
-        });
+        seenPaths.add(entry.path);
+
+        return [entry];
+    });
 
     return { conflicts, staged, unstaged, untracked, diffEntries };
 }

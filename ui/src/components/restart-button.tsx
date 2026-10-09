@@ -1,6 +1,7 @@
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
+import type { RestartResponse } from "#ui/api-client";
 
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
@@ -14,7 +15,7 @@ function restartErrorMessage(cause: unknown): string {
 export function RestartButton(props: {
     target: string;
     description: React.ReactNode;
-    restart: () => Promise<unknown>;
+    restart: () => Promise<RestartResponse>;
     waitUntilReady: () => Promise<void>;
     className?: string;
     ariaLabel?: string;
@@ -77,7 +78,7 @@ export function RestartButton(props: {
 
 /** Polls a target-specific probe until it proves the replacement process is ready. */
 export async function waitForRestart(
-    probe: () => Promise<unknown>,
+    probe: () => Promise<void>,
     timeoutMessage: string,
 ): Promise<void> {
     const startedAt = Date.now();

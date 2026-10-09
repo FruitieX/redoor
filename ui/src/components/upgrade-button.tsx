@@ -2,7 +2,7 @@ import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { PackageOpen } from "lucide-react";
 
-import type { ServerInfoResponse } from "#ui/api-client";
+import type { ServerInfoResponse, UpgradeAgentResponse } from "#ui/api-client";
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
 import { InputControl } from "./input-control";
@@ -16,8 +16,8 @@ type UpgradeButtonProps = {
     agentExePath: string;
     supportsSelfExec: boolean;
     serverInfo: ServerInfoResponse;
-    upgrade: (targetVersion: string) => Promise<unknown>;
-    forceInstallRunningBinary: () => Promise<unknown>;
+    upgrade: (targetVersion: string) => Promise<UpgradeAgentResponse>;
+    forceInstallRunningBinary: () => Promise<UpgradeAgentResponse>;
     waitUntilReady: (
         targetVersion: string,
         requireServerIdentity: boolean,
