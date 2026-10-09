@@ -254,10 +254,10 @@ pub(crate) fn start(state: &mut RouterState, request: StartCopyRequest) {
                         explicitly_canceled: false,
                         kind: match request.content_kind {
                             super::super::state::CopyContentKind::RawFile => {
-                                super::super::state::DirectUploadKind::RawUpload
+                                redoor_protocol::wire::policy::UploadKind::RawUpload
                             }
                             super::super::state::CopyContentKind::TarDirectory => {
-                                super::super::state::DirectUploadKind::TarUpload
+                                redoor_protocol::wire::policy::UploadKind::TarUpload
                             }
                         },
                     },
@@ -361,10 +361,10 @@ pub(crate) fn start(state: &mut RouterState, request: StartCopyRequest) {
                     explicitly_canceled: false,
                     kind: match request.content_kind {
                         super::super::state::CopyContentKind::RawFile => {
-                            super::super::state::DirectUploadKind::RawUpload
+                            redoor_protocol::wire::policy::UploadKind::RawUpload
                         }
                         super::super::state::CopyContentKind::TarDirectory => {
-                            super::super::state::DirectUploadKind::TarUpload
+                            redoor_protocol::wire::policy::UploadKind::TarUpload
                         }
                     },
                 },

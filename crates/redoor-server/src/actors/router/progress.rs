@@ -1,11 +1,12 @@
 use super::RouterError;
-use super::state::{DirectUpload, DirectUploadKind, RouterState, TransferProgressStore};
+use super::state::{DirectUpload, RouterState, TransferProgressStore};
 use super::ui;
 use redoor_protocol::api::transfers::{
     CopyEndpoint, TransferDirection, TransferProgressEntry, TransferProgressListResponse,
     TransferProgressState,
 };
 use redoor_protocol::ids::{AgentId, RequestId, TransferId, UnixTimestampSeconds};
+use redoor_protocol::wire::policy::UploadKind;
 
 /// Recent history stays useful without growing with the server lifetime.
 const MAX_TERMINAL_HISTORY: usize = 1000;
@@ -129,7 +130,7 @@ pub(crate) struct UploadStartContext {
     pub(crate) ready_sender:
         tokio::sync::oneshot::Sender<Result<super::messages::UploadStartOutcome, RouterError>>,
     /// Controls completion matching and the public transfer direction.
-    pub(crate) kind: DirectUploadKind,
+    pub(crate) kind: UploadKind,
 }
 
 /// Inputs needed to register a new copy transfer in progress tracking.

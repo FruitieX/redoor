@@ -5,6 +5,7 @@ use axum::extract::ws::Message as WsMessage;
 use redoor_protocol::ids::{
     AgentId, ChunkIndex, RequestId, SocketId, TransferId, UnixTimestampSeconds,
 };
+use redoor_protocol::wire::policy::UploadKind;
 use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
 use redoor_protocol::{
     api::{agents::AgentConnectionStatus, transfers::TransferProgressEntry},
@@ -212,47 +213,7 @@ pub struct DirectUpload {
     /// Distinguishes an explicit user action from an implicit disconnected HTTP producer.
     pub(crate) explicitly_canceled: bool,
     /// Defines public progress semantics and the only accepted successful result.
-    pub(crate) kind: DirectUploadKind,
-}
-
-/// Distinguishes direct inbound byte streams that share transport but not publication semantics.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DirectUploadKind {
-    RawUpload,
-    TarUpload,
-    EditFile,
-}
-
-impl DirectUploadKind {
-    /// Derives direct-write semantics from the command sent to the destination agent.
-    pub(crate) fn from_command(command: &Command) -> Option<Self> {
-        match command {
-            Command::RawUpload { .. } => Some(Self::RawUpload),
-            Command::TarUpload { .. } => Some(Self::TarUpload),
-            Command::EditFile { .. } => Some(Self::EditFile),
-            _ => None,
-        }
-    }
-
-    /// Selects the direction exposed through transfer progress APIs.
-    pub(crate) fn direction(self) -> redoor_protocol::api::transfers::TransferDirection {
-        match self {
-            Self::RawUpload | Self::TarUpload => {
-                redoor_protocol::api::transfers::TransferDirection::Upload
-            }
-            Self::EditFile => redoor_protocol::api::transfers::TransferDirection::Edit,
-        }
-    }
-
-    /// Ensures one stream cannot be completed by another write operation's response.
-    pub(crate) fn completion_matches(self, result: &CommandResult) -> bool {
-        matches!(
-            (self, result),
-            (Self::RawUpload, CommandResult::RawUpload)
-                | (Self::TarUpload, CommandResult::TarUpload)
-                | (Self::EditFile, CommandResult::EditFile)
-        )
-    }
+    pub(crate) kind: UploadKind,
 }
 
 #[derive(Default)]

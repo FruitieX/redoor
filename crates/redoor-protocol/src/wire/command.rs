@@ -380,6 +380,24 @@ pub struct MoveSourceIdentity {
     pub is_directory: bool,
 }
 
+impl MoveSourceIdentity {
+    /// Captures the identity from one metadata read so every move, trash restore and conditional
+    /// source deletion compares the same fields.
+    #[cfg(unix)]
+    pub fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            is_directory: metadata.is_dir(),
+        }
+    }
+}
+
 /// Returns move-specific metadata without exposing filesystem identity through the public API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveMetadataResult {

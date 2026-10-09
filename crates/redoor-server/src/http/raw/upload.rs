@@ -154,8 +154,9 @@ impl AgentUpload {
         path: String,
         total_bytes: u64,
     ) -> Result<Self, AgentUploadStartError> {
-        let is_edit = matches!(command, Command::EditFile { .. });
-        let is_tar = matches!(command, Command::TarUpload { .. });
+        let upload_kind = command.policy().upload_kind();
+        let is_edit = upload_kind == Some(redoor_protocol::wire::policy::UploadKind::EditFile);
+        let is_tar = upload_kind == Some(redoor_protocol::wire::policy::UploadKind::TarUpload);
         let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
         let (ready_sender, ready_receiver) = tokio::sync::oneshot::channel();
         let request_id = match state

@@ -6,11 +6,12 @@ use super::super::messages::{
     StartUploadRequest, UploadStartOutcome,
 };
 use super::super::progress::{self, UploadStartContext};
-use super::super::state::{DirectUploadKind, RouterState};
+use super::super::state::RouterState;
 use super::super::ui;
 use redoor_core::log;
 use redoor_protocol::wire::command::CommandResult;
 use redoor_protocol::wire::log::Level;
+use redoor_protocol::wire::policy::UploadKind;
 use redoor_protocol::{ids::AgentId, wire::Message};
 
 /// Reserves the irreversible boundary only for the live destination worker, never after cancellation.
@@ -34,7 +35,7 @@ fn authorize_publication(
         public_id
     } else if let Some(upload) = state.streams.uploads.get(&request_id) {
         if &upload.agent_id != agent_id
-            || upload.kind == DirectUploadKind::EditFile
+            || upload.kind == UploadKind::EditFile
             || upload.canceled_by_rest
         {
             return false;
@@ -84,7 +85,7 @@ pub(crate) fn begin_publication(
 /// before waiting for destination readiness on a separate channel.
 pub(crate) fn start(state: &mut RouterState, request: StartUploadRequest) {
     let request_id = state.next_id();
-    let Some(kind) = DirectUploadKind::from_command(&request.command) else {
+    let Some(kind) = request.command.policy().upload_kind() else {
         let _ = request.reply.send(Err(RouterError::UnexpectedResponseType {
             operation: "starting direct upload command",
         }));
@@ -209,7 +210,7 @@ fn validate_commit(
             request_id: request.request_id.to_string(),
         });
     }
-    if upload.kind != DirectUploadKind::EditFile {
+    if upload.kind != UploadKind::EditFile {
         return Err(RouterError::UnexpectedResponseType {
             operation: "beginning edit commit",
         });
@@ -615,7 +616,7 @@ mod tests {
             let source_id = RequestId::new(61);
             let public_id = redoor_protocol::ids::TransferId::new(60);
             let _completion =
-                record_direct_write(&mut state, destination_id, DirectUploadKind::TarUpload);
+                record_direct_write(&mut state, destination_id, UploadKind::TarUpload);
             let mut entry = state
                 .progress
                 .entries
@@ -670,7 +671,7 @@ mod tests {
     #[tokio::test]
     async fn publication_boundary_orders_cancellation_for_raw_and_tar_uploads() {
         redoor_core::logging::init(None).await.unwrap();
-        for kind in [DirectUploadKind::RawUpload, DirectUploadKind::TarUpload] {
+        for kind in [UploadKind::RawUpload, UploadKind::TarUpload] {
             let mut state = router_state();
             let request_id = RequestId::new(51);
             let _completion = record_direct_write(&mut state, request_id, kind);
@@ -718,7 +719,7 @@ mod tests {
     fn record_direct_write(
         state: &mut RouterState,
         request_id: RequestId,
-        kind: DirectUploadKind,
+        kind: UploadKind,
     ) -> tokio::sync::oneshot::Receiver<Result<CommandResult, RouterError>> {
         let (completion_sender, completion_receiver) = tokio::sync::oneshot::channel();
         let (ready_sender, _ready_receiver) = tokio::sync::oneshot::channel();
@@ -740,20 +741,20 @@ mod tests {
     #[test]
     fn direct_write_kinds_accept_only_their_own_success_result() {
         // Raw uploads must accept only replacement-upload completion.
-        assert!(DirectUploadKind::RawUpload.completion_matches(&CommandResult::RawUpload));
+        assert!(UploadKind::RawUpload.completion_matches(&CommandResult::RawUpload));
         // Tar uploads must not accept an editor completion on their shared transport.
-        assert!(!DirectUploadKind::TarUpload.completion_matches(&CommandResult::EditFile));
+        assert!(!UploadKind::TarUpload.completion_matches(&CommandResult::EditFile));
         // File edits must accept only the dedicated inode-rewrite completion.
-        assert!(DirectUploadKind::EditFile.completion_matches(&CommandResult::EditFile));
+        assert!(UploadKind::EditFile.completion_matches(&CommandResult::EditFile));
         // File edits must reject raw-upload success so the REST endpoint cannot report false success.
-        assert!(!DirectUploadKind::EditFile.completion_matches(&CommandResult::RawUpload));
+        assert!(!UploadKind::EditFile.completion_matches(&CommandResult::RawUpload));
     }
 
     #[tokio::test]
     async fn commit_validation_accepts_only_live_edit_terminals() {
         let mut state = router_state();
         let edit_id = RequestId::new(41);
-        let _edit_completion = record_direct_write(&mut state, edit_id, DirectUploadKind::EditFile);
+        let _edit_completion = record_direct_write(&mut state, edit_id, UploadKind::EditFile);
         let (edit_reply, _edit_reply_receiver) = tokio::sync::oneshot::channel();
         let edit_request = CommitDirectUploadRequest {
             agent_id: AgentId::from("agent-1"),
@@ -775,8 +776,7 @@ mod tests {
         assert!(edit_result.is_ok());
 
         let upload_id = RequestId::new(42);
-        let _upload_completion =
-            record_direct_write(&mut state, upload_id, DirectUploadKind::RawUpload);
+        let _upload_completion = record_direct_write(&mut state, upload_id, UploadKind::RawUpload);
         let (upload_reply, _upload_reply_receiver) = tokio::sync::oneshot::channel();
         let upload_request = CommitDirectUploadRequest {
             agent_id: AgentId::from("agent-1"),
@@ -817,8 +817,7 @@ mod tests {
         redoor_core::logging::init(None).await.unwrap();
         let mut state = router_state();
         let request_id = RequestId::new(43);
-        let completion_receiver =
-            record_direct_write(&mut state, request_id, DirectUploadKind::EditFile);
+        let completion_receiver = record_direct_write(&mut state, request_id, UploadKind::EditFile);
         state
             .streams
             .uploads
@@ -862,10 +861,10 @@ mod tests {
             path: "/tmp/file.txt".to_string(),
         };
 
-        let kind = DirectUploadKind::from_command(&command).unwrap();
+        let kind = command.policy().upload_kind().unwrap();
 
         // The wire command must retain edit identity throughout shared upload transport.
-        assert_eq!(kind, DirectUploadKind::EditFile);
+        assert_eq!(kind, UploadKind::EditFile);
         // Public progress must distinguish inode rewrites from replacement uploads.
         assert!(matches!(
             kind.direction(),

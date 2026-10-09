@@ -3,6 +3,7 @@
 pub mod command;
 pub mod exec;
 pub mod log;
+pub mod policy;
 pub mod stream;
 pub mod terminal;
 pub mod transfer;

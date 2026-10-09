@@ -959,7 +959,7 @@ mod tests {
                 ready: true,
                 canceled_by_rest: false,
                 explicitly_canceled: false,
-                kind: super::super::state::DirectUploadKind::RawUpload,
+                kind: redoor_protocol::wire::policy::UploadKind::RawUpload,
             },
         );
 
