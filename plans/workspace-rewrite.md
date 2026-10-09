@@ -578,3 +578,64 @@ Items 5–8 of Phase 3.
 - Remaining `Result<_, String>`: clap value parsers and `FromStr` impls (clap's convention), and
   agent command internals (download sources, platform mounts/accounts) whose string is the wire
   error message.
+
+### Final review fixes (done)
+
+- SSH provisioning (regressions from the split): the expected `--version` line came from the
+  server crate's package name (`redoor-server 0.1.36`), and the debug binary was looked up under
+  `crates/redoor-server/target`. `redoor_core::identity::{BINARY_NAME, BINARY_VERSION,
+  version_line()}` now feed both clap (`#[command(name, version)]`) and the check (unit test
+  compares `Cli::command().render_version()`), and `workspace_root()` climbs to the workspace
+  (unit-tested). The managed-SSH real test passed before only because the watchdog retry hit the
+  SHA-1 cache; it now requires one uploading attempt without any cache-hit message and, on x86_64
+  Linux, the local debug build (verified to fail on the old code).
+- `/ws` authentication: the session drops every frame except `agent_register` until a
+  registration with a valid token succeeded, routes later frames under its own agent id (frame ids
+  are only logged on mismatch) and tags them with its socket id. `RouteResponse`,
+  `RouteTransferReadyRequest`, `TransferProgressUpdateRequest` and `BeginUploadPublication` carry
+  `socket_id`; the router (`accepts_agent_frame`) ignores frames not from the agent's current
+  session and `finish_command` checks the owning agent. Integration test: an unauthenticated
+  client's forged `command_response` does not resolve a pending echo.
+- Router/server: `CopyFlow::involves` is phase-dependent (Remote: both agents; Local and
+  DeletingSource: source only); the tick's `prune_abandoned_commands` returns the removed commands
+  and the router cancels the request-scoped ones like `abandon_command` (shared
+  `cancel_abandoned`); `AgentCall::RUNS_TO_COMPLETION` (set for `RestoreTrash`) runs the call in a
+  detached task so a dropped HTTP request neither cancels nor prunes the restore; an upgrade upload
+  that completes before readiness answers 500 "Unexpected early upgrade upload completion"
+  (integration test with a fake agent: no `SelfExec`); `serve_until_restart` stops watchdog
+  children on serve errors too.
+- Watchdog: the exited child's stderr diagnostic read is bounded (2 s, then the log fallback);
+  `reserve()` gives up after 5 s with `WatchdogError::Busy` (503); retry acknowledgements are
+  bounded (10 s, 504) like shutdown; `mark_disconnected`, `signal_stale` and `remove_stopped` are
+  synchronous and defer to a task when the mailbox is full, so sessions never wait on a busy
+  supervisor. The configuration lock is still held across lifecycle calls (it serializes them
+  with config edits on purpose); every wait under it is now bounded.
+- Agent: the tar writer's result ends a directory download (`next_block` returns its error), so a
+  truncated archive sends an error frame (integration test with a socket member: body fails,
+  history `errored`); uploads unroute before `sink.abort()` and the transfer reader only answers
+  for workers that vanished while routed; early-cancel tombstones are capped at 1024 (oldest
+  evicted, `EarlyCancels`); host commands no longer build a full `sysinfo::System`; registry
+  rejections log "already running" vs "session limit reached".
+- Staging: `redoor_core::staging::reserve_unique` (retry only on `AlreadyExists`, 16 attempts)
+  and `StagingPath::create_sibling` (ownership after creation). Local file copies use
+  `create_new`, symlink/directory copies and tar uploads use `symlink`/`create_dir` as the
+  reservation, raw uploads and edits use the helper instead of their own loops, and the move
+  override hides the displaced destination with a no-replace rename instead of check-then-rename.
+  The move-source quarantine in `commands/fs.rs` keeps its own loop (deliberately avoids
+  renameat2; uuid names).
+- Passthrough wrappers removed: `CopyContext::ensure_active`,
+  `LocalCopyProgressReporter::ensure_active`, `enqueue_reconnect`, `prepare_daemon_config`
+  (`redoor_agent::locate_config` is public).
+- Config compatibility: `[[agents]]` rows ignore unknown keys again, logging
+  `Ignoring unknown key 'agents[N].key' in config file '…'` (`AGENT_ENTRY_KEYS`); type errors stay
+  errors. Duplicate managed names are checked by `RedoorConfig::ensure_unique_agent_names` in
+  server startup and the restart pre-validation only. Top-level, `[server]`, `[agent]` and
+  `[[relays]]` keep rejecting unknown keys (as the old code did).
+- Docs: doc comments for the remaining undocumented functions, methods, types, constants,
+  statics, type aliases and modules (mostly `redoor-protocol` ids/stream/api); `ProcessSlot`'s
+  dangling `///`.
+- Tests: full `pn test` green (second run; the first stopped at `pn lint` on spacing/typing rules
+  in the new test code, fixed, no test failures). Integration suite 358 passed / 7 skipped in a
+  separate full run. `REDOOR_SSH_TEST=1 REDOOR_SSH_TEST_PASSWORD=… pn integration-test
+  tests/real-ssh.test.ts`: 5/5 passed (password and root ownership cases included). Android and
+  macOS type-check clean with the Phase 2 recipe. No flakes.
