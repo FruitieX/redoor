@@ -73,6 +73,7 @@ if [ "$(uname -s)" = "Linux" ] && systemctl --user cat redoor-dev &>/dev/null; t
     silent_unless_error ./scripts/install-and-restart-redoor-dev
 fi
 silent_unless_error pn types
+silent_unless_error pn test:anti-slop
 silent_unless_error pn lint
 silent_unless_error pn format:check
 silent_unless_error cargo fmt -- --check
