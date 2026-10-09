@@ -220,3 +220,80 @@ in the "Log" section below.
 - Later phases: protocol still depends on anyhow (StreamChunk parsing) and thiserror;
   `rand_core` stays in core only to enable `getrandom` for argon2's `OsRng`; Android
   could not be type-checked locally (no NDK C toolchain for aws-lc-sys).
+
+### Phase 2 – Agent runtime (done)
+
+- `redoor-protocol::wire::policy`: `Command::policy() -> CommandPolicy { lane, cancel_scope,
+  exclusive }` with `CommandLane::{Control, Output, Upload(UploadKind)}`,
+  `CancelScope::{Connection, Request, Uninterruptible}` and `exclusive` (= serialized trash
+  mutations: Trash, EmptyTrash, RestoreTrash). One exhaustive match; unit tests check sample
+  coverage of every variant and consistency rules. `UploadKind` owns `direction()`,
+  `completion_matches()` and `payload_kind()`; the server's `DirectUploadKind` is gone and the
+  router/HTTP upload code reads `command.policy().upload_kind()`.
+- `wire::Message` split into `ServerToAgent` / `AgentToServer` (identical JSON, golden-string
+  tests). `ServerToAgent::unparsed_command_request_id` lets the agent answer an unparsable
+  `command` frame with `CommandResult::Error { kind: InvalidInput }`; other parse failures are
+  logged. Server matches are now exhaustive (an unreachable `_ => {}` disappeared).
+  `MoveSourceIdentity::from_metadata` replaces the two agent copies.
+- `redoor-core::staging`: `StagingKind` (one naming scheme `.{name}.{tag}-{random}`, temp-dir
+  names for edits) and `StagingPath` (owned, `discard().await` on failure paths, `keep()` after
+  publication, `Drop` spawns removal as the abort fallback). Override backups only borrow the
+  name generator (never drop-deleted, they may hold user data).
+- `redoor-agent` layout:
+  - `runtime/{mod, links, sessions, cancel, dispatch, responder}.rs`: `AgentRuntime` (event loop,
+    connect, frame handling) with `ControlLink` / `TransferLink` (generations, `attach`/`begin`/
+    `lose`/`invalidate`) and `Sessions` (request/terminal/log registries, early-cancel tombstones,
+    `invalidate_transfers()` / `invalidate()`); one `invalidate_connection()` replaces the two
+    clear-everything blocks. `AgentActor`, `AgentState`, `protocol.rs`, `messages.rs`, `raw/`
+    and `TerminalFinished`/`LogStreamFinished` messages are gone (RAII registrations).
+  - `CancelRegistry<K>` on `CancellationToken`: generation token per registry (child of the
+    control connection scope), per-key child tokens, RAII `Registration` (serial-checked drop),
+    `revoked()` token distinguishing teardown from a per-request cancel, optional capacity.
+    One request registry replaces the upload/download/local-transfer maps, so `cancel_transfer`
+    is a single lookup; file search / grep just get connection child tokens.
+  - `Dispatcher`: reads the policy once; admission (transfer link, 32-command cap that uploads
+    bypass), registration, early-cancel, exclusive lock, spawn into `commands`/`uploads`
+    JoinSets (both joined on teardown), abort of `Connection`-scope commands via
+    `run_until_cancelled`, and delivery of `Reply::{Result, Streamed, Fallback}`.
+  - `Responder` + typed `OutboundFrame { frame: ControlFrame, after_send: Option<PostSend> }`;
+    the control writer serializes and runs `PostSend::Reexec` only after a successful write
+    (tests use a recording closure). `Responder::recording()` / `CommandCtx::detached()` give
+    typed frames to unit tests.
+  - `commands/mod.rs`: `RunCommand for Command` is the only command match; implementations moved
+    to domain modules (`fs`, `host`, `git`, `file_search`, `content_grep`, `metadata`, trash,
+    transfers). `CommandHandler`, stub "handled by the runtime" arms and the dead
+    FileSearch/ContentGrep fallbacks are gone.
+  - `transfers/`: `UploadSink` trait + `UploadDriver` (raw `RawFileSink`, tar `TarDirectorySink`,
+    edit `EditSession`; `PublicationGate` and `UploadRoutes` for chunk/publication routing),
+    `ByteSource` trait + `DownloadDriver` (`FileRangeSource`, `TarDirectorySource`), and
+    `StreamWriter` (per-request framed writer used by downloads and exec). Cancel/failure order is
+    now uniform: stop -> abort/finish producer -> unregister -> respond.
+  - `trash/`: `TrashProvider` trait (boxed futures, "unsupported" defaults) with
+    `FreedesktopTrash` (Linux and Android), `MacTrash`, `UnsupportedTrash`; `Trash::select`
+    chooses once at startup. `platform/{mounts, accounts, identity}` holds the Android/Termux
+    constraints (no mount capacity, no per-mount trash discovery, empty account catalog).
+- Deviations / behavior notes:
+  - Downloads are now `Request`-scope cooperative instead of being dropped on disconnect; their
+    terminal error frame is raced against `revoked()` so teardown never waits on a full queue.
+  - Upload setup (destination checks, staging creation) runs in the spawned upload task instead
+    of inline in the actor; readiness is still sent only after the chunk route exists.
+  - Duplicate request ids answer `AlreadyExists "Request is already running for request_id=N"`.
+  - Every `Reply::Result` logs "Command complete"; the "Received transfer cancel from server"
+    log line is kept for any registry hit (tests wait for it).
+  - Android and macOS were type-checked locally with `cargo check --target
+    aarch64-linux-android` / `aarch64-apple-darwin` using a no-op C compiler and archiver for
+    aws-lc-sys (`CC_<target>=fakecc AR_<target>=fakear AWS_LC_SYS_NO_ASM=1
+    AWS_LC_SYS_CMAKE_BUILDER=0`; the fake tools write empty objects/archives, which works because
+    `check` never links). `redoor-core`'s lib tests still reference a non-Android function on
+    Android (pre-existing; non-test targets are clean).
+- Notes for Phase 3:
+  - Credit gate: `transfers::stream::StreamWriter::send_frames` is the only egress for
+    agent-to-server payload frames (downloads and exec). Put the "await credit for one frame"
+    immediately before each `transfer.send(...)` there; the writer already knows its request id.
+    A credit grant can be routed like publication decisions (a map in `AgentServices` keyed by
+    request id, fed from a new `ServerToAgent::StreamCredit` arm in
+    `AgentRuntime::handle_server_frame`).
+  - Server should drive admission/flow kind from `Command::policy()`: `requires_transfer()` for
+    the transfer-link check, `upload_kind()` for upload flows (done), `lane == Output` for
+    output-stream flows (the `streaming::start` command/tracking validation still uses
+    `matches!`), and `cancel_scope == Request` to decide whether `cancel_transfer` is meaningful.
