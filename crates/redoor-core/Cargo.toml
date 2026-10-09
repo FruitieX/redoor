@@ -1,0 +1,30 @@
+[package]
+name = "redoor-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Exposes `test_support` to other crates' tests without shipping it in release builds.
+test-support = []
+
+[dependencies]
+redoor-protocol.workspace = true
+anyhow.workspace = true
+argon2.workspace = true
+fastrand.workspace = true
+libc.workspace = true
+nix.workspace = true
+# Not referenced directly: enables `getrandom` for the `OsRng` re-exported through argon2.
+rand_core.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml_edit.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+jiff.workspace = true

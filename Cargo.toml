@@ -1,13 +1,18 @@
-[package]
-name = "redoor"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.36"
 edition = "2024"
 
-[[bin]]
-name = "redoor"
-path = "src/main.rs"
+[workspace.dependencies]
+redoor-protocol = { path = "crates/redoor-protocol" }
+redoor-core = { path = "crates/redoor-core" }
+redoor-agent = { path = "crates/redoor-agent" }
+redoor-server = { path = "crates/redoor-server" }
+redoor-cli = { path = "crates/redoor-cli" }
 
-[dependencies]
 tokio = { version = "1.53.1", features = ["full"] }
 axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
@@ -57,18 +62,9 @@ grep-regex = "0.1.14"
 gix = { version = "0.87.0", default-features = false, features = ["status", "parallel", "sha1"] }
 # Names status-walk enums returned by gix without enabling any additional Git capabilities.
 gix-dir = "0.29.0"
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
 mountpoints = "0.2.1"
-
-[target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.9.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "FoundationErrors", "NSError", "NSFileManager", "NSObject", "NSString", "NSURL"] }
-
-[dev-dependencies]
-tokio = { version = "1.53.1", features = ["test-util"] }
 rcgen = "0.14.5"
 tokio-rustls = "0.26.4"

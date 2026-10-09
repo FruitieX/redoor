@@ -318,28 +318,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-extra"
-version = "0.12.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
-dependencies = [
- "axum",
- "axum-core 0.5.6",
- "bytes",
- "futures-core",
- "futures-util",
- "headers",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3011,28 +2989,43 @@ name = "redoor"
 version = "0.1.36"
 dependencies = [
  "anyhow",
- "argon2",
- "async-compression",
  "async-stream",
  "axum",
- "axum-embed",
- "axum-extra",
- "base64",
  "bytes",
  "clap",
  "cookie_store",
  "fastrand",
- "fs2",
+ "jiff",
+ "libc",
+ "nix",
+ "redoor-agent",
+ "redoor-cli",
+ "redoor-core",
+ "redoor-protocol",
+ "redoor-server",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "redoor-agent"
+version = "0.1.36"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "fastrand",
  "futures-util",
  "gix",
  "gix-dir",
  "grep-matcher",
  "grep-regex",
- "headers",
  "ignore",
  "jiff",
  "libc",
- "libloading",
  "mime_guess",
  "mountpoints",
  "nix",
@@ -3040,12 +3033,113 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "pty-process",
- "rand_core 0.6.4",
  "rcgen",
+ "redoor-core",
+ "redoor-protocol",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "sysinfo",
+ "tar",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.30.0",
+ "uuid",
+]
+
+[[package]]
+name = "redoor-cli"
+version = "0.1.36"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "async-stream",
+ "axum",
+ "bytes",
+ "clap",
+ "cookie_store",
+ "fs2",
+ "futures-util",
+ "libc",
+ "nix",
+ "redoor-core",
+ "redoor-protocol",
  "reqwest",
  "rpassword",
+ "serde",
+ "serde_json",
+ "tar",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "redoor-core"
+version = "0.1.36"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "fastrand",
+ "jiff",
+ "libc",
+ "nix",
+ "rand_core 0.6.4",
+ "redoor-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "thiserror",
+ "tokio",
+ "toml_edit",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "redoor-protocol"
+version = "0.1.36"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "redoor-server"
+version = "0.1.36"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-compression",
+ "async-stream",
+ "axum",
+ "axum-embed",
+ "base64",
+ "bytes",
+ "clap",
+ "fastrand",
+ "fs2",
+ "futures-util",
+ "headers",
+ "jiff",
+ "libc",
+ "libloading",
+ "nix",
+ "rand_core 0.6.4",
+ "redoor-core",
+ "redoor-protocol",
+ "reqwest",
  "rust-embed",
- "rustls",
  "semver",
  "serde",
  "serde_json",
@@ -3053,16 +3147,10 @@ dependencies = [
  "sha2 0.10.9",
  "similar",
  "subtle",
- "sysinfo",
- "tar",
  "thiserror",
  "tokio",
- "tokio-rustls",
- "tokio-tungstenite 0.30.0",
  "tokio-util",
- "toml_edit",
  "tower-http 0.7.0",
- "ts-rs",
  "uuid",
 ]
 

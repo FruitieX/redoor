@@ -1,0 +1,48 @@
+[package]
+name = "redoor-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+redoor-protocol.workspace = true
+redoor-core.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+fastrand.workspace = true
+futures-util.workspace = true
+gix.workspace = true
+gix-dir.workspace = true
+grep-matcher.workspace = true
+grep-regex.workspace = true
+ignore.workspace = true
+jiff.workspace = true
+libc.workspace = true
+mime_guess.workspace = true
+nix.workspace = true
+nucleo-matcher.workspace = true
+pty-process.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+similar.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+mountpoints.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+
+[dev-dependencies]
+redoor-core = { workspace = true, features = ["test-support"] }
+rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls.workspace = true
