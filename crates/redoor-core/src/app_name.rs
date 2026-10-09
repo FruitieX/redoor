@@ -1,71 +1,14 @@
 //! Resolves the application namespace used for persistent paths and service names.
 
-use std::{path::PathBuf, sync::OnceLock};
-
-use anyhow::{Context, Result};
-
 /// Environment variable that lets independent Redoor installations avoid sharing state.
 pub const APP_NAME_ENV: &str = "REDOOR_APP_NAME";
 
-/// Stable namespace retained when no installation-specific name is configured.
-const DEFAULT_APP_NAME: &str = "redoor";
-
-/// Clap initializes this once so every subsystem observes the same namespace.
-static APP_NAME: OnceLock<String> = OnceLock::new();
-
-/// Stores the root CLI value before command dispatch begins.
-pub fn initialize(app_name: String) {
-    APP_NAME
-        .set(app_name)
-        .expect("application name must only be initialized once");
-}
+/// Stable namespace used when no installation-specific name is configured.
+pub const DEFAULT_APP_NAME: &str = "redoor";
 
 /// Parses and validates a root `--app-name` value for Clap.
 pub fn parse_app_name(name: &str) -> Result<String, String> {
     validate_app_name(name).map(|()| name.to_string())
-}
-
-/// Returns the validated namespace selected for this process.
-///
-/// A conservative character set keeps the value safe as one path component and
-/// as part of a service name, including when installation runs with root privileges.
-pub fn app_name() -> Result<String> {
-    if let Some(name) = APP_NAME.get() {
-        return Ok(name.clone());
-    }
-    let name = match std::env::var_os(APP_NAME_ENV) {
-        Some(name) => name
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("{APP_NAME_ENV} must contain valid UTF-8"))?,
-        None => DEFAULT_APP_NAME.to_string(),
-    };
-    parse_app_name(&name).map_err(anyhow::Error::msg)
-}
-
-/// Returns the per-application data directory under the current account's home.
-pub fn user_data_directory() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set; cannot locate the application data directory")?;
-    Ok(home.join(".local/share").join(app_name()?))
-}
-
-/// Returns the per-application cache directory using the XDG cache root when set.
-/// Keeping disposable downloads out of the data directory lets cache cleanup tools
-/// reclaim them without removing persistent configuration or application state.
-pub fn user_cache_directory() -> Result<PathBuf> {
-    let cache_root = match std::env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
-        Some(cache_root) => PathBuf::from(cache_root),
-        None => std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set; cannot locate the application cache directory")?
-            .join(".cache"),
-    };
-    anyhow::ensure!(
-        cache_root.is_absolute(),
-        "XDG_CACHE_HOME must be an absolute path"
-    );
-    Ok(cache_root.join(app_name()?))
 }
 
 /// Rejects names that could escape their intended path or systemd namespace.

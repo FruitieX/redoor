@@ -685,7 +685,6 @@ mod tests {
     /// Verifies retry projection removes the old socket before reporting a fresh start.
     #[tokio::test]
     async fn retry_lifecycle_evicts_existing_managed_connection() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let agent_id = AgentId::from("managed-retry");
         let (register_reply, register_receiver) = oneshot::channel();
@@ -755,7 +754,6 @@ mod tests {
     /// Verifies clients that wait for Connected never see it before the payload socket is usable.
     #[tokio::test]
     async fn connected_status_waits_for_transfer_socket() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let token = insert_control(&mut state, "agent");
         // Control registration alone must not advertise full readiness.
@@ -788,7 +786,6 @@ mod tests {
     /// Verifies only the current session token can attach and replacements shut down old sockets.
     #[tokio::test]
     async fn transfer_registration_authenticates_and_replaces_atomically() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let token = insert_control(&mut state, "agent");
         let first_socket = redoor_protocol::ids::SocketId::new();
@@ -839,7 +836,6 @@ mod tests {
     /// Verifies replacement fails payload-dependent work the delayed unregister would skip.
     #[tokio::test]
     async fn transfer_replacement_cleans_up_payload_requests() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let token = insert_control(&mut state, "agent");
         let first_socket = redoor_protocol::ids::SocketId::new();
@@ -918,7 +914,6 @@ mod tests {
     /// Verifies a timed-out socket handler cannot install dead channels or evict a live socket.
     #[tokio::test]
     async fn transfer_registration_ignores_cancelled_reply() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let token = insert_control(&mut state, "agent");
         let live_socket = redoor_protocol::ids::SocketId::new();
@@ -951,7 +946,6 @@ mod tests {
     /// Verifies unknown agents and stale unregister events cannot affect live payload state.
     #[tokio::test]
     async fn transfer_registration_rejects_unknown_and_ignores_stale_unregister() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let unknown_socket = redoor_protocol::ids::SocketId::new();
         let (unknown_request, unknown_reply, _unknown_shutdown) =
@@ -986,7 +980,6 @@ mod tests {
     /// Verifies command overload is explicit while priority cancellation remains admitted.
     #[tokio::test]
     async fn full_control_queue_rejects_commands_and_preserves_priority_lane() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let agent_id = AgentId::from("bounded-agent");
         let (lanes, mut receivers) = ControlLanes::bounded(1, 1);

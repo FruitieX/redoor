@@ -99,21 +99,17 @@ async fn remove_remote_temp(host: &SshHost, path: &str) -> bool {
 
 /// Default remote redoor binary path when the user does not override it
 /// via `--remote-bin` or `REDOOR_REMOTE_BIN`.
-pub(super) fn default_remote_bin() -> anyhow::Result<String> {
-    Ok(format!(
-        "${{XDG_DATA_HOME:-$HOME/.local/share}}/{}/binaries/{}/redoor",
-        redoor_core::app_name::app_name()?,
+pub(super) fn default_remote_bin(app_name: &str) -> String {
+    format!(
+        "${{XDG_DATA_HOME:-$HOME/.local/share}}/{app_name}/binaries/{}/redoor",
         env!("CARGO_PKG_VERSION")
-    ))
+    )
 }
 
 /// Dedicated remote path for local debug binary uploads so iterative debug
 /// deploys never overwrite a versioned release install on the same host.
-fn debug_remote_bin() -> anyhow::Result<String> {
-    Ok(format!(
-        "${{XDG_DATA_HOME:-$HOME/.local/share}}/{}/binaries/debug/redoor",
-        redoor_core::app_name::app_name()?
-    ))
+fn debug_remote_bin(app_name: &str) -> String {
+    format!("${{XDG_DATA_HOME:-$HOME/.local/share}}/{app_name}/binaries/debug/redoor")
 }
 
 /// Result of probing a remote host: which OS/arch it runs, what its existing
@@ -332,6 +328,7 @@ fn remote_binary_matches(
 pub(super) async fn ensure_remote_binary(
     host: &SshHost,
     sniff: &RemoteSniff,
+    provision: &super::ProvisionContext,
     status: &ProvisioningStatusSink,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let expected = format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
@@ -343,7 +340,7 @@ pub(super) async fn ensure_remote_binary(
         // The first sniff targeted the versioned path. Debug installs live
         // elsewhere, so this extra probe is the SHA-1 check, not a cache read.
         status.report("Comparing the remote debug install to this local build");
-        let debug_sniff = sniff_remote(host, &debug_remote_bin()?).await?;
+        let debug_sniff = sniff_remote(host, &debug_remote_bin(&provision.app_name)).await?;
         log!(
             Level::Info,
             "Using local debug binary for matching remote platform: path={}, remote_bin={}, os={}, arch={}",
@@ -385,13 +382,12 @@ pub(super) async fn ensure_remote_binary(
             sniff.os,
             sniff.arch
         );
-        let local_path = crate::binaries::ensure_local_binary_reported(
-            env!("CARGO_PKG_VERSION"),
-            &sniff.os,
-            &sniff.arch,
-            |line| status.report(line),
-        )
-        .await?;
+        let local_path = provision
+            .binaries
+            .ensure(env!("CARGO_PKG_VERSION"), &sniff.os, &sniff.arch, |line| {
+                status.report(line)
+            })
+            .await?;
         log!(
             Level::Info,
             "Relay binary available in local cache: path={}",
@@ -792,11 +788,10 @@ mod tests {
     /// while using the persistent XDG data location on the target host.
     #[test]
     fn default_remote_bin_uses_versioned_data_hierarchy() {
-        let app_name = redoor_core::app_name::app_name().unwrap();
         assert_eq!(
-            default_remote_bin().unwrap(),
+            default_remote_bin("redoor-dev"),
             format!(
-                "${{XDG_DATA_HOME:-$HOME/.local/share}}/{app_name}/binaries/{}/redoor",
+                "${{XDG_DATA_HOME:-$HOME/.local/share}}/redoor-dev/binaries/{}/redoor",
                 env!("CARGO_PKG_VERSION")
             ),
             "the remote install should live under the application data hierarchy"
@@ -807,10 +802,9 @@ mod tests {
     /// versioned release layout, so both can coexist on one remote host.
     #[test]
     fn debug_remote_bin_uses_dedicated_debug_version() {
-        let app_name = redoor_core::app_name::app_name().unwrap();
         assert_eq!(
-            debug_remote_bin().unwrap(),
-            format!("${{XDG_DATA_HOME:-$HOME/.local/share}}/{app_name}/binaries/debug/redoor"),
+            debug_remote_bin("redoor-dev"),
+            "${XDG_DATA_HOME:-$HOME/.local/share}/redoor-dev/binaries/debug/redoor",
             "the debug install path should use the effective application namespace"
         );
     }

@@ -112,7 +112,6 @@ mod tests {
     /// Verifies the early-cancel tombstone survives until the command registers.
     #[tokio::test]
     async fn early_cancel_is_remembered_until_registration() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut sessions = Sessions::new(UploadRoutes::default());
 
         sessions.cancel_request(RequestId::new(3));

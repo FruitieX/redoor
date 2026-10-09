@@ -35,16 +35,22 @@ pub(crate) struct AgentServices {
     pub(crate) upload_routes: UploadRoutes,
     /// Routes server credit grants to the output stream writers waiting for them.
     pub(crate) output_credits: OutputCredits,
+    /// TOML file this process loaded, reported by `GetAgentDetails`; empty for CLI/env-only runs.
+    pub(crate) loaded_config_path: Arc<str>,
 }
 
 impl AgentServices {
-    /// Bundles the startup-selected trash provider with fresh shared coordination state.
-    pub(crate) fn new(trash: Trash) -> Self {
+    /// Bundles the startup-selected trash provider and config origin with fresh shared state.
+    pub(crate) fn new(trash: Trash, loaded_config_path: Option<&std::path::Path>) -> Self {
         Self {
             trash,
             grep_slots: Arc::new(Semaphore::new(CONTENT_GREP_SLOTS)),
             upload_routes: UploadRoutes::default(),
             output_credits: OutputCredits::default(),
+            loaded_config_path: loaded_config_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+                .into(),
         }
     }
 }
@@ -121,7 +127,7 @@ impl CommandCtx {
                 cancel: CancellationToken::new(),
                 registration: None,
                 transfer: None,
-                services: AgentServices::new(Trash::unsupported()),
+                services: AgentServices::new(Trash::unsupported(), None),
                 stream_credit: false,
             },
             frames,

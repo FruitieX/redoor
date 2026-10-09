@@ -22,6 +22,7 @@ pub(super) async fn spawn_read_task(
     control_tx: ControlSender,
     shutdown_sender: watch::Sender<bool>,
     mut shutdown: watch::Receiver<bool>,
+    timeouts: redoor_core::websocket::WebSocketTimeouts,
 ) {
     let (activity_sender, activity_receiver) = watch::channel(Instant::now());
     let monitor_handle = agent_ref.clone();
@@ -34,7 +35,7 @@ pub(super) async fn spawn_read_task(
         monitor_shutdown,
         monitor_handle,
         connection_generation,
-        redoor_core::websocket::timeouts(),
+        timeouts,
     ));
 
     tokio::spawn(async move {

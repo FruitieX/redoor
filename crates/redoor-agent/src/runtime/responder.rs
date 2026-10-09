@@ -266,7 +266,6 @@ mod tests {
     /// Verifies the responder queues typed frames with their post-send action.
     #[tokio::test]
     async fn responder_queues_typed_frames() {
-        redoor_core::logging::init(None).await.unwrap();
         let (responder, mut frames) = Responder::recording(RequestId::new(7), 4);
 
         responder.transfer_ready().await.unwrap();

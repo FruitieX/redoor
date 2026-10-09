@@ -47,8 +47,7 @@ enum RemoteCommand {
 }
 
 /// Dispatches without mixing status messages into machine-readable stdout.
-pub async fn run(args: RemoteArgs) -> Result<i32> {
-    let store = SessionStore::for_current_namespace()?;
+pub async fn run(args: RemoteArgs, store: SessionStore) -> Result<i32> {
     match args.command {
         RemoteCommand::Start(args) => lifecycle::run(store, args, true).await?,
         RemoteCommand::Stop(args) => lifecycle::run(store, args, false).await?,

@@ -17,7 +17,7 @@ use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use redoor_core::websocket::keepalive_interval;
+use redoor_core::websocket::WebSocketTimeouts;
 use redoor_protocol::{
     ids::AgentId,
     wire::terminal::{
@@ -146,7 +146,15 @@ async fn run_browser_setup(
     let paired = wait_for_agent(&mut browser, agent_receiver).await;
     state.terminal_registry.remove_pending(&terminal_id);
     match paired {
-        Some(paired) => relay_terminal(browser, paired.agent, paired.buffered_browser_frames).await,
+        Some(paired) => {
+            relay_terminal(
+                browser,
+                paired.agent,
+                paired.buffered_browser_frames,
+                state.runtime.ws_timeouts,
+            )
+            .await
+        }
         None => {
             send_terminal_error(
                 &mut browser,
@@ -258,12 +266,13 @@ async fn relay_terminal(
     browser: WebSocket,
     agent: WebSocket,
     buffered_browser_frames: Vec<WsMessage>,
+    timeouts: WebSocketTimeouts,
 ) {
     let (browser_sink, browser_stream) = browser.split();
     let (agent_sink, agent_stream) = agent.split();
     tokio::select! {
-        _ = forward_browser_to_agent(browser_stream, agent_sink, buffered_browser_frames) => {}
-        _ = forward_agent_to_browser(agent_stream, browser_sink) => {}
+        _ = forward_browser_to_agent(browser_stream, agent_sink, buffered_browser_frames, timeouts) => {}
+        _ = forward_agent_to_browser(agent_stream, browser_sink, timeouts) => {}
     }
 }
 
@@ -272,13 +281,14 @@ async fn forward_browser_to_agent(
     mut browser: SplitStream<WebSocket>,
     mut agent: SplitSink<WebSocket, WsMessage>,
     buffered_frames: Vec<WsMessage>,
+    timeouts: WebSocketTimeouts,
 ) -> Result<(), ()> {
     for frame in buffered_frames {
         if !forward_browser_frame(frame, &mut agent).await? {
             return Ok(());
         }
     }
-    let mut keepalive = keepalive_interval();
+    let mut keepalive = timeouts.keepalive_interval();
     loop {
         let frame = tokio::select! {
             _ = keepalive.tick() => {
@@ -338,8 +348,9 @@ async fn forward_browser_frame(
 async fn forward_agent_to_browser(
     mut agent: SplitStream<WebSocket>,
     mut browser: SplitSink<WebSocket, WsMessage>,
+    timeouts: WebSocketTimeouts,
 ) -> Result<(), ()> {
-    let mut keepalive = keepalive_interval();
+    let mut keepalive = timeouts.keepalive_interval();
     loop {
         let frame = tokio::select! {
             _ = keepalive.tick() => {

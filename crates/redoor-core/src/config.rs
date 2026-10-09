@@ -16,13 +16,7 @@ mod local_agent;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "linux")]
-pub use bootstrap::default_log_directory;
-pub use bootstrap::{
-    create_default_config_if_missing, default_agent_log_path, default_config_path,
-    default_local_agent_name, default_process_log_path, default_relay_log_path,
-    default_server_log_path,
-};
+pub use bootstrap::{create_default_config_if_missing, default_local_agent_name};
 pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_agent};
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;
@@ -58,9 +52,17 @@ pub enum ConfigError {
         /// Rendered `toml_edit` diagnostic (line, column, offending key and reason).
         message: String,
     },
-    /// A rule spanning several keys; the text names the key path and the fix.
-    #[error("{0}")]
-    Invalid(String),
+    /// A rule spanning several keys; the message names the key path and the fix.
+    #[error("Invalid config file '{}': {message}", path.display())]
+    Invalid {
+        /// File whose content broke the rule.
+        path: PathBuf,
+        /// Key path plus reason, e.g. `server.password is required when ...`.
+        message: String,
+    },
+    /// A server entry point was given a file without `[server]`.
+    #[error("config file must contain a [server] table")]
+    MissingServerSection,
 }
 
 /// Configuration for one SSH-backed agent, independent of any specific CLI
@@ -295,6 +297,10 @@ fn parse_config_str(path: &Path, content: &str) -> Result<RedoorConfig, ConfigEr
             message: error.to_string().trim_end().to_string(),
         })?;
     raw.validate()
+        .map_err(|file::Invalid(message)| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message,
+        })
 }
 
 /// Returns the named relay or an actionable error listing the missing identity.
@@ -343,7 +349,7 @@ pub fn require_server_section(config: &RedoorConfig) -> Result<&ServerSection, C
     config
         .server
         .as_ref()
-        .ok_or_else(|| ConfigError::Invalid("config file must contain a [server] table".into()))
+        .ok_or(ConfigError::MissingServerSection)
 }
 
 /// Returns whether `[agent]` supplies every configured field a bare `redoor agent` needs.
@@ -1385,10 +1391,10 @@ log_level = "loud"
 "#,
         )
         .expect_err("unknown levels must be rejected");
-        // Operators need the key path and the valid values to fix the file.
+        // Operators need the file, the key path and the valid values to fix it.
         assert_eq!(
             error.to_string(),
-            "agent.log_level: logging level must be one of: trace, debug, info, warning, error"
+            "Invalid config file 'config.toml': agent.log_level: logging level must be one of: trace, debug, info, warning, error"
         );
     }
 }

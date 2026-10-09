@@ -9,7 +9,6 @@ pub(crate) mod file_search;
 mod fs;
 mod git;
 mod host;
-pub mod identity;
 mod metadata;
 
 use crate::transfers::{
@@ -205,7 +204,9 @@ impl RunCommand for Command {
             Command::OpenPath { path } => host::open_path(path).await.into(),
             Command::Echo { request } => host::echo(request).await.into(),
             Command::AgentInfo => host::agent_info().await.into(),
-            Command::GetAgentDetails => host::get_agent_details().await.into(),
+            Command::GetAgentDetails => host::get_agent_details(&ctx.services.loaded_config_path)
+                .await
+                .into(),
             Command::GetLoggingLevel => {
                 CommandResult::LoggingLevel(redoor_core::logging::level()).into()
             }
@@ -233,7 +234,6 @@ mod tests {
 
     /// Runs one control-lane command through the real dispatch table without a connection.
     async fn run(command: Command) -> CommandResult {
-        redoor_core::logging::init(None).await.unwrap();
         let (ctx, _frames) = CommandCtx::detached(RequestId::new(1));
         match command.run(ctx).await {
             Reply::Result(result) => result,
@@ -511,7 +511,7 @@ mod tests {
             CommandResult::GetAgentDetails(details) => {
                 assert!(details.pid > 0, "PID should be positive");
                 assert!(!details.cwd.is_empty(), "CWD should not be empty");
-                // Unit tests do not call set_agent_loaded_config_path, so path stays empty.
+                // Detached test services record no loaded config, so the path stays empty.
                 assert!(
                     details.config_path.is_empty(),
                     "config_path should be empty without agent startup registration"

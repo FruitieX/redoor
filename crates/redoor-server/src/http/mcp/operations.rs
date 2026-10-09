@@ -68,14 +68,9 @@ pub(super) struct OperationRegistry {
 }
 
 impl OperationRegistry {
-    /// Loads durable admissions and marks unacknowledged work interrupted after restart.
-    pub(super) async fn for_application() -> Result<Self> {
-        let directory = redoor_core::app_name::user_data_directory()?.join("mcp/operations");
-        Self::in_directory(directory).await
-    }
-
-    /// Accepts an isolated directory so restart recovery can be verified without application state.
-    async fn in_directory(directory: PathBuf) -> Result<Self> {
+    /// Loads durable admissions from the given directory and marks unacknowledged work
+    /// interrupted after restart; tests pass an isolated directory.
+    pub(super) async fn in_directory(directory: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(&directory)
             .await
             .context("creating MCP operation directory")?;

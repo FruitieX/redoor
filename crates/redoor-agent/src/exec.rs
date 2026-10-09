@@ -228,7 +228,6 @@ mod tests {
     /// A completed and reaped process must retain its remote status for arbitrarily slow consumers.
     #[tokio::test]
     async fn normal_exit_waits_beyond_five_seconds_and_preserves_control_lane() {
-        redoor_core::logging::init(None).await.unwrap();
         let (stream, mut payload) = blocked_stream().await;
         let mut worker = ExecWorker { stream };
         let cancel = CancellationToken::new();

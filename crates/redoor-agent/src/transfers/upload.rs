@@ -630,7 +630,6 @@ mod tests {
     /// Verifies the cancel ordering: abort staging, unregister, then answer.
     #[tokio::test]
     async fn cancel_aborts_before_unregistering_and_answering() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut harness = start();
         let ready = harness.frames.recv().await.unwrap();
         // Readiness is announced only once the route exists.
@@ -660,7 +659,6 @@ mod tests {
     /// Verifies protocol corruption aborts staging like a cancellation.
     #[tokio::test]
     async fn protocol_failure_aborts_and_reports_the_error() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut harness = start();
         harness.frames.recv().await.unwrap();
         let (control, _control_frames) = mpsc::channel(1);
@@ -693,7 +691,6 @@ mod tests {
     /// Verifies publication runs while cancel_transfer can still reach the gate.
     #[tokio::test]
     async fn terminal_chunk_commits_while_still_registered() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut harness = start();
         harness.frames.recv().await.unwrap();
         let (control, _control_frames) = mpsc::channel(1);
@@ -724,7 +721,6 @@ mod tests {
     /// A credited route never makes the reader wait: overflow unroutes only that upload.
     #[tokio::test]
     async fn credited_route_overflow_fails_only_that_upload() {
-        redoor_core::logging::init(None).await.unwrap();
         let routes = UploadRoutes::default();
         let (control, _control_frames) = mpsc::channel(1);
         let agent = AgentId::from("test-agent");

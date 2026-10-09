@@ -371,8 +371,6 @@ mod tests {
 
     #[tokio::test]
     async fn slow_upload_send_does_not_block_unrelated_router_work() {
-        redoor_core::logging::init(None).await.unwrap();
-
         let (router_ref, router_task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
 
         let (lanes, receivers) = ControlLanes::bounded(64, 16);

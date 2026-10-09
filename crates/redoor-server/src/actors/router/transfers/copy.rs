@@ -874,7 +874,6 @@ mod tests {
     /// acknowledges, instead of waiting for a source acknowledgement that can never come.
     #[tokio::test]
     async fn cancel_after_source_finished_settles_on_destination_ack() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = RouterState::new(
             tokio::spawn(async {}),
             crate::terminal_registry::TerminalRegistry::new(),

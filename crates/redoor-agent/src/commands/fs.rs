@@ -699,9 +699,6 @@ mod tests {
     async fn directory_move_source_cleanup_timeout_does_not_fail_the_move() {
         static CLEANUP_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-        redoor_core::logging::init(None)
-            .await
-            .expect("test logger should initialize");
         let temp = TempDir::create();
         let path = temp.path().join("timeout-move-source");
         tokio::fs::create_dir(&path)
@@ -761,9 +758,6 @@ mod tests {
         static SATURATED_CLEANUP_PERMITS: tokio::sync::Semaphore =
             tokio::sync::Semaphore::const_new(0);
 
-        redoor_core::logging::init(None)
-            .await
-            .expect("test logger should initialize");
         let temp = TempDir::create();
         let path = temp.path().join("saturated-move-source");
         tokio::fs::create_dir(&path)

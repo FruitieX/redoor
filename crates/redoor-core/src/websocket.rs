@@ -1,4 +1,3 @@
-use std::sync::OnceLock;
 use tokio::time::{Duration, Interval, MissedTickBehavior};
 
 /// Production ping period; tests shrink this so idle sockets prove liveness quickly.
@@ -8,7 +7,7 @@ pub const WEBSOCKET_STALE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Production stale-poll period; independent of the ping so the threshold can be a multiple of it.
 pub const WEBSOCKET_STALE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Process-wide idle timing so CLI/env can shrink production defaults in tests.
+/// Idle-socket timing chosen once at startup so CLI/env can shrink production defaults in tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebSocketTimeouts {
     /// How often idle sockets write a ping so proxies stay alive and half-open links fail.
@@ -28,29 +27,14 @@ impl WebSocketTimeouts {
             stale_check_interval: WEBSOCKET_STALE_CHECK_INTERVAL,
         }
     }
-}
 
-static TIMEOUTS: OnceLock<WebSocketTimeouts> = OnceLock::new();
-
-/// Installs process-wide timeouts from CLI/env before any socket is opened.
-pub fn configure(timeouts: WebSocketTimeouts) {
-    let _ = TIMEOUTS.set(timeouts);
-}
-
-/// Reads the active timeouts, falling back to production when `configure` was not called.
-pub fn timeouts() -> WebSocketTimeouts {
-    TIMEOUTS
-        .get()
-        .copied()
-        .unwrap_or_else(WebSocketTimeouts::production)
-}
-
-/// Creates a delayed interval so opening a socket does not immediately add a control frame.
-pub fn keepalive_interval() -> Interval {
-    let mut interval = tokio::time::interval(timeouts().keepalive);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    interval.reset();
-    interval
+    /// Creates a delayed ping interval so opening a socket does not immediately add a frame.
+    pub fn keepalive_interval(&self) -> Interval {
+        let mut interval = tokio::time::interval(self.keepalive);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        interval.reset();
+        interval
+    }
 }
 
 /// Parses `10s`, `200ms`, or a bare millisecond integer for CLI and env overrides.

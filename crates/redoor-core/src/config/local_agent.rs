@@ -15,23 +15,27 @@ use tokio::process::Command;
 /// This avoids requiring the operator to keep two binaries in sync or
 /// configure a path. Stdio is inherited so agent logs appear in the same
 /// terminal as the server logs unless `--log` is set in the toml.
+///
+/// Failures are I/O errors whose message already names the failing step and path, so the
+/// watchdog can show them to the browser unchanged.
 pub async fn spawn_local_agent(
     config: &LocalAgentConfig,
+    app_name: &str,
     redoor_port: u16,
     agent_token: &str,
-) -> Result<tokio::process::Child, Box<dyn std::error::Error>> {
+) -> std::io::Result<tokio::process::Child> {
     let name = config.name.clone().unwrap_or_else(default_local_agent_name);
     let ws_url = format!("ws://localhost:{}/ws", redoor_port);
 
     let bin = std::env::current_exe()
-        .map_err(|e| format!("Failed to determine redoor binary path: {}", e))?;
+        .map_err(|e| with_context(e, "Failed to determine redoor binary path"))?;
 
     let mut command = Command::new(&bin);
     command
         .env_remove(crate::process::DETACHED_ENV)
         .env(crate::process::MANAGED_AGENT_ENV, "1")
         .arg("--app-name")
-        .arg(crate::app_name::app_name()?)
+        .arg(app_name)
         .arg("agent")
         .arg(&ws_url)
         .arg("--log-format")
@@ -58,10 +62,12 @@ pub async fn spawn_local_agent(
             .filter(|parent| !parent.as_os_str().is_empty())
         {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                format!(
-                    "failed to create local agent log directory '{}': {}",
-                    parent.display(),
-                    e
+                with_context(
+                    e,
+                    &format!(
+                        "failed to create local agent log directory '{}'",
+                        parent.display()
+                    ),
                 )
             })?;
         }
@@ -70,11 +76,13 @@ pub async fn spawn_local_agent(
             .append(true)
             .open(log)
             .await
-            .map_err(|e| format!("failed to open local agent log file '{}': {}", log, e))?;
+            .map_err(|e| {
+                with_context(e, &format!("failed to open local agent log file '{log}'"))
+            })?;
         let file_for_stderr = file.try_clone().await.map_err(|e| {
-            format!(
-                "failed to clone local agent log file handle '{}': {}",
-                log, e
+            with_context(
+                e,
+                &format!("failed to clone local agent log file handle '{log}'"),
             )
         })?;
         command.stdout(Stdio::from(file.into_std().await));
@@ -97,12 +105,15 @@ pub async fn spawn_local_agent(
     // dropped (e.g. on server shutdown), preventing the `redoor agent`
     // child from being orphaned. `kill_on_drop` sends SIGKILL.
     command.kill_on_drop(true);
-    let child = command.spawn().map_err(|e| {
-        format!(
-            "failed to spawn local agent binary '{}': {}",
-            bin.display(),
-            e
+    command.spawn().map_err(|e| {
+        with_context(
+            e,
+            &format!("failed to spawn local agent binary '{}'", bin.display()),
         )
-    })?;
-    Ok(child)
+    })
+}
+
+/// Prefixes an I/O error with the failed step while keeping its kind for callers.
+fn with_context(error: std::io::Error, context: &str) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{context}: {error}"))
 }

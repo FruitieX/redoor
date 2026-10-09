@@ -173,6 +173,8 @@ pub(crate) struct AgentProfile {
     pub(crate) default_directory: String,
     /// Shared secret presented during registration so the server can reject impostors.
     pub(crate) token: String,
+    /// Keepalive and stale-detection timings chosen at process start.
+    pub(crate) ws_timeouts: redoor_core::websocket::WebSocketTimeouts,
 }
 
 /// One-shot desktop notification shown after the first fully connected session.
@@ -185,6 +187,15 @@ struct StartupNotification {
     generation: Option<(u64, u64)>,
     /// Prevents reconnects from repeating the process-start notification.
     sent: bool,
+}
+
+/// Why the agent event loop ended, so the binary can choose the process exit status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentExit {
+    /// Requested shutdown (stdin EOF of an SSH-launched agent, closed mailboxes).
+    Shutdown,
+    /// The server rejected this agent; a failure status lets supervisors notice.
+    Rejected,
 }
 
 /// Long-lived agent runtime that owns connection lifecycle and running work.
@@ -233,7 +244,7 @@ impl AgentRuntime {
         mut lifecycle_receiver: mpsc::UnboundedReceiver<AgentLifecycleMsg>,
         handle: AgentHandle,
         exit_on_stdin_eof: bool,
-    ) {
+    ) -> AgentExit {
         spawn_stdin_task(handle.clone(), exit_on_stdin_eof).await;
         let _ = handle.try_send(AgentMsg::Connect);
 
@@ -244,23 +255,23 @@ impl AgentRuntime {
             self.profile.agent_name
         );
 
-        loop {
+        let exit = loop {
             tokio::select! {
                 biased;
                 lifecycle = lifecycle_receiver.recv() => match lifecycle {
                     Some(message) => self.handle_lifecycle_message(handle.clone(), message).await,
-                    None => break,
+                    None => break AgentExit::Shutdown,
                 },
                 message = receiver.recv() => match message {
                     Some(message) => {
-                        if !self.handle_message(handle.clone(), message).await {
-                            break;
+                        if let Some(exit) = self.handle_message(handle.clone(), message).await {
+                            break exit;
                         }
                     }
-                    None => break,
+                    None => break AgentExit::Shutdown,
                 },
             }
-        }
+        };
 
         self.invalidate_connection().await;
         log!(
@@ -268,6 +279,7 @@ impl AgentRuntime {
             "Agent stopped: agent_id={}",
             self.profile.agent_id
         );
+        exit
     }
 
     /// Stops both sockets, cancels all connection-owned work and joins command tasks.
@@ -278,8 +290,12 @@ impl AgentRuntime {
         self.dispatcher.stop().await;
     }
 
-    /// Handles one agent control message and returns whether the event loop should continue.
-    async fn handle_message(&mut self, handle: AgentHandle, message: AgentMsg) -> bool {
+    /// Handles one agent control message and returns how the event loop ends, if it should.
+    async fn handle_message(
+        &mut self,
+        handle: AgentHandle,
+        message: AgentMsg,
+    ) -> Option<AgentExit> {
         match message {
             AgentMsg::Connect => {
                 if self.control.sender().is_none() {
@@ -350,14 +366,14 @@ impl AgentRuntime {
                     log_error!(error, "Failed to send message; connection may be lost");
                 }
             }
-            AgentMsg::Shutdown => return false,
+            AgentMsg::Shutdown => return Some(AgentExit::Shutdown),
             AgentMsg::ExitWithError => {
                 let error = anyhow::anyhow!("agent received fatal exit signal");
                 log_error!(error, "Exiting agent due to error");
-                std::process::exit(1);
+                return Some(AgentExit::Rejected);
             }
         }
-        true
+        None
     }
 
     /// Detaches a failed payload socket and schedules a reconnect with the same credentials.
@@ -697,7 +713,7 @@ impl AgentRuntime {
             self.profile.agent_name
         );
 
-        let stale_timeout = redoor_core::websocket::timeouts().stale_timeout;
+        let stale_timeout = self.profile.ws_timeouts.stale_timeout;
         let connection_result = tokio::time::timeout(
             stale_timeout,
             self.connection.connect(self.connection.server_url()),
@@ -751,6 +767,7 @@ impl AgentRuntime {
             control_tx.clone(),
             control_shutdown.clone(),
             control_shutdown_rx.clone(),
+            self.profile.ws_timeouts,
         )
         .await;
         spawn_write_task(
@@ -826,9 +843,10 @@ mod tests {
                 agent_name: "agent".to_string(),
                 default_directory: "/tmp".to_string(),
                 token: "test-token".to_string(),
+                ws_timeouts: redoor_core::websocket::WebSocketTimeouts::production(),
             },
             AgentConnection::new("ws://localhost".to_string(), None, false).unwrap(),
-            AgentServices::new(Trash::unsupported()),
+            AgentServices::new(Trash::unsupported(), None),
             None,
         )
     }
@@ -882,7 +900,6 @@ mod tests {
     /// Verifies a delayed writer failure cannot clear a newer live connection.
     #[tokio::test]
     async fn stale_connection_loss_does_not_clear_replacement_connection() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut runtime = runtime();
         let (_control_rx, _transfer_rx) = attach_links(&mut runtime);
         let stale_generation = runtime.control.generation();
@@ -911,7 +928,6 @@ mod tests {
     /// Verifies delayed transfer teardown cannot detach a newer payload socket.
     #[tokio::test]
     async fn stale_transfer_loss_does_not_clear_replacement_sender() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut runtime = runtime();
         let (_control_rx, _transfer_rx) = attach_links(&mut runtime);
         let stale_generation = runtime.transfer.generation();
@@ -921,7 +937,7 @@ mod tests {
         runtime.transfer.install(transfer_tx, transfer_shutdown);
         let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);
 
-        let keep_running = runtime
+        let exit = runtime
             .handle_message(
                 handle,
                 AgentMsg::TransferConnectionLost {
@@ -933,7 +949,7 @@ mod tests {
             .await;
 
         // A stale transfer event must not stop the authoritative control actor.
-        assert!(keep_running);
+        assert_eq!(exit, None);
         // The current transfer generation must remain unchanged by delayed teardown.
         assert_eq!(runtime.transfer.generation(), current_generation);
         // The replacement payload sender must remain installed and usable.
@@ -1007,7 +1023,6 @@ mod tests {
     /// Verifies an unknown command variant is answered instead of silently dropped.
     #[tokio::test]
     async fn unparsable_command_frames_are_answered() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut runtime = runtime();
         let (mut control_rx, _transfer_rx) = attach_links(&mut runtime);
         let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);
@@ -1035,7 +1050,6 @@ mod tests {
     /// Verifies control loss cancels and joins command workers before reconnecting.
     #[tokio::test]
     async fn connection_loss_cancels_and_joins_commands() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut runtime = runtime();
         let (_control_rx, transfer_rx) = attach_links(&mut runtime);
         let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);

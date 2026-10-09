@@ -1,7 +1,6 @@
 //! Host and process commands: echo, process info, agent details, accounts, logging and
 //! process replacement.
 
-use crate::commands::identity::agent_loaded_config_path;
 use crate::platform::identity::HostIdentity;
 use redoor_core::identity::{current_binary_identity, current_exe_path, external_ip};
 use redoor_protocol::{
@@ -49,7 +48,7 @@ pub(super) async fn agent_info() -> CommandResult {
 }
 
 /// Collects process identity and host details used by the connected-agent view.
-pub(super) async fn get_agent_details() -> CommandResult {
+pub(super) async fn get_agent_details(loaded_config_path: &str) -> CommandResult {
     use sysinfo::System;
 
     let pid = std::process::id();
@@ -59,7 +58,7 @@ pub(super) async fn get_agent_details() -> CommandResult {
     // Operators need the on-disk binary path when diagnosing upgrades and restarts.
     let (exe_path, external_ip) = tokio::join!(current_exe_path(), external_ip());
     // Empty when the agent was launched without a TOML file (CLI/env only).
-    let config_path = agent_loaded_config_path();
+    let config_path = loaded_config_path.to_string();
 
     let mut sys = System::new_all();
     sys.refresh_all();

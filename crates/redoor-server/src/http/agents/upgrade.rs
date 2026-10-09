@@ -198,13 +198,10 @@ pub(crate) async fn upgrade_agent_handler(
                 details.arch,
                 details.exe_path
             );
-            let source_path = match crate::binaries::ensure_local_binary_reported(
-                &target_version,
-                &details.os,
-                &details.arch,
-                |_| {},
-            )
-            .await
+            let source_path = match state
+                .binaries
+                .ensure(&target_version, &details.os, &details.arch, |_| {})
+                .await
             {
                 Ok(source_path) => source_path,
                 Err(error) => {

@@ -17,8 +17,12 @@ use super::mcp::McpState;
 
 #[derive(Clone)]
 pub(crate) struct ServerState {
-    /// Effective installation namespace displayed on the home page.
-    pub(crate) app_name: String,
+    /// Namespace, data directories and websocket timings chosen at process start.
+    pub(crate) runtime: redoor_core::runtime::RuntimeContext,
+    /// Release cache shared by agent upgrades and SSH provisioning.
+    pub(crate) binaries: crate::binaries::BinaryCache,
+    /// Registers managed supervisors for startup inventory and configuration routes alike.
+    pub(crate) launcher: super::watchdog::ManagedLauncher,
     pub(crate) router_ref: actors::router::RouterHandle,
     /// Typed one-shot agent commands with their deadlines and cancel-on-abandon behavior.
     pub(crate) agents: super::agent_client::AgentClient,
@@ -48,8 +52,6 @@ pub(crate) struct ServerState {
     pub(crate) config_path: PathBuf,
     /// Serializes read-modify-write config edits so concurrent submissions cannot lose entries.
     pub(crate) config_edit_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Effective listener port used when dynamically creating managed SSH supervisors.
-    pub(crate) port: u16,
     /// Login backend resolved from the TOML credentials (or their absence).
     pub(crate) auth_mode: ServerAuthMode,
     /// Signals axum graceful shutdown; restart fires this after a successful

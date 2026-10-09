@@ -180,8 +180,8 @@ enum MachineTokenCommand {
 }
 
 /// Executes token administration without loading server config or starting a listener.
-pub async fn run_cli(args: MachineTokenArgs) -> Result<()> {
-    let service = MachineTokenService::for_application().await?;
+pub async fn run_cli(args: MachineTokenArgs, paths: &redoor_core::paths::AppPaths) -> Result<()> {
+    let service = MachineTokenService::in_data_dir(&paths.data_dir()?).await?;
     match args.command {
         MachineTokenCommand::Create {
             name,
@@ -229,8 +229,8 @@ fn parse_expiry(value: &str) -> std::result::Result<Timestamp, String> {
 
 impl MachineTokenService {
     /// Uses Redoor's private application data directory rather than source-controlled config.
-    pub(crate) async fn for_application() -> Result<Self> {
-        let directory = redoor_core::app_name::user_data_directory()?.join("mcp");
+    pub(crate) async fn in_data_dir(data_dir: &std::path::Path) -> Result<Self> {
+        let directory = data_dir.join("mcp");
         ensure_private_directory(&directory).await?;
         Ok(Self {
             path: directory.join("machine-tokens.json"),

@@ -33,11 +33,17 @@ pub(crate) async fn agent_transfer_websocket_handler(
 ) -> impl IntoResponse {
     ws.max_message_size(MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES)
         .max_frame_size(MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES)
-        .on_upgrade(move |socket| run_transfer_socket(socket, state.router_ref))
+        .on_upgrade(move |socket| {
+            run_transfer_socket(socket, state.router_ref, state.runtime.ws_timeouts)
+        })
 }
 
 /// Authenticates and runs one persistent payload socket without exposing credential details.
-async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
+async fn run_transfer_socket(
+    mut socket: WebSocket,
+    router: RouterHandle,
+    timeouts: redoor_core::websocket::WebSocketTimeouts,
+) {
     let socket_id = SocketId::new();
     let Some((agent_id, token)) = authenticate_transfer_socket(&mut socket, &socket_id).await
     else {
@@ -79,7 +85,7 @@ async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
     let mut writer_shutdown = shutdown_receiver;
     tokio::select! {
         _ = read_transfer_frames(&mut reader, &router, &streams, &socket_id, &mut reader_shutdown) => {}
-        _ = write_transfer_frames(&mut writer, &mut binary_receiver, &mut writer_shutdown) => {}
+        _ = write_transfer_frames(&mut writer, &mut binary_receiver, &mut writer_shutdown, timeouts) => {}
     }
 
     let _ = router
@@ -184,8 +190,9 @@ async fn write_transfer_frames(
     writer: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
     receiver: &mut mpsc::Receiver<StreamChunk>,
     shutdown: &mut watch::Receiver<bool>,
+    timeouts: redoor_core::websocket::WebSocketTimeouts,
 ) {
-    let mut ping = redoor_core::websocket::keepalive_interval();
+    let mut ping = timeouts.keepalive_interval();
     loop {
         let message = tokio::select! {
             _ = shutdown.changed() => break,

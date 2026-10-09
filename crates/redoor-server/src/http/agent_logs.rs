@@ -15,7 +15,7 @@ use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use redoor_core::{log, websocket::keepalive_interval};
+use redoor_core::{log, websocket::WebSocketTimeouts};
 use redoor_protocol::{
     ids::AgentId,
     wire::log::{Level, LogAgentHandshake, LogEvent, LogStreamId},
@@ -119,7 +119,7 @@ async fn run_browser_setup(mut browser: WebSocket, agent_id: AgentId, state: Ser
                 agent_id,
                 log_stream_id.0
             );
-            relay_logs(browser, *agent, agent_disconnect).await;
+            relay_logs(browser, *agent, agent_disconnect, state.runtime.ws_timeouts).await;
             state.log_registry.remove(&log_stream_id);
             log!(
                 Level::Info,
@@ -211,12 +211,13 @@ async fn relay_logs(
     browser: WebSocket,
     agent: WebSocket,
     mut agent_disconnect: watch::Receiver<bool>,
+    timeouts: WebSocketTimeouts,
 ) {
     let (browser_sink, browser_stream) = browser.split();
     let (agent_sink, agent_stream) = agent.split();
     tokio::select! {
-        _ = forward_agent_events(agent_stream, browser_sink) => {}
-        _ = wait_for_browser_disconnect(browser_stream, agent_sink) => {}
+        _ = forward_agent_events(agent_stream, browser_sink, timeouts) => {}
+        _ = wait_for_browser_disconnect(browser_stream, agent_sink, timeouts) => {}
         _ = wait_for_authoritative_agent_disconnect(&mut agent_disconnect) => {}
     }
 }
@@ -233,8 +234,9 @@ async fn wait_for_authoritative_agent_disconnect(disconnect: &mut watch::Receive
 async fn forward_agent_events(
     mut agent: SplitStream<WebSocket>,
     mut browser: SplitSink<WebSocket, WsMessage>,
+    timeouts: WebSocketTimeouts,
 ) -> Result<(), ()> {
-    let mut keepalive = keepalive_interval();
+    let mut keepalive = timeouts.keepalive_interval();
     loop {
         let frame = tokio::select! {
             _ = keepalive.tick() => {
@@ -269,8 +271,9 @@ async fn forward_agent_events(
 async fn wait_for_browser_disconnect(
     mut browser: SplitStream<WebSocket>,
     mut agent: SplitSink<WebSocket, WsMessage>,
+    timeouts: WebSocketTimeouts,
 ) -> Result<(), ()> {
-    let mut keepalive = keepalive_interval();
+    let mut keepalive = timeouts.keepalive_interval();
     loop {
         let frame = tokio::select! {
             _ = keepalive.tick() => {

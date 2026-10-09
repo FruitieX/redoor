@@ -19,45 +19,48 @@ use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
+use redoor_core::paths::AppPaths;
 use redoor_core::process::{DETACHED_ENV, ProcessSlot};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt, process::Command};
 
-/// Ties this foreground process to its parent so SIGKILL of the supervisor cannot leak it.
-pub(crate) fn bind_to_parent_lifetime() {
-    if std::env::var_os(DETACHED_ENV).is_some() {
-        return;
+/// Parent process observed when this process started.
+///
+/// Captured once at the top of `main`, before anything can await, and passed to the role
+/// that needs it: if the parent dies before the lifetime hook is installed the kernel will
+/// not replay the death, so the hook compares against this snapshot instead of re-reading.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LaunchParent(Pid);
+
+impl LaunchParent {
+    /// Records the current parent PID.
+    pub(crate) fn capture() -> Self {
+        Self(Pid::parent())
     }
 
-    // Linux and Android expose a kernel-maintained parent-death signal, so no
-    // userspace task or thread needs to remain scheduled after registration.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    bind_to_parent_lifetime_linux();
+    /// Ties this foreground process to its parent so SIGKILL of the supervisor cannot leak it.
+    pub(crate) fn bind_lifetime(self) {
+        if std::env::var_os(DETACHED_ENV).is_some() {
+            return;
+        }
 
-    // macOS has no PR_SET_PDEATHSIG equivalent. A kqueue watcher provides the
-    // closest behavior and also observes parents terminated with SIGKILL.
-    #[cfg(target_os = "macos")]
-    bind_to_parent_lifetime_macos();
-}
+        // Linux and Android expose a kernel-maintained parent-death signal, so no
+        // userspace task or thread needs to remain scheduled after registration.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        bind_to_parent_lifetime_linux(self.0);
 
-/// Snapshots getppid() before any await; the kernel will not replay a parent death in that window.
-pub(crate) fn record_launch_parent() {
-    #[cfg(unix)]
-    {
-        let _ = launch_parent();
+        // macOS has no PR_SET_PDEATHSIG equivalent. A kqueue watcher provides the
+        // closest behavior and also observes parents terminated with SIGKILL.
+        #[cfg(target_os = "macos")]
+        bind_to_parent_lifetime_macos(self.0);
     }
-}
-
-/// Remembers the first observed parent so a later hook can still see a parent that died first.
-#[cfg(unix)]
-fn launch_parent() -> nix::unistd::Pid {
-    static LAUNCH_PARENT: std::sync::OnceLock<nix::unistd::Pid> = std::sync::OnceLock::new();
-    *LAUNCH_PARENT.get_or_init(nix::unistd::Pid::parent)
 }
 
 /// Exits when the recorded parent is no longer ours; the kernel does not replay PR_SET_PDEATHSIG.
-#[cfg(unix)]
-fn exit_if_parent_gone(parent: nix::unistd::Pid) {
+///
+/// A hard exit is intended: the process is an orphan of a dead supervisor and must not
+/// start serving, so there is nothing to unwind into.
+fn exit_if_parent_gone(parent: Pid) {
     if nix::unistd::getppid() != parent {
         std::process::exit(1);
     }
@@ -68,8 +71,7 @@ fn exit_if_parent_gone(parent: nix::unistd::Pid) {
 /// Android uses the Linux kernel facility too. It is named separately by Rust's
 /// `target_os`, so both targets must be included even though the behavior is shared.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn bind_to_parent_lifetime_linux() {
-    let parent = launch_parent();
+fn bind_to_parent_lifetime_linux(parent: Pid) {
     if let Err(error) = set_parent_death_sigterm() {
         eprintln!("Failed to bind process lifetime to the parent: {error}");
     }
@@ -78,11 +80,11 @@ fn bind_to_parent_lifetime_linux() {
 
 /// Configures the Linux-kernel `PR_SET_PDEATHSIG` facility for Linux and Android.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn set_parent_death_sigterm() -> Result<(), String> {
+fn set_parent_death_sigterm() -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         // nix exposes its checked prctl wrapper only for the Rust Linux target.
-        nix::sys::prctl::set_pdeathsig(Some(Signal::SIGTERM)).map_err(|error| error.to_string())
+        nix::sys::prctl::set_pdeathsig(Some(Signal::SIGTERM)).map_err(std::io::Error::from)
     }
     #[cfg(target_os = "android")]
     {
@@ -94,7 +96,7 @@ fn set_parent_death_sigterm() -> Result<(), String> {
         if result == 0 {
             Ok(())
         } else {
-            Err(std::io::Error::last_os_error().to_string())
+            Err(std::io::Error::last_os_error())
         }
     }
 }
@@ -105,10 +107,9 @@ fn set_parent_death_sigterm() -> Result<(), String> {
 /// instead of delivering a termination signal, so a live watcher must explicitly
 /// exit Redoor when the parent disappears.
 #[cfg(target_os = "macos")]
-fn bind_to_parent_lifetime_macos() {
+fn bind_to_parent_lifetime_macos(parent: Pid) {
     use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 
-    let parent = launch_parent();
     let queue = match Kqueue::new() {
         Ok(queue) => queue,
         Err(error) => {
@@ -182,12 +183,16 @@ fn watch_parent_exit(queue: nix::sys::event::Kqueue) -> ! {
     }
 }
 
-/// Owns the path claimed by a long-lived process so startup failures can clean it up.
+/// Owns the path claimed by a long-lived process; dropping it releases the claim.
+///
+/// Cleanup lives in `Drop` so every return path of a role (success, startup error,
+/// runtime error) removes the file without each caller remembering to do it.
 pub(crate) struct PidFile {
     path: PathBuf,
     pid: u32,
-    /// Keeping this descriptor open makes the advisory lock represent process lifetime.
-    file: fs::File,
+    /// Keeping this descriptor open makes the advisory lock represent process lifetime;
+    /// it is only held, never read, and closes after `Drop` removed the file.
+    _lock: fs::File,
 }
 
 /// Runtime identity persisted for a named relay without recording its secret.
@@ -211,27 +216,31 @@ pub(crate) struct RelayPidMetadata {
     pub(crate) log: String,
 }
 
-impl PidFile {
+impl Drop for PidFile {
     /// Removes only this process's claim, avoiding deletion after a concurrent replacement.
-    pub(crate) async fn remove(self) {
-        let owns_numeric_file = read_pid(&self.path).await == Some(self.pid);
-        let owns_relay_file = read_relay_metadata(&self.path)
-            .await
-            .is_some_and(|metadata| metadata.pid == self.pid);
+    ///
+    /// `Drop` cannot await, so this uses blocking std I/O on one tiny local file; the
+    /// advisory lock is released afterwards when the `file` field is dropped.
+    fn drop(&mut self) {
+        let Ok(content) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let owns_numeric_file = content.trim().parse::<u32>().ok() == Some(self.pid);
+        let owns_relay_file = serde_json::from_str::<RelayPidMetadata>(&content)
+            .is_ok_and(|metadata| metadata.pid == self.pid);
         if owns_numeric_file || owns_relay_file {
-            let _ = fs::remove_file(self.path).await;
+            let _ = std::fs::remove_file(&self.path);
         }
-        drop(self.file);
     }
 }
 
 /// Atomically claims the role PID file, rejecting a process that is still alive.
-pub(crate) async fn acquire(slot: ProcessSlot) -> Result<Option<PidFile>> {
+pub(crate) async fn acquire(slot: ProcessSlot, paths: &AppPaths) -> Result<Option<PidFile>> {
     if slot.skips_pid_when_managed() {
         return Ok(None);
     }
 
-    let path = pid_path(slot)?;
+    let path = pid_path(slot, paths)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -242,9 +251,12 @@ pub(crate) async fn acquire(slot: ProcessSlot) -> Result<Option<PidFile>> {
 }
 
 /// Claims one named relay runtime file and writes its JSON launch metadata.
-pub(crate) async fn acquire_relay(mut metadata: RelayPidMetadata) -> Result<PidFile> {
+pub(crate) async fn acquire_relay(
+    mut metadata: RelayPidMetadata,
+    paths: &AppPaths,
+) -> Result<PidFile> {
     metadata.pid = std::process::id();
-    let path = relay_pid_path(&metadata.id)?;
+    let path = relay_pid_path(&metadata.id, paths)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -269,7 +281,7 @@ pub(crate) async fn acquire_relay(mut metadata: RelayPidMetadata) -> Result<PidF
     Ok(PidFile {
         path,
         pid: metadata.pid,
-        file,
+        _lock: file,
     })
 }
 
@@ -292,13 +304,13 @@ async fn claim_pid_file(slot: ProcessSlot, path: PathBuf) -> Result<PidFile> {
     Ok(PidFile {
         path,
         pid: own_pid,
-        file,
+        _lock: file,
     })
 }
 
 /// Reports whether the lock owner is alive without changing process state.
-pub(crate) async fn status(slot: ProcessSlot) -> Result<()> {
-    let path = pid_path(slot)?;
+pub(crate) async fn status(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
+    let path = pid_path(slot, paths)?;
     if !fs::try_exists(&path).await? {
         bail!("{} is not running", slot.file_stem());
     }
@@ -315,16 +327,16 @@ pub(crate) async fn status(slot: ProcessSlot) -> Result<()> {
 }
 
 /// Reports whether one named relay owns its runtime-file lock.
-pub(crate) async fn status_relay(id: &str) -> Result<()> {
-    let (path, metadata) = open_running_relay(id).await?;
+pub(crate) async fn status_relay(id: &str, paths: &AppPaths) -> Result<()> {
+    let (path, metadata) = open_running_relay(id, paths).await?;
     println!("relay '{id}' is running with PID {}", metadata.pid);
     drop(path);
     Ok(())
 }
 
 /// Sends SIGTERM to the lock owner and waits until that exact process releases the PID file.
-pub(crate) async fn stop(slot: ProcessSlot) -> Result<()> {
-    let path = pid_path(slot)?;
+pub(crate) async fn stop(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
+    let path = pid_path(slot, paths)?;
     if !fs::try_exists(&path).await? {
         bail!("{} is not running", slot.file_stem());
     }
@@ -339,21 +351,7 @@ pub(crate) async fn stop(slot: ProcessSlot) -> Result<()> {
 
     kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
         .with_context(|| format!("Failed to stop {} process {pid}", slot.file_stem()))?;
-    let stopped = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut interval = tokio::time::interval(Duration::from_millis(25));
-        while !try_lock(&file)? {
-            interval.tick().await;
-        }
-        anyhow::Ok(())
-    })
-    .await;
-    match stopped {
-        Ok(result) => result?,
-        Err(_) => bail!(
-            "Timed out waiting for {} process {pid} to stop",
-            slot.file_stem()
-        ),
-    }
+    wait_for_unlock(&file, slot.file_stem(), pid).await?;
     if read_pid(&path).await == Some(pid) {
         let _ = fs::remove_file(path).await;
     }
@@ -362,8 +360,8 @@ pub(crate) async fn stop(slot: ProcessSlot) -> Result<()> {
 }
 
 /// Stops one named relay and waits for its exact runtime-file lock to be released.
-pub(crate) async fn stop_relay(id: &str) -> Result<()> {
-    let path = relay_pid_path(id)?;
+pub(crate) async fn stop_relay(id: &str, paths: &AppPaths) -> Result<()> {
+    let path = relay_pid_path(id, paths)?;
     if !fs::try_exists(&path).await? {
         bail!("relay '{id}' is not running");
     }
@@ -389,58 +387,23 @@ pub(crate) async fn stop_relay(id: &str) -> Result<()> {
 }
 
 /// Re-launches the current command without `--daemon` and detaches its session and stdio.
-pub(crate) async fn spawn_daemon(slot: ProcessSlot) -> Result<()> {
-    ensure_not_running(slot).await?;
-    let executable = std::env::current_exe().context("Failed to locate the current executable")?;
-    let arguments: Vec<OsString> = std::env::args_os()
-        .skip(1)
-        .filter(|argument| argument != "--daemon")
-        .collect();
-    let mut command = Command::new(executable);
-    command
-        .args(arguments)
-        .env(DETACHED_ENV, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-
-        // A new session prevents terminal hangups from terminating the background process.
-        // SAFETY: this closure runs after fork and before exec, so it calls only
-        // `setsid` and converts its errno without touching locks or shared runtime state.
-        unsafe {
-            command.as_std_mut().pre_exec(|| {
-                nix::unistd::setsid()
-                    .map(|_| ())
-                    .map_err(std::io::Error::from)
-            });
-        }
-    }
-
-    let child = command.spawn().context("Failed to start daemon process")?;
-    let pid = child.id().context("Daemon process did not receive a PID")?;
-    println!(
-        "Started {} process {pid} in the background",
-        slot.file_stem()
-    );
-    Ok(())
+pub(crate) async fn spawn_daemon(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
+    ensure_not_running(slot, paths).await?;
+    spawn_daemon_process(slot.file_stem()).await
 }
 
 /// Detaches one named relay after checking its own runtime-file lock.
-pub(crate) async fn spawn_relay_daemon(id: &str) -> Result<()> {
-    ensure_relay_not_running(id).await?;
+pub(crate) async fn spawn_relay_daemon(id: &str, paths: &AppPaths) -> Result<()> {
+    ensure_relay_not_running(id, paths).await?;
     spawn_daemon_process(&format!("relay '{id}'")).await
 }
 
 /// Rejects daemon launch before detaching so duplicate-start guidance reaches the caller.
-async fn ensure_not_running(slot: ProcessSlot) -> Result<()> {
+async fn ensure_not_running(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
     if slot.skips_pid_when_managed() {
         return Ok(());
     }
-    let path = pid_path(slot)?;
+    let path = pid_path(slot, paths)?;
     if !fs::try_exists(&path).await? {
         return Ok(());
     }
@@ -457,8 +420,8 @@ async fn ensure_not_running(slot: ProcessSlot) -> Result<()> {
 }
 
 /// Rejects a detached named-relay launch while the selected ID is active.
-async fn ensure_relay_not_running(id: &str) -> Result<()> {
-    let path = relay_pid_path(id)?;
+async fn ensure_relay_not_running(id: &str, paths: &AppPaths) -> Result<()> {
+    let path = relay_pid_path(id, paths)?;
     if !fs::try_exists(&path).await? {
         return Ok(());
     }
@@ -474,7 +437,7 @@ async fn ensure_relay_not_running(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Spawns the current command without `--daemon`, preserving role-specific messaging.
+/// Spawns the current command without `--daemon` in a new session, reporting `description`.
 async fn spawn_daemon_process(description: &str) -> Result<()> {
     let executable = std::env::current_exe().context("Failed to locate the current executable")?;
     let arguments: Vec<OsString> = std::env::args_os()
@@ -492,6 +455,7 @@ async fn spawn_daemon_process(description: &str) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
 
+        // A new session prevents terminal hangups from terminating the background process.
         // SAFETY: this closure runs after fork and before exec, so it calls only
         // `setsid` and converts its errno without touching locks or shared runtime state.
         unsafe {
@@ -509,16 +473,14 @@ async fn spawn_daemon_process(description: &str) -> Result<()> {
 }
 
 /// Resolves a role PID file inside the selected application's persistent data directory.
-fn pid_path(slot: ProcessSlot) -> Result<PathBuf> {
-    Ok(redoor_core::app_name::user_data_directory()?.join(format!("{}.pid", slot.file_stem())))
+fn pid_path(slot: ProcessSlot, paths: &AppPaths) -> Result<PathBuf> {
+    Ok(paths.data_dir()?.join(format!("{}.pid", slot.file_stem())))
 }
 
 /// Resolves the isolated runtime file for one validated relay ID.
-pub(crate) fn relay_pid_path(id: &str) -> Result<PathBuf> {
+pub(crate) fn relay_pid_path(id: &str, paths: &AppPaths) -> Result<PathBuf> {
     redoor_core::config::parse_relay_id(id).map_err(anyhow::Error::msg)?;
-    Ok(redoor_core::app_name::user_data_directory()?
-        .join("relays")
-        .join(format!("{id}.pid")))
+    Ok(paths.data_dir()?.join("relays").join(format!("{id}.pid")))
 }
 
 /// Reads a PID defensively so malformed or partially written stale files can be replaced.
@@ -533,8 +495,8 @@ pub(crate) async fn read_relay_metadata(path: &PathBuf) -> Option<RelayPidMetada
 }
 
 /// Opens a running relay and returns its locked descriptor and persisted metadata.
-async fn open_running_relay(id: &str) -> Result<(fs::File, RelayPidMetadata)> {
-    let path = relay_pid_path(id)?;
+async fn open_running_relay(id: &str, paths: &AppPaths) -> Result<(fs::File, RelayPidMetadata)> {
+    let path = relay_pid_path(id, paths)?;
     if !fs::try_exists(&path).await? {
         bail!("relay '{id}' is not running");
     }
@@ -618,7 +580,7 @@ mod tests {
         let first = PidFile {
             path: path.clone(),
             pid: metadata.pid,
-            file,
+            _lock: file,
         };
 
         let record = read_relay_metadata(&path)
@@ -632,7 +594,7 @@ mod tests {
             "relay JSON should contain the lock owner's PID"
         );
 
-        first.remove().await;
+        drop(first);
         // Normal relay exit must remove JSON records just like numeric role PID files.
         assert!(
             !path.exists(),
@@ -656,29 +618,18 @@ mod tests {
             return;
         };
         match mode.as_str() {
-            "foreground" => {
-                record_launch_parent();
-                bind_to_parent_lifetime();
-                write_ready_pid();
-                park_forever();
-            }
-            "detached" => {
-                record_launch_parent();
-                bind_to_parent_lifetime();
+            "foreground" | "detached" => {
+                LaunchParent::capture().bind_lifetime();
                 write_ready_pid();
                 park_forever();
             }
             "already-dead" => {
-                record_launch_parent();
+                let parent = LaunchParent::capture();
                 write_ready_pid();
-                #[cfg(unix)]
-                {
-                    let parent = launch_parent();
-                    while nix::unistd::getppid() == parent {
-                        std::thread::yield_now();
-                    }
+                while nix::unistd::getppid() == parent.0 {
+                    std::thread::yield_now();
                 }
-                bind_to_parent_lifetime();
+                parent.bind_lifetime();
                 if let Ok(path) = std::env::var(PARENT_DEATH_SURVIVED_ENV) {
                     let _ = std::fs::write(path, "survived");
                 }

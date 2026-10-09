@@ -65,7 +65,12 @@ pub async fn run_relay(
     relay: redoor_core::config::RelayConfig,
     token: String,
     agent_app_name: String,
+    paths: redoor_core::paths::AppPaths,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let provision = ProvisionContext {
+        app_name: paths.app_name().to_string(),
+        binaries: crate::binaries::BinaryCache::new(paths),
+    };
     let server = relay.server.parse::<ServerAddress>()?;
     if relay.insecure && !server.is_secure() {
         return Err("relay insecure = true requires an https:// or wss:// server URL".into());
@@ -88,8 +93,18 @@ pub async fn run_relay(
         relay.insecure,
         relay.binary_source,
         agent_app_name,
+        &provision,
     )
     .await
+}
+
+/// Local facts every SSH preparation needs besides the target's own settings.
+#[derive(Clone)]
+pub(crate) struct ProvisionContext {
+    /// Local namespace: installs land under it remotely and spawned agents inherit it.
+    pub(crate) app_name: String,
+    /// Release cache used when the target lacks a matching binary.
+    pub(crate) binaries: crate::binaries::BinaryCache,
 }
 
 /// Remembers the last random remote port so every retry necessarily chooses a
@@ -408,6 +423,7 @@ pub(crate) async fn prepare_ssh_backed_agent(
     config: &SshBackedAgentConfig,
     redoor_port: u16,
     agent_token: &str,
+    provision: &ProvisionContext,
     status: &ProvisioningStatusSink,
 ) -> Result<PreparedSshBackedAgent, Box<dyn std::error::Error>> {
     log!(
@@ -433,6 +449,7 @@ pub(crate) async fn prepare_ssh_backed_agent(
         redoor_port,
         agent_token,
         RelayPreparationOptions::default(),
+        provision,
         status,
     )
     .await;
@@ -467,6 +484,7 @@ async fn prepare_ssh_backed_agent_for_destination(
     destination_port: u16,
     agent_token: &str,
     preparation: RelayPreparationOptions<'_>,
+    provision: &ProvisionContext,
     status: &ProvisioningStatusSink,
 ) -> Result<PreparedSshBackedAgent, Box<dyn std::error::Error>> {
     let prepare_start = std::time::Instant::now();
@@ -498,7 +516,7 @@ async fn prepare_ssh_backed_agent_for_destination(
             remote_bin
         }
         None => {
-            let default = default_remote_bin()?;
+            let default = default_remote_bin(&provision.app_name);
             log!(
                 Level::Debug,
                 "SSH prepare resolved default remote_bin: target={}, remote_bin={}",
@@ -590,7 +608,7 @@ async fn prepare_ssh_backed_agent_for_destination(
             sniff.remote_bin,
             prepare_start.elapsed()
         );
-        let ensured = ensure_remote_binary(&host, &sniff, status).await?;
+        let ensured = ensure_remote_binary(&host, &sniff, provision, status).await?;
         log!(
             Level::Debug,
             "SSH prepare ensure_remote_binary completed: target={}, remote_bin={}, elapsed={:?}, total_prepare_elapsed={:?}",
@@ -667,10 +685,9 @@ async fn prepare_ssh_backed_agent_for_destination(
     Ok(PreparedSshBackedAgent {
         host,
         agent_name,
-        app_name: match preparation.agent_app_name {
-            Some(app_name) => app_name,
-            None => redoor_core::app_name::app_name()?,
-        },
+        app_name: preparation
+            .agent_app_name
+            .unwrap_or_else(|| provision.app_name.clone()),
         remote_bin,
         home: config.home.clone(),
         destination_host,
@@ -801,6 +818,7 @@ pub(crate) async fn start_relay(
     insecure: bool,
     binary_source: Option<PathBuf>,
     agent_app_name: String,
+    provision: &ProvisionContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let secure_server = server.is_secure().then(|| SecureRelayServer {
         authority: server.authority(),
@@ -823,6 +841,7 @@ pub(crate) async fn start_relay(
                     binary_source: binary_source.as_deref(),
                     agent_app_name: Some(agent_app_name.clone()),
                 },
+                provision,
                 &ProvisioningStatusSink::noop(),
             )
             .await

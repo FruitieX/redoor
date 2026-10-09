@@ -614,7 +614,6 @@ mod tests {
 
     #[tokio::test]
     async fn queued_terminal_wins_over_transfer_teardown_cancellation() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp = TempDir::create();
         let path = temp.path().join("target");
         tokio::fs::write(&path, b"old").await.unwrap();

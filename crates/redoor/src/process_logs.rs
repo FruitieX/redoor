@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
+use redoor_core::paths::AppPaths;
 use redoor_core::process::ProcessSlot;
 
 /// Process role whose configured file log should be displayed.
@@ -26,21 +27,27 @@ impl LogRole {
     }
 }
 
+/// Options shared by `server logs` and `agent logs`.
+pub(crate) struct LogArgs {
+    /// Explicit config file; the namespace's conventional path otherwise.
+    pub(crate) config: Option<String>,
+    /// Explicit log file that bypasses config lookup.
+    pub(crate) log: Option<String>,
+    /// Number of trailing lines to print.
+    pub(crate) lines: usize,
+    /// Keep printing appended lines.
+    pub(crate) follow: bool,
+}
+
 /// Resolves the configured path and streams its last lines through the platform `tail` tool.
-pub(crate) async fn run(
-    role: LogRole,
-    config: Option<String>,
-    explicit_log: Option<String>,
-    lines: usize,
-    follow: bool,
-) -> Result<()> {
-    let log_path = match explicit_log.filter(|path| !path.trim().is_empty()) {
+pub(crate) async fn run(role: LogRole, args: LogArgs, paths: &AppPaths) -> Result<()> {
+    let log_path = match args.log.filter(|path| !path.trim().is_empty()) {
         Some(path) => path,
-        None => configured_log_path(role, config).await?,
+        None => configured_log_path(role, args.config, paths).await?,
     };
 
     let status = Command::new("tail")
-        .args(tail_arguments(lines, follow, &log_path))
+        .args(tail_arguments(args.lines, args.follow, &log_path))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -65,39 +72,46 @@ fn tail_arguments(lines: usize, follow: bool, log_path: &str) -> Vec<String> {
 }
 
 /// Loads the conventional or explicit TOML and returns the selected role's log path.
-async fn configured_log_path(role: LogRole, config: Option<String>) -> Result<String> {
+async fn configured_log_path(
+    role: LogRole,
+    config: Option<String>,
+    paths: &AppPaths,
+) -> Result<String> {
     let config_path = match config {
         Some(path) => PathBuf::from(path),
-        None => redoor_core::config::default_config_path()?,
+        None => paths.default_config_path()?,
     };
-    let parsed = redoor_core::config::parse_config_file(&config_path)
-        .await
-        .with_context(|| format!("Failed to parse config file '{}'", config_path.display()))?;
+    let parsed = redoor_core::config::parse_config_file(&config_path).await?;
     let configured = match role {
         LogRole::Server => parsed.server.and_then(|section| section.log),
         LogRole::Agent => parsed.agent.and_then(|section| section.log),
     };
     match configured {
         Some(path) if !path.trim().is_empty() => Ok(path),
-        _ => redoor_core::config::default_process_log_path(role.process_slot()),
+        _ => paths.process_log_path(role.process_slot()),
     }
 }
 
 /// Streams one named relay log, preferring immutable runtime metadata over mutable TOML.
-pub(crate) async fn run_relay(id: &str, config: Option<String>, lines: usize) -> Result<()> {
-    let pid_path = crate::process_control::relay_pid_path(id)?;
+pub(crate) async fn run_relay(
+    id: &str,
+    config: Option<String>,
+    lines: usize,
+    paths: &AppPaths,
+) -> Result<()> {
+    let pid_path = crate::process_control::relay_pid_path(id, paths)?;
     let log = match crate::process_control::read_relay_metadata(&pid_path).await {
         Some(metadata) => metadata.log,
         None => {
             let config_path = match config {
                 Some(path) => PathBuf::from(path),
-                None => redoor_core::config::default_config_path()?,
+                None => paths.default_config_path()?,
             };
             let parsed = redoor_core::config::parse_config_file(&config_path).await?;
             let relay = redoor_core::config::require_relay(&parsed, id)?;
             match relay.agent.log.clone() {
                 Some(log) => log,
-                None => redoor_core::config::default_relay_log_path(id)?,
+                None => paths.relay_log_path(id)?,
             }
         }
     };

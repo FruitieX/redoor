@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 
 use super::{
-    AgentConfig, AgentSection, AuthMode, ConfigError, LocalAgentConfig, RedoorConfig, RelayConfig,
+    AgentConfig, AgentSection, AuthMode, LocalAgentConfig, RedoorConfig, RelayConfig,
     ServerSection, SshBackedAgentConfig, default_agent_name, default_local_agent_name,
     parse_relay_id, parse_server_username,
 };
@@ -105,14 +105,20 @@ struct RawRelay {
     password: Option<String>,
 }
 
-/// Shorthand for semantic failures, which carry their full operator-facing text.
-fn invalid(message: impl Into<String>) -> ConfigError {
-    ConfigError::Invalid(message.into())
+/// A violated cross-key rule; the text names the key path and how to fix it.
+///
+/// Kept private and path-less: `parse_config_str` attaches the file path when it turns
+/// this into the public [`super::Invalid`].
+pub(super) struct Invalid(pub(super) String);
+
+/// Shorthand for building a rule violation from any message.
+fn invalid(message: impl Into<String>) -> Invalid {
+    Invalid(message.into())
 }
 
 impl RawConfig {
     /// Applies cross-key rules and converts into the public config model.
-    pub(super) fn validate(self) -> Result<RedoorConfig, ConfigError> {
+    pub(super) fn validate(self) -> Result<RedoorConfig, Invalid> {
         // The legacy nested token gets its migration hint before the generic missing-token error.
         if self
             .server
@@ -159,7 +165,7 @@ impl RawConfig {
 }
 
 /// Rejects two managed rows that would register under one name, before any supervisor exists.
-fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), ConfigError> {
+fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
     let mut names = HashSet::new();
     for agent in agents {
         let name = match agent {
@@ -182,7 +188,7 @@ fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), ConfigErro
 
 impl RawServerSection {
     /// Resolves the login backend and checks values serde only sees as plain strings.
-    fn validate(self) -> Result<ServerSection, ConfigError> {
+    fn validate(self) -> Result<ServerSection, Invalid> {
         let log_level = parse_named(self.log_level, "server.log_level")?;
         let log_format = parse_named(self.log_format, "server.log_format")?;
         let username = self
@@ -233,7 +239,7 @@ impl RawServerSection {
 }
 
 /// Selects PAM login where it exists; other platforms need explicit TOML credentials.
-fn system_account_auth() -> Result<AuthMode, ConfigError> {
+fn system_account_auth() -> Result<AuthMode, Invalid> {
     #[cfg(target_os = "linux")]
     {
         Ok(AuthMode::SystemAccount)
@@ -248,7 +254,7 @@ fn system_account_auth() -> Result<AuthMode, ConfigError> {
 
 impl RawAgentSection {
     /// Folds legacy keys into their current names and rejects empty overrides.
-    fn validate(self) -> Result<AgentSection, ConfigError> {
+    fn validate(self) -> Result<AgentSection, Invalid> {
         let non_empty = |value: Option<String>, key: &str| match value {
             Some(value) if value.is_empty() => Err(invalid(format!(
                 "agent.{key} must be a non-empty string when set"
@@ -283,7 +289,7 @@ impl RawAgentSection {
 
 impl RawAgentEntry {
     /// Splits the row into the SSH or local model selected by `local`.
-    fn validate(mut self, index: usize) -> Result<AgentConfig, ConfigError> {
+    fn validate(mut self, index: usize) -> Result<AgentConfig, Invalid> {
         let home = legacy_alias(
             self.home.take(),
             self.dir.take(),
@@ -299,11 +305,7 @@ impl RawAgentEntry {
 
     /// Rejects SSH-only keys so a pasted SSH row with `local = true` fails clearly instead of
     /// starting an agent that silently ignores them.
-    fn validate_local(
-        self,
-        index: usize,
-        home: Option<String>,
-    ) -> Result<AgentConfig, ConfigError> {
+    fn validate_local(self, index: usize, home: Option<String>) -> Result<AgentConfig, Invalid> {
         if self.target.is_some() {
             return Err(invalid(format!(
                 "agents entry #{index} has both 'local = true' and a 'target'; local agents do not use ssh, remove 'target'"
@@ -328,7 +330,7 @@ impl RawAgentEntry {
     }
 
     /// Requires the SSH destination; every other field defers to OpenSSH or agent defaults.
-    fn validate_ssh(self, index: usize, home: Option<String>) -> Result<AgentConfig, ConfigError> {
+    fn validate_ssh(self, index: usize, home: Option<String>) -> Result<AgentConfig, Invalid> {
         let target = self.target.ok_or_else(|| {
             invalid(format!(
                 "agents entry #{index} is missing a 'target' string"
@@ -354,7 +356,7 @@ impl RawAgentEntry {
 
 impl RawRelay {
     /// Checks identity, URL and TLS settings before any PID file or SSH session exists.
-    fn validate(self, index: usize) -> Result<RelayConfig, ConfigError> {
+    fn validate(self, index: usize) -> Result<RelayConfig, Invalid> {
         let non_blank = |value: Option<String>, key: &str| match value {
             Some(value) if value.trim().is_empty() => Err(invalid(format!(
                 "relays entry #{index} '{key}' must be non-empty"
@@ -406,7 +408,7 @@ fn legacy_alias(
     legacy: Option<String>,
     current_key: &str,
     legacy_key: &str,
-) -> Result<Option<String>, ConfigError> {
+) -> Result<Option<String>, Invalid> {
     match (current, legacy) {
         (Some(_), Some(_)) => Err(invalid(format!(
             "{current_key} and {legacy_key} cannot both be set; use {current_key}"
@@ -417,7 +419,7 @@ fn legacy_alias(
 }
 
 /// Parses an enum-like string setting with the type's own vocabulary and the key path.
-fn parse_named<T>(value: Option<String>, key: &str) -> Result<Option<T>, ConfigError>
+fn parse_named<T>(value: Option<String>, key: &str) -> Result<Option<T>, Invalid>
 where
     T: std::str::FromStr<Err = String>,
 {

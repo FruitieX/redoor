@@ -21,6 +21,7 @@ use crate::ServiceRole;
 #[cfg(target_os = "linux")]
 use crate::service_management::InstallArgs;
 use crate::service_management::ServiceCommand;
+use redoor_core::paths::AppPaths;
 
 /// Arguments for role-scoped `redoor agent|server systemd` service management.
 #[derive(Args)]
@@ -33,34 +34,30 @@ pub(crate) struct SystemdArgs {
 
 /// Derives the unit file name from the already validated installation identity.
 #[cfg(any(target_os = "linux", test))]
-fn unit_name(role: ServiceRole) -> Result<String> {
-    Ok(format!(
-        "{}-{}.service",
-        redoor_core::app_name::app_name()?,
-        role.cli_name()
-    ))
+fn unit_name(role: ServiceRole, app_name: &str) -> String {
+    format!("{app_name}-{}.service", role.cli_name())
 }
 
 /// Runs one systemd operation against the unit scope implied by current privileges.
-pub(crate) async fn run(args: SystemdArgs, role: ServiceRole) -> Result<()> {
+pub(crate) async fn run(args: SystemdArgs, role: ServiceRole, paths: &AppPaths) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (args, role);
+        let _ = (args, role, paths);
         bail!("systemd commands are only supported on Linux");
     }
 
     #[cfg(target_os = "linux")]
     {
         match args.command {
-            ServiceCommand::Install(install_args) => install(install_args, role).await,
-            ServiceCommand::Uninstall => uninstall(role).await,
-            ServiceCommand::Start => manage_unit(role, UnitAction::Start).await,
-            ServiceCommand::Stop => manage_unit(role, UnitAction::Stop).await,
-            ServiceCommand::Restart => manage_unit(role, UnitAction::Restart).await,
-            ServiceCommand::Status => manage_unit(role, UnitAction::Status).await,
-            ServiceCommand::Enable => manage_unit(role, UnitAction::Enable).await,
+            ServiceCommand::Install(install_args) => install(install_args, role, paths).await,
+            ServiceCommand::Uninstall => uninstall(role, paths).await,
+            ServiceCommand::Start => manage_unit(role, UnitAction::Start, paths).await,
+            ServiceCommand::Stop => manage_unit(role, UnitAction::Stop, paths).await,
+            ServiceCommand::Restart => manage_unit(role, UnitAction::Restart, paths).await,
+            ServiceCommand::Status => manage_unit(role, UnitAction::Status, paths).await,
+            ServiceCommand::Enable => manage_unit(role, UnitAction::Enable, paths).await,
             ServiceCommand::Disable(disable) => {
-                manage_unit(role, UnitAction::Disable { now: disable.now }).await
+                manage_unit(role, UnitAction::Disable { now: disable.now }, paths).await
             }
         }
     }
@@ -68,12 +65,12 @@ pub(crate) async fn run(args: SystemdArgs, role: ServiceRole) -> Result<()> {
 
 /// Installs and enables the requested service in the privilege-selected scope.
 #[cfg(target_os = "linux")]
-async fn install(args: InstallArgs, role: ServiceRole) -> Result<()> {
-    let unit_name = unit_name(role)?;
+async fn install(args: InstallArgs, role: ServiceRole, paths: &AppPaths) -> Result<()> {
+    let unit_name = unit_name(role, paths.app_name());
     if nix::unistd::Uid::effective().is_root() {
-        run_system(role, &unit_name, args.start).await
+        run_system(role, &unit_name, args.start, paths).await
     } else {
-        run_user(role, &unit_name, args.start).await
+        run_user(role, &unit_name, args.start, paths).await
     }
 }
 
@@ -91,12 +88,12 @@ enum UnitAction {
 
 /// Executes a shortcut with `--user` for non-root callers and system scope for root.
 #[cfg(target_os = "linux")]
-async fn manage_unit(role: ServiceRole, action: UnitAction) -> Result<()> {
-    let service = unit_name(role)?;
+async fn manage_unit(role: ServiceRole, action: UnitAction, paths: &AppPaths) -> Result<()> {
+    let service = unit_name(role, paths.app_name());
     let user = !nix::unistd::Uid::effective().is_root();
     let flag: &[&str] = if user { &["--user"] } else { &[] };
     if matches!(action, UnitAction::Status) {
-        return show_status(&service, user, flag).await;
+        return show_status(&service, user, flag, paths).await;
     }
     ensure_unit_exists(&service, role, user, flag).await?;
 
@@ -241,8 +238,8 @@ fn format_status(
 
 /// Reports service state successfully even when the unit has not been installed.
 #[cfg(target_os = "linux")]
-async fn show_status(service: &str, user: bool, flag: &[&str]) -> Result<()> {
-    let path = unit_path(service, user)?;
+async fn show_status(service: &str, user: bool, flag: &[&str], paths: &AppPaths) -> Result<()> {
+    let path = unit_path(service, user, paths)?;
     let installed = tokio::fs::try_exists(&path)
         .await
         .with_context(|| format!("Failed to inspect systemd unit '{}'", path.display()))?;
@@ -295,9 +292,12 @@ fn parse_enabled_state(output: &str) -> Option<bool> {
 
 /// Returns the expected unit path for the selected user or system scope.
 #[cfg(target_os = "linux")]
-fn unit_path(service: &str, user: bool) -> Result<PathBuf> {
+fn unit_path(service: &str, user: bool, paths: &AppPaths) -> Result<PathBuf> {
     if user {
-        Ok(home_directory()?.join(".config/systemd/user").join(service))
+        Ok(paths
+            .home("the systemd user unit directory")?
+            .join(".config/systemd/user")
+            .join(service))
     } else {
         Ok(PathBuf::from("/etc/systemd/system").join(service))
     }
@@ -305,11 +305,11 @@ fn unit_path(service: &str, user: bool) -> Result<PathBuf> {
 
 /// Stops, disables, and removes a unit while making repeated calls harmless.
 #[cfg(target_os = "linux")]
-async fn uninstall(role: ServiceRole) -> Result<()> {
-    let service = unit_name(role)?;
+async fn uninstall(role: ServiceRole, paths: &AppPaths) -> Result<()> {
+    let service = unit_name(role, paths.app_name());
     let user = !nix::unistd::Uid::effective().is_root();
     let flag: &[&str] = if user { &["--user"] } else { &[] };
-    let path = unit_path(&service, user)?;
+    let path = unit_path(&service, user, paths)?;
     let installed = tokio::fs::try_exists(&path)
         .await
         .with_context(|| format!("Failed to inspect systemd unit '{}'", path.display()))?;
@@ -365,17 +365,18 @@ async fn uninstall(role: ServiceRole) -> Result<()> {
 
 /// Installs a lingering systemd user unit owned by the invoking account.
 #[cfg(target_os = "linux")]
-async fn run_user(mode: ServiceRole, unit_name: &str, start: bool) -> Result<()> {
-    let app_name = redoor_core::app_name::app_name()?;
-    let config_path = redoor_core::config::default_config_path()?;
+async fn run_user(mode: ServiceRole, unit_name: &str, start: bool, paths: &AppPaths) -> Result<()> {
+    let app_name = paths.app_name();
+    let config_path = paths.default_config_path()?;
     let config_created = crate::service_management::prepare_config(mode, &config_path).await?;
 
     let binary = tokio::fs::canonicalize(std::env::current_exe()?)
         .await
         .context("Failed to resolve the current redoor executable")?;
-    let unit_content = render_unit(mode, &binary, &config_path, false, &app_name);
-    let home = home_directory()?;
-    let unit_directory = home.join(".config/systemd/user");
+    let unit_content = render_unit(mode, &binary, &config_path, false, app_name);
+    let unit_directory = paths
+        .home("the systemd user unit directory")?
+        .join(".config/systemd/user");
     tokio::fs::create_dir_all(&unit_directory)
         .await
         .with_context(|| {
@@ -408,9 +409,14 @@ async fn run_user(mode: ServiceRole, unit_name: &str, start: bool) -> Result<()>
 
 /// Installs a system unit: server as the `redoor` user, agent as root.
 #[cfg(target_os = "linux")]
-async fn run_system(mode: ServiceRole, unit_name: &str, start: bool) -> Result<()> {
-    let app_name = redoor_core::app_name::app_name()?;
-    let config_path = redoor_core::config::default_config_path()?;
+async fn run_system(
+    mode: ServiceRole,
+    unit_name: &str,
+    start: bool,
+    paths: &AppPaths,
+) -> Result<()> {
+    let app_name = paths.app_name();
+    let config_path = paths.default_config_path()?;
     let config_created = crate::service_management::prepare_config(mode, &config_path).await?;
 
     if mode == ServiceRole::Server {
@@ -423,12 +429,12 @@ async fn run_system(mode: ServiceRole, unit_name: &str, start: bool) -> Result<(
 
     // Pre-create the conventional system log directory so the `redoor` service
     // user can open log files even when the agent unit (root) created the tree.
-    ensure_system_log_directory().await?;
+    ensure_system_log_directory(paths).await?;
 
     let binary = tokio::fs::canonicalize(std::env::current_exe()?)
         .await
         .context("Failed to resolve the current redoor executable")?;
-    let unit_content = render_unit(mode, &binary, &config_path, true, &app_name);
+    let unit_content = render_unit(mode, &binary, &config_path, true, app_name);
     let unit_directory = PathBuf::from("/etc/systemd/system");
     let unit_path = unit_directory.join(unit_name);
     crate::service_management::atomic_write(&unit_path, unit_content.as_bytes(), "systemd unit")
@@ -492,8 +498,8 @@ async fn activate_unit(service: &str, user: bool, start: bool) -> Result<()> {
 
 /// Creates the selected `/var/log/<app-name>` and hands ownership to `redoor` when available.
 #[cfg(target_os = "linux")]
-async fn ensure_system_log_directory() -> Result<()> {
-    let log_directory = redoor_core::config::default_log_directory()?;
+async fn ensure_system_log_directory(paths: &AppPaths) -> Result<()> {
+    let log_directory = paths.log_dir()?;
     tokio::fs::create_dir_all(&log_directory)
         .await
         .with_context(|| {
@@ -557,14 +563,6 @@ Manage the service:
         mode.cli_name(),
         mode.cli_name()
     );
-}
-
-/// Returns the conventional home directory required by user services and config.
-#[cfg(target_os = "linux")]
-fn home_directory() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set; cannot locate the systemd user or Redoor config directories")
 }
 
 /// Looks up the effective account name off the async runtime because NSS may block.
@@ -729,15 +727,14 @@ mod tests {
     /// Verifies unit names derive solely from the validated application identity.
     #[test]
     fn unit_names_use_application_identity() {
-        let app_name = redoor_core::app_name::app_name().unwrap();
         assert_eq!(
-            unit_name(ServiceRole::Agent).unwrap(),
-            format!("{app_name}-agent.service"),
+            unit_name(ServiceRole::Agent, "redoor-dev"),
+            "redoor-dev-agent.service",
             "the agent unit should use the effective application namespace"
         );
         assert_eq!(
-            unit_name(ServiceRole::Server).unwrap(),
-            format!("{app_name}-server.service"),
+            unit_name(ServiceRole::Server, "redoor-dev"),
+            "redoor-dev-server.service",
             "the server unit should use the effective application namespace"
         );
     }

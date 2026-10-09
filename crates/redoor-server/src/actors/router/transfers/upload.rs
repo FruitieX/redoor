@@ -514,7 +514,6 @@ mod tests {
     /// Remote copy/move destinations must reserve the public copy's lifecycle boundary.
     #[tokio::test]
     async fn remote_upload_publication_uses_copy_or_move_identity() {
-        redoor_core::logging::init(None).await.unwrap();
         for is_move in [false, true] {
             let mut state = router_state();
             let public_id = RequestId::new(60);
@@ -574,7 +573,6 @@ mod tests {
     /// Both router orderings: accepted cancellation cannot race a later publication grant.
     #[tokio::test]
     async fn publication_boundary_orders_cancellation_for_raw_and_tar_uploads() {
-        redoor_core::logging::init(None).await.unwrap();
         for kind in [UploadKind::RawUpload, UploadKind::TarUpload] {
             let mut state = router_state();
             let request_id = RequestId::new(51);
@@ -669,7 +667,6 @@ mod tests {
     /// A mismatched completion errors both the transfer and the REST request.
     #[tokio::test]
     async fn mismatched_edit_completion_errors_the_transfer_and_rest_request() {
-        redoor_core::logging::init(None).await.unwrap();
         let mut state = router_state();
         let request_id = RequestId::new(43);
         let completion_receiver = record_upload(&mut state, request_id, UploadKind::EditFile);

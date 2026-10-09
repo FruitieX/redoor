@@ -242,7 +242,6 @@ mod tests {
     /// Waits for the real worker's publication request so cancellation cannot depend on IO timing.
     #[tokio::test]
     async fn cancellation_at_raw_publication_gate_preserves_destination_and_cleans_staging() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp = TempDir::create();
         let destination = temp.path().join("destination");
         tokio::fs::write(&destination, b"original").await.unwrap();

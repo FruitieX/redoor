@@ -1,73 +1,8 @@
-//! Host-derived paths and first-run configuration bootstrap.
+//! First-run configuration bootstrap and host-derived defaults.
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
-
-/// Conventional config path for the current process privileges.
-///
-/// Root loads `/etc/<app-name>/config.toml` so system units and admin installs
-/// share one file; non-root uses the matching directory under `~/.config`.
-pub fn default_config_path() -> Result<PathBuf> {
-    let app_name = crate::app_name::app_name()?;
-    if effective_uid_is_root() {
-        return Ok(PathBuf::from("/etc").join(app_name).join("config.toml"));
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set; pass --config with a config.toml path")?;
-    Ok(home.join(".config").join(app_name).join("config.toml"))
-}
-
-/// Conventional directory for process log files under the current privileges.
-///
-/// Root uses `/var/log/<app-name>` so system units share a writable location;
-/// non-root keeps logs in the matching per-application data directory.
-pub fn default_log_directory() -> Result<PathBuf> {
-    if effective_uid_is_root() {
-        return Ok(PathBuf::from("/var/log").join(crate::app_name::app_name()?));
-    }
-    crate::app_name::user_data_directory()
-}
-
-/// Default persistent log for a process slot when no CLI, environment, or TOML path is set.
-pub fn default_process_log_path(slot: crate::process::ProcessSlot) -> Result<String> {
-    Ok(default_log_directory()?
-        .join(format!("{}.log", slot.file_stem()))
-        .display()
-        .to_string())
-}
-
-/// Default persistent server log used when no CLI, environment, or TOML path is set.
-pub fn default_server_log_path() -> Result<String> {
-    default_process_log_path(crate::process::ProcessSlot::Server)
-}
-
-/// Default persistent standalone-agent log used when no explicit path is set.
-pub fn default_agent_log_path() -> Result<String> {
-    default_process_log_path(crate::process::ProcessSlot::Agent)
-}
-
-/// Default persistent SSH-relay log uses its stable ID to avoid cross-relay output mixing.
-pub fn default_relay_log_path(id: &str) -> Result<String> {
-    Ok(default_log_directory()?
-        .join("relays")
-        .join(format!("{id}.log"))
-        .display()
-        .to_string())
-}
-
-/// Whether the process effective UID is root (system-install / privileged path).
-fn effective_uid_is_root() -> bool {
-    #[cfg(unix)]
-    {
-        nix::unistd::Uid::effective().is_root()
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
 
 /// Generates a high-entropy secret for bootstrap agent tokens.
 fn generate_secret() -> String {

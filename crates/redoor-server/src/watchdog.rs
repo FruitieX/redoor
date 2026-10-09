@@ -1022,7 +1022,6 @@ mod tests {
 
     #[tokio::test]
     async fn remove_stopped_is_idempotent_and_exits_a_dormant_supervisor() {
-        redoor_core::logging::init(None).await.unwrap();
         let registry = WatchdogRegistry::new();
         let _guard = SupervisorGuard(
             spawn_supervisor(
@@ -1053,7 +1052,6 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_is_dormant_until_started_and_start_is_idempotent() {
-        redoor_core::logging::init(None).await.unwrap();
         let count = Arc::new(AtomicUsize::new(0));
         let spawn_count = count.clone();
         let spawn = SpawnFn::new(move |_status| {
@@ -1095,7 +1093,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_revokes_registration_and_interrupts_pending_spawn() {
-        redoor_core::logging::init(None).await.unwrap();
         let spawn_count = Arc::new(AtomicUsize::new(0));
         let observed_spawn = spawn_count.clone();
         let registry = WatchdogRegistry::new();
@@ -1135,7 +1132,6 @@ mod tests {
 
     #[tokio::test]
     async fn retry_fences_pending_attempt_and_starts_with_clean_state() {
-        redoor_core::logging::init(None).await.unwrap();
         let spawn_count = Arc::new(AtomicUsize::new(0));
         let observed_spawns = spawn_count.clone();
         let registry = WatchdogRegistry::new();
@@ -1201,7 +1197,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn retry_reaps_owned_child_before_acknowledging_replacement() {
-        redoor_core::logging::init(None).await.unwrap();
         let spawn_count = Arc::new(AtomicUsize::new(0));
         let first_pid = Arc::new(AtomicUsize::new(0));
         let observed_spawns = spawn_count.clone();
@@ -1257,7 +1252,6 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_errors_are_visible_and_shutdown_interrupts_backoff() {
-        redoor_core::logging::init(None).await.unwrap();
         let spawn_count = Arc::new(AtomicUsize::new(0));
         let observed_spawns = spawn_count.clone();
         let registry = WatchdogRegistry::new();
@@ -1326,7 +1320,6 @@ mod tests {
 
     #[tokio::test]
     async fn piped_ssh_stderr_is_visible_in_connection_issue() {
-        redoor_core::logging::init(None).await.unwrap();
         let registry = WatchdogRegistry::new();
         let spawn = SpawnFn::new(|_status| async {
             Command::new("sh")
@@ -1362,7 +1355,6 @@ mod tests {
 
     #[tokio::test]
     async fn connection_generation_clears_issue_and_ignores_stale_disconnect() {
-        redoor_core::logging::init(None).await.unwrap();
         let registry = WatchdogRegistry::new();
         let snapshots = Arc::new(Mutex::new(Vec::new()));
         let callback_snapshots = snapshots.clone();
@@ -1442,7 +1434,6 @@ mod tests {
 
     #[tokio::test]
     async fn stale_signal_restarts_only_the_current_socket_generation() {
-        redoor_core::logging::init(None).await.unwrap();
         let spawn_count = Arc::new(AtomicUsize::new(0));
         let observed_spawns = spawn_count.clone();
         let registry = WatchdogRegistry::new();
@@ -1506,7 +1497,6 @@ mod tests {
 
     #[tokio::test]
     async fn provisioning_status_accumulates_then_resets_on_the_next_cycle() {
-        redoor_core::logging::init(None).await.unwrap();
         let first_spawn = Arc::new(tokio::sync::Notify::new());
         let release_first = Arc::new(tokio::sync::Notify::new());
         let spawn_count = Arc::new(AtomicUsize::new(0));

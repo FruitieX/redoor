@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
 };
@@ -27,7 +27,12 @@ const LOG_RECORD_CAPACITY: usize = 2_048;
 const TRUNCATION_NOTICE: &str = "
 [diagnostic truncated]";
 
-static LOGGER: OnceLock<LoggerHandle> = OnceLock::new();
+/// Sink the `log!` macros write through; replaceable so tests and embedders can inject one.
+///
+/// The macros stay global because threading a logger through every call site would touch
+/// almost every function, but the sink itself is an ordinary owned [`LoggerHandle`].
+static LOGGER: RwLock<Option<LoggerHandle>> = RwLock::new(None);
+/// Admission threshold read by the macros before formatting; process-wide by design.
 static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
 
 /// Selects operator-facing output without changing structured browser payloads.
@@ -116,7 +121,10 @@ impl ReplayState {
 }
 
 /// Keeps normal logging non-blocking while sharing a precise replay/live boundary.
-struct LoggerHandle {
+///
+/// Cloning shares the same output task; the task ends when the last clone is dropped.
+#[derive(Clone)]
+pub struct LoggerHandle {
     records: Sender<LogRecord>,
     dropped_records: Arc<AtomicU64>,
     replay: Arc<Mutex<ReplayState>>,
@@ -124,6 +132,24 @@ struct LoggerHandle {
 }
 
 impl LoggerHandle {
+    /// Opens the optional log file and starts the single output task owning stdout and file I/O.
+    pub async fn spawn(log_file_path: Option<PathBuf>, format: LogFormat) -> Result<Self> {
+        let (records, record_receiver) = mpsc::channel(LOG_RECORD_CAPACITY);
+        let logger = Logger::new(log_file_path, format).await?;
+        let file_logging_enabled = logger.log_file.is_some();
+        let (live_entries, _) = broadcast::channel(LIVE_LOG_CAPACITY);
+        tokio::spawn(logger.run(record_receiver));
+        Ok(Self {
+            records,
+            dropped_records: Arc::new(AtomicU64::new(0)),
+            replay: Arc::new(Mutex::new(ReplayState {
+                history: VecDeque::with_capacity(LOG_HISTORY_ENTRY_LIMIT),
+                live_entries,
+            })),
+            file_logging_enabled,
+        })
+    }
+
     /// Admits a record immediately and retains exact bounded-queue loss accounting.
     fn send_record(&self, entry: LogEntry) {
         let dropped = self.dropped_records.swap(0, Ordering::AcqRel);
@@ -161,7 +187,7 @@ impl LoggerHandle {
     }
 
     /// Captures history and installs the receiver while holding one short lock.
-    fn subscribe(&self) -> LogSubscription {
+    pub fn subscribe(&self) -> LogSubscription {
         let replay = self
             .replay
             .lock()
@@ -191,7 +217,7 @@ pub enum SubscribeError {
 }
 
 /// Owns output and replay state in one task so producers never wait for I/O.
-pub struct Logger {
+struct Logger {
     log_file_path: Option<PathBuf>,
     log_file: Option<tokio::fs::File>,
     format: LogFormat,
@@ -199,7 +225,7 @@ pub struct Logger {
 
 impl Logger {
     /// Opens persistent output before startup so availability is authoritative.
-    pub async fn new(log_file_path: Option<PathBuf>, format: LogFormat) -> Result<Self> {
+    async fn new(log_file_path: Option<PathBuf>, format: LogFormat) -> Result<Self> {
         let (log_file_path, log_file) = match log_file_path {
             Some(path) => {
                 if let Some(parent) = path
@@ -284,59 +310,74 @@ pub async fn init_with_level(log_file_path: Option<String>, level: Level) -> Res
 }
 
 /// Initializes logging after the owning process role resolves startup options.
+///
+/// Keeps an already installed sink: role startup runs once per process, and tests that
+/// call this repeatedly (or injected their own sink first) must not be replaced.
 pub async fn init_with_options(
     log_file_path: Option<String>,
     level: Level,
     format: LogFormat,
 ) -> Result<()> {
-    if LOGGER.get().is_some() {
+    if current().is_some() {
         return Ok(());
     }
     set_level(level);
-    let (records, record_receiver) = mpsc::channel(LOG_RECORD_CAPACITY);
-    let logger = Logger::new(log_file_path.map(PathBuf::from), format).await?;
-    let file_logging_enabled = logger.log_file.is_some();
-    let (live_entries, _) = broadcast::channel(LIVE_LOG_CAPACITY);
-    let handle = LoggerHandle {
-        records,
-        dropped_records: Arc::new(AtomicU64::new(0)),
-        replay: Arc::new(Mutex::new(ReplayState {
-            history: VecDeque::with_capacity(LOG_HISTORY_ENTRY_LIMIT),
-            live_entries,
-        })),
-        file_logging_enabled,
-    };
-    if LOGGER.set(handle).is_err() {
-        return Ok(());
+    let handle = LoggerHandle::spawn(log_file_path.map(PathBuf::from), format).await?;
+    let mut slot = LOGGER.write().unwrap_or_else(PoisonError::into_inner);
+    if slot.is_none() {
+        *slot = Some(handle);
     }
-    tokio::spawn(logger.run(record_receiver));
     Ok(())
+}
+
+/// Replaces the sink behind the `log!` macros and returns the previous one.
+///
+/// Lets tests capture records through [`LoggerHandle::subscribe`] and restore the
+/// previous sink afterwards.
+pub fn install(handle: LoggerHandle) -> Option<LoggerHandle> {
+    LOGGER
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .replace(handle)
+}
+
+/// Returns the installed sink; a short read lock keeps producers effectively lock-free.
+fn current() -> Option<LoggerHandle> {
+    LOGGER
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// Establishes an ordered snapshot/live boundary without blocking producers.
 pub async fn subscribe() -> Result<LogSubscription, SubscribeError> {
-    let logger = LOGGER.get().ok_or(SubscribeError::LoggerClosed)?;
+    let logger = current().ok_or(SubscribeError::LoggerClosed)?;
     Ok(logger.subscribe())
+}
+
+/// Delivers a record to the installed sink, or to stderr before any sink exists.
+///
+/// The stderr fallback keeps early-startup and unit-test records visible instead of
+/// panicking when no role has initialized logging yet.
+fn deliver(entry: LogEntry) {
+    match current() {
+        Some(logger) => logger.send_record(entry),
+        None => eprintln!("{}", entry.render_line()),
+    }
 }
 
 /// Enqueues an ordinary entry immediately.
 pub fn log(level: Level, message: String) {
-    LOGGER
-        .get()
-        .expect("global logger is unavailable")
-        .send_record(LogEntry::new(level, bound_message(message), None));
+    deliver(LogEntry::new(level, bound_message(message), None));
 }
 
 /// Enqueues a failure with its preserved anyhow chain and captured backtrace.
 pub fn log_error(message: String, error: &anyhow::Error) {
-    LOGGER
-        .get()
-        .expect("global logger is unavailable")
-        .send_record(LogEntry::new(
-            Level::Error,
-            bound_message(message),
-            Some(error_details(error)),
-        ));
+    deliver(LogEntry::new(
+        Level::Error,
+        bound_message(message),
+        Some(error_details(error)),
+    ));
 }
 
 /// Truncates on a UTF-8 boundary while making diagnostic loss visible.
@@ -530,24 +571,11 @@ mod tests {
         }
     }
 
-    /// Starts an owned logger because the global OnceLock cannot reset between tests.
-    async fn start_logger(format: LogFormat) -> (LoggerHandle, tokio::task::JoinHandle<()>) {
-        let logger = Logger::new(None, format)
+    /// Starts an owned logger so each test observes only its own records.
+    async fn start_logger(format: LogFormat) -> LoggerHandle {
+        LoggerHandle::spawn(None, format)
             .await
-            .expect("test logger should open");
-        let (records, record_receiver) = mpsc::channel(LOG_RECORD_CAPACITY);
-        let (live_entries, _) = broadcast::channel(LIVE_LOG_CAPACITY);
-        let handle = LoggerHandle {
-            records,
-            dropped_records: Arc::new(AtomicU64::new(0)),
-            replay: Arc::new(Mutex::new(ReplayState {
-                history: VecDeque::with_capacity(LOG_HISTORY_ENTRY_LIMIT),
-                live_entries,
-            })),
-            file_logging_enabled: false,
-        };
-        let task = tokio::spawn(logger.run(record_receiver));
-        (handle, task)
+            .expect("test logger should open")
     }
 
     /// Requests an ordered snapshot as a deterministic barrier.
@@ -613,7 +641,7 @@ second"
     /// Protects exact history capacity and chronological eviction without a log file.
     #[tokio::test]
     async fn history_retains_exactly_latest_one_thousand_records() {
-        let (logger, task) = start_logger(LogFormat::Line).await;
+        let logger = start_logger(LogFormat::Line).await;
         for index in 0..1_010 {
             send_log(&logger, Level::Info, format!("record-{index}"));
         }
@@ -626,14 +654,12 @@ second"
         assert_eq!(subscription.entries[999].message, "record-1009");
         // Replay remains available even when persistence is disabled.
         assert!(!subscription.file_logging_enabled);
-        drop(logger);
-        task.await.expect("logger stops");
     }
 
     /// Protects the atomic snapshot/live boundary.
     #[tokio::test]
     async fn subscription_separates_snapshot_from_live_records() {
-        let (logger, task) = start_logger(LogFormat::Line).await;
+        let logger = start_logger(LogFormat::Line).await;
         send_log(&logger, Level::Info, "history".to_string());
         let mut subscription = snapshot(&logger).await;
         send_log(&logger, Level::Error, "live".to_string());
@@ -646,8 +672,6 @@ second"
         assert_eq!(subscription.entries[0].message, "history");
         // Post-subscription records appear once on the live receiver.
         assert_eq!(live.message, "live");
-        drop(logger);
-        task.await.expect("logger stops");
     }
 
     /// Protects visible UTF-8-safe diagnostic truncation.
@@ -727,5 +751,27 @@ second"
             .parent()
             .expect("core crate should live inside the crates directory");
         assert_no_ordinary_error_macros(crates_dir).await;
+    }
+
+    /// Producers write through whatever sink is installed, so tests can capture records.
+    ///
+    /// Calls `log` directly: the macro adds only the level gate, which another test in
+    /// this module toggles concurrently.
+    #[tokio::test]
+    async fn records_go_through_an_injected_logger() {
+        let capture = start_logger(LogFormat::Line).await;
+        let previous = install(capture.clone());
+        log(Level::Warning, "captured-by-injected-logger".to_string());
+        if let Some(previous) = previous {
+            install(previous);
+        }
+        // Other tests may log concurrently, so look for this test's unique record.
+        assert!(
+            capture
+                .subscribe()
+                .entries
+                .iter()
+                .any(|entry| entry.message == "captured-by-injected-logger")
+        );
     }
 }

@@ -13,22 +13,22 @@ pub const ENV: &str = "REDOOR_ASKPASS";
 /// Carries the configured password to the askpass re-exec without putting it on argv.
 pub(crate) const PASSWORD_ENV: &str = "REDOOR_ASKPASS_PASSWORD";
 
-/// Prints the stored password only for password prompts, then exits.
+/// Prints the stored password only for password prompts and reports the exit status.
 ///
 /// Host-key "yes/no" confirmations also go through `SSH_ASKPASS`. Answering
-/// those with the stored password would fail authentication and leak intent.
-pub fn run() {
+/// those with the stored password would fail authentication and leak intent, so
+/// they get a failure status, which OpenSSH treats as a refused prompt.
+pub fn run() -> std::process::ExitCode {
     let prompt = std::env::args().nth(1).unwrap_or_default();
     let password = std::env::var(PASSWORD_ENV).ok();
-    match password_response(&prompt, password.as_deref()) {
-        Some(response) => {
-            let mut out = stdout().lock();
-            if out.write_all(response.as_bytes()).is_err() || out.flush().is_err() {
-                std::process::exit(1);
-            }
-        }
-        None => std::process::exit(1),
+    let Some(response) = password_response(&prompt, password.as_deref()) else {
+        return std::process::ExitCode::FAILURE;
+    };
+    let mut out = stdout().lock();
+    if out.write_all(response.as_bytes()).is_err() || out.flush().is_err() {
+        return std::process::ExitCode::FAILURE;
     }
+    std::process::ExitCode::SUCCESS
 }
 
 /// Returns the password plus newline when the prompt is asking for a password.

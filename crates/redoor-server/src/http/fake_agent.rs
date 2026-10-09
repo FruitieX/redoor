@@ -28,7 +28,6 @@ pub(crate) struct FakeAgent {
 impl FakeAgent {
     /// Starts a router and registers one uncredited agent with control and transfer sockets.
     pub(crate) async fn connect() -> Self {
-        let _ = redoor_core::logging::init(None).await;
         let (router, _task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
         let agent_id = AgentId::from("fake-agent");
         let (lanes, receivers) = ControlLanes::bounded(16, 16);

@@ -150,15 +150,11 @@ async fn create_ssh_agent(
     append_ssh_agent(&state.config_path, &config)
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let registered_id = watchdog::register_agent(
-        agent_config,
-        state.port,
-        state.auth.agent_token(),
-        &state.watchdog_registry,
-        &state.router_ref,
-    )
-    .await
-    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let registered_id = state
+        .launcher
+        .register(agent_config, &state.watchdog_registry, &state.router_ref)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
     Ok(stopped_agent_response(
         registered_id,
@@ -219,15 +215,11 @@ async fn create_local_agent(
     append_local_agent(&state.config_path, &config)
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    let registered_id = watchdog::register_agent(
-        agent_config,
-        state.port,
-        state.auth.agent_token(),
-        &state.watchdog_registry,
-        &state.router_ref,
-    )
-    .await
-    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let registered_id = state
+        .launcher
+        .register(agent_config, &state.watchdog_registry, &state.router_ref)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
     Ok(stopped_agent_response(registered_id, config.home, None))
 }
@@ -471,15 +463,15 @@ async fn ensure_ssh_agent_registered(
             })?;
         return Ok(agent_id.into());
     }
-    watchdog::register_agent(
-        AgentConfig::SshBacked(config),
-        state.port,
-        state.auth.agent_token(),
-        &state.watchdog_registry,
-        &state.router_ref,
-    )
-    .await
-    .map_err(internal_error)
+    state
+        .launcher
+        .register(
+            AgentConfig::SshBacked(config),
+            &state.watchdog_registry,
+            &state.router_ref,
+        )
+        .await
+        .map_err(internal_error)
 }
 
 /// Registers the replacement local supervisor unless a previous attempt already spawned it.
@@ -510,15 +502,15 @@ async fn ensure_local_agent_registered(
             })?;
         return Ok(agent_id.into());
     }
-    watchdog::register_agent(
-        AgentConfig::Local(config),
-        state.port,
-        state.auth.agent_token(),
-        &state.watchdog_registry,
-        &state.router_ref,
-    )
-    .await
-    .map_err(internal_error)
+    state
+        .launcher
+        .register(
+            AgentConfig::Local(config),
+            &state.watchdog_registry,
+            &state.router_ref,
+        )
+        .await
+        .map_err(internal_error)
 }
 
 /// Accepts either the pre-rename or post-rename identity so a failed persist-then-replace can retry.

@@ -72,12 +72,16 @@ impl McpState {
     pub(crate) async fn new(
         tokens: MachineTokenService,
         allowed_origins: Vec<String>,
+        data_dir: &std::path::Path,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             tokens,
             allowed_origins: Arc::new(allowed_origins),
             limits: Arc::new(Mutex::new(HashMap::new())),
-            operations: operations::OperationRegistry::for_application().await?,
+            operations: operations::OperationRegistry::in_directory(
+                data_dir.join("mcp/operations"),
+            )
+            .await?,
         })
     }
 

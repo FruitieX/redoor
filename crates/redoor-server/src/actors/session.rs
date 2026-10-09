@@ -359,6 +359,7 @@ pub async fn handle_websocket(
     router_ref: RouterHandle,
     watchdog_registry: WatchdogRegistry,
     agent_token: String,
+    timeouts: redoor_core::websocket::WebSocketTimeouts,
 ) {
     let (mut sender, mut receiver) = socket.split::<WsMessage>();
     let (lanes, receivers) = ControlLanes::bounded(
@@ -386,12 +387,11 @@ pub async fn handle_websocket(
     // loop can stop promptly instead of waiting for the read side to notice the
     // broken connection.
     let (writer_done_tx, mut writer_done_rx) = oneshot::channel::<()>();
-    let timeouts = redoor_core::websocket::timeouts();
 
     let writer_task = tokio::spawn(async move {
         let mut commands_closed = false;
         let mut priority_closed = false;
-        let mut ping_interval = redoor_core::websocket::keepalive_interval();
+        let mut ping_interval = timeouts.keepalive_interval();
 
         loop {
             // `biased` keeps control-plane text messages responsive while binary streaming is active.

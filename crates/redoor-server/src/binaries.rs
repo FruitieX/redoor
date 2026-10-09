@@ -6,8 +6,17 @@ use redoor_protocol::wire::log::Level;
 use std::path::{Path, PathBuf};
 use tokio::{io::AsyncWriteExt, process::Command};
 
-/// Serializes cache misses so one process downloads each missing artifact only once.
-static BINARY_PROVISION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Local cache of released binaries shared by SSH provisioning and agent upgrades.
+///
+/// One instance is built per process and cloned into every user, so its lock (rather
+/// than a static) is what makes concurrent cache misses download each artifact once.
+#[derive(Clone)]
+pub(crate) struct BinaryCache {
+    /// Supplies the per-application cache directory.
+    paths: redoor_core::paths::AppPaths,
+    /// Serializes cache misses so one process downloads each missing artifact only once.
+    provision_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
 
 /// Owns one unique provisioning directory across errors and future cancellation.
 struct ProvisionWorkDir {
@@ -98,19 +107,80 @@ fn validate_release_platform(os: &str, arch: &str) -> Result<(), UpgradeBinaryEr
     }
 }
 
-/// Returns the version/platform cache directory under the selected application namespace.
-fn local_binaries_dir(version: &str, os: &str, arch: &str) -> anyhow::Result<PathBuf> {
-    Ok(redoor_core::app_name::user_cache_directory()?
-        .join("binaries")
-        .join(version)
-        .join(os)
-        .join(arch))
-}
+impl BinaryCache {
+    /// Creates the process-wide cache for the selected application namespace.
+    pub(crate) fn new(paths: redoor_core::paths::AppPaths) -> Self {
+        Self {
+            paths,
+            provision_lock: std::sync::Arc::default(),
+        }
+    }
 
-/// Returns the final cached executable path for one released target.
-#[cfg(test)]
-fn cached_binary_path(version: &str, os: &str, arch: &str) -> anyhow::Result<PathBuf> {
-    Ok(local_binaries_dir(version, os, arch)?.join("redoor"))
+    /// Returns the version/platform cache directory under the selected application namespace.
+    fn directory(&self, version: &str, os: &str, arch: &str) -> anyhow::Result<PathBuf> {
+        Ok(self
+            .paths
+            .cache_dir()?
+            .join("binaries")
+            .join(version)
+            .join(os)
+            .join(arch))
+    }
+
+    /// Ensures a released binary is cached, reporting the source before slow download work.
+    pub(crate) async fn ensure(
+        &self,
+        version: &str,
+        os: &str,
+        arch: &str,
+        report: impl Fn(&str) + Send + Sync,
+    ) -> Result<PathBuf, UpgradeBinaryError> {
+        validate_release_version(version)?;
+        validate_release_platform(os, arch)?;
+        let binaries_dir = self
+            .directory(version, os, arch)
+            .map_err(|error| UpgradeBinaryError::Provision(format!("{error:#}")))?;
+        let url = release_url(version, os, arch);
+        self.ensure_in_from_url(version, os, arch, &binaries_dir, &url, report)
+            .await
+    }
+
+    /// Provisions from an explicit directory and URL so cache behavior can be tested locally.
+    async fn ensure_in_from_url(
+        &self,
+        version: &str,
+        os: &str,
+        arch: &str,
+        binaries_dir: &Path,
+        url: &str,
+        report: impl Fn(&str) + Send + Sync,
+    ) -> Result<PathBuf, UpgradeBinaryError> {
+        validate_release_version(version)?;
+        validate_release_platform(os, arch)?;
+        tokio::fs::create_dir_all(binaries_dir)
+            .await
+            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
+        let _provision_guard = self.provision_lock.lock().await;
+        let final_path = binaries_dir.join("redoor");
+        if cached_binary_is_ready(&final_path).await? {
+            report(&format!(
+                "Using cached binary from {}",
+                final_path.display()
+            ));
+            return Ok(final_path);
+        }
+        if tokio::fs::try_exists(&final_path)
+            .await
+            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?
+        {
+            tokio::fs::remove_file(&final_path)
+                .await
+                .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
+        }
+        report(&format!("Downloading the matching binary from {url}"));
+        download_binary(version, os, arch, binaries_dir, &final_path, url).await?;
+        Ok(final_path)
+    }
 }
 
 /// Constructs a release URL only after callers validate the platform pair.
@@ -118,70 +188,6 @@ fn release_url(version: &str, os: &str, arch: &str) -> String {
     format!(
         "https://github.com/esamattis/redoor/releases/download/v{version}/redoor-{arch}-{os}.tar.gz"
     )
-}
-
-/// Ensures a released binary is cached, reporting the source before slow download work.
-pub(crate) async fn ensure_local_binary_reported(
-    version: &str,
-    os: &str,
-    arch: &str,
-    report: impl Fn(&str) + Send + Sync,
-) -> Result<PathBuf, UpgradeBinaryError> {
-    validate_release_version(version)?;
-    validate_release_platform(os, arch)?;
-    let binaries_dir = local_binaries_dir(version, os, arch)
-        .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-    ensure_local_binary_in(version, os, arch, &binaries_dir, report).await
-}
-
-/// Uses an explicit cache directory so cache-hit behavior can be tested without network access.
-async fn ensure_local_binary_in(
-    version: &str,
-    os: &str,
-    arch: &str,
-    binaries_dir: &Path,
-    report: impl Fn(&str) + Send + Sync,
-) -> Result<PathBuf, UpgradeBinaryError> {
-    validate_release_version(version)?;
-    validate_release_platform(os, arch)?;
-    let url = release_url(version, os, arch);
-    ensure_local_binary_in_from_url(version, os, arch, binaries_dir, &url, report).await
-}
-
-/// Provisions from an explicit URL so publication behavior can be tested locally.
-async fn ensure_local_binary_in_from_url(
-    version: &str,
-    os: &str,
-    arch: &str,
-    binaries_dir: &Path,
-    url: &str,
-    report: impl Fn(&str) + Send + Sync,
-) -> Result<PathBuf, UpgradeBinaryError> {
-    validate_release_version(version)?;
-    validate_release_platform(os, arch)?;
-    tokio::fs::create_dir_all(binaries_dir)
-        .await
-        .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-    let _provision_guard = BINARY_PROVISION_LOCK.lock().await;
-    let final_path = binaries_dir.join("redoor");
-    if cached_binary_is_ready(&final_path).await? {
-        report(&format!(
-            "Using cached binary from {}",
-            final_path.display()
-        ));
-        return Ok(final_path);
-    }
-    if tokio::fs::try_exists(&final_path)
-        .await
-        .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?
-    {
-        tokio::fs::remove_file(&final_path)
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-    }
-    report(&format!("Downloading the matching binary from {url}"));
-    download_binary(version, os, arch, binaries_dir, &final_path, url).await?;
-    Ok(final_path)
 }
 
 /// Accepts only complete-looking executable files as published cache entries.
@@ -469,13 +475,19 @@ mod tests {
         );
     }
 
+    /// Builds a cache rooted in a throwaway home so tests never share real cache state.
+    fn test_cache(home: &Path) -> BinaryCache {
+        BinaryCache::new(redoor_core::paths::AppPaths::for_home("redoor", home))
+    }
+
     /// Release cache paths expose version, operating system, and architecture.
     #[test]
     fn cached_binary_uses_versioned_platform_hierarchy() {
-        let cache_dir = redoor_core::app_name::user_cache_directory().unwrap();
+        let cache = test_cache(Path::new("/home/test"));
+        // Versioned per-platform directories keep upgrades from overwriting other targets.
         assert_eq!(
-            cached_binary_path("1.2.3", "linux", "x86_64").unwrap(),
-            cache_dir.join("binaries/1.2.3/linux/x86_64/redoor")
+            cache.directory("1.2.3", "linux", "x86_64").unwrap(),
+            Path::new("/home/test/.cache/redoor/binaries/1.2.3/linux/x86_64")
         );
     }
 
@@ -489,7 +501,15 @@ mod tests {
         let expected = dir.join("redoor");
         tokio::fs::write(&expected, b"cached").await.unwrap();
         make_executable(&expected).await.unwrap();
-        let selected = ensure_local_binary_in("1.2.3", "linux", "x86_64", &dir, |_| {})
+        let selected = test_cache(temp_dir.path())
+            .ensure_in_from_url(
+                "1.2.3",
+                "linux",
+                "x86_64",
+                &dir,
+                "http://127.0.0.1:9/unreachable",
+                |_| {},
+            )
             .await
             .unwrap();
         assert_eq!(selected, expected);
@@ -498,7 +518,6 @@ mod tests {
     /// Concurrent misses share one provision and only observe the atomically published file.
     #[tokio::test]
     async fn concurrent_cache_misses_download_once() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp_dir = TempDir::create();
         let root = temp_dir.path().join("binary-cache-concurrent");
         tokio::fs::create_dir_all(&root).await.unwrap();
@@ -506,9 +525,10 @@ mod tests {
         let (url, requests, server) = start_test_archive_server(archive).await;
         let cache = root.join("cache");
 
+        let binaries = test_cache(temp_dir.path());
         let (first, second) = tokio::join!(
-            ensure_local_binary_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {}),
-            ensure_local_binary_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {})
+            binaries.ensure_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {}),
+            binaries.ensure_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {})
         );
         let first = first.unwrap();
         let second = second.unwrap();
@@ -528,7 +548,6 @@ mod tests {
     /// Failed extraction leaves neither a final executable nor temporary provisioning state.
     #[tokio::test]
     async fn failed_provisioning_cleans_temporary_state() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp_dir = TempDir::create();
         let root = temp_dir.path().join("binary-cache-failure");
         tokio::fs::create_dir_all(&root).await.unwrap();
@@ -539,8 +558,9 @@ mod tests {
         let (url, _requests, server) = start_test_archive_server(invalid_archive).await;
         let cache = root.join("cache");
 
-        let result =
-            ensure_local_binary_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {}).await;
+        let result = test_cache(temp_dir.path())
+            .ensure_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {})
+            .await;
         // Extraction failure must be visible rather than publishing corrupt bytes.
         assert!(result.is_err());
         // No final path can be exposed after an unsuccessful provision.
@@ -555,23 +575,17 @@ mod tests {
     /// Canceling a streaming download must not strand its unique provisioning directory.
     #[tokio::test]
     async fn canceled_provisioning_cleans_temporary_state() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp_dir = TempDir::create();
         let root = temp_dir.path().join("binary-cache-canceled");
         let cache = root.join("cache");
         tokio::fs::create_dir_all(&cache).await.unwrap();
         let (url, started, server) = start_hanging_archive_server().await;
         let provision_cache = cache.clone();
+        let binaries = test_cache(temp_dir.path());
         let provision = tokio::spawn(async move {
-            ensure_local_binary_in_from_url(
-                "1.2.3",
-                "linux",
-                "x86_64",
-                &provision_cache,
-                &url,
-                |_| {},
-            )
-            .await
+            binaries
+                .ensure_in_from_url("1.2.3", "linux", "x86_64", &provision_cache, &url, |_| {})
+                .await
         });
 
         tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())

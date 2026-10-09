@@ -172,6 +172,7 @@ impl AuthState {
         credentials: AuthMode,
         agent_token: String,
         cookie_secure: bool,
+        data_dir: &std::path::Path,
     ) -> anyhow::Result<Self> {
         let (username, password_backend, credentials_fingerprint) = match credentials {
             AuthMode::Configured { username, password } => {
@@ -214,7 +215,7 @@ impl AuthState {
         };
 
         // Keep independent application namespaces from sharing browser sessions on disk.
-        let sessions_directory = redoor_core::app_name::user_data_directory()?.join("sessions");
+        let sessions_directory = data_dir.join("sessions");
         tokio::fs::create_dir_all(&sessions_directory).await?;
 
         #[cfg(unix)]

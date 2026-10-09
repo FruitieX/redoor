@@ -12,7 +12,7 @@ use super::state::ServerState;
 ///
 /// Missing files become an empty object so first-run clients can apply schema defaults.
 pub(crate) async fn get_user_state_handler(State(state): State<ServerState>) -> impl IntoResponse {
-    match read_user_state(state.auth.username()).await {
+    match read_user_state(&state.runtime.paths, state.auth.username()).await {
         Ok(value) => Json(UserStateResponse { state: value }).into_response(),
         Err(error) => state_io_error(error),
     }
@@ -25,7 +25,7 @@ pub(crate) async fn update_user_state_handler(
     State(state): State<ServerState>,
     Json(request): Json<UpdateUserStateRequest>,
 ) -> impl IntoResponse {
-    match write_user_state(state.auth.username(), &request.state).await {
+    match write_user_state(&state.runtime.paths, state.auth.username(), &request.state).await {
         Ok(()) => Json(UserStateResponse {
             state: request.state,
         })
@@ -35,8 +35,11 @@ pub(crate) async fn update_user_state_handler(
 }
 
 /// Reads the account document, treating a missing file as `{}` rather than an error.
-async fn read_user_state(username: &str) -> anyhow::Result<serde_json::Value> {
-    let path = user_state_path(username)?;
+async fn read_user_state(
+    paths: &redoor_core::paths::AppPaths,
+    username: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let path = user_state_path(paths, username)?;
     match tokio::fs::read(&path).await {
         Ok(contents) if contents.is_empty() => Ok(serde_json::json!({})),
         Ok(contents) => serde_json::from_slice(&contents).map_err(|error| {
@@ -54,8 +57,12 @@ async fn read_user_state(username: &str) -> anyhow::Result<serde_json::Value> {
 }
 
 /// Writes through a temporary sibling so readers never observe a partial document.
-async fn write_user_state(username: &str, state: &serde_json::Value) -> anyhow::Result<()> {
-    let path = user_state_path(username)?;
+async fn write_user_state(
+    paths: &redoor_core::paths::AppPaths,
+    username: &str,
+    state: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let path = user_state_path(paths, username)?;
     let account_directory = path
         .parent()
         .expect("state.json is nested under users/<username>");
@@ -83,10 +90,14 @@ async fn write_user_state(username: &str, state: &serde_json::Value) -> anyhow::
 }
 
 /// Keeps each login name as one path component so a crafted username cannot escape the data dir.
-fn user_state_path(username: &str) -> anyhow::Result<PathBuf> {
+fn user_state_path(
+    paths: &redoor_core::paths::AppPaths,
+    username: &str,
+) -> anyhow::Result<PathBuf> {
     redoor_core::config::parse_server_username(username)
         .map_err(|_| anyhow::anyhow!("login username cannot be used as a state directory name"))?;
-    Ok(redoor_core::app_name::user_data_directory()?
+    Ok(paths
+        .data_dir()?
         .join("users")
         .join(username)
         .join("state.json"))

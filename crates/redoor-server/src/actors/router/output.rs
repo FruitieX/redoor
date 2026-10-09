@@ -360,8 +360,7 @@ mod tests {
 
     impl Fixture {
         /// Single-slot control lanes make saturation deterministic without a network peer.
-        async fn new(credit: bool) -> Self {
-            redoor_core::logging::init(None).await.unwrap();
+        fn new(credit: bool) -> Self {
             let mut state = RouterState::new(
                 tokio::spawn(std::future::pending()),
                 TerminalRegistry::new(),
@@ -456,7 +455,7 @@ mod tests {
     /// Both full lanes must retain one cancellation intent, with no fabricated termination.
     #[tokio::test]
     async fn saturated_lanes_retain_cancel_without_acknowledging_termination() {
-        let mut fixture = Fixture::new(true).await;
+        let mut fixture = Fixture::new(true);
         let (mut output, terminal) = fixture.exec().await;
         let id = output.request_id();
         let connection = &fixture.state.agents.by_id[&fixture.agent];
@@ -489,7 +488,7 @@ mod tests {
     /// Failed admission must leave the stream untouched so a caller can retry.
     #[tokio::test]
     async fn closed_priority_lane_rejects_without_losing_retry() {
-        let mut fixture = Fixture::new(true).await;
+        let mut fixture = Fixture::new(true);
         let (_output, terminal) = fixture.exec().await;
         let id = _output.request_id();
         fixture.priority.close();
@@ -522,7 +521,7 @@ mod tests {
     /// Output queued before a cancel is still drained, then the consumer sees the end.
     #[tokio::test]
     async fn cancel_keeps_queued_output_and_releases_consumer() {
-        let mut fixture = Fixture::new(false).await;
+        let mut fixture = Fixture::new(false);
         let (mut output, _terminal) = fixture.exec().await;
         let id = output.request_id();
         fixture.deliver(id, false, b"queued".to_vec()).await;
@@ -536,7 +535,7 @@ mod tests {
     /// Bad tracking metadata is rejected before remote work or file history is admitted.
     #[tokio::test]
     async fn command_tracking_mismatch_is_rejected_before_admission() {
-        let mut fixture = Fixture::new(true).await;
+        let mut fixture = Fixture::new(true);
         let result = fixture
             .start(
                 Command::Exec {
@@ -573,7 +572,7 @@ mod tests {
                 signal: None,
             },
         ] {
-            let mut fixture = Fixture::new(true).await;
+            let mut fixture = Fixture::new(true);
             let (_output, terminal) = fixture.exec().await;
             let id = _output.request_id();
             // Admission alone is deliberately not termination.
@@ -601,7 +600,7 @@ mod tests {
     /// An exit already acknowledged by the agent wins over a later cancel request.
     #[tokio::test]
     async fn terminal_after_cancel_retains_normal_exit() {
-        let mut fixture = Fixture::new(true).await;
+        let mut fixture = Fixture::new(true);
         let (_output, terminal) = fixture.exec().await;
         let id = _output.request_id();
         assert_eq!(fixture.cancel(id), Ok(true));
@@ -623,7 +622,7 @@ mod tests {
     /// is not reachable through the execution endpoint.
     #[tokio::test]
     async fn download_completion_counts_queued_bytes_and_is_not_an_execution() {
-        let mut fixture = Fixture::new(true).await;
+        let mut fixture = Fixture::new(true);
         let output = fixture
             .start(
                 Command::TarDownload {
@@ -653,7 +652,7 @@ mod tests {
     /// A credit violation fails only the violating stream and stops its agent worker.
     #[tokio::test]
     async fn credit_overflow_fails_stream_and_cancels_worker() {
-        let mut fixture = Fixture::new(true).await;
+        let mut fixture = Fixture::new(true);
         // Room for the cancel and the credit grants the drained frames return.
         let (lanes, receivers) = ControlLanes::bounded(1, 16);
         fixture

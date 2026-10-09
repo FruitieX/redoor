@@ -257,9 +257,8 @@ mod tests {
     impl Fixture {
         /// Builds a dispatcher bound to a live scope; `with_transfer` attaches a payload lane.
         async fn new(with_transfer: bool) -> (Self, Option<mpsc::Receiver<WsMessage>>) {
-            redoor_core::logging::init(None).await.unwrap();
             let routes = UploadRoutes::default();
-            let services = AgentServices::new(Trash::unsupported());
+            let services = AgentServices::new(Trash::unsupported(), None);
             let (control, frames) = mpsc::channel(8);
             let (transfer, payload) = if with_transfer {
                 let (sender, receiver) = mpsc::channel(8);
@@ -490,7 +489,6 @@ mod tests {
     /// Verifies retained fallback acknowledgements are released only by teardown.
     #[tokio::test]
     async fn fallback_survives_request_cancel_but_not_teardown() {
-        redoor_core::logging::init(None).await.unwrap();
         let (responder, mut frames) = Responder::recording(RequestId::new(9), 1);
         // Occupy the control lane so delivery has to wait.
         responder.transfer_ready().await.unwrap();

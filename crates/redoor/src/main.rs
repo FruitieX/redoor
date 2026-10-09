@@ -7,8 +7,14 @@ mod service_management;
 mod systemd;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use process_control::LaunchParent;
+use redoor_core::paths::AppPaths;
+use redoor_core::runtime::RuntimeContext;
+use redoor_core::websocket::WebSocketTimeouts;
 use redoor_core::{app_name, config, process::ProcessSlot};
 
 #[derive(Parser)]
@@ -19,7 +25,7 @@ struct Cli {
     #[arg(
         long,
         env = app_name::APP_NAME_ENV,
-        default_value = "redoor",
+        default_value = app_name::DEFAULT_APP_NAME,
         value_parser = app_name::parse_app_name,
         global = true
     )]
@@ -243,130 +249,160 @@ struct AgentLogsArgs {
     log: Option<String>,
 }
 
-#[tokio::main]
-async fn main() {
+/// Parses the CLI, runs the selected role on a Tokio runtime and maps its outcome to an exit code.
+///
+/// Every role returns `anyhow::Result<ExitCode>`; this is the single place that prints a
+/// failure (`{:#}` shows the whole context chain) so no role needs `process::exit`.
+fn main() -> ExitCode {
     // OpenSSH execs SSH_ASKPASS as this binary with the prompt as argv[1].
     // Detect that role before clap treats the prompt as a subcommand.
     if std::env::var_os(redoor_server::ssh::askpass::ENV).is_some() {
-        redoor_server::ssh::askpass::run();
-        return;
+        return redoor_server::ssh::askpass::run();
     }
-    process_control::record_launch_parent();
+    // Snapshot before anything can await: the kernel will not replay a parent death later.
+    let launch_parent = LaunchParent::capture();
     let cli = Cli::parse();
-    app_name::initialize(cli.app_name);
-    // Apply before any listener starts so tests can shrink idle waits via env.
-    redoor_core::websocket::configure(redoor_core::websocket::WebSocketTimeouts {
-        keepalive: cli.websocket_keepalive,
-        stale_timeout: cli.websocket_stale_timeout,
-        stale_check_interval: cli.websocket_stale_check_interval,
-    });
-    match cli.command {
-        Commands::Remote(args) => {
-            let code = match redoor_cli::run(args).await {
-                Ok(code) => code,
-                Err(error) => {
-                    eprintln!("{error:#}");
-                    1
-                }
-            };
-            std::process::exit(code);
+    let context = RuntimeContext {
+        paths: AppPaths::from_env(cli.app_name),
+        // Applied before any listener starts so tests can shrink idle waits via env.
+        ws_timeouts: WebSocketTimeouts {
+            keepalive: cli.websocket_keepalive,
+            stale_timeout: cli.websocket_stale_timeout,
+            stale_check_interval: cli.websocket_stale_check_interval,
+        },
+    };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Failed to start the async runtime: {error}");
+            return ExitCode::FAILURE;
         }
-        Commands::Server(args) => match args.command {
-            Some(ServerCommand::Logs(logs)) => {
-                run_utility(process_logs::run(
-                    process_logs::LogRole::Server,
-                    logs.config,
-                    logs.log,
-                    logs.lines,
-                    logs.follow,
-                ))
-                .await;
-            }
-            Some(ServerCommand::Stop) => {
-                run_utility(process_control::stop(ProcessSlot::Server)).await;
-            }
-            Some(ServerCommand::Status) => {
-                run_utility(process_control::status(ProcessSlot::Server)).await;
-            }
-            Some(ServerCommand::Systemd(systemd)) => {
-                run_utility(systemd::run(systemd, ServiceRole::Server)).await;
-            }
-            Some(ServerCommand::Launchd(launchd)) => {
-                run_utility(launchd::run(launchd, ServiceRole::Server)).await;
-            }
-            Some(ServerCommand::McpToken(tokens)) => {
-                run_utility(redoor_server::http::machine_tokens::run_cli(tokens)).await;
-            }
-            None => {
-                run_role(ProcessSlot::Server, args.run.daemon, || {
-                    redoor_server::startup::run_server(args.run)
-                })
-                .await
+    };
+    let result = runtime.block_on(run(cli.command, context, launch_parent));
+    // Blocking stdin readers (agents, remote exec) never finish on their own; waiting for
+    // them would keep a finished command alive.
+    runtime.shutdown_background();
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("{error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Dispatches the parsed top-level command to its role.
+async fn run(command: Commands, context: RuntimeContext, parent: LaunchParent) -> Result<ExitCode> {
+    match command {
+        Commands::Remote(args) => {
+            let store = redoor_cli::session::SessionStore::new(context.paths.data_dir()?);
+            let code = redoor_cli::run(args, store).await?;
+            // Wrapping matches what the OS does with an out-of-range process status.
+            Ok(ExitCode::from(code as u8))
+        }
+        Commands::Server(args) => run_server_command(args, context, parent).await,
+        Commands::Agent(args) => run_agent_command(*args, context, parent).await,
+    }
+}
+
+/// Runs `redoor server` or one of its utilities.
+async fn run_server_command(
+    args: ServerArgs,
+    context: RuntimeContext,
+    parent: LaunchParent,
+) -> Result<ExitCode> {
+    let paths = &context.paths;
+    match args.command {
+        Some(ServerCommand::Logs(logs)) => {
+            let log_args = process_logs::LogArgs {
+                config: logs.config,
+                log: logs.log,
+                lines: logs.lines,
+                follow: logs.follow,
+            };
+            process_logs::run(process_logs::LogRole::Server, log_args, paths).await?;
+        }
+        Some(ServerCommand::Stop) => process_control::stop(ProcessSlot::Server, paths).await?,
+        Some(ServerCommand::Status) => process_control::status(ProcessSlot::Server, paths).await?,
+        Some(ServerCommand::Systemd(systemd)) => {
+            systemd::run(systemd, ServiceRole::Server, paths).await?
+        }
+        Some(ServerCommand::Launchd(launchd)) => {
+            launchd::run(launchd, ServiceRole::Server, paths).await?
+        }
+        Some(ServerCommand::McpToken(tokens)) => {
+            redoor_server::http::machine_tokens::run_cli(tokens, paths).await?
+        }
+        None => {
+            let daemon = args.run.daemon;
+            return run_role(ProcessSlot::Server, daemon, &context, parent, || {
+                redoor_server::startup::run_server(args.run, context.clone())
+            })
+            .await;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Runs `redoor agent`, one of its utilities, or a named relay.
+async fn run_agent_command(
+    args: AgentCommandArgs,
+    context: RuntimeContext,
+    parent: LaunchParent,
+) -> Result<ExitCode> {
+    let paths = &context.paths;
+    match args.command {
+        Some(AgentCommand::Logs(logs)) => {
+            let log_args = process_logs::LogArgs {
+                config: logs.config,
+                log: logs.log,
+                lines: logs.lines,
+                follow: logs.follow,
+            };
+            process_logs::run(process_logs::LogRole::Agent, log_args, paths).await?;
+        }
+        Some(AgentCommand::Stop) => process_control::stop(ProcessSlot::Agent, paths).await?,
+        Some(AgentCommand::Status) => process_control::status(ProcessSlot::Agent, paths).await?,
+        Some(AgentCommand::Systemd(systemd)) => {
+            systemd::run(systemd, ServiceRole::Agent, paths).await?
+        }
+        Some(AgentCommand::Launchd(launchd)) => {
+            launchd::run(launchd, ServiceRole::Agent, paths).await?
+        }
+        Some(AgentCommand::Relay(relay)) => match relay.command {
+            RelayCommand::Ls(list) => list_relays(list, paths).await?,
+            RelayCommand::Start(start) => return run_named_relay(start, &context, parent).await,
+            RelayCommand::Stop(relay) => process_control::stop_relay(&relay.id, paths).await?,
+            RelayCommand::Status(relay) => process_control::status_relay(&relay.id, paths).await?,
+            RelayCommand::Logs(logs) => {
+                process_logs::run_relay(&logs.id, logs.config, logs.lines, paths).await?
             }
         },
-        Commands::Agent(args) => match args.command {
-            Some(AgentCommand::Logs(logs)) => {
-                run_utility(process_logs::run(
-                    process_logs::LogRole::Agent,
-                    logs.config,
-                    logs.log,
-                    logs.lines,
-                    logs.follow,
-                ))
-                .await;
+        None => {
+            let daemon = args.run.daemon;
+            if daemon {
+                redoor_agent::prepare_daemon_config(&args.run, paths).await?;
             }
-            Some(AgentCommand::Stop) => {
-                run_utility(process_control::stop(ProcessSlot::Agent)).await;
-            }
-            Some(AgentCommand::Status) => {
-                run_utility(process_control::status(ProcessSlot::Agent)).await;
-            }
-            Some(AgentCommand::Systemd(systemd)) => {
-                run_utility(systemd::run(systemd, ServiceRole::Agent)).await;
-            }
-            Some(AgentCommand::Launchd(launchd)) => {
-                run_utility(launchd::run(launchd, ServiceRole::Agent)).await;
-            }
-            Some(AgentCommand::Relay(relay)) => match relay.command {
-                RelayCommand::Ls(list) => {
-                    run_utility(list_relays(list)).await;
-                }
-                RelayCommand::Start(start) => {
-                    run_named_relay(start).await;
-                }
-                RelayCommand::Stop(relay) => {
-                    run_utility(process_control::stop_relay(&relay.id)).await;
-                }
-                RelayCommand::Status(relay) => {
-                    run_utility(process_control::status_relay(&relay.id)).await;
-                }
-                RelayCommand::Logs(logs) => {
-                    run_utility(process_logs::run_relay(&logs.id, logs.config, logs.lines)).await;
-                }
-            },
-            None => {
-                let daemon = args.run.daemon;
-                if daemon {
-                    run_utility(redoor_agent::prepare_daemon_config(&args.run)).await;
-                }
-                run_role(ProcessSlot::Agent, daemon, || async move {
-                    redoor_agent::run(args.run)
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))
-                })
-                .await;
-            }
-        },
+            return run_role(ProcessSlot::Agent, daemon, &context, parent, || {
+                redoor_agent::run(args.run, context.clone())
+            })
+            .await;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Resolves an explicit `--config` or the namespace's conventional config path.
+fn config_path(explicit: Option<String>, paths: &AppPaths) -> Result<PathBuf> {
+    match explicit {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => paths.default_config_path(),
     }
 }
 
 /// Prints configured relay IDs in declaration order for interactive and scripted selection.
-async fn list_relays(args: RelayListArgs) -> anyhow::Result<()> {
-    let config_path = match args.config.map(PathBuf::from) {
-        Some(path) => path,
-        None => config::default_config_path()?,
-    };
-    let parsed = config::parse_config_file(&config_path).await?;
+async fn list_relays(args: RelayListArgs, paths: &AppPaths) -> Result<()> {
+    let parsed = config::parse_config_file(&config_path(args.config, paths)?).await?;
     for relay in parsed.relays {
         println!("{}", relay.id);
     }
@@ -374,36 +410,24 @@ async fn list_relays(args: RelayListArgs) -> anyhow::Result<()> {
 }
 
 /// Loads one named relay, establishes its isolated runtime identity, and starts it.
-async fn run_named_relay(args: RelayStartArgs) {
-    process_control::record_launch_parent();
-    let config_path = match args.config.map(PathBuf::from) {
-        Some(path) => path,
-        None => match config::default_config_path() {
-            Ok(path) => path,
-            Err(error) => return run_utility(async { Err(error) }).await,
-        },
-    };
-    let parsed = match config::parse_config_file(&config_path).await {
-        Ok(config) => config,
-        Err(error) => return run_utility(async { Err(error.into()) }).await,
-    };
-    let mut relay = match config::require_relay(&parsed, &args.id) {
-        Ok(relay) => relay.clone(),
-        Err(error) => return run_utility(async { Err(error) }).await,
-    };
+async fn run_named_relay(
+    args: RelayStartArgs,
+    context: &RuntimeContext,
+    parent: LaunchParent,
+) -> Result<ExitCode> {
+    let paths = &context.paths;
+    let parsed = config::parse_config_file(&config_path(args.config, paths)?).await?;
+    let mut relay = config::require_relay(&parsed, &args.id)?.clone();
     let log = match relay.agent.log.clone() {
         Some(log) => log,
-        None => match config::default_relay_log_path(&relay.id) {
-            Ok(log) => log,
-            Err(error) => return run_utility(async { Err(error) }).await,
-        },
+        None => paths.relay_log_path(&relay.id)?,
     };
     relay.agent.log = Some(log.clone());
     if args.daemon {
-        run_utility(process_control::spawn_relay_daemon(&relay.id)).await;
-        return;
+        process_control::spawn_relay_daemon(&relay.id, paths).await?;
+        return Ok(ExitCode::SUCCESS);
     }
-    process_control::bind_to_parent_lifetime();
+    parent.bind_lifetime();
     let agent_name = relay
         .agent
         .name
@@ -412,7 +436,7 @@ async fn run_named_relay(args: RelayStartArgs) {
     let agent_app_name = relay
         .agent_app_name
         .clone()
-        .unwrap_or_else(|| format!("{}-relay-{}", app_name::app_name().unwrap(), relay.id));
+        .unwrap_or_else(|| format!("{}-relay-{}", paths.app_name(), relay.id));
     let metadata = process_control::RelayPidMetadata {
         pid: 0,
         id: relay.id.clone(),
@@ -423,59 +447,38 @@ async fn run_named_relay(args: RelayStartArgs) {
         agent_app_name: agent_app_name.clone(),
         log,
     };
-    let pid_file = match process_control::acquire_relay(metadata).await {
-        Ok(pid_file) => pid_file,
-        Err(error) => return run_utility(async { Err(error) }).await,
-    };
+    // Held until return; dropping it removes this process's runtime file on every path.
+    let _pid_file = process_control::acquire_relay(metadata, paths).await?;
     let token = std::env::var("REDOOR_AGENT_TOKEN")
         .ok()
         .filter(|token| !token.is_empty())
         .unwrap_or(parsed.agent_token);
-    if let Err(error) = redoor_server::ssh::run_relay(relay, token, agent_app_name).await {
-        eprintln!("{error}");
-        pid_file.remove().await;
-        std::process::exit(1);
-    }
-    pid_file.remove().await;
+    redoor_server::ssh::run_relay(relay, token, agent_app_name, paths.clone())
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Applies daemon and PID-file behavior consistently around a long-lived role.
-async fn run_role<F, Fut>(slot: ProcessSlot, daemon: bool, run: F)
+async fn run_role<F, Fut>(
+    slot: ProcessSlot,
+    daemon: bool,
+    context: &RuntimeContext,
+    parent: LaunchParent,
+    run: F,
+) -> Result<ExitCode>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: std::future::Future<Output = Result<ExitCode>>,
 {
-    process_control::record_launch_parent();
     if daemon {
-        run_utility(process_control::spawn_daemon(slot)).await;
-        return;
+        process_control::spawn_daemon(slot, &context.paths).await?;
+        return Ok(ExitCode::SUCCESS);
     }
-    process_control::bind_to_parent_lifetime();
-    let pid_file = match process_control::acquire(slot).await {
-        Ok(pid_file) => pid_file,
-        Err(error) => {
-            eprintln!("{error:#}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(error) = run().await {
-        eprintln!("{error}");
-        if let Some(pid_file) = pid_file {
-            pid_file.remove().await;
-        }
-        std::process::exit(1);
-    }
-    if let Some(pid_file) = pid_file {
-        pid_file.remove().await;
-    }
-}
-
-/// Reports a finite utility command failure consistently with other CLI branches.
-async fn run_utility(future: impl std::future::Future<Output = anyhow::Result<()>>) {
-    if let Err(error) = future.await {
-        eprintln!("{error:#}");
-        std::process::exit(1);
-    }
+    parent.bind_lifetime();
+    // Held for the role's lifetime; its Drop removes the claim on success and failure alike.
+    let _pid_file = process_control::acquire(slot, &context.paths).await?;
+    run().await
 }
 
 #[cfg(test)]

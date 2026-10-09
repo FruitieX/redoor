@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use redoor_core::websocket::keepalive_interval;
+use redoor_core::websocket::WebSocketTimeouts;
 use redoor_protocol::api::ui_events::UiEvent;
 use redoor_protocol::ids::SocketId;
 use uuid::Uuid;
@@ -23,7 +23,10 @@ pub(crate) async fn websocket_handler(
     let router_ref = state.router_ref;
     let watchdog_registry = state.watchdog_registry;
     let agent_token = state.auth.agent_token().to_string();
-    ws.on_upgrade(move |socket| handle_socket(socket, router_ref, watchdog_registry, agent_token))
+    let timeouts = state.runtime.ws_timeouts;
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, router_ref, watchdog_registry, agent_token, timeouts)
+    })
 }
 
 /// Route: `GET /api/v1/ui/ws`
@@ -31,7 +34,8 @@ pub(crate) async fn ui_websocket_handler(
     ws: WebSocketUpgrade,
     AxumState(state): AxumState<ServerState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_ui_socket(socket, state.router_ref))
+    let timeouts = state.runtime.ws_timeouts;
+    ws.on_upgrade(move |socket| handle_ui_socket(socket, state.router_ref, timeouts))
 }
 
 async fn handle_socket(
@@ -39,6 +43,7 @@ async fn handle_socket(
     router_ref: actors::router::RouterHandle,
     watchdog_registry: WatchdogRegistry,
     agent_token: String,
+    timeouts: WebSocketTimeouts,
 ) {
     let socket_id = SocketId::new();
     actors::session::handle_websocket(
@@ -47,6 +52,7 @@ async fn handle_socket(
         router_ref,
         watchdog_registry,
         agent_token,
+        timeouts,
     )
     .await;
 }
@@ -55,8 +61,9 @@ async fn handle_socket(
 async fn forward_ui_events(
     sender: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
     rx_out: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    timeouts: WebSocketTimeouts,
 ) {
-    let mut keepalive = keepalive_interval();
+    let mut keepalive = timeouts.keepalive_interval();
     loop {
         let event = tokio::select! {
             _ = keepalive.tick() => {
@@ -97,7 +104,11 @@ async fn wait_for_ui_disconnect(receiver: &mut futures_util::stream::SplitStream
     }
 }
 
-async fn handle_ui_socket(socket: WebSocket, router_ref: actors::router::RouterHandle) {
+async fn handle_ui_socket(
+    socket: WebSocket,
+    router_ref: actors::router::RouterHandle,
+    timeouts: WebSocketTimeouts,
+) {
     let subscriber_id = Uuid::new_v4().to_string();
     let (mut sender, mut receiver) = socket.split();
     let (tx_out, mut rx_out) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
@@ -121,7 +132,7 @@ async fn handle_ui_socket(socket: WebSocket, router_ref: actors::router::RouterH
     }
 
     tokio::select! {
-        _ = forward_ui_events(&mut sender, &mut rx_out) => {}
+        _ = forward_ui_events(&mut sender, &mut rx_out, timeouts) => {}
         _ = wait_for_ui_disconnect(&mut receiver) => {}
     }
 

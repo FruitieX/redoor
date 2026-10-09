@@ -466,7 +466,6 @@ mod tests {
     /// A completed extractor is still reversible until the router grants placement.
     #[tokio::test]
     async fn denied_archive_publication_preserves_destination_and_cleans_staging() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp = TempDir::create();
         let destination = temp.path().join("destination");
         let staging = temp.path().join("staging");
@@ -525,7 +524,6 @@ mod tests {
     /// Holds extraction after body completion to reproduce cancellation before overwrite deterministically.
     #[tokio::test]
     async fn cancellation_during_final_extraction_preserves_destination_and_cleans_staging() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp = TempDir::create();
         let destination = temp.path().join("destination");
         let staging = temp.path().join("staging");
@@ -577,7 +575,6 @@ mod tests {
 
     #[tokio::test]
     async fn full_unpacker_queue_keeps_cancellation_async_and_joins_before_cleanup() {
-        redoor_core::logging::init(None).await.unwrap();
         let temp_dir = TempDir::create();
         let temp_path = temp_dir.path().join("tar-upload-cancel");
         tokio::fs::create_dir(&temp_path).await.unwrap();

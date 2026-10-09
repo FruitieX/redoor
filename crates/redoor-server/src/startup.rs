@@ -6,7 +6,7 @@ use crate::actors::router::spawn_router;
 use crate::http::auth::AuthState;
 use crate::http::routes::build_app;
 use crate::http::state::{CoordinatorArgs, ServerState};
-use crate::http::watchdog::register_agents;
+use crate::http::watchdog::ManagedLauncher;
 use crate::log_registry::LogRegistry;
 use crate::one_time_token_registry::OneTimeTokenRegistry;
 use crate::terminal_registry::TerminalRegistry;
@@ -15,15 +15,17 @@ use redoor_core::log;
 use redoor_protocol::{api::server::ServerAuthMode, wire::log::Level};
 
 /// Starts the long-lived server using the established flat startup arguments.
-pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
-    let app_name = redoor_core::app_name::app_name().expect("Clap validated the application name");
+pub async fn run_server(
+    args: CoordinatorArgs,
+    runtime: redoor_core::runtime::RuntimeContext,
+) -> anyhow::Result<std::process::ExitCode> {
     // Only this command bootstraps the conventional path so first-run secrets and
     // the local agent entry appear from a single intentional entry point.
     let mut created_default_config = false;
     let config_path = match args.config.clone() {
         Some(path) => PathBuf::from(path),
         None => {
-            let path = match redoor_core::config::default_config_path() {
+            let path = match runtime.paths.default_config_path() {
                 Ok(path) => path,
                 Err(error) => {
                     eprintln!("{error:#}");
@@ -101,7 +103,10 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
 
     let log = match args.log.clone().or_else(|| server_section.log.clone()) {
         Some(path) => Some(path),
-        None => match redoor_core::config::default_server_log_path() {
+        None => match runtime
+            .paths
+            .process_log_path(redoor_core::process::ProcessSlot::Server)
+        {
             Ok(path) => Some(path),
             Err(error) => {
                 eprintln!("{error:#}");
@@ -142,17 +147,25 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
     );
 
     let auth_mode = ServerAuthMode::from(&server_section.auth);
+    let data_dir = match runtime.paths.data_dir() {
+        Ok(data_dir) => data_dir,
+        Err(error) => {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+    };
     let auth = AuthState::new(
         server_section.auth.clone(),
         config.agent_token.clone(),
         server_section.cookie_secure,
+        &data_dir,
     )
     .await
     .unwrap_or_else(|error| {
         eprintln!("Failed to initialize authentication: {error}");
         std::process::exit(1);
     });
-    let machine_tokens = crate::http::machine_tokens::MachineTokenService::for_application()
+    let machine_tokens = crate::http::machine_tokens::MachineTokenService::in_data_dir(&data_dir)
         .await
         .unwrap_or_else(|error| {
             eprintln!("Failed to initialize MCP credential storage: {error:#}");
@@ -161,6 +174,7 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
     let mcp = crate::http::mcp::McpState::new(
         machine_tokens.clone(),
         server_section.mcp_allowed_origins.clone(),
+        &data_dir,
     )
     .await
     .unwrap_or_else(|error| {
@@ -182,8 +196,19 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
     // Oneshot so restart can drop the axum listener before self-exec; keeping
     // the listen FD open would race the restarted process on the same port.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let binaries = crate::binaries::BinaryCache::new(runtime.paths.clone());
+    let launcher = ManagedLauncher::new(
+        port,
+        config.agent_token.clone(),
+        crate::ssh::ProvisionContext {
+            app_name: runtime.paths.app_name().to_string(),
+            binaries: binaries.clone(),
+        },
+    );
     let app = build_app(ServerState {
-        app_name,
+        runtime: runtime.clone(),
+        binaries,
+        launcher: launcher.clone(),
         router_ref: router_ref.clone(),
         agents: crate::http::agent_client::AgentClient::new(router_ref.clone()),
         transfers: crate::http::services::transfer::TransferService::new(router_ref.clone()),
@@ -197,7 +222,6 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
         mcp,
         config_path,
         config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
-        port,
         auth_mode,
         shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
     });
@@ -218,14 +242,9 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
     // a resolved port. Registration creates dormant supervisors only; no local or
     // SSH subprocess starts until a tab, direct status route, or management action
     // requests it. Duplicate effective names remain fatal before HTTP serving.
-    if let Err(error) = register_agents(
-        &config.agents,
-        port,
-        &config.agent_token,
-        &watchdog_registry,
-        &router_ref,
-    )
-    .await
+    if let Err(error) = launcher
+        .register_all(&config.agents, &watchdog_registry, &router_ref)
+        .await
     {
         eprintln!("Failed to register managed agents: {error}");
         std::process::exit(1);

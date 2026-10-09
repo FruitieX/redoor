@@ -1,9 +1,12 @@
 use axum::{
-    extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    extract::{
+        State,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    },
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use redoor_core::{log_error, logging, websocket::keepalive_interval};
+use redoor_core::{log_error, logging, websocket::WebSocketTimeouts};
 use redoor_protocol::wire::log::{LogEntry, LogEvent};
 use tokio::sync::broadcast;
 
@@ -13,8 +16,12 @@ type SocketSender = futures_util::stream::SplitSink<WebSocket, WsMessage>;
 type SocketReceiver = futures_util::stream::SplitStream<WebSocket>;
 
 /// Upgrades the authenticated route-scoped connection used only by the server-log page.
-pub(crate) async fn server_logs_websocket_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(handle_server_logs_socket)
+pub(crate) async fn server_logs_websocket_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<super::state::ServerState>,
+) -> impl IntoResponse {
+    let timeouts = state.runtime.ws_timeouts;
+    ws.on_upgrade(move |socket| handle_server_logs_socket(socket, timeouts))
 }
 
 /// Sends one typed event and returns whether forwarding can safely continue.
@@ -34,8 +41,9 @@ async fn send_event(sender: &mut SocketSender, event: &LogEvent) -> bool {
 async fn forward_live_entries(
     sender: &mut SocketSender,
     live_entries: &mut broadcast::Receiver<LogEntry>,
+    timeouts: WebSocketTimeouts,
 ) {
-    let mut keepalive = keepalive_interval();
+    let mut keepalive = timeouts.keepalive_interval();
     loop {
         let entry = tokio::select! {
             _ = keepalive.tick() => {
@@ -72,7 +80,7 @@ async fn wait_for_disconnect(receiver: &mut SocketReceiver) {
 }
 
 /// Builds the snapshot before forwarding live records so protocol ordering remains deterministic.
-async fn handle_server_logs_socket(socket: WebSocket) {
+async fn handle_server_logs_socket(socket: WebSocket, timeouts: WebSocketTimeouts) {
     let subscription = match logging::subscribe().await {
         Ok(subscription) => subscription,
         Err(error) => {
@@ -97,7 +105,7 @@ async fn handle_server_logs_socket(socket: WebSocket) {
 
     let mut live_entries = subscription.receiver;
     tokio::select! {
-        _ = forward_live_entries(&mut sender, &mut live_entries) => {}
+        _ = forward_live_entries(&mut sender, &mut live_entries, timeouts) => {}
         _ = wait_for_disconnect(&mut receiver) => {}
     }
 }

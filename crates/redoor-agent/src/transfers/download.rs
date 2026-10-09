@@ -655,7 +655,6 @@ mod tests {
         blocks: Vec<Result<Option<Vec<u8>>, String>>,
         cancel_first: bool,
     ) -> (Vec<StreamChunk>, bool, bool, bool) {
-        redoor_core::logging::init(None).await.unwrap();
         let registry = CancelRegistry::new(None);
         let registration = registry.register(RequestId::new(9)).unwrap();
         if cancel_first {
@@ -760,7 +759,6 @@ mod tests {
     /// Failed range seeks must not retain cancellation handles after the worker exits.
     #[tokio::test]
     async fn failed_seek_unregisters_raw_download() {
-        redoor_core::logging::init(None).await.unwrap();
         let registry = CancelRegistry::new(None);
         let registration = registry.register(RequestId::new(1)).unwrap();
         let (transfer, mut frames) = mpsc::channel(1);

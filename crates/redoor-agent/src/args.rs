@@ -66,6 +66,19 @@ pub struct AgentArgs {
     pub(crate) notification: Option<NotificationDelay>,
 }
 
+impl AgentArgs {
+    /// Whether CLI/env already supply the two settings no default can replace.
+    ///
+    /// When they do, a missing conventional config file is fine; otherwise the agent
+    /// prompts for a pasted config instead of failing later with a missing-server error.
+    pub(crate) fn has_required_settings(&self) -> bool {
+        self.server
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && self.token.as_deref().is_some_and(|value| !value.is_empty())
+    }
+}
+
 /// Parsed startup-notification setting kept explicit so disabling cannot resemble a valid delay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NotificationDelay {

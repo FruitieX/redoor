@@ -69,14 +69,10 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// Allows tests to isolate HOME without changing process-global environment variables.
+    /// Stores credentials in the given application data directory; `main` passes the
+    /// namespace's data directory and tests pass a temporary one.
     pub fn new(directory: PathBuf) -> Self {
         Self { directory }
-    }
-
-    /// Uses the same application namespace as configuration, service names, and agent data.
-    pub fn for_current_namespace() -> Result<Self> {
-        Ok(Self::new(redoor_core::app_name::user_data_directory()?))
     }
 
     /// Secures the directory before opening any credential file and rejects symlink substitution.

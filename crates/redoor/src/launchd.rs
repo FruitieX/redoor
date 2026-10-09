@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 use crate::ServiceRole;
 use crate::service_management::{DisableArgs, InstallArgs};
+use redoor_core::paths::AppPaths;
 
 /// Arguments for role-scoped `redoor agent|server launchd` management.
 #[derive(Args)]
@@ -54,10 +55,10 @@ enum LaunchdCommand {
 }
 
 /// Runs one macOS LaunchAgent operation for the invoking non-root user.
-pub(crate) async fn run(args: LaunchdArgs, role: ServiceRole) -> Result<()> {
+pub(crate) async fn run(args: LaunchdArgs, role: ServiceRole, paths: &AppPaths) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (args, role);
+        let _ = (args, role, paths);
         bail!("launchd commands are only supported on macOS");
     }
 
@@ -66,30 +67,35 @@ pub(crate) async fn run(args: LaunchdArgs, role: ServiceRole) -> Result<()> {
         ensure_non_root()?;
         match args.command {
             LaunchdCommand::Install(install_args) => {
-                install(install_args, role, args.verbose).await
+                install(install_args, role, args.verbose, paths).await
             }
-            LaunchdCommand::Uninstall => uninstall(role, args.verbose).await,
-            LaunchdCommand::Start => manage_service(role, ServiceAction::Start, args.verbose).await,
-            LaunchdCommand::Stop => manage_service(role, ServiceAction::Stop, args.verbose).await,
+            LaunchdCommand::Uninstall => uninstall(role, args.verbose, paths).await,
+            LaunchdCommand::Start => {
+                manage_service(role, ServiceAction::Start, args.verbose, paths).await
+            }
+            LaunchdCommand::Stop => {
+                manage_service(role, ServiceAction::Stop, args.verbose, paths).await
+            }
             LaunchdCommand::Restart => {
-                manage_service(role, ServiceAction::Restart, args.verbose).await
+                manage_service(role, ServiceAction::Restart, args.verbose, paths).await
             }
             LaunchdCommand::Status => {
-                manage_service(role, ServiceAction::Status, args.verbose).await
+                manage_service(role, ServiceAction::Status, args.verbose, paths).await
             }
             LaunchdCommand::Enable => {
-                manage_service(role, ServiceAction::Enable, args.verbose).await
+                manage_service(role, ServiceAction::Enable, args.verbose, paths).await
             }
             LaunchdCommand::Disable(disable) => {
                 manage_service(
                     role,
                     ServiceAction::Disable { now: disable.now },
                     args.verbose,
+                    paths,
                 )
                 .await
             }
             LaunchdCommand::RefreshLocalNetworkPermission => {
-                refresh_local_network_permission(role).await
+                refresh_local_network_permission(role, paths).await
             }
         }
     }
@@ -108,26 +114,28 @@ fn ensure_non_root() -> Result<()> {
 
 /// Derives a safe launchd label from the already validated installation identity.
 #[cfg(any(target_os = "macos", test))]
-fn service_name(role: ServiceRole) -> Result<String> {
-    Ok(format!(
-        "{}-{}",
-        redoor_core::app_name::app_name()?,
-        role.cli_name()
-    ))
+fn service_name(role: ServiceRole, app_name: &str) -> String {
+    format!("{app_name}-{}", role.cli_name())
 }
 
 /// Atomically installs a current LaunchAgent definition and optionally starts it.
 #[cfg(target_os = "macos")]
-async fn install(args: InstallArgs, role: ServiceRole, verbose: bool) -> Result<()> {
-    let service = service_name(role)?;
-    let config_path = redoor_core::config::default_config_path()?;
+async fn install(
+    args: InstallArgs,
+    role: ServiceRole,
+    verbose: bool,
+    paths: &AppPaths,
+) -> Result<()> {
+    let service = service_name(role, paths.app_name());
+    let config_path = paths.default_config_path()?;
     let config_created = crate::service_management::prepare_config(role, &config_path).await?;
     let binary = tokio::fs::canonicalize(std::env::current_exe()?)
         .await
         .context("Failed to resolve the current redoor executable")?;
-    let app_name = redoor_core::app_name::app_name()?;
-    let plist_content = render_plist(role, &service, &binary, &config_path, &app_name);
-    let launch_agents = home_directory()?.join("Library/LaunchAgents");
+    let plist_content = render_plist(role, &service, &binary, &config_path, paths.app_name());
+    let launch_agents = paths
+        .home("the macOS LaunchAgents directory")?
+        .join("Library/LaunchAgents");
     tokio::fs::create_dir_all(&launch_agents)
         .await
         .with_context(|| {
@@ -175,9 +183,9 @@ async fn install(args: InstallArgs, role: ServiceRole, verbose: bool) -> Result<
 
 /// Stops and removes a LaunchAgent while retaining config and enabling future installs.
 #[cfg(target_os = "macos")]
-async fn uninstall(role: ServiceRole, verbose: bool) -> Result<()> {
-    let service = service_name(role)?;
-    let plist_path = launch_agent_path(&service)?;
+async fn uninstall(role: ServiceRole, verbose: bool, paths: &AppPaths) -> Result<()> {
+    let service = service_name(role, paths.app_name());
+    let plist_path = launch_agent_path(&service, paths)?;
     let target = service_target(&service);
     let loaded = service_is_loaded(&target, verbose).await?;
     if loaded {
@@ -208,9 +216,9 @@ async fn uninstall(role: ServiceRole, verbose: bool) -> Result<()> {
 
 /// Gives an ad-hoc-signed executable a fresh identity so macOS prompts again.
 #[cfg(target_os = "macos")]
-async fn refresh_local_network_permission(role: ServiceRole) -> Result<()> {
-    let service = service_name(role)?;
-    let plist_path = launch_agent_path(&service)?;
+async fn refresh_local_network_permission(role: ServiceRole, paths: &AppPaths) -> Result<()> {
+    let service = service_name(role, paths.app_name());
+    let plist_path = launch_agent_path(&service, paths)?;
     ensure_plist_exists(&plist_path, &service, role).await?;
 
     let plist = plist_path.to_string_lossy().into_owned();
@@ -371,9 +379,14 @@ enum ServiceAction {
 
 /// Executes one action against an installed LaunchAgent in the current GUI domain.
 #[cfg(target_os = "macos")]
-async fn manage_service(role: ServiceRole, action: ServiceAction, verbose: bool) -> Result<()> {
-    let service = service_name(role)?;
-    let plist_path = launch_agent_path(&service)?;
+async fn manage_service(
+    role: ServiceRole,
+    action: ServiceAction,
+    verbose: bool,
+    paths: &AppPaths,
+) -> Result<()> {
+    let service = service_name(role, paths.app_name());
+    let plist_path = launch_agent_path(&service, paths)?;
     if matches!(action, ServiceAction::Status) {
         return show_status(&service, &plist_path).await;
     }
@@ -594,8 +607,9 @@ fn format_status(
 
 /// Returns the conventional plist path for a user LaunchAgent label.
 #[cfg(target_os = "macos")]
-fn launch_agent_path(service: &str) -> Result<PathBuf> {
-    Ok(home_directory()?
+fn launch_agent_path(service: &str, paths: &AppPaths) -> Result<PathBuf> {
+    Ok(paths
+        .home("the macOS LaunchAgents directory")?
         .join("Library/LaunchAgents")
         .join(format!("{service}.plist")))
 }
@@ -613,14 +627,6 @@ async fn ensure_plist_exists(path: &Path, service: &str, mode: ServiceRole) -> R
         "macOS LaunchAgent '{service}' is not installed. Install it with: redoor {} launchd install",
         mode.cli_name()
     )
-}
-
-/// Returns the home directory required for user config and LaunchAgents.
-#[cfg(target_os = "macos")]
-fn home_directory() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .context("HOME is not set; cannot locate the macOS LaunchAgents directory")
 }
 
 /// Prints user-scoped launchctl commands after successful installation.
@@ -850,10 +856,9 @@ mod tests {
     /// Verifies labels derive solely from the validated application identity.
     #[test]
     fn service_names_use_application_identity() {
-        let app_name = redoor_core::app_name::app_name().unwrap();
         assert_eq!(
-            service_name(ServiceRole::Agent).unwrap(),
-            format!("{app_name}-agent"),
+            service_name(ServiceRole::Agent, "redoor-dev"),
+            "redoor-dev-agent",
             "the agent label should use the validated application namespace"
         );
     }

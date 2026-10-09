@@ -241,7 +241,6 @@ mod tests {
     /// Verifies the unsupported provider rejects every operation without advertising support.
     #[tokio::test]
     async fn unsupported_provider_rejects_every_operation() {
-        redoor_core::logging::init(None).await.unwrap();
         let trash = Trash::unsupported();
 
         // Registration must not advertise capabilities the provider lacks.
