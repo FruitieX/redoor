@@ -13,6 +13,7 @@ pub mod logging;
 pub mod process;
 pub mod safe_fs;
 pub mod server_address;
+pub mod staging;
 pub mod systemd_notify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
