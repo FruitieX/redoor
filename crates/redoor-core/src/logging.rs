@@ -443,8 +443,10 @@ pub fn resolve_initial_level(
     )
 }
 
-/// Isolates level precedence from process environment access for tests.
-fn resolve_level_sources(
+/// Applies level precedence to an already captured environment value.
+///
+/// Public so role startup can resolve settings as a pure function of its inputs.
+pub fn resolve_level_sources(
     cli: Option<Level>,
     role_env_name: &str,
     role_env: Option<&str>,
@@ -475,8 +477,10 @@ pub fn resolve_initial_format(
     )
 }
 
-/// Isolates format precedence from process environment access for tests.
-fn resolve_format_sources(
+/// Applies format precedence to an already captured environment value.
+///
+/// Public so role startup can resolve settings as a pure function of its inputs.
+pub fn resolve_format_sources(
     cli: Option<LogFormat>,
     role_env_name: &str,
     role_env: Option<&str>,

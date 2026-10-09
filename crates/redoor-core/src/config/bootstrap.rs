@@ -57,6 +57,7 @@ name = "local"
 pub struct CreatedDefaultConfig {
     /// Present only when the starter config embeds a dedicated login password.
     pub password: Option<String>,
+    /// Generated shared registration secret written to the new config.
     pub agent_token: String,
 }
 

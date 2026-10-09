@@ -16,7 +16,9 @@ mod local_agent;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-pub use bootstrap::{create_default_config_if_missing, default_local_agent_name};
+pub use bootstrap::{
+    CreatedDefaultConfig, create_default_config_if_missing, default_local_agent_name,
+};
 pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_agent};
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;

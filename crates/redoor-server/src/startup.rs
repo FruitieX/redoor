@@ -1,6 +1,17 @@
 //! Server process startup: resolves configuration, builds shared state, and serves HTTP.
+//!
+//! Split into three steps so each can be reasoned about (and tested) on its own:
+//! [`ServerConfig::resolve`] is a pure precedence function (CLI > env > file > default),
+//! [`ServerRuntime::build`] performs the fallible side effects (logging, credential
+//! storage, actors, listener, managed inventory), and [`ServerRuntime::serve_until_restart`]
+//! runs until the restart route asks for a re-exec.
 
-use std::{path::PathBuf, sync::Arc};
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
 
 use crate::actors::router::spawn_router;
 use crate::http::auth::AuthState;
@@ -11,249 +22,341 @@ use crate::log_registry::LogRegistry;
 use crate::one_time_token_registry::OneTimeTokenRegistry;
 use crate::terminal_registry::TerminalRegistry;
 use crate::watchdog::WatchdogRegistry;
+use redoor_core::config::{AgentConfig, AuthMode, RedoorConfig};
 use redoor_core::log;
+use redoor_core::logging::LogFormat;
+use redoor_core::paths::AppPaths;
+use redoor_core::process::ProcessSlot;
+use redoor_core::runtime::RuntimeContext;
 use redoor_protocol::{api::server::ServerAuthMode, wire::log::Level};
 
+/// Listener port used when neither CLI, env nor `[server].port` choose one.
+const DEFAULT_PORT: u16 = 7666;
+/// Listener address used when neither CLI nor `[server].bind` choose one.
+const DEFAULT_BIND: &str = "127.0.0.1";
+/// Role-specific environment variable for the initial log threshold.
+const LOG_LEVEL_ENV: &str = "REDOOR_SERVER_LOG_LEVEL";
+/// Role-specific environment variable for the process output format.
+const LOG_FORMAT_ENV: &str = "REDOOR_SERVER_LOG_FORMAT";
+
 /// Starts the long-lived server using the established flat startup arguments.
-pub async fn run_server(
-    args: CoordinatorArgs,
-    runtime: redoor_core::runtime::RuntimeContext,
-) -> anyhow::Result<std::process::ExitCode> {
-    // Only this command bootstraps the conventional path so first-run secrets and
-    // the local agent entry appear from a single intentional entry point.
-    let mut created_default_config = false;
-    let config_path = match args.config.clone() {
-        Some(path) => PathBuf::from(path),
-        None => {
-            let path = match runtime.paths.default_config_path() {
-                Ok(path) => path,
-                Err(error) => {
-                    eprintln!("{error:#}");
-                    std::process::exit(1);
-                }
-            };
-            match redoor_core::config::create_default_config_if_missing(&path).await {
-                Ok(Some(created)) => {
-                    created_default_config = true;
-                    if let Some(password) = created.password {
-                        eprintln!(
-                            "Created default config '{}'.\n  username: redoor\n  password: {password}\n  agent_token: {}\nStore these secrets securely; they will not be shown again.",
-                            path.display(),
-                            created.agent_token
-                        );
-                    } else {
-                        eprintln!(
-                            "Created default config '{}'.\n  browser login: process owner's system username/password (PAM)\n  agent_token: {}\nStore the agent_token securely; it will not be shown again.",
-                            path.display(),
-                            created.agent_token
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    eprintln!(
-                        "Failed to create default config '{}': {error}",
-                        path.display()
-                    );
-                    std::process::exit(1);
-                }
-            }
-            path
-        }
-    };
-    let config_path = tokio::fs::canonicalize(&config_path)
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!(
-                "Failed to resolve config file '{}': {error}",
-                config_path.display()
-            );
-            std::process::exit(1);
-        });
-    let config = match redoor_core::config::parse_config_file(&config_path).await {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!(
-                "Failed to parse config file '{}': {error}",
-                config_path.display()
-            );
-            std::process::exit(1);
-        }
-    };
-    let server_section = match redoor_core::config::require_server_section(&config) {
-        Ok(section) => section.clone(),
-        Err(error) => {
-            eprintln!(
-                "Failed to parse config file '{}': {error}",
-                config_path.display()
-            );
-            std::process::exit(1);
-        }
-    };
-
-    // Precedence: CLI > env > config file > default.
-    // Clap already merged CLI and env into `args`; config is the next fallback.
-    let port = args.port.or(server_section.port).unwrap_or(7666);
-
-    let bind = args
-        .bind
-        .clone()
-        .or_else(|| server_section.bind.clone())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-
-    let log = match args.log.clone().or_else(|| server_section.log.clone()) {
-        Some(path) => Some(path),
-        None => match runtime
-            .paths
-            .process_log_path(redoor_core::process::ProcessSlot::Server)
-        {
-            Ok(path) => Some(path),
-            Err(error) => {
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
-        },
-    };
-
-    let log_level = redoor_core::logging::resolve_initial_level(
-        args.log_level,
-        "REDOOR_SERVER_LOG_LEVEL",
-        server_section.log_level,
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(1);
-    });
-    let log_format = redoor_core::logging::resolve_initial_format(
-        args.log_format,
-        "REDOOR_SERVER_LOG_FORMAT",
-        server_section.log_format,
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(1);
-    });
-
-    if let Err(error) =
-        redoor_core::logging::init_with_options(log.clone(), log_level, log_format).await
-    {
-        eprintln!("{error:#}");
-        std::process::exit(1);
+///
+/// Only returns on startup failure; a successful run ends in a re-exec of this binary so
+/// a restart re-reads `config.toml` from scratch.
+pub async fn run_server(args: CoordinatorArgs, runtime: RuntimeContext) -> Result<ExitCode> {
+    let location = ConfigLocation::find_or_bootstrap(args.config.clone(), &runtime.paths).await?;
+    let file = redoor_core::config::parse_config_file(&location.path).await?;
+    let config = ServerConfig::resolve(
+        &args,
+        &ServerEnvironment::from_process(),
+        file,
+        location.path,
+        &runtime.paths,
+    )?;
+    let server = ServerRuntime::build(config, runtime).await?;
+    if location.created {
+        server.open_first_run_login();
     }
-    log!(
-        Level::Info,
-        "Loaded server config: path={}",
-        config_path.display()
-    );
+    server.serve_until_restart().await?;
+    // Only reached after restart. Replace this process with the same binary and
+    // arguments so startup re-reads config.toml.
+    redoor_core::process::reexec_current_process();
+}
 
-    let auth_mode = ServerAuthMode::from(&server_section.auth);
-    let data_dir = match runtime.paths.data_dir() {
-        Ok(data_dir) => data_dir,
-        Err(error) => {
-            eprintln!("{error:#}");
-            std::process::exit(1);
+/// Where the server's TOML lives and whether this start created it.
+struct ConfigLocation {
+    /// Canonical path, also shown in the UI and re-validated before restarts.
+    path: PathBuf,
+    /// True on the first run that wrote the starter config (enables the browser demo).
+    created: bool,
+}
+
+impl ConfigLocation {
+    /// Uses `--config` as given, or bootstraps the conventional path on first run.
+    ///
+    /// Only this command bootstraps the conventional path so first-run secrets and the
+    /// local agent entry appear from a single intentional entry point.
+    async fn find_or_bootstrap(explicit: Option<String>, paths: &AppPaths) -> Result<Self> {
+        let (path, created) = match explicit {
+            Some(path) => (PathBuf::from(path), false),
+            None => {
+                let path = paths.default_config_path()?;
+                let created = redoor_core::config::create_default_config_if_missing(&path)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to create default config '{}'", path.display())
+                    })?;
+                if let Some(created) = &created {
+                    print_bootstrap_secrets(&path, created);
+                }
+                (path, created.is_some())
+            }
+        };
+        let path = tokio::fs::canonicalize(&path)
+            .await
+            .with_context(|| format!("Failed to resolve config file '{}'", path.display()))?;
+        Ok(Self { path, created })
+    }
+}
+
+/// Shows the generated secrets exactly once; they are not logged or retrievable later.
+fn print_bootstrap_secrets(
+    path: &std::path::Path,
+    created: &redoor_core::config::CreatedDefaultConfig,
+) {
+    match &created.password {
+        Some(password) => eprintln!(
+            "Created default config '{}'.
+  username: redoor
+  password: {password}
+  agent_token: {}
+Store these secrets securely; they will not be shown again.",
+            path.display(),
+            created.agent_token
+        ),
+        None => eprintln!(
+            "Created default config '{}'.
+  browser login: process owner's system username/password (PAM)
+  agent_token: {}
+Store the agent_token securely; it will not be shown again.",
+            path.display(),
+            created.agent_token
+        ),
+    }
+}
+
+/// Environment values the server reads itself (clap already merges `REDOOR_PORT` etc.).
+///
+/// Captured once so [`ServerConfig::resolve`] stays a pure function of its inputs.
+#[derive(Default)]
+struct ServerEnvironment {
+    /// Raw `REDOOR_SERVER_LOG_LEVEL`.
+    log_level: Option<String>,
+    /// Raw `REDOOR_SERVER_LOG_FORMAT`.
+    log_format: Option<String>,
+}
+
+impl ServerEnvironment {
+    /// Reads the role-specific logging variables from the process environment.
+    fn from_process() -> Self {
+        Self {
+            log_level: std::env::var(LOG_LEVEL_ENV).ok(),
+            log_format: std::env::var(LOG_FORMAT_ENV).ok(),
         }
-    };
-    let auth = AuthState::new(
-        server_section.auth.clone(),
-        config.agent_token.clone(),
-        server_section.cookie_secure,
-        &data_dir,
-    )
-    .await
-    .unwrap_or_else(|error| {
-        eprintln!("Failed to initialize authentication: {error}");
-        std::process::exit(1);
-    });
-    let machine_tokens = crate::http::machine_tokens::MachineTokenService::in_data_dir(&data_dir)
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("Failed to initialize MCP credential storage: {error:#}");
-            std::process::exit(1);
-        });
-    let mcp = crate::http::mcp::McpState::new(
-        machine_tokens.clone(),
-        server_section.mcp_allowed_origins.clone(),
-        &data_dir,
-    )
-    .await
-    .unwrap_or_else(|error| {
-        eprintln!("Failed to initialize MCP operation storage: {error:#}");
-        std::process::exit(1);
-    });
+    }
+}
 
-    let terminal_registry = TerminalRegistry::new();
-    let log_registry = LogRegistry::new();
-    let one_time_token_registry = OneTimeTokenRegistry::new();
-    let (router_ref, _router_task) = spawn_router(terminal_registry.clone(), log_registry.clone());
+/// Server settings after applying CLI > env > config file > default precedence.
+struct ServerConfig {
+    /// Canonical config path, shown in the UI and re-validated by the restart route.
+    config_path: PathBuf,
+    /// Listener port.
+    port: u16,
+    /// Listener address.
+    bind: String,
+    /// Persistent server log file.
+    log: String,
+    /// Initial log threshold.
+    log_level: Level,
+    /// Process output format.
+    log_format: LogFormat,
+    /// Browser login backend.
+    auth: AuthMode,
+    /// Whether session cookies require HTTPS.
+    cookie_secure: bool,
+    /// Browser origins allowed to call MCP.
+    mcp_allowed_origins: Vec<String>,
+    /// Shared agent registration secret.
+    agent_token: String,
+    /// Managed agents registered dormant at startup.
+    agents: Vec<AgentConfig>,
+}
 
-    // Build the watchdog registry up front so the axum state and the
-    // supervisor spawn loop share the same map of agent name →
-    // supervisor signal. Built before binding the listener so the
-    // registry exists by the time the first WebSocket connects.
-    let watchdog_registry = WatchdogRegistry::new();
+impl ServerConfig {
+    /// Applies CLI > env > config file > default without touching the process environment.
+    ///
+    /// Clap already merged CLI and env for the flags that have an env variable, so for
+    /// those the file is simply the next fallback.
+    fn resolve(
+        args: &CoordinatorArgs,
+        env: &ServerEnvironment,
+        file: RedoorConfig,
+        config_path: PathBuf,
+        paths: &AppPaths,
+    ) -> Result<Self> {
+        let server = redoor_core::config::require_server_section(&file)?.clone();
+        let log = match args.log.clone().or(server.log) {
+            Some(log) => log,
+            None => paths.process_log_path(ProcessSlot::Server)?,
+        };
+        let log_level = redoor_core::logging::resolve_level_sources(
+            args.log_level,
+            LOG_LEVEL_ENV,
+            env.log_level.as_deref(),
+            server.log_level,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let log_format = redoor_core::logging::resolve_format_sources(
+            args.log_format,
+            LOG_FORMAT_ENV,
+            env.log_format.as_deref(),
+            server.log_format,
+        )
+        .map_err(anyhow::Error::msg)?;
+        Ok(Self {
+            config_path,
+            port: args.port.or(server.port).unwrap_or(DEFAULT_PORT),
+            bind: args
+                .bind
+                .clone()
+                .or(server.bind)
+                .unwrap_or_else(|| DEFAULT_BIND.to_string()),
+            log,
+            log_level,
+            log_format,
+            auth: server.auth,
+            cookie_secure: server.cookie_secure,
+            mcp_allowed_origins: server.mcp_allowed_origins,
+            agent_token: file.agent_token,
+            agents: file.agents,
+        })
+    }
 
-    // Oneshot so restart can drop the axum listener before self-exec; keeping
-    // the listen FD open would race the restarted process on the same port.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let binaries = crate::binaries::BinaryCache::new(runtime.paths.clone());
-    let launcher = ManagedLauncher::new(
-        port,
-        config.agent_token.clone(),
-        crate::ssh::ProvisionContext {
-            app_name: runtime.paths.app_name().to_string(),
-            binaries: binaries.clone(),
-        },
-    );
-    let app = build_app(ServerState {
-        runtime: runtime.clone(),
-        binaries,
-        launcher: launcher.clone(),
-        router_ref: router_ref.clone(),
-        agents: crate::http::agent_client::AgentClient::new(router_ref.clone()),
-        transfers: crate::http::services::transfer::TransferService::new(router_ref.clone()),
-        watchdog_registry: watchdog_registry.clone(),
-        terminal_registry,
-        log_registry,
-        one_time_token_registry,
-        upload_requests: crate::http::upload_requests::UploadRequests::default(),
-        auth,
-        machine_tokens,
-        mcp,
-        config_path,
-        config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
-        auth_mode,
-        shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
-    });
+    /// `bind:port` as passed to the listener and printed for operators.
+    fn listen_address(&self) -> String {
+        format!("{}:{}", self.bind, self.port)
+    }
+}
 
-    let addr = format!("{bind}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|_| panic!("Failed to bind to address {}", addr));
-    if let Err(error) = redoor_core::systemd_notify::ready().await {
+/// A fully initialized server whose listener is bound and inventory registered.
+struct ServerRuntime {
+    /// Router of the HTTP application.
+    app: axum::Router,
+    /// Bound listener; held so the port is ours before managed agents are told about it.
+    listener: tokio::net::TcpListener,
+    /// Fired by the restart route to stop serving before re-exec.
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+    /// Supervisors that must stop their children before the process image is replaced.
+    watchdogs: WatchdogRegistry,
+    /// Printed address, also used for the first-run login URL.
+    bind: String,
+    /// Listener port, also used for the first-run login URL.
+    port: u16,
+}
+
+impl ServerRuntime {
+    /// Initializes logging, credential stores, actors and the listener, then registers inventory.
+    async fn build(config: ServerConfig, runtime: RuntimeContext) -> Result<Self> {
+        redoor_core::logging::init_with_options(
+            Some(config.log.clone()),
+            config.log_level,
+            config.log_format,
+        )
+        .await?;
         log!(
-            Level::Warning,
-            "Failed to notify systemd readiness: {error}"
+            Level::Info,
+            "Loaded server config: path={}",
+            config.config_path.display()
         );
-    }
-    println!("Server running on http://{addr}");
 
-    // Register configured agents after binding so later lazy starts can connect to
-    // a resolved port. Registration creates dormant supervisors only; no local or
-    // SSH subprocess starts until a tab, direct status route, or management action
-    // requests it. Duplicate effective names remain fatal before HTTP serving.
-    if let Err(error) = launcher
-        .register_all(&config.agents, &watchdog_registry, &router_ref)
+        let address = config.listen_address();
+        let data_dir = runtime.paths.data_dir()?;
+        let auth_mode = ServerAuthMode::from(&config.auth);
+        let auth = AuthState::new(
+            config.auth,
+            config.agent_token.clone(),
+            config.cookie_secure,
+            &data_dir,
+        )
         .await
-    {
-        eprintln!("Failed to register managed agents: {error}");
-        std::process::exit(1);
+        .context("Failed to initialize authentication")?;
+        let machine_tokens =
+            crate::http::machine_tokens::MachineTokenService::in_data_dir(&data_dir)
+                .await
+                .context("Failed to initialize MCP credential storage")?;
+        let mcp = crate::http::mcp::McpState::new(
+            machine_tokens.clone(),
+            config.mcp_allowed_origins,
+            &data_dir,
+        )
+        .await
+        .context("Failed to initialize MCP operation storage")?;
+
+        let terminal_registry = TerminalRegistry::new();
+        let log_registry = LogRegistry::new();
+        let (router, _router_task) = spawn_router(terminal_registry.clone(), log_registry.clone());
+        // Built before the listener so the registry exists when the first WebSocket connects.
+        let watchdogs = WatchdogRegistry::new();
+        let binaries = crate::binaries::BinaryCache::new(runtime.paths.clone());
+        let launcher = ManagedLauncher::new(
+            config.port,
+            config.agent_token,
+            crate::ssh::ProvisionContext {
+                app_name: runtime.paths.app_name().to_string(),
+                binaries: binaries.clone(),
+            },
+        );
+
+        // Oneshot so restart can drop the axum listener before self-exec; keeping
+        // the listen FD open would race the restarted process on the same port.
+        let (shutdown_tx, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let app = build_app(ServerState {
+            runtime,
+            binaries,
+            launcher: launcher.clone(),
+            router_ref: router.clone(),
+            agents: crate::http::agent_client::AgentClient::new(router.clone()),
+            transfers: crate::http::services::transfer::TransferService::new(router.clone()),
+            watchdog_registry: watchdogs.clone(),
+            terminal_registry,
+            log_registry,
+            one_time_token_registry: OneTimeTokenRegistry::new(),
+            upload_requests: crate::http::upload_requests::UploadRequests::default(),
+            auth,
+            machine_tokens,
+            mcp,
+            config_path: config.config_path,
+            config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            auth_mode,
+            shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
+        });
+
+        let listener = tokio::net::TcpListener::bind(&address)
+            .await
+            .with_context(|| format!("Failed to bind to address {address}"))?;
+        if let Err(error) = redoor_core::systemd_notify::ready().await {
+            log!(
+                Level::Warning,
+                "Failed to notify systemd readiness: {error}"
+            );
+        }
+        println!("Server running on http://{address}");
+
+        // Registered after binding so later lazy starts connect to a resolved port.
+        // Registration creates dormant supervisors only; nothing starts until a tab,
+        // direct status route, or management action requests it.
+        launcher
+            .register_all(&config.agents, &watchdogs, &router)
+            .await
+            .context("Failed to register managed agents")?;
+
+        Ok(Self {
+            app,
+            listener,
+            shutdown,
+            watchdogs,
+            bind: config.bind,
+            port: config.port,
+        })
     }
 
-    // First-run demo: open the login page with a platform-specific credential hint
-    // when a graphical desktop is available so `redoor server` is enough to try the UI.
-    if created_default_config && redoor_core::desktop::first_run_should_open_browser() {
-        let login_url = redoor_core::desktop::first_run_login_url(&bind, port);
+    /// First-run demo: opens the login page when a desktop is available so `redoor server`
+    /// alone is enough to try the UI.
+    fn open_first_run_login(&self) {
+        if !redoor_core::desktop::first_run_should_open_browser() {
+            return;
+        }
+        let login_url = redoor_core::desktop::first_run_login_url(&self.bind, self.port);
         println!("Opening {login_url}");
         tokio::spawn(async move {
             if let Err(error) = redoor_core::desktop::open_with_desktop(&login_url).await {
@@ -265,22 +368,194 @@ pub async fn run_server(
         });
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async {
-        shutdown_rx.await.ok();
-    })
-    .await
-    .unwrap();
+    /// Serves HTTP until the restart route fires, then stops every managed child.
+    ///
+    /// Exec preserves process memory rather than dropping Rust values, so children are
+    /// stopped and reaped here; the new process recreates the inventory dormant.
+    async fn serve_until_restart(self) -> Result<()> {
+        let shutdown = self.shutdown;
+        axum::serve(
+            self.listener,
+            self.app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            shutdown.await.ok();
+        })
+        .await
+        .context("HTTP server failed")?;
+        self.watchdogs.shutdown_all().await;
+        Ok(())
+    }
+}
 
-    // Exec preserves process memory rather than dropping Rust values, so explicitly
-    // stop and reap managed children before replacing the server image. Configured
-    // inventory will be recreated dormant by the new process.
-    watchdog_registry.shutdown_all().await;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
 
-    // Only reached after restart (or future shutdown paths). Replace this process
-    // with the same binary and arguments so startup re-reads config.toml.
-    redoor_core::process::reexec_current_process();
+    /// Wraps the flattened server flags so tests parse them like the real CLI.
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: CoordinatorArgs,
+    }
+
+    /// Parses server flags exactly as `redoor server` would.
+    fn args(argv: &[&str]) -> CoordinatorArgs {
+        TestCli::try_parse_from(std::iter::once("server").chain(argv.iter().copied()))
+            .expect("test arguments should parse")
+            .args
+    }
+
+    /// Parses a config fixture through the real file parser.
+    async fn file(content: &str) -> RedoorConfig {
+        let directory = redoor_core::test_support::TempDir::create();
+        let path = directory.path().join("config.toml");
+        tokio::fs::write(&path, content)
+            .await
+            .expect("fixture should be writable");
+        redoor_core::config::parse_config_file(&path)
+            .await
+            .expect("fixture should parse")
+    }
+
+    /// A config whose `[server]` sets every value precedence applies to.
+    const FULL_FILE: &str = r#"agent_token = "token"
+[server]
+username = "user"
+password = "secret"
+port = 4000
+bind = "0.0.0.0"
+log = "/file/server.log"
+log_level = "debug"
+log_format = "json"
+"#;
+
+    /// Resolves with an explicit environment and a throwaway home.
+    fn resolve(
+        args: &CoordinatorArgs,
+        env: &ServerEnvironment,
+        file: RedoorConfig,
+    ) -> Result<ServerConfig> {
+        ServerConfig::resolve(
+            args,
+            env,
+            file,
+            PathBuf::from("/etc/redoor/config.toml"),
+            &AppPaths::for_home("redoor", "/home/test"),
+        )
+    }
+
+    /// CLI flags beat both the environment and the file.
+    #[tokio::test]
+    async fn cli_beats_env_and_file() {
+        let config = resolve(
+            &args(&[
+                "--port",
+                "5000",
+                "--bind",
+                "127.0.0.2",
+                "--log",
+                "/cli.log",
+                "--log-level",
+                "error",
+                "--log-format",
+                "line",
+            ]),
+            &ServerEnvironment {
+                log_level: Some("warn".into()),
+                log_format: Some("json".into()),
+            },
+            file(FULL_FILE).await,
+        )
+        .expect("config should resolve");
+        // Every CLI value must win over the lower tiers.
+        assert_eq!(config.listen_address(), "127.0.0.2:5000");
+        assert_eq!(config.log, "/cli.log");
+        assert_eq!(config.log_level, Level::Error);
+        assert_eq!(config.log_format, LogFormat::Line);
+    }
+
+    /// The environment beats the file when the CLI is silent.
+    #[tokio::test]
+    async fn env_beats_file() {
+        let config = resolve(
+            &args(&[]),
+            &ServerEnvironment {
+                log_level: Some("warn".into()),
+                log_format: Some("line".into()),
+            },
+            file(FULL_FILE).await,
+        )
+        .expect("config should resolve");
+        // Role env variables sit between CLI and TOML.
+        assert_eq!(config.log_level, Level::Warning);
+        assert_eq!(config.log_format, LogFormat::Line);
+        // Values without an env override still come from the file.
+        assert_eq!(config.listen_address(), "0.0.0.0:4000");
+        assert_eq!(config.log, "/file/server.log");
+        // Explicit TOML credentials select password login.
+        assert!(matches!(config.auth, AuthMode::Configured { .. }));
+    }
+
+    /// Built-in defaults apply only when no tier sets a value.
+    #[tokio::test]
+    async fn defaults_fill_unset_values() {
+        let config = resolve(
+            &args(&[]),
+            &ServerEnvironment::default(),
+            file(
+                r#"agent_token = "token"
+[server]
+username = "user"
+password = "secret"
+"#,
+            )
+            .await,
+        )
+        .expect("config should resolve");
+        // Loopback on the documented port keeps a fresh install private.
+        assert_eq!(config.listen_address(), "127.0.0.1:7666");
+        // The log defaults into the namespace's data directory.
+        assert_eq!(config.log, "/home/test/.local/share/redoor/server.log");
+        assert_eq!(config.log_level, Level::Info);
+        assert_eq!(config.log_format, LogFormat::Line);
+    }
+
+    /// An invalid environment value fails instead of silently falling back to the file.
+    #[tokio::test]
+    async fn invalid_env_value_is_an_error() {
+        let error = resolve(
+            &args(&[]),
+            &ServerEnvironment {
+                log_level: Some("loud".into()),
+                log_format: None,
+            },
+            file(FULL_FILE).await,
+        )
+        .err()
+        .expect("an unknown level must be rejected");
+        // The variable name tells operators which setting to fix.
+        assert!(error.to_string().contains(LOG_LEVEL_ENV), "{error}");
+    }
+
+    /// Agent-only config files cannot start a server.
+    #[tokio::test]
+    async fn missing_server_section_is_rejected() {
+        let error = resolve(
+            &args(&[]),
+            &ServerEnvironment::default(),
+            file(
+                r#"agent_token = "token"
+[agent]
+server = "http://localhost:1"
+"#,
+            )
+            .await,
+        )
+        .err()
+        .expect("a server needs [server]");
+        // The message names the missing table.
+        assert!(error.to_string().contains("[server]"), "{error}");
+    }
 }
