@@ -584,8 +584,9 @@ async fn find_configured_agent(
     state: &ServerState,
     agent_id: &str,
 ) -> Result<Option<AgentConfig>, (StatusCode, String)> {
-    let path = state.config_path.to_string_lossy();
-    let config = parse_config_file(&path).await.map_err(internal_error)?;
+    let config = parse_config_file(&state.config_path)
+        .await
+        .map_err(internal_error)?;
     Ok(config
         .agents
         .into_iter()

@@ -18,6 +18,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use redoor_core::config::AuthMode;
 use redoor_core::log_error;
 use redoor_protocol::api::{
     ErrorResponse,
@@ -67,15 +68,6 @@ pub(crate) struct AuthState {
     /// Serializes PAM because blocking checks can otherwise exhaust Tokio's blocking pool.
     #[cfg(target_os = "linux")]
     pam_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-}
-
-/// Browser login credentials resolved from the config file (or Linux system account).
-pub(crate) enum LoginCredentials {
-    /// Explicit username/password pair from `[server]` in the TOML config.
-    Configured { username: String, password: String },
-    /// Authenticate as the process owner via Linux PAM when TOML omits credentials.
-    #[cfg(target_os = "linux")]
-    SystemUser,
 }
 
 /// Distinguishes rejected credentials from temporary PAM saturation for correct HTTP responses.
@@ -177,12 +169,12 @@ struct SessionFile {
 impl AuthState {
     /// Creates the private session directory before requests arrive so login failures are actionable.
     pub(crate) async fn new(
-        credentials: LoginCredentials,
+        credentials: AuthMode,
         agent_token: String,
         cookie_secure: bool,
     ) -> anyhow::Result<Self> {
         let (username, password_backend, credentials_fingerprint) = match credentials {
-            LoginCredentials::Configured { username, password } => {
+            AuthMode::Configured { username, password } => {
                 let password_hash = hash_password(&password)?;
                 // Fingerprint is independent of the per-process argon2 salt so sessions survive
                 // restarts until the operator actually changes the configured password.
@@ -196,7 +188,7 @@ impl AuthState {
                 )
             }
             #[cfg(target_os = "linux")]
-            LoginCredentials::SystemUser => {
+            AuthMode::SystemAccount => {
                 // Dynamic library loading and passwd lookups can block on filesystem or NSS work,
                 // so validate the complete PAM backend away from Tokio's async worker threads.
                 let (username, pam_api) = tokio::task::spawn_blocking(|| {

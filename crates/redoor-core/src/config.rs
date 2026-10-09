@@ -9,12 +9,12 @@
 
 mod bootstrap;
 mod edit;
+mod file;
 mod import;
 mod local_agent;
 
-use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
-use toml_edit::Document;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
 pub use bootstrap::default_log_directory;
@@ -27,11 +27,6 @@ pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;
 
-/// Shorthand for the [`Document`] type produced by [`Document::parse`], whose
-/// key storage is borrowed from the parsed source. Used in helper signatures
-/// so we don't have to spell out the generic parameter on every function.
-type ParsedDocument<'a> = Document<&'a String>;
-
 use crate::logging::LogFormat;
 use redoor_protocol::wire::log::Level;
 
@@ -39,6 +34,33 @@ use redoor_protocol::wire::log::Level;
 /// `user@` prefix so the name reflects the host being connected to.
 pub fn default_agent_name(target: &str) -> String {
     target.rsplit('@').next().unwrap_or(target).to_string()
+}
+
+/// Why a config file could not be loaded; every variant renders a complete operator message.
+///
+/// Callers only display these, but a typed error keeps the read/syntax/semantic split
+/// visible and lets the restart route answer 400 without string matching.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The file could not be read at all.
+    #[error("Failed to read config file '{}': {source}", path.display())]
+    Read {
+        /// File the caller asked for.
+        path: PathBuf,
+        /// Underlying I/O failure (missing file, permissions, ...).
+        source: std::io::Error,
+    },
+    /// TOML syntax, unknown keys or wrongly typed values, with serde's location snippet.
+    #[error("Failed to parse config file '{}': {message}", path.display())]
+    Syntax {
+        /// File whose content was rejected.
+        path: PathBuf,
+        /// Rendered `toml_edit` diagnostic (line, column, offending key and reason).
+        message: String,
+    },
+    /// A rule spanning several keys; the text names the key path and the fix.
+    #[error("{0}")]
+    Invalid(String),
 }
 
 /// Configuration for one SSH-backed agent, independent of any specific CLI
@@ -79,6 +101,7 @@ pub struct SshBackedAgentConfig {
 }
 
 impl std::fmt::Debug for SshBackedAgentConfig {
+    /// Redacts the SSH password so debug logging cannot leak it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SshBackedAgentConfig")
             .field("username", &self.username)
@@ -125,22 +148,68 @@ pub enum AgentConfig {
     Local(LocalAgentConfig),
 }
 
-/// Parsed `[server]` table with optional listener and browser-auth overrides.
+/// Browser login backend selected by the `[server]` credentials.
 ///
-/// `username`/`password` are optional as a pair: both set uses config credentials;
-/// both absent uses Linux PAM for the process owner (rejected on non-Linux).
+/// An enum instead of two optional strings: the "exactly both or neither" rule is
+/// enforced once at parse time, and the PAM variant only exists where PAM does, so
+/// no consumer has to handle impossible combinations.
+#[derive(Clone)]
+pub enum AuthMode {
+    /// `username`/`password` pair from the TOML file.
+    Configured {
+        /// Login name, already restricted to a portable path component.
+        username: String,
+        /// Plaintext password; hashed by the server at startup.
+        password: String,
+    },
+    /// Linux PAM for the account running the server, chosen when TOML omits both credentials.
+    #[cfg(target_os = "linux")]
+    SystemAccount,
+}
+
+impl std::fmt::Debug for AuthMode {
+    /// Redacts the configured password so config debugging cannot leak it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Configured { username, .. } => f
+                .debug_struct("Configured")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            #[cfg(target_os = "linux")]
+            Self::SystemAccount => f.write_str("SystemAccount"),
+        }
+    }
+}
+
+impl From<&AuthMode> for redoor_protocol::api::server::ServerAuthMode {
+    /// Projects the backend into the public server-info vocabulary shown by the UI.
+    fn from(mode: &AuthMode) -> Self {
+        match mode {
+            AuthMode::Configured { .. } => Self::Toml,
+            #[cfg(target_os = "linux")]
+            AuthMode::SystemAccount => Self::Pam,
+        }
+    }
+}
+
+/// Parsed `[server]` table with optional listener settings and the resolved login backend.
+///
 /// The shared `agent_token` lives at the document root, not here.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ServerSection {
+    /// Listener port; CLI and env override it.
     pub port: Option<u16>,
+    /// Listener address; CLI overrides it.
     pub bind: Option<String>,
+    /// Server log file; CLI and env override it.
     pub log: Option<String>,
     /// Initial server threshold; runtime API changes deliberately do not rewrite it.
     pub log_level: Option<Level>,
     /// Initial process output format; browser streams remain structured.
     pub log_format: Option<LogFormat>,
-    pub username: Option<String>,
-    pub password: Option<String>,
+    /// Browser login backend derived from `username`/`password`.
+    pub auth: AuthMode,
     /// When true, session cookies are marked `Secure` for HTTPS deployments.
     pub cookie_secure: bool,
     /// Browser origins allowed to call MCP; origin-less native clients do not need an entry.
@@ -157,8 +226,11 @@ pub struct ServerSection {
 pub struct AgentSection {
     /// Redoor server URL (`http(s)://` or `ws(s)://`); path optional and forced to `/ws`.
     pub server: Option<String>,
+    /// Registration name; defaults to the hostname.
     pub name: Option<String>,
+    /// Directory the UI opens first.
     pub home: Option<String>,
+    /// Agent log file.
     pub log: Option<String>,
     /// Initial standalone-agent threshold before runtime control becomes available.
     pub log_level: Option<Level>,
@@ -202,54 +274,27 @@ pub struct RelayConfig {
 ///
 /// Top-level non-empty `agent_token` is always required. `[server]`, `[agent]`,
 /// and `[[agents]]` are optional at parse time; each process validates the
-/// sections it needs after applying CLI/env overrides.
-///
-/// Uses `toml_edit` (instead of the `toml` crate) so future server-side
-/// rewriting of the file — for example adding an agent via a REST endpoint —
-/// can preserve comments, whitespace and formatting without re-serializing the
-/// whole document from scratch. Parsing with the immutable `Document` is
-/// enough for the read path; it can be upgraded to `DocumentMut` via
-/// `into_mut()` when editing support is added.
-pub async fn parse_config_file(path: &str) -> Result<RedoorConfig> {
+/// sections it needs after applying CLI/env overrides. Reading goes through serde
+/// (`toml_edit::de`) so unknown keys and wrong types are reported with their line;
+/// `toml_edit::DocumentMut` is used only by the format-preserving edit helpers.
+pub async fn parse_config_file(path: &Path) -> Result<RedoorConfig, ConfigError> {
     let content = tokio::fs::read_to_string(path)
         .await
-        .with_context(|| format!("Failed to read config file '{}'", path))?;
-    let doc = Document::parse(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse config file '{}': {}", path, e))?;
+        .map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    parse_config_str(path, &content)
+}
 
-    // Reject unknown root keys so typos are not silently ignored.
-    const KNOWN_ROOT_KEYS: [&str; 5] = ["agent_token", "server", "agent", "agents", "relays"];
-    for (key, _) in doc.iter() {
-        if !KNOWN_ROOT_KEYS.contains(&key) {
-            bail!(
-                "unknown top-level key '{}' in config file; expected one of: {}",
-                key,
-                KNOWN_ROOT_KEYS.join(", ")
-            );
-        }
-    }
-
-    let agent_token = doc
-        .get("agent_token")
-        .and_then(|item| item.as_str())
-        .filter(|value| !value.is_empty())
-        .with_context(
-            || "agent_token must be a non-empty string at the top level of the config file",
-        )?
-        .to_string();
-
-    let server = parse_server_section(&doc)?;
-    let agent = parse_agent_section(&doc)?;
-    let agents = parse_agents_array(&doc, path)?;
-    let relays = parse_relays_array(&doc)?;
-
-    Ok(RedoorConfig {
-        agent_token,
-        server,
-        agent,
-        agents,
-        relays,
-    })
+/// Parses already-loaded file content; split out so tests can exercise rules without files.
+fn parse_config_str(path: &Path, content: &str) -> Result<RedoorConfig, ConfigError> {
+    let raw: file::RawConfig =
+        toml_edit::de::from_str(content).map_err(|error| ConfigError::Syntax {
+            path: path.to_path_buf(),
+            message: error.to_string().trim_end().to_string(),
+        })?;
+    raw.validate()
 }
 
 /// Returns the named relay or an actionable error listing the missing identity.
@@ -294,11 +339,11 @@ pub fn parse_relay_id(value: &str) -> Result<String, String> {
 }
 
 /// Returns the `[server]` section or a clear error for server-only entry points.
-pub fn require_server_section(config: &RedoorConfig) -> Result<&ServerSection> {
+pub fn require_server_section(config: &RedoorConfig) -> Result<&ServerSection, ConfigError> {
     config
         .server
         .as_ref()
-        .with_context(|| "config file must contain a [server] table")
+        .ok_or_else(|| ConfigError::Invalid("config file must contain a [server] table".into()))
 }
 
 /// Returns whether `[agent]` supplies every configured field a bare `redoor agent` needs.
@@ -311,551 +356,6 @@ pub fn standalone_agent_is_fully_configured(config: &RedoorConfig) -> bool {
         return false;
     };
     !config.agent_token.is_empty() && agent.server.as_ref().is_some_and(|value| !value.is_empty())
-}
-
-/// Parses optional login credentials and listener settings from `[server]`.
-///
-/// Returns `Ok(None)` when the table is absent so agent-only configs stay valid.
-fn parse_server_section(doc: &ParsedDocument<'_>) -> Result<Option<ServerSection>> {
-    let Some(table) = doc.get("server").and_then(|item| item.as_table()) else {
-        return Ok(None);
-    };
-
-    // Reject unknown keys so a misspelled setting is surfaced immediately
-    // instead of silently falling back to a default the operator didn't mean.
-    // agent_token moved to the document root; keep rejecting it here with a
-    // pointer so existing files fail with an actionable message.
-    const KNOWN_KEYS: [&str; 9] = [
-        "port",
-        "bind",
-        "log",
-        "log_level",
-        "log_format",
-        "username",
-        "password",
-        "cookie_secure",
-        "mcp_allowed_origins",
-    ];
-    for (key, _) in table.iter() {
-        if key == "agent_token" {
-            bail!(
-                "server.agent_token is no longer valid; move agent_token to the top level of the config file"
-            );
-        }
-        if !KNOWN_KEYS.contains(&key) {
-            bail!(
-                "unknown key 'server.{}' in config file; expected one of: {}",
-                key,
-                KNOWN_KEYS.join(", ")
-            );
-        }
-    }
-
-    let port = match table.get("port") {
-        None => None,
-        Some(item) => {
-            let raw = item
-                .as_integer()
-                .with_context(|| "server.port must be an integer")?;
-            Some(
-                u16::try_from(raw)
-                    .with_context(|| format!("server.port '{}' does not fit in a u16", raw))?,
-            )
-        }
-    };
-
-    let bind = table
-        .get("bind")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-
-    let log = table
-        .get("log")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-    let log_level = table
-        .get("log_level")
-        .map(|item| {
-            item.as_str()
-                .with_context(|| "server.log_level must be a string")?
-                .parse::<Level>()
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()?;
-    let log_format = table
-        .get("log_format")
-        .map(|item| {
-            item.as_str()
-                .with_context(|| "server.log_format must be a string")?
-                .parse::<LogFormat>()
-                .map_err(anyhow::Error::msg)
-        })
-        .transpose()?;
-    let username = match table.get("username") {
-        None => None,
-        Some(item) => {
-            let value = item
-                .as_str()
-                .with_context(|| "server.username must be a string")?;
-            Some(parse_server_username(value).map_err(anyhow::Error::msg)?)
-        }
-    };
-    let password = match table.get("password") {
-        None => None,
-        Some(item) => {
-            let value = item
-                .as_str()
-                .with_context(|| "server.password must be a string")?
-                .to_string();
-            if value.is_empty() {
-                bail!("server.password must be a non-empty string when set");
-            }
-            Some(value)
-        }
-    };
-    // Require the pair together so a half-configured file cannot silently fall
-    // back to system auth while still embedding one of the secrets.
-    match (&username, &password) {
-        (Some(_), Some(_)) | (None, None) => {}
-        (Some(_), None) => {
-            bail!("server.password is required when server.username is set")
-        }
-        (None, Some(_)) => {
-            bail!("server.username is required when server.password is set")
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    if username.is_none() {
-        bail!(
-            "server.username and server.password are required on this platform; \
-             system-account (PAM) login is only supported on Linux"
-        );
-    }
-    let cookie_secure = match table.get("cookie_secure") {
-        None => false,
-        Some(item) => item
-            .as_bool()
-            .with_context(|| "server.cookie_secure must be a boolean")?,
-    };
-    let mcp_allowed_origins = match table.get("mcp_allowed_origins") {
-        None => Vec::new(),
-        Some(item) => item
-            .as_array()
-            .with_context(|| "server.mcp_allowed_origins must be an array of origin strings")?
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|origin| {
-                        origin.starts_with("http://") || origin.starts_with("https://")
-                    })
-                    .map(str::to_string)
-                    .with_context(
-                        || "server.mcp_allowed_origins entries must be absolute HTTP(S) origins",
-                    )
-            })
-            .collect::<Result<Vec<_>>>()?,
-    };
-
-    Ok(Some(ServerSection {
-        port,
-        bind,
-        log,
-        log_level,
-        log_format,
-        username,
-        password,
-        cookie_secure,
-        mcp_allowed_origins,
-    }))
-}
-
-/// Parses optional standalone agent settings from `[agent]`.
-fn parse_agent_section(doc: &ParsedDocument<'_>) -> Result<Option<AgentSection>> {
-    let Some(table) = doc.get("agent").and_then(|item| item.as_table()) else {
-        return Ok(None);
-    };
-
-    // `ws_address` remains accepted so existing agent configs keep working.
-    const KNOWN_KEYS: [&str; 8] = [
-        "server",
-        "ws_address",
-        "name",
-        "home",
-        "dir",
-        "log",
-        "log_level",
-        "log_format",
-    ];
-    for (key, _) in table.iter() {
-        if !KNOWN_KEYS.contains(&key) {
-            bail!(
-                "unknown key 'agent.{}' in config file; expected one of: {}",
-                key,
-                KNOWN_KEYS.join(", ")
-            );
-        }
-    }
-
-    let non_empty_string = |key: &str| -> Result<Option<String>> {
-        match table.get(key) {
-            None => Ok(None),
-            Some(item) => {
-                let value = item
-                    .as_str()
-                    .with_context(|| format!("agent.{key} must be a string"))?
-                    .to_string();
-                if value.is_empty() {
-                    bail!("agent.{key} must be a non-empty string when set");
-                }
-                Ok(Some(value))
-            }
-        }
-    };
-
-    let server = non_empty_string("server")?;
-    let legacy_ws_address = non_empty_string("ws_address")?;
-    let server = match (server, legacy_ws_address) {
-        (Some(_), Some(_)) => {
-            bail!("agent.server and agent.ws_address cannot both be set; use agent.server")
-        }
-        (Some(server), None) => Some(server),
-        // Prefer the new key name in memory while still loading legacy files.
-        (None, Some(ws_address)) => Some(ws_address),
-        (None, None) => None,
-    };
-
-    let home = aliased_string(&non_empty_string, "agent", "home", "dir")?;
-    let log_level = match non_empty_string("log_level")? {
-        Some(value) => Some(value.parse::<Level>().map_err(anyhow::Error::msg)?),
-        None => None,
-    };
-    let log_format = match non_empty_string("log_format")? {
-        Some(value) => Some(value.parse::<LogFormat>().map_err(anyhow::Error::msg)?),
-        None => None,
-    };
-
-    Ok(Some(AgentSection {
-        server,
-        name: non_empty_string("name")?,
-        home,
-        log: non_empty_string("log")?,
-        log_level,
-        log_format,
-    }))
-}
-
-/// Parses optional managed agents so authentication-only servers remain valid.
-fn parse_agents_array(doc: &ParsedDocument<'_>, _path: &str) -> Result<Vec<AgentConfig>> {
-    let Some(agents) = doc.get("agents").and_then(|item| item.as_array_of_tables()) else {
-        return Ok(Vec::new());
-    };
-
-    let mut configs = Vec::new();
-    for (index, entry) in agents.iter().enumerate() {
-        // The `local` flag selects between ssh and local. We default to
-        // `false` so an existing ssh-style entry keeps working unchanged.
-        let local = entry
-            .get("local")
-            .and_then(|item| item.as_bool())
-            .unwrap_or(false);
-
-        if local {
-            configs.push(parse_local_entry(index, entry)?);
-        } else {
-            configs.push(AgentConfig::SshBacked(parse_ssh_backed_entry(
-                index, entry,
-            )?));
-        }
-    }
-    Ok(configs)
-}
-
-/// Parses named relays separately from server-managed agents because their lifecycle is manual.
-fn parse_relays_array(doc: &ParsedDocument<'_>) -> Result<Vec<RelayConfig>> {
-    let Some(relays) = doc.get("relays").and_then(|item| item.as_array_of_tables()) else {
-        return Ok(Vec::new());
-    };
-    let mut configs = Vec::new();
-    for (index, entry) in relays.iter().enumerate() {
-        const KNOWN_KEYS: [&str; 13] = [
-            "id",
-            "target",
-            "server",
-            "username",
-            "ssh_port",
-            "name",
-            "remote_bin",
-            "binary_source",
-            "home",
-            "log",
-            "insecure",
-            "agent_app_name",
-            "password",
-        ];
-        for (key, _) in entry.iter() {
-            if !KNOWN_KEYS.contains(&key) {
-                bail!(
-                    "unknown key 'relays[{}].{}' in config file; expected one of: {}",
-                    index,
-                    key,
-                    KNOWN_KEYS.join(", ")
-                );
-            }
-        }
-        let string = |key: &str, required: bool| -> Result<Option<String>> {
-            let Some(item) = entry.get(key) else {
-                if required {
-                    bail!("relays entry #{} is missing a '{}' string", index, key);
-                }
-                return Ok(None);
-            };
-            let value = item
-                .as_str()
-                .with_context(|| format!("relays entry #{} '{}' must be a string", index, key))?;
-            if value.trim().is_empty() {
-                bail!("relays entry #{} '{}' must be non-empty", index, key);
-            }
-            Ok(Some(value.to_string()))
-        };
-        let id = parse_relay_id(&string("id", true)?.expect("required relay ID"))
-            .map_err(anyhow::Error::msg)?;
-        if configs.iter().any(|relay: &RelayConfig| relay.id == id) {
-            bail!("duplicate relay ID '{id}'");
-        }
-        let target = string("target", true)?.expect("required relay target");
-        let server = string("server", true)?.expect("required relay server");
-        let server_address = server
-            .parse::<crate::server_address::ServerAddress>()
-            .map_err(|error| anyhow::anyhow!("invalid server in relay '{id}': {error}"))?;
-        let ssh_port = match entry.get("ssh_port") {
-            None => None,
-            Some(item) => {
-                let raw = item.as_integer().with_context(|| {
-                    format!("relays entry #{} 'ssh_port' must be an integer", index)
-                })?;
-                Some(u16::try_from(raw).with_context(|| {
-                    format!(
-                        "ssh_port '{raw}' in relays entry #{} does not fit in a u16",
-                        index
-                    )
-                })?)
-            }
-        };
-        let insecure = match entry.get("insecure") {
-            None => false,
-            Some(item) => item
-                .as_bool()
-                .with_context(|| format!("relays entry #{} 'insecure' must be a boolean", index))?,
-        };
-        if insecure && !server_address.is_secure() {
-            bail!("relay '{id}' insecure = true requires an https:// or wss:// server URL");
-        }
-        let agent_app_name = string("agent_app_name", false)?
-            .map(|value| crate::app_name::parse_app_name(&value))
-            .transpose()
-            .map_err(anyhow::Error::msg)?;
-        configs.push(RelayConfig {
-            id,
-            server,
-            insecure,
-            binary_source: string("binary_source", false)?.map(PathBuf::from),
-            agent_app_name,
-            agent: SshBackedAgentConfig {
-                username: string("username", false)?,
-                ssh_port,
-                name: string("name", false)?,
-                remote_bin: string("remote_bin", false)?,
-                home: string("home", false)?,
-                target,
-                log: string("log", false)?,
-                password: string("password", false)?,
-            },
-        });
-    }
-    Ok(configs)
-}
-
-/// Parses one ssh-style `[[agents]]` entry. `target` is the only required
-/// field: without a host there is nothing to ssh to. All other fields are
-/// explicit per-entry settings that the operator must declare so a missing
-/// field is surfaced as an error rather than silently falling back to a
-/// default the operator may not have intended. `home` is shared with the
-/// local variant so an operator can mirror a UI default directory across both
-/// kinds of agents without duplicating logic.
-fn parse_ssh_backed_entry(index: usize, entry: &toml_edit::Table) -> Result<SshBackedAgentConfig> {
-    let target = entry
-        .get("target")
-        .and_then(|item| item.as_str())
-        .with_context(|| format!("agents entry #{} is missing a 'target' string", index))?
-        .to_string();
-
-    let username = entry
-        .get("username")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-
-    let ssh_port = match entry.get("ssh_port") {
-        None => None,
-        Some(item) => {
-            let raw = item.as_integer().with_context(|| {
-                format!("agents entry #{} 'ssh_port' must be an integer", index)
-            })?;
-            Some(u16::try_from(raw).with_context(|| {
-                format!(
-                    "ssh_port '{}' in agents entry #{} does not fit in a u16",
-                    raw, index
-                )
-            })?)
-        }
-    };
-
-    let name = entry
-        .get("name")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-
-    let remote_bin = entry
-        .get("remote_bin")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-
-    let home = aliased_table_string(entry, index, "home", "dir")?;
-
-    let log = entry
-        .get("log")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-
-    let password = match entry.get("password") {
-        None => None,
-        Some(item) => {
-            let value = item
-                .as_str()
-                .with_context(|| format!("agents entry #{} 'password' must be a string", index))?;
-            if value.is_empty() {
-                bail!(
-                    "agents entry #{} 'password' must be non-empty when set",
-                    index
-                );
-            }
-            Some(value.to_string())
-        }
-    };
-
-    Ok(SshBackedAgentConfig {
-        username,
-        ssh_port,
-        name,
-        remote_bin,
-        home,
-        target,
-        log,
-        password,
-    })
-}
-
-/// Parses one local `[[agents]]` entry. No ssh-specific fields are allowed
-/// because local agents speak the websocket protocol directly and would
-/// never use them. `name`, `home`, and `log` are all optional and fall back
-/// to the agent's own defaults (hostname, process user home, stdio logging).
-fn parse_local_entry(index: usize, entry: &toml_edit::Table) -> Result<AgentConfig> {
-    // Reject ssh-specific fields so an operator who pastes an ssh entry and
-    // just adds `local = true` gets a clear error rather than a confusing
-    // "agent started but never connected" failure later.
-    if entry.get("target").and_then(|item| item.as_str()).is_some() {
-        bail!(
-            "agents entry #{} has both 'local = true' and a 'target'; \
-             local agents do not use ssh, remove 'target'",
-            index
-        );
-    }
-    if entry
-        .get("username")
-        .and_then(|item| item.as_str())
-        .is_some()
-    {
-        bail!(
-            "agents entry #{} has 'username' which only applies to SSH-backed agents (local = true); \
-             remove 'username'",
-            index
-        );
-    }
-    if entry.get("ssh_port").is_some() {
-        bail!(
-            "agents entry #{} has 'ssh_port' which only applies to SSH-backed agents (local = true); \
-             remove 'ssh_port'",
-            index
-        );
-    }
-    if entry
-        .get("remote_bin")
-        .and_then(|item| item.as_str())
-        .is_some()
-    {
-        bail!(
-            "agents entry #{} has 'remote_bin' which only applies to SSH-backed agents (local = true); \
-             remove 'remote_bin'",
-            index
-        );
-    }
-    if entry.get("password").is_some() {
-        bail!(
-            "agents entry #{} has 'password' which only applies to SSH-backed agents (local = true); \
-             remove 'password'",
-            index
-        );
-    }
-
-    let name = entry
-        .get("name")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-    let home = aliased_table_string(entry, index, "home", "dir")?;
-    let log = entry
-        .get("log")
-        .and_then(|item| item.as_str())
-        .map(|s| s.to_string());
-
-    Ok(AgentConfig::Local(LocalAgentConfig { name, home, log }))
-}
-
-/// Reads a renamed standalone setting while rejecting ambiguous old-and-new input.
-fn aliased_string(
-    read: &impl Fn(&str) -> Result<Option<String>>,
-    section: &str,
-    key: &str,
-    legacy_key: &str,
-) -> Result<Option<String>> {
-    match (read(key)?, read(legacy_key)?) {
-        (Some(_), Some(_)) => bail!(
-            "{section}.{key} and {section}.{legacy_key} cannot both be set; use {section}.{key}"
-        ),
-        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
-        (None, None) => Ok(None),
-    }
-}
-
-/// Reads a renamed managed-agent setting while rejecting ambiguous old-and-new input.
-fn aliased_table_string(
-    entry: &toml_edit::Table,
-    index: usize,
-    key: &str,
-    legacy_key: &str,
-) -> Result<Option<String>> {
-    let value = entry.get(key).and_then(|item| item.as_str());
-    let legacy_value = entry.get(legacy_key).and_then(|item| item.as_str());
-    match (value, legacy_value) {
-        (Some(_), Some(_)) => bail!(
-            "agents entry #{} has both '{}' and '{}'; use '{}'",
-            index,
-            key,
-            legacy_key,
-            key
-        ),
-        (Some(value), None) | (None, Some(value)) => Ok(Some(value.to_string())),
-        (None, None) => Ok(None),
-    }
 }
 
 // The REST views live with the config types so the server can convert without orphan wrappers.
@@ -966,7 +466,7 @@ target = "user@example.com"
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(
             config.agents.len(),
@@ -1010,7 +510,7 @@ target = "web-1"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(config.agents.len(), 2, "both entries should be parsed");
         let first = match &config.agents[0] {
@@ -1040,7 +540,7 @@ target = "web-1"
         let (_directory, temp) = test_config_path();
         write_test_config(&temp, "port = 3000\n").unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert!(
             config.agents.is_empty(),
@@ -1062,7 +562,7 @@ name = "no-target"
         )
         .unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         assert!(
             result.is_err(),
@@ -1085,7 +585,7 @@ ssh_port = "not-a-port"
         )
         .unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         assert!(result.is_err(), "a non-integer ssh_port should be rejected");
     }
@@ -1104,7 +604,7 @@ ssh_port = 99999
         )
         .unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         assert!(
             result.is_err(),
@@ -1127,7 +627,7 @@ local = true
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(
             config.agents.len(),
@@ -1160,7 +660,7 @@ log = "/var/log/my-local.log"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(
             config.agents.len(),
@@ -1196,7 +696,7 @@ name = "web-agent"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(config.agents.len(), 3, "all three entries should be parsed");
 
@@ -1235,7 +735,7 @@ target = "host"
         )
         .unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         let error = result.expect_err("local + target should be rejected");
         // The error should mention both fields so the operator immediately
@@ -1266,7 +766,7 @@ local = true
             )
             .unwrap();
 
-            let result = parse_config_file(temp.to_str().unwrap()).await;
+            let result = parse_config_file(&temp).await;
 
             let error = result.expect_err(&format!("local + {} should be rejected", field));
             assert!(
@@ -1289,7 +789,7 @@ dir = "/var/www/app"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(
             config.agents.len(),
@@ -1320,7 +820,7 @@ log = "log/prod-db.log"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert_eq!(config.agents.len(), 1);
         let agent = match &config.agents[0] {
@@ -1345,7 +845,7 @@ password = "  keep spaces  "
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         let agent = match &config.agents[0] {
             AgentConfig::SshBacked(config) => config,
@@ -1372,7 +872,7 @@ server = "http://127.0.0.1:3000"
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         assert!(
             config.server.is_none(),
@@ -1401,7 +901,7 @@ password = "test-password"
         )
         .unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         assert!(result.is_err(), "top-level agent_token must be required");
     }
@@ -1422,7 +922,7 @@ target = "host"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         let server = config.server.expect("[server] should be present");
         assert_eq!(server.port, Some(4000));
@@ -1445,7 +945,7 @@ target = "host"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         assert!(
             result.is_err(),
@@ -1469,7 +969,7 @@ target = "host"
 "#;
         write_test_config(&temp, content).unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         assert!(
             result.is_err(),
@@ -1485,7 +985,7 @@ target = "host"
 
         let created = create_default_config_if_missing(&path).await.unwrap();
         let content = tokio::fs::read_to_string(&path).await.unwrap();
-        let config = parse_config_file(path.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&path).await.unwrap();
 
         let bootstrap = created.expect("a missing conventional config should be created");
         assert_eq!(
@@ -1509,7 +1009,7 @@ target = "host"
         {
             // Linux starter configs omit credentials so login uses PAM.
             assert!(
-                server.username.is_none() && server.password.is_none(),
+                matches!(server.auth, AuthMode::SystemAccount),
                 "Linux default config should omit username/password for PAM login"
             );
             assert!(
@@ -1527,14 +1027,13 @@ target = "host"
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let AuthMode::Configured { username, password } = &server.auth;
             assert_eq!(
-                server.username.as_deref(),
-                Some("redoor"),
+                username, "redoor",
                 "macOS demo login should use the fixed redoor username"
             );
             assert_eq!(
-                server.password.as_deref(),
-                Some("changeme"),
+                password, "changeme",
                 "macOS demo login should use the fixed changeme password"
             );
             assert_eq!(
@@ -1597,7 +1096,7 @@ target = "host"
             .await
             .unwrap();
 
-        let result = parse_config_file(path.to_str().unwrap()).await;
+        let result = parse_config_file(&path).await;
 
         let error = result
             .expect_err("legacy server.agent_token must be rejected")
@@ -1625,7 +1124,7 @@ log = "log/agent.log"
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         let agent = config.agent.expect("[agent] should be present");
         assert_eq!(agent.server.as_deref(), Some("https://example.com"));
@@ -1648,7 +1147,7 @@ ws_address = "wss://example.com/ws"
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         let agent = config.agent.as_ref().expect("[agent] should be present");
         // Legacy key maps into the same field so resolve/start paths stay single-keyed.
@@ -1674,7 +1173,7 @@ ws_address = "wss://example.com/ws"
         )
         .unwrap();
 
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
 
         let error = result
             .expect_err("both server keys must be rejected")
@@ -1699,12 +1198,12 @@ ws_address = "wss://example.com/ws"
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
 
         let server = config.server.expect("[server] should be present");
         assert!(
-            server.username.is_none() && server.password.is_none(),
-            "omitted credentials should parse as None for PAM mode"
+            matches!(server.auth, AuthMode::SystemAccount),
+            "omitted credentials should select PAM mode"
         );
         assert_eq!(config.agent_token, "test-agent-token");
     }
@@ -1726,7 +1225,7 @@ password = "only-password"
         ] {
             let (_directory, temp) = test_config_path();
             std::fs::write(&temp, content).unwrap();
-            let result = parse_config_file(temp.to_str().unwrap()).await;
+            let result = parse_config_file(&temp).await;
             assert!(
                 result.is_err(),
                 "username and password must be provided together"
@@ -1748,7 +1247,7 @@ password = "test-password"
 "#,
         )
         .unwrap();
-        let result = parse_config_file(temp.to_str().unwrap()).await;
+        let result = parse_config_file(&temp).await;
         assert!(
             result.is_err(),
             "a path-escaping server.username must not parse"
@@ -1785,7 +1284,7 @@ insecure = true
         )
         .unwrap();
 
-        let config = parse_config_file(temp.to_str().unwrap()).await.unwrap();
+        let config = parse_config_file(&temp).await.unwrap();
         let relay = require_relay(&config, "production").unwrap();
         // Identity and connection fields prove lifecycle and transport settings stay associated.
         assert_eq!(relay.id, "production");
@@ -1825,9 +1324,71 @@ server = "http://redoor.example.com"
         ] {
             let (_directory, temp) = test_config_path();
             std::fs::write(&temp, content).unwrap();
-            let result = parse_config_file(temp.to_str().unwrap()).await;
+            let result = parse_config_file(&temp).await;
             // Invalid identities must fail before any process or PID file is created.
             assert!(result.is_err());
         }
+    }
+
+    /// Serde rejects misspelled managed-agent keys with their line instead of ignoring them.
+    #[test]
+    fn unknown_managed_agent_key_points_at_the_line() {
+        let error = parse_config_str(
+            Path::new("/etc/redoor/config.toml"),
+            r#"agent_token = "t"
+[[agents]]
+target = "host"
+remotebin = "/opt/redoor"
+"#,
+        )
+        .expect_err("a misspelled key must not be silently ignored");
+        let message = error.to_string();
+        // The file path tells operators which config was rejected.
+        assert!(message.contains("/etc/redoor/config.toml"), "{message}");
+        // The offending key and its location make the typo actionable.
+        assert!(
+            message.contains("remotebin") && message.contains("line 4"),
+            "{message}"
+        );
+    }
+
+    /// Two rows that would register under one name fail at parse time, before any supervisor.
+    #[test]
+    fn duplicate_managed_agent_names_are_rejected() {
+        let error = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[[agents]]
+target = "deploy@web"
+[[agents]]
+target = "web"
+"#,
+        )
+        .expect_err("both rows default to the name 'web'");
+        // The message names the colliding identity and how to resolve it.
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate managed agent name 'web'"),
+            "{error}"
+        );
+    }
+
+    /// Enum-like settings keep the key path and the accepted vocabulary in the error.
+    #[test]
+    fn invalid_log_level_names_key_and_choices() {
+        let error = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[agent]
+log_level = "loud"
+"#,
+        )
+        .expect_err("unknown levels must be rejected");
+        // Operators need the key path and the valid values to fix the file.
+        assert_eq!(
+            error.to_string(),
+            "agent.log_level: logging level must be one of: trace, debug, info, warning, error"
+        );
     }
 }

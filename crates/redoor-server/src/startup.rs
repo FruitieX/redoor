@@ -3,7 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::actors::router::spawn_router;
-use crate::http::auth::{AuthState, LoginCredentials};
+use crate::http::auth::AuthState;
 use crate::http::routes::build_app;
 use crate::http::state::{CoordinatorArgs, ServerState};
 use crate::http::watchdog::register_agents;
@@ -68,8 +68,7 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
             );
             std::process::exit(1);
         });
-    let config = match redoor_core::config::parse_config_file(&config_path.to_string_lossy()).await
-    {
+    let config = match redoor_core::config::parse_config_file(&config_path).await {
         Ok(config) => config,
         Err(error) => {
             eprintln!(
@@ -142,29 +141,9 @@ pub async fn run_server(args: CoordinatorArgs) -> anyhow::Result<()> {
         config_path.display()
     );
 
-    let (credentials, auth_mode) = match (
-        server_section.username.clone(),
-        server_section.password.clone(),
-    ) {
-        (Some(username), Some(password)) => (
-            LoginCredentials::Configured { username, password },
-            ServerAuthMode::Toml,
-        ),
-        (None, None) => {
-            // Config parser already rejects this pair on non-Linux platforms.
-            #[cfg(target_os = "linux")]
-            {
-                (LoginCredentials::SystemUser, ServerAuthMode::Pam)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                unreachable!("config parser requires username/password on non-Linux");
-            }
-        }
-        _ => unreachable!("config parser rejects partial username/password pairs"),
-    };
+    let auth_mode = ServerAuthMode::from(&server_section.auth);
     let auth = AuthState::new(
-        credentials,
+        server_section.auth.clone(),
         config.agent_token.clone(),
         server_section.cookie_secure,
     )

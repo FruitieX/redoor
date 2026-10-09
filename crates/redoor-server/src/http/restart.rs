@@ -11,11 +11,10 @@ use redoor_core::config::{parse_config_file, require_server_section};
 /// cannot take the running process down. Concurrent restarts get 409 once
 /// the oneshot sender has already been taken.
 pub(crate) async fn restart_server_handler(State(state): State<ServerState>) -> impl IntoResponse {
-    let path = state.config_path.to_string_lossy().to_string();
     let validated = async {
-        let config = parse_config_file(&path).await?;
+        let config = parse_config_file(&state.config_path).await?;
         require_server_section(&config)?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), redoor_core::config::ConfigError>(())
     }
     .await;
     if let Err(error) = validated {

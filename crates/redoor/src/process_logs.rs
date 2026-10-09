@@ -70,7 +70,7 @@ async fn configured_log_path(role: LogRole, config: Option<String>) -> Result<St
         Some(path) => PathBuf::from(path),
         None => redoor_core::config::default_config_path()?,
     };
-    let parsed = redoor_core::config::parse_config_file(&config_path.to_string_lossy())
+    let parsed = redoor_core::config::parse_config_file(&config_path)
         .await
         .with_context(|| format!("Failed to parse config file '{}'", config_path.display()))?;
     let configured = match role {
@@ -93,8 +93,7 @@ pub(crate) async fn run_relay(id: &str, config: Option<String>, lines: usize) ->
                 Some(path) => PathBuf::from(path),
                 None => redoor_core::config::default_config_path()?,
             };
-            let parsed =
-                redoor_core::config::parse_config_file(&config_path.to_string_lossy()).await?;
+            let parsed = redoor_core::config::parse_config_file(&config_path).await?;
             let relay = redoor_core::config::require_relay(&parsed, id)?;
             match relay.agent.log.clone() {
                 Some(log) => log,

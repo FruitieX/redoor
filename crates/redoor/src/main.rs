@@ -366,7 +366,7 @@ async fn list_relays(args: RelayListArgs) -> anyhow::Result<()> {
         Some(path) => path,
         None => config::default_config_path()?,
     };
-    let parsed = config::parse_config_file(&config_path.to_string_lossy()).await?;
+    let parsed = config::parse_config_file(&config_path).await?;
     for relay in parsed.relays {
         println!("{}", relay.id);
     }
@@ -383,9 +383,9 @@ async fn run_named_relay(args: RelayStartArgs) {
             Err(error) => return run_utility(async { Err(error) }).await,
         },
     };
-    let parsed = match config::parse_config_file(&config_path.to_string_lossy()).await {
+    let parsed = match config::parse_config_file(&config_path).await {
         Ok(config) => config,
-        Err(error) => return run_utility(async { Err(error) }).await,
+        Err(error) => return run_utility(async { Err(error.into()) }).await,
     };
     let mut relay = match config::require_relay(&parsed, &args.id) {
         Ok(relay) => relay.clone(),

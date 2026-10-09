@@ -222,7 +222,7 @@ async fn resolve_agent_settings(
                     return resolve_agent_settings_from_sources(args, None, None);
                 }
             }
-            let parsed = redoor_core::config::parse_config_file(&path.to_string_lossy())
+            let parsed = redoor_core::config::parse_config_file(&path)
                 .await
                 .map_err(|error| {
                     format!("Failed to parse config file '{}': {error}", path.display())

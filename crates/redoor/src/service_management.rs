@@ -78,7 +78,7 @@ pub(crate) async fn prepare_config(mode: ServiceRole, config_path: &Path) -> Res
 /// Rejects configs that cannot run the selected role without extra CLI flags.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn validate_existing_config(mode: ServiceRole, config_path: &Path) -> Result<()> {
-    let config = redoor_core::config::parse_config_file(&config_path.to_string_lossy())
+    let config = redoor_core::config::parse_config_file(config_path)
         .await
         .with_context(|| format!("Failed to parse config '{}'", config_path.display()))?;
     match mode {
