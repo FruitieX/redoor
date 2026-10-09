@@ -17,6 +17,8 @@ use tokio::sync::{mpsc, watch};
 pub(crate) struct FakeAgent {
     pub(crate) router: RouterHandle,
     pub(crate) agent_id: AgentId,
+    /// Control session the agent registered on; the router only accepts its frames from it.
+    socket_id: SocketId,
     pub(crate) commands: mpsc::Receiver<ServerToAgent>,
     pub(crate) priority: mpsc::Receiver<ServerToAgent>,
     /// Kept open so server-to-agent payload frames have somewhere to go.
@@ -34,12 +36,10 @@ impl FakeAgent {
         let (commands, mut priority) = (receivers.commands, receivers.priority);
         let (transfer_sender, transfer) = mpsc::channel(16);
         let streams = ConnectionStreams::new(agent_id.clone(), false);
+        let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
+        let socket_id = registration.socket_id.clone();
         router
-            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
-                &agent_id,
-                lanes,
-                streams.clone(),
-            )))
+            .send_async(RouterMsg::RegisterAgent(registration))
             .await
             .unwrap();
         let ServerToAgent::TransferSocketOpen { token, .. } = Self::next(&mut priority).await
@@ -64,6 +64,7 @@ impl FakeAgent {
         Self {
             router,
             agent_id,
+            socket_id,
             commands,
             priority,
             _transfer: transfer,
@@ -99,6 +100,7 @@ impl FakeAgent {
         self.router
             .send_async(RouterMsg::RouteResponse(RouteResponse {
                 agent_id: self.agent_id.clone(),
+                socket_id: self.socket_id.clone(),
                 request_id,
                 result,
             }))

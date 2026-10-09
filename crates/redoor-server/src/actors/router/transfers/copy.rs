@@ -922,6 +922,7 @@ mod tests {
             flow_id,
             RouteResponse {
                 agent_id: AgentId::from("dest"),
+                socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id: dest_id,
                 result: CommandResult::error(
                     redoor_protocol::wire::command::CommandErrorKind::InvalidInput,

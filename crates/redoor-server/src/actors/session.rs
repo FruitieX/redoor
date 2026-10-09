@@ -177,7 +177,38 @@ impl SessionRuntime {
                 }
                 self.agent_id = Some(agent_id);
             }
-            AgentToServer::AgentUnregister { agent_id } => {
+            other => match self.agent_id.clone() {
+                Some(agent_id) => self.handle_agent_frame(agent_id, other).await,
+                None => log!(
+                    Level::Warning,
+                    "Ignoring agent frame before successful registration: socket_id={}, frame={}",
+                    self.socket_id,
+                    other.kind()
+                ),
+            },
+        }
+    }
+
+    /// Handles a frame from a session whose registration was accepted.
+    ///
+    /// Frames carry their own `agent_id`, but it is never trusted: the session's registered
+    /// id (bound to a valid `agent_token`) is what the router checks ownership against, so a
+    /// client cannot answer or steer another agent's requests by naming that agent.
+    async fn handle_agent_frame(&mut self, agent_id: AgentId, message: AgentToServer) {
+        if let Some(claimed) = message.claimed_agent_id()
+            && claimed != &agent_id
+        {
+            log!(
+                Level::Warning,
+                "Agent frame names a different agent than its session; using the session's: socket_id={}, session_agent_id={}, frame_agent_id={}",
+                self.socket_id,
+                agent_id,
+                claimed
+            );
+        }
+        match message {
+            AgentToServer::AgentRegister { .. } => {}
+            AgentToServer::AgentUnregister { .. } => {
                 if let Some(watchdog) = self.watchdog.as_ref() {
                     watchdog.mark_disconnected(self.socket_id.clone()).await;
                 }
@@ -198,10 +229,7 @@ impl SessionRuntime {
                     );
                 }
             }
-            AgentToServer::TransferReady {
-                agent_id,
-                request_id,
-            } => {
+            AgentToServer::TransferReady { request_id, .. } => {
                 // TransferReady is a one-shot gate for uploads/copies. try_send would
                 // permanently drop readiness when the router mailbox is full, leaving
                 // the transfer stuck until client timeout with no cleanup path.
@@ -209,6 +237,7 @@ impl SessionRuntime {
                     .router_ref
                     .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
                         agent_id: agent_id.clone(),
+                        socket_id: self.socket_id.clone(),
                         request_id,
                     }))
                     .await
@@ -223,9 +252,7 @@ impl SessionRuntime {
                 }
             }
             AgentToServer::CommandResponse {
-                agent_id,
-                request_id,
-                result,
+                request_id, result, ..
             } => {
                 // Terminal responses release pending requests and transfer state, so
                 // temporary mailbox pressure must never discard their cleanup signal.
@@ -233,6 +260,7 @@ impl SessionRuntime {
                     .router_ref
                     .send_async(RouterMsg::RouteResponse(RouteResponse {
                         agent_id: agent_id.clone(),
+                        socket_id: self.socket_id.clone(),
                         request_id,
                         result,
                     }))
@@ -247,19 +275,15 @@ impl SessionRuntime {
                     );
                 }
             }
-            AgentToServer::UploadPublicationRequest {
-                agent_id,
-                request_id,
-            } => {
-                if self.agent_id.as_ref() == Some(&agent_id) {
-                    let _ = self
-                        .router_ref
-                        .send_async(RouterMsg::BeginUploadPublication {
-                            agent_id,
-                            request_id,
-                        })
-                        .await;
-                }
+            AgentToServer::UploadPublicationRequest { request_id, .. } => {
+                let _ = self
+                    .router_ref
+                    .send_async(RouterMsg::BeginUploadPublication {
+                        agent_id,
+                        socket_id: self.socket_id.clone(),
+                        request_id,
+                    })
+                    .await;
             }
             AgentToServer::StreamCredit { request_id, frames } => {
                 if let Some(streams) = &self.streams {
@@ -267,10 +291,10 @@ impl SessionRuntime {
                 }
             }
             AgentToServer::TransferProgressUpdate {
-                agent_id,
                 request_id,
                 transferred_bytes,
                 total_bytes,
+                ..
             } => {
                 // Late archive totals and local copy progress arrive once or rarely, so waiting
                 // for mailbox capacity is cheap while dropping them would leave stale progress.
@@ -279,6 +303,7 @@ impl SessionRuntime {
                     .send_async(RouterMsg::TransferProgressUpdate(
                         TransferProgressUpdateRequest {
                             agent_id,
+                            socket_id: self.socket_id.clone(),
                             request_id,
                             transferred_bytes,
                             total_bytes,
@@ -516,6 +541,87 @@ mod tests {
         );
     }
 
+    /// Builds a session runtime over a capturing router mailbox.
+    fn capture_session(agent_id: Option<AgentId>) -> (SessionRuntime, mpsc::Receiver<RouterMsg>) {
+        let (sender, receiver) = mpsc::channel(8);
+        let (lanes, _receivers) = ControlLanes::bounded(1, 1);
+        let runtime = SessionRuntime {
+            socket_id: SocketId::new(),
+            router_ref: RouterHandle::new(sender),
+            agent_id,
+            lanes,
+            watchdog: None,
+            agent_token: "token".to_string(),
+            streams: None,
+        };
+        (runtime, receiver)
+    }
+
+    /// An unauthenticated socket must not reach the router with agent frames: otherwise any
+    /// client of the public `/ws` endpoint could resolve or steer pending requests.
+    #[tokio::test]
+    async fn unregistered_session_forwards_no_agent_frames() {
+        let (mut runtime, mut receiver) = capture_session(None);
+        let watchdog_registry = WatchdogRegistry::new();
+        let request_id = redoor_protocol::ids::RequestId::new(1);
+        let agent_id = AgentId::from("victim");
+        for frame in [
+            AgentToServer::CommandResponse {
+                agent_id: agent_id.clone(),
+                request_id,
+                result: redoor_protocol::wire::command::CommandResult::RawUpload,
+            },
+            AgentToServer::TransferReady {
+                agent_id: agent_id.clone(),
+                request_id,
+            },
+            AgentToServer::TransferProgressUpdate {
+                agent_id: agent_id.clone(),
+                request_id,
+                transferred_bytes: 1,
+                total_bytes: None,
+            },
+            AgentToServer::UploadPublicationRequest {
+                agent_id: agent_id.clone(),
+                request_id,
+            },
+            AgentToServer::AgentUnregister {
+                agent_id: agent_id.clone(),
+            },
+        ] {
+            runtime
+                .handle_control_message(frame, &watchdog_registry)
+                .await;
+        }
+        // Nothing may be queued for the router before a registration with a valid token.
+        assert!(receiver.try_recv().is_err());
+    }
+
+    /// A registered session routes frames under its own agent id, never the one a frame
+    /// claims, so an authenticated agent cannot impersonate another.
+    #[tokio::test]
+    async fn registered_session_routes_frames_under_its_own_agent_id() {
+        let own = AgentId::from("own");
+        let (mut runtime, mut receiver) = capture_session(Some(own.clone()));
+        let socket_id = runtime.socket_id.clone();
+        runtime
+            .handle_control_message(
+                AgentToServer::CommandResponse {
+                    agent_id: AgentId::from("someone-else"),
+                    request_id: redoor_protocol::ids::RequestId::new(3),
+                    result: redoor_protocol::wire::command::CommandResult::RawUpload,
+                },
+                &WatchdogRegistry::new(),
+            )
+            .await;
+        // The router sees the session's identity and socket, which it checks for ownership.
+        let Ok(RouterMsg::RouteResponse(response)) = receiver.try_recv() else {
+            panic!("registered session should forward the response");
+        };
+        assert_eq!(response.agent_id, own);
+        assert_eq!(response.socket_id, socket_id);
+    }
+
     /// Exercises session dispatch under backpressure so completion cleanup cannot be lost.
     #[tokio::test]
     async fn command_response_waits_for_router_capacity_before_routing() {
@@ -561,6 +667,7 @@ mod tests {
             Some(RouterMsg::RouteResponse(RouteResponse {
                 agent_id: received_agent_id,
                 request_id: received_request_id,
+                socket_id: _,
                 result: redoor_protocol::wire::command::CommandResult::RawUpload,
             })) if received_agent_id == agent_id && received_request_id == request_id
         ));

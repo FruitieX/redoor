@@ -582,6 +582,7 @@ mod tests {
                 id,
                 RouteResponse {
                     agent_id: fixture.agent.clone(),
+                    socket_id: redoor_protocol::ids::SocketId::new(),
                     request_id: id,
                     result: CommandResult::Exec {
                         event: event.clone(),

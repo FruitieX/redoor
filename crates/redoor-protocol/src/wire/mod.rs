@@ -191,6 +191,36 @@ pub enum AgentToServer {
     StreamCredit { request_id: RequestId, frames: u32 },
 }
 
+impl AgentToServer {
+    /// Wire tag of the frame, for logs that must not echo payloads (results can carry file
+    /// contents, registration carries the agent token).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::AgentRegister { .. } => "agent_register",
+            Self::AgentUnregister { .. } => "agent_unregister",
+            Self::TransferReady { .. } => "transfer_ready",
+            Self::CommandResponse { .. } => "command_response",
+            Self::TransferProgressUpdate { .. } => "transfer_progress_update",
+            Self::UploadPublicationRequest { .. } => "upload_publication_request",
+            Self::StreamCredit { .. } => "stream_credit",
+        }
+    }
+
+    /// The agent id the frame claims to come from. The server never routes by it (the
+    /// session's registered id is authoritative); it only exists to log mismatches.
+    pub fn claimed_agent_id(&self) -> Option<&AgentId> {
+        match self {
+            Self::AgentRegister { agent_id, .. }
+            | Self::AgentUnregister { agent_id }
+            | Self::TransferReady { agent_id, .. }
+            | Self::CommandResponse { agent_id, .. }
+            | Self::TransferProgressUpdate { agent_id, .. }
+            | Self::UploadPublicationRequest { agent_id, .. } => Some(agent_id),
+            Self::StreamCredit { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

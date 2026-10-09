@@ -120,6 +120,19 @@ pub struct AgentRegistry {
     pub(crate) known_by_id: HashMap<AgentId, KnownAgent>,
 }
 
+impl AgentRegistry {
+    /// Whether `socket_id` is the live control session of `agent_id`.
+    ///
+    /// Agent-originated frames (results, readiness, progress, publication requests) may only
+    /// drive flows when they arrive on the session that currently owns the agent; a replaced
+    /// session's late frames and frames from sessions that never registered are ignored.
+    pub(crate) fn is_current_session(&self, agent_id: &AgentId, socket_id: &SocketId) -> bool {
+        self.by_id
+            .get(agent_id)
+            .is_some_and(|connection| &connection.socket_id == socket_id)
+    }
+}
+
 /// Whether a copy streams one file or a directory archive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyContentKind {

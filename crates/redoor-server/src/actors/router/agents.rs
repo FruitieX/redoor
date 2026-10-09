@@ -602,6 +602,21 @@ impl RouterState {
         flow_id: super::flows::FlowId,
         response: RouteResponse,
     ) {
+        // Only the agent the command was sent to may answer it; any other agent naming the
+        // same request id must not resolve (or drop) the caller's reply.
+        let owned = matches!(
+            self.flows.get(flow_id),
+            Some(Flow::Command(command)) if command.agent_id == response.agent_id
+        );
+        if !owned {
+            log!(
+                Level::Warning,
+                "Command response agent mismatch: request_id={}, agent_id={}",
+                response.request_id,
+                response.agent_id
+            );
+            return;
+        }
         if let Some(Flow::Command(command)) = self.flows.remove(flow_id) {
             let _ = command.reply.send(response.result);
         }
@@ -680,6 +695,69 @@ mod tests {
         state.agents.by_id[&AgentId::from(agent_id)]
             .transfer_token
             .clone()
+    }
+
+    /// Inserts a pending one-shot command owned by `agent_id` and returns its reply port.
+    fn insert_command(
+        state: &mut RouterState,
+        id: u64,
+        agent_id: &str,
+    ) -> oneshot::Receiver<CommandResult> {
+        let (reply, receiver) = oneshot::channel();
+        let request_id = redoor_protocol::ids::RequestId::new(id);
+        state.flows.insert(
+            request_id,
+            Flow::Command(CommandFlow {
+                request_id,
+                agent_id: AgentId::from(agent_id),
+                cancelable: false,
+                reply,
+            }),
+        );
+        receiver
+    }
+
+    /// Builds the router message a session sends for an agent's `command_response`.
+    fn response_message(agent_id: &str, socket_id: SocketId, id: u64) -> super::super::RouterMsg {
+        super::super::RouterMsg::RouteResponse(RouteResponse {
+            agent_id: AgentId::from(agent_id),
+            socket_id,
+            request_id: redoor_protocol::ids::RequestId::new(id),
+            result: CommandResult::RawUpload,
+        })
+    }
+
+    /// A response may only resolve a command when it arrives on the owning agent's current
+    /// session; request ids are sequential, so anything else could forge results.
+    #[tokio::test]
+    async fn command_response_requires_owning_agent_and_current_session() {
+        let mut state = test_state();
+        insert_control(&mut state, "owner");
+        insert_control(&mut state, "other");
+        let owner_socket = state.agents.by_id[&AgentId::from("owner")]
+            .socket_id
+            .clone();
+        let other_socket = state.agents.by_id[&AgentId::from("other")]
+            .socket_id
+            .clone();
+        let mut reply = insert_command(&mut state, 7, "owner");
+
+        // A session that never registered (or was replaced) cannot speak for the owner.
+        state.handle(response_message("owner", SocketId::new(), 7));
+        assert!(
+            reply.try_recv().is_err(),
+            "unknown session resolved a command"
+        );
+        // Another authenticated agent cannot answer a request it was never sent.
+        state.handle(response_message("other", other_socket, 7));
+        assert!(
+            reply.try_recv().is_err(),
+            "foreign agent resolved a command"
+        );
+        // The flow survives both attempts, so the real answer still reaches the caller.
+        state.handle(response_message("owner", owner_socket, 7));
+        assert!(matches!(reply.try_recv(), Ok(CommandResult::RawUpload)));
+        state.ui.refresh_check_task.abort();
     }
 
     /// Verifies retry projection removes the old socket before reporting a fresh start.

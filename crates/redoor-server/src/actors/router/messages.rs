@@ -195,6 +195,9 @@ pub struct RegisterTransferConnectionRequest {
 pub struct RouteTransferReadyRequest {
     /// Agent that registered the destination-side upload worker.
     pub agent_id: AgentId,
+    /// Control session that reported readiness; the router ignores frames from any session
+    /// other than the agent's current one, so a stale or forged socket cannot drive a flow.
+    pub socket_id: SocketId,
     /// Upload request whose bounded worker channel is now available.
     pub request_id: RequestId,
 }
@@ -203,6 +206,9 @@ pub struct RouteTransferReadyRequest {
 pub struct RouteResponse {
     /// Agent that produced the response.
     pub agent_id: AgentId,
+    /// Control session that delivered the response; only the agent's current session may
+    /// resolve its flows.
+    pub socket_id: SocketId,
     /// Internal request id used to correlate the response.
     pub request_id: RequestId,
     /// Final command result returned by the agent.
@@ -340,6 +346,8 @@ pub struct StartCopyRequest {
 pub struct TransferProgressUpdateRequest {
     /// Agent that emitted the progress update.
     pub agent_id: AgentId,
+    /// Control session that delivered the update; only the agent's current session counts.
+    pub socket_id: SocketId,
     /// Internal request id the update belongs to.
     pub request_id: RequestId,
     /// Latest transferred byte count reported by the agent.
@@ -434,6 +442,8 @@ pub enum RouterMsg {
     /// Serializes staged publication with public cancellation before filesystem mutation.
     BeginUploadPublication {
         agent_id: AgentId,
+        /// Session that asked; publication is authorized only for the agent's current session.
+        socket_id: SocketId,
         request_id: RequestId,
     },
     CancelTransfer {

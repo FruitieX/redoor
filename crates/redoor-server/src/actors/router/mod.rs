@@ -35,7 +35,7 @@ use crate::log_registry::LogRegistry;
 use crate::terminal_registry::TerminalRegistry;
 use flows::Flow;
 use redoor_core::log;
-use redoor_protocol::ids::UnixTimestampSeconds;
+use redoor_protocol::ids::{AgentId, SocketId, UnixTimestampSeconds};
 use redoor_protocol::wire::log::Level;
 use state::RouterState;
 use streams::StreamEnd;
@@ -159,6 +159,25 @@ pub fn spawn_router(
 }
 
 impl RouterState {
+    /// Admits an agent-originated frame only from the agent's current control session.
+    ///
+    /// Request ids are guessable sequence numbers, so a frame is only trusted when the
+    /// session that delivered it is the one registered for the agent it names; the flow
+    /// handlers then check that this agent owns the request.
+    fn accepts_agent_frame(&self, agent_id: &AgentId, socket_id: &SocketId, what: &str) -> bool {
+        let current = self.agents.is_current_session(agent_id, socket_id);
+        if !current {
+            log!(
+                Level::Warning,
+                "Ignoring agent {} from a session that does not own the agent: agent_id={}, socket_id={}",
+                what,
+                agent_id,
+                socket_id
+            );
+        }
+        current
+    }
+
     /// Routes an agent's final command response to the flow that owns its request id.
     fn route_response(&mut self, response: RouteResponse) {
         let Some(flow_id) = self.flows.id_for(response.request_id) else {
@@ -247,9 +266,15 @@ impl RouterState {
                 agent_id,
                 socket_id,
             } => self.unregister_agent(agent_id, socket_id),
-            RouterMsg::RouteResponse(response) => self.route_response(response),
+            RouterMsg::RouteResponse(response) => {
+                if self.accepts_agent_frame(&response.agent_id, &response.socket_id, "response") {
+                    self.route_response(response)
+                }
+            }
             RouterMsg::RouteTransferReady(request) => {
-                self.mark_transfer_ready(request.agent_id, request.request_id)
+                if self.accepts_agent_frame(&request.agent_id, &request.socket_id, "readiness") {
+                    self.mark_transfer_ready(request.agent_id, request.request_id)
+                }
             }
             RouterMsg::GetAgentList { reply } => {
                 let _ = reply.send(self.list_agents());
@@ -270,8 +295,13 @@ impl RouterState {
             RouterMsg::CommitDirectUpload(request) => self.commit_edit(request),
             RouterMsg::BeginUploadPublication {
                 agent_id,
+                socket_id,
                 request_id,
-            } => self.begin_upload_publication(agent_id, request_id),
+            } => {
+                if self.accepts_agent_frame(&agent_id, &socket_id, "publication request") {
+                    self.begin_upload_publication(agent_id, request_id)
+                }
+            }
             RouterMsg::CancelTransfer {
                 agent_id,
                 request_id,
@@ -287,7 +317,11 @@ impl RouterState {
                 let _ = reply.send(self.cancel_execution(request_id, agent_id));
             }
             RouterMsg::StartCopyRest(request) => self.start_copy(request),
-            RouterMsg::TransferProgressUpdate(request) => self.route_progress_update(request),
+            RouterMsg::TransferProgressUpdate(request) => {
+                if self.accepts_agent_frame(&request.agent_id, &request.socket_id, "progress") {
+                    self.route_progress_update(request)
+                }
+            }
             RouterMsg::OpenTerminal(request) => self.open_terminal(request),
             RouterMsg::OpenAgentLogStream(request) => self.open_log_stream(request),
             RouterMsg::CheckPendingUiRefresh => self.tick(),
@@ -380,12 +414,10 @@ mod tests {
         // A credit-capable agent, so the reader never waits on any stream's consumer.
         let streams = ConnectionStreams::new(agent_id.clone(), true);
 
+        let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
+        let socket_id = registration.socket_id.clone();
         router_ref
-            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
-                &agent_id,
-                lanes,
-                streams.clone(),
-            )))
+            .send_async(RouterMsg::RegisterAgent(registration))
             .await
             .expect("agent registered");
 
@@ -450,6 +482,7 @@ mod tests {
         router_ref
             .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
                 agent_id: agent_id.clone(),
+                socket_id: socket_id.clone(),
                 request_id,
             }))
             .await
@@ -672,6 +705,7 @@ mod tests {
         router_ref
             .send_async(RouterMsg::RouteResponse(RouteResponse {
                 agent_id: agent_id.clone(),
+                socket_id: socket_id.clone(),
                 request_id,
                 result: CommandResult::EditFile,
             }))

@@ -1295,6 +1295,110 @@ describe("Agents API", () => {
         expect(disconnected.status).toBe("disconnected");
     });
 
+    it("ignores command responses from unauthenticated websocket clients", async () => {
+        const targetName = "forge-target-agent";
+        const target = new WebSocket(wsUrl);
+        onTestFinished(() => target.close());
+        const attacker = new WebSocket(wsUrl);
+        onTestFinished(() => attacker.close());
+        await Promise.all(
+            [target, attacker].map(
+                (socket) =>
+                    new Promise<void>((resolve, reject) => {
+                        socket.once("open", resolve);
+                        socket.once("error", reject);
+                    }),
+            ),
+        );
+
+        const commandSchema = z.object({
+            type: z.literal("command"),
+            request_id: z.number(),
+            command: z.object({ type: z.literal("Echo") }),
+        });
+        const echoCommand = new Promise<number>((resolve) => {
+            target.on("message", (data) => {
+                const parsed = commandSchema.safeParse(
+                    JSON.parse(String(data)),
+                );
+
+                if (parsed.success) {
+                    resolve(parsed.data.request_id);
+                }
+            });
+        });
+
+        target.send(
+            JSON.stringify({
+                type: "agent_register",
+                agent_id: targetName,
+                agent_name: targetName,
+                os: "linux",
+                arch: "x86_64",
+                hostname: "forge-host",
+                username: "forge-user",
+                cwd: "/tmp",
+                token: TEST_AGENT_TOKEN,
+                binary: {
+                    version: "0.0.0",
+                    git_rev: "test",
+                    git_dirty: false,
+                    version_dirty: false,
+                    build_mode: "debug",
+                    build_date: "unknown",
+                },
+                supports_self_exec: false,
+                supports_native_open: false,
+                supports_trash: false,
+            }),
+        );
+
+        const registered = await waitForValue({
+            description: "forge target fixture to register",
+            predicate: async () =>
+                (await apiClient.listAgents()).find(
+                    (agent) =>
+                        agent.name === targetName && agent.connectionId !== null,
+                ),
+        });
+
+        const echo = registered.echo("genuine");
+        const requestId = await echoCommand;
+
+        const serverProcess = processManager.getProcess(serverPid);
+
+        if (serverProcess === undefined) {
+            throw new Error("Server process is not tracked");
+        }
+
+        const rejected = waitForLogMessage(
+            serverProcess,
+            /Ignoring agent frame before successful registration: .*frame=command_response/,
+        );
+        // The attacker knows the agent id and the (sequential) request id but never registered.
+        attacker.send(
+            JSON.stringify({
+                type: "command_response",
+                agent_id: targetName,
+                request_id: requestId,
+                result: { type: "Echo", message: "forged" },
+            }),
+        );
+        await rejected;
+
+        target.send(
+            JSON.stringify({
+                type: "command_response",
+                agent_id: targetName,
+                request_id: requestId,
+                result: { type: "Echo", message: "genuine" },
+            }),
+        );
+
+        // Only the registered agent's answer may resolve the pending REST request.
+        expect((await echo).message).toBe("genuine");
+    });
+
     it("should echo message back from connected agent", async () => {
         const testAgent = await getConnectedTestAgent();
 

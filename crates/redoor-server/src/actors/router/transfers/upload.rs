@@ -674,6 +674,7 @@ mod tests {
             request_id,
             RouteResponse {
                 agent_id: AgentId::from("agent-1"),
+                socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id,
                 result: CommandResult::RawUpload,
             },
