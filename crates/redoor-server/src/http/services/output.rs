@@ -26,6 +26,11 @@ const UNDESCRIBED_FAILURE: &str = "Agent stream failed";
 /// dropped `recv` futures and `Stream` polls alike.
 type ReceiveFuture = ReusableBoxFuture<'static, (OutputReceiver, Option<StreamChunk>)>;
 
+/// The agent ended an output stream with an error frame; the text is its (possibly empty) message.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct AgentStreamError(pub(crate) String);
+
 /// One admitted output stream plus the cleanup its consumer owes the agent.
 ///
 /// Dropping the stream before its terminal frame (an HTTP client disconnecting, an MCP read that
@@ -130,11 +135,16 @@ impl OutputStream {
     /// Reading stops at the final frame or at the first byte beyond `limit`; dropping the
     /// stream afterwards cancels an agent that still has more. An agent error frame becomes
     /// `Err` with its message (possibly empty).
-    pub(crate) async fn read_bounded(&mut self, limit: usize) -> Result<BoundedRead, String> {
+    pub(crate) async fn read_bounded(
+        &mut self,
+        limit: usize,
+    ) -> Result<BoundedRead, AgentStreamError> {
         let mut data = Vec::with_capacity(limit.min(64 * 1024));
         while let Some(chunk) = self.recv().await {
             if chunk.is_error {
-                return Err(String::from_utf8_lossy(&chunk.data).into_owned());
+                return Err(AgentStreamError(
+                    String::from_utf8_lossy(&chunk.data).into_owned(),
+                ));
             }
             let room = limit - data.len();
             if chunk.data.len() > room {

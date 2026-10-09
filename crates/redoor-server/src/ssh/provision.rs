@@ -7,6 +7,7 @@ use redoor_protocol::wire::log::Level;
 use tokio::io::AsyncReadExt;
 use tokio::time::{Duration, timeout};
 
+use super::ProvisionError;
 use super::transport::{SshHost, SshRunOptions};
 use crate::watchdog::ProvisioningStatusSink;
 
@@ -165,7 +166,7 @@ fn remote_sniff_script(remote_bin: &str) -> String {
 pub(super) async fn sniff_remote(
     host: &SshHost,
     remote_bin: &str,
-) -> Result<RemoteSniff, Box<dyn std::error::Error>> {
+) -> Result<RemoteSniff, ProvisionError> {
     log!(
         Level::Debug,
         "Remote sniff started: target={}, ssh_server_port={}, remote_bin={}, script_bytes={}",
@@ -206,25 +207,34 @@ pub(super) async fn sniff_remote(
     let trimmed = output.trim();
     let parts: Vec<&str> = trimmed.split(',').collect();
     if parts.len() != 5 {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "unexpected ssh sniff output '{}': expected '<os>,<arch>,<version>,<sha1sum>,<remote_bin>'",
             trimmed
-        )
-        .into());
+        )));
     }
     // Map `uname` values to the os component used in the release artifact
     // filenames (e.g. `redoor-aarch64-linux.tar.gz`).
     let os = match parts[0] {
         "Linux" => "linux",
         "Darwin" => "macos",
-        other => return Err(format!("unsupported remote os '{}'", other).into()),
+        other => {
+            return Err(ProvisionError::Remote(format!(
+                "unsupported remote os '{}'",
+                other
+            )));
+        }
     };
     // macOS reports `arm64` for Apple Silicon but the release artifacts use
     // `aarch64`, so normalize before looking up the download URL.
     let arch = match parts[1] {
         "x86_64" => "x86_64",
         "aarch64" | "arm64" => "aarch64",
-        other => return Err(format!("unsupported remote arch '{}'", other).into()),
+        other => {
+            return Err(ProvisionError::Remote(format!(
+                "unsupported remote arch '{}'",
+                other
+            )));
+        }
     };
     let version_output = parts[2].trim().to_string();
     let sha1sum = parts[3].trim().to_string();
@@ -330,7 +340,7 @@ pub(super) async fn ensure_remote_binary(
     sniff: &RemoteSniff,
     provision: &super::ProvisionContext,
     status: &ProvisioningStatusSink,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ProvisionError> {
     let expected = format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     let debug_binary = available_debug_binary(&sniff.os, &sniff.arch).await?;
 
@@ -446,18 +456,16 @@ pub(super) async fn ensure_remote_binary(
             );
         }
     } else if post_upload.sha1sum != local_sha1 {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "remote binary at {} sha1sum mismatch after upload: got '{}', want '{}'",
             remote_bin, post_upload.sha1sum, local_sha1
-        )
-        .into());
+        )));
     }
     if post_upload.version_output != expected {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "remote binary at {} did not report expected version after upload: got '{}', want '{}'",
             remote_bin, post_upload.version_output, expected
-        )
-        .into());
+        )));
     }
     log!(
         Level::Info,
@@ -477,7 +485,7 @@ pub(super) async fn force_upload_binary(
     local_path: &Path,
     remote_bin: &str,
     status: &ProvisioningStatusSink,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, ProvisionError> {
     let metadata = tokio::fs::metadata(local_path).await.map_err(|error| {
         std::io::Error::other(format!(
             "failed to access binary source '{}': {error}",
@@ -485,29 +493,26 @@ pub(super) async fn force_upload_binary(
         ))
     })?;
     if !metadata.is_file() {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "binary source '{}' is not a regular file",
             local_path.display()
-        )
-        .into());
+        )));
     }
 
     let local_sha1 = file_sha1sum(local_path).await?;
     upload_binary(host, local_path, remote_bin, status).await?;
     let uploaded = sniff_remote(host, remote_bin).await?;
     if uploaded.version_output.is_empty() {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "uploaded binary at {} did not execute successfully with --version",
             remote_bin
-        )
-        .into());
+        )));
     }
     if !uploaded.sha1sum.is_empty() && uploaded.sha1sum != local_sha1 {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "remote binary at {} sha1sum mismatch after forced upload: got '{}', want '{}'",
             remote_bin, uploaded.sha1sum, local_sha1
-        )
-        .into());
+        )));
     }
 
     log!(
@@ -591,7 +596,7 @@ async fn upload_binary(
     local_path: &Path,
     remote_bin: &str,
     status: &ProvisioningStatusSink,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ProvisionError> {
     let parent = parent_dir_of(remote_bin);
     let options = SshRunOptions::default().compressed();
     let unique = format!(
@@ -619,21 +624,19 @@ async fn upload_binary(
     let mkdir_cmd = format!("mkdir -p {}", parent);
     let mkdir_status = host.run(&mkdir_cmd, &[], &options).await?;
     if !mkdir_status.success() {
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "remote mkdir '{}' failed with status {}",
             parent,
             mkdir_status.code().unwrap_or(-1)
-        )
-        .into());
+        )));
     }
 
     if let Err(error) = host.upload_via_cat(local_path, &remote_tmp).await {
         remote_tmp_guard.cleanup().await;
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "failed to upload binary to temporary remote path '{}': {}",
             remote_tmp, error
-        )
-        .into());
+        )));
     }
 
     // `cat` does not always copy the source mode bits across ssh, so be
@@ -643,12 +646,11 @@ async fn upload_binary(
     let chmod_status = host.run(&chmod_cmd, &[], &options).await?;
     if !chmod_status.success() {
         remote_tmp_guard.cleanup().await;
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "remote chmod +x '{}' failed with status {}",
             remote_tmp,
             chmod_status.code().unwrap_or(-1)
-        )
-        .into());
+        )));
     }
 
     // rename replaces the path even if remote_bin is currently executing.
@@ -656,13 +658,12 @@ async fn upload_binary(
     let mv_status = host.run(&mv_cmd, &[], &options).await?;
     if !mv_status.success() {
         remote_tmp_guard.cleanup().await;
-        return Err(format!(
+        return Err(ProvisionError::Remote(format!(
             "remote mv -f '{}' -> '{}' failed with status {}",
             remote_tmp,
             remote_bin,
             mv_status.code().unwrap_or(-1)
-        )
-        .into());
+        )));
     }
     remote_tmp_guard.disarm();
 

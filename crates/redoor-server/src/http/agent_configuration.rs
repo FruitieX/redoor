@@ -5,17 +5,13 @@ use axum::{
     Json,
     extract::{Path, State as AxumState},
     http::StatusCode,
-    response::IntoResponse,
 };
-use redoor_protocol::api::{
-    ErrorResponse,
-    agents::{
-        AgentConnectionStatus, AgentInfoResponse, CreateLocalAgentRequest,
-        CreateLocalAgentResponse, CreateSshAgentRequest, CreateSshAgentResponse,
-        DeleteManagedAgentResponse, ManagedLocalAgentConfigurationResponse,
-        ManagedSshAgentConfigurationResponse, UpdateLocalAgentRequest, UpdateLocalAgentResponse,
-        UpdateSshAgentRequest, UpdateSshAgentResponse,
-    },
+use redoor_protocol::api::agents::{
+    AgentConnectionStatus, AgentInfoResponse, CreateLocalAgentRequest, CreateLocalAgentResponse,
+    CreateSshAgentRequest, CreateSshAgentResponse, DeleteManagedAgentResponse,
+    ManagedLocalAgentConfigurationResponse, ManagedSshAgentConfigurationResponse,
+    UpdateLocalAgentRequest, UpdateLocalAgentResponse, UpdateSshAgentRequest,
+    UpdateSshAgentResponse,
 };
 
 use redoor_core::config::{
@@ -23,32 +19,24 @@ use redoor_core::config::{
     edit_local_agent, edit_ssh_agent, parse_config_file,
 };
 
-use super::{agents::list_agent_snapshots, state::ServerState, watchdog};
+use super::{agents::list_agent_snapshots, error::ApiError, state::ServerState, watchdog};
 
 /// Route: `POST /api/v1/agents` persists and immediately registers one SSH-backed agent.
 pub(crate) async fn create_ssh_agent_handler(
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<CreateSshAgentRequest>,
-) -> impl IntoResponse {
-    match create_ssh_agent(&state, request).await {
-        Ok(agent) => (StatusCode::CREATED, Json(CreateSshAgentResponse { agent })).into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<(StatusCode, Json<CreateSshAgentResponse>), ApiError> {
+    let agent = create_ssh_agent(&state, request).await?;
+    Ok((StatusCode::CREATED, Json(CreateSshAgentResponse { agent })))
 }
 
 /// Route: `GET /api/v1/agents/{agent}/configuration` returns editable SSH TOML fields.
 pub(crate) async fn get_ssh_agent_configuration_handler(
     Path(agent_id): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    match find_ssh_agent(&state, &agent_id).await {
-        Ok(config) => (
-            StatusCode::OK,
-            Json(ManagedSshAgentConfigurationResponse::from(config)),
-        )
-            .into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<Json<ManagedSshAgentConfigurationResponse>, ApiError> {
+    let config = find_ssh_agent(&state, &agent_id).await?;
+    Ok(Json(ManagedSshAgentConfigurationResponse::from(config)))
 }
 
 /// Route: `PUT /api/v1/agents/{agent}` replaces one stopped SSH-backed TOML entry.
@@ -56,71 +44,48 @@ pub(crate) async fn update_ssh_agent_handler(
     Path(agent_id): Path<String>,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<UpdateSshAgentRequest>,
-) -> impl IntoResponse {
-    match update_ssh_agent(&state, &agent_id, request).await {
-        Ok(agent) => (StatusCode::OK, Json(UpdateSshAgentResponse { agent })).into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<Json<UpdateSshAgentResponse>, ApiError> {
+    let agent = update_ssh_agent(&state, &agent_id, request).await?;
+    Ok(Json(UpdateSshAgentResponse { agent }))
 }
 
 /// Route: `DELETE /api/v1/agents/{agent}` removes one stopped SSH-backed TOML entry.
 pub(crate) async fn delete_ssh_agent_handler(
     Path(agent_id): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    match delete_managed_agent(&state, &agent_id, ManagedAgentKind::Ssh).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(DeleteManagedAgentResponse { deleted: true }),
-        )
-            .into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<Json<DeleteManagedAgentResponse>, ApiError> {
+    delete_managed_agent(&state, &agent_id, ManagedAgentKind::Ssh).await?;
+    Ok(Json(DeleteManagedAgentResponse { deleted: true }))
 }
 
 /// Route: `POST /api/v1/local-agents` persists and immediately registers one local agent.
 pub(crate) async fn create_local_agent_handler(
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<CreateLocalAgentRequest>,
-) -> impl IntoResponse {
-    match create_local_agent(&state, request).await {
-        Ok(agent) => (
-            StatusCode::CREATED,
-            Json(CreateLocalAgentResponse { agent }),
-        )
-            .into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<(StatusCode, Json<CreateLocalAgentResponse>), ApiError> {
+    let agent = create_local_agent(&state, request).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateLocalAgentResponse { agent }),
+    ))
 }
 
 /// Route: `DELETE /api/v1/local-agents/{agent}` removes one stopped local TOML entry.
 pub(crate) async fn delete_local_agent_handler(
     Path(agent_id): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    match delete_managed_agent(&state, &agent_id, ManagedAgentKind::Local).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(DeleteManagedAgentResponse { deleted: true }),
-        )
-            .into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<Json<DeleteManagedAgentResponse>, ApiError> {
+    delete_managed_agent(&state, &agent_id, ManagedAgentKind::Local).await?;
+    Ok(Json(DeleteManagedAgentResponse { deleted: true }))
 }
 
 /// Route: `GET /api/v1/local-agents/{agent}/configuration` returns editable local TOML fields.
 pub(crate) async fn get_local_agent_configuration_handler(
     Path(agent_id): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    match find_local_agent(&state, &agent_id).await {
-        Ok(config) => (
-            StatusCode::OK,
-            Json(ManagedLocalAgentConfigurationResponse::from(config)),
-        )
-            .into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<Json<ManagedLocalAgentConfigurationResponse>, ApiError> {
+    let config = find_local_agent(&state, &agent_id).await?;
+    Ok(Json(ManagedLocalAgentConfigurationResponse::from(config)))
 }
 
 /// Route: `PUT /api/v1/local-agents/{agent}` replaces one stopped local TOML entry.
@@ -128,19 +93,17 @@ pub(crate) async fn update_local_agent_handler(
     Path(agent_id): Path<String>,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<UpdateLocalAgentRequest>,
-) -> impl IntoResponse {
-    match update_local_agent(&state, &agent_id, request).await {
-        Ok(agent) => (StatusCode::OK, Json(UpdateLocalAgentResponse { agent })).into_response(),
-        Err((status, error)) => (status, Json(ErrorResponse { error })).into_response(),
-    }
+) -> Result<Json<UpdateLocalAgentResponse>, ApiError> {
+    let agent = update_local_agent(&state, &agent_id, request).await?;
+    Ok(Json(UpdateLocalAgentResponse { agent }))
 }
 
 /// Serializes persistence and runtime registration so effective names stay unique.
 async fn create_ssh_agent(
     state: &ServerState,
     request: CreateSshAgentRequest,
-) -> Result<AgentInfoResponse, (StatusCode, String)> {
-    let config = validate_request(request).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+) -> Result<AgentInfoResponse, ApiError> {
+    let config = validate_request(request)?;
     let agent_config = AgentConfig::SshBacked(config.clone());
     let agent_id = watchdog::supervisor_key(&agent_config);
     let _edit_guard = state.config_edit_lock.lock().await;
@@ -149,12 +112,12 @@ async fn create_ssh_agent(
 
     append_ssh_agent(&state.config_path, &config)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(internal_error)?;
     let registered_id = state
         .launcher
         .register(agent_config, &state.watchdog_registry, &state.router_ref)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(internal_error)?;
 
     Ok(stopped_agent_response(
         registered_id,
@@ -168,10 +131,9 @@ async fn update_ssh_agent(
     state: &ServerState,
     old_id: &str,
     request: UpdateSshAgentRequest,
-) -> Result<AgentInfoResponse, (StatusCode, String)> {
+) -> Result<AgentInfoResponse, ApiError> {
     let clear_password = request.clear_password.unwrap_or(false);
-    let mut config =
-        validate_update_request(request).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let mut config = validate_update_request(request)?;
     let new_id = watchdog::supervisor_key(&AgentConfig::SshBacked(config.clone()));
     let _edit_guard = state.config_edit_lock.lock().await;
     let existing_config = find_ssh_agent_for_update(state, old_id, &new_id).await?;
@@ -184,7 +146,7 @@ async fn update_ssh_agent(
                 ensure_unique_agent_id(state, &new_id).await?;
             }
             // A retry after rename persist no longer has the old identity, so skip this check.
-            Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
             Err(error) => return Err(error),
         }
     }
@@ -204,7 +166,7 @@ async fn update_ssh_agent(
 async fn create_local_agent(
     state: &ServerState,
     request: CreateLocalAgentRequest,
-) -> Result<AgentInfoResponse, (StatusCode, String)> {
+) -> Result<AgentInfoResponse, ApiError> {
     let config = validate_local_request(request);
     let agent_config = AgentConfig::Local(config.clone());
     let agent_id = watchdog::supervisor_key(&agent_config);
@@ -214,12 +176,12 @@ async fn create_local_agent(
 
     append_local_agent(&state.config_path, &config)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(internal_error)?;
     let registered_id = state
         .launcher
         .register(agent_config, &state.watchdog_registry, &state.router_ref)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(internal_error)?;
 
     Ok(stopped_agent_response(registered_id, config.home, None))
 }
@@ -229,7 +191,7 @@ async fn update_local_agent(
     state: &ServerState,
     old_id: &str,
     request: UpdateLocalAgentRequest,
-) -> Result<AgentInfoResponse, (StatusCode, String)> {
+) -> Result<AgentInfoResponse, ApiError> {
     let config = validate_local_update_request(request);
     let new_id = watchdog::supervisor_key(&AgentConfig::Local(config.clone()));
     let _edit_guard = state.config_edit_lock.lock().await;
@@ -241,7 +203,7 @@ async fn update_local_agent(
                 ensure_unique_agent_id(state, &new_id).await?;
             }
             // A retry after rename persist no longer has the old identity, so skip this check.
-            Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
             Err(error) => return Err(error),
         }
     }
@@ -258,7 +220,7 @@ async fn delete_managed_agent(
     state: &ServerState,
     agent_id: &str,
     expected_kind: ManagedAgentKind,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     let _edit_guard = state.config_edit_lock.lock().await;
     let configured = find_configured_agent(state, agent_id).await?;
     if let Some(config) = &configured {
@@ -266,9 +228,7 @@ async fn delete_managed_agent(
             return Err(expected_kind.not_found(agent_id));
         }
     } else {
-        let inventory = list_agent_snapshots(state)
-            .await
-            .map_err(|error| (error.status_code(), error.to_string()))?;
+        let inventory = list_agent_snapshots(state).await?;
         let retained = inventory
             .iter()
             .find(|agent| agent.id.to_string() == agent_id && agent.configuration_editable);
@@ -319,27 +279,18 @@ impl ManagedAgentKind {
     }
 
     /// Uses resource-specific wording so a cross-kind route does not reveal another collection.
-    fn not_found(self, agent_id: &str) -> (StatusCode, String) {
+    fn not_found(self, agent_id: &str) -> ApiError {
         let kind = match self {
             Self::Ssh => "SSH",
             Self::Local => "local",
         };
-        (
-            StatusCode::NOT_FOUND,
-            format!("Managed {kind} agent '{agent_id}' was not found"),
-        )
+        ApiError::not_found(format!("Managed {kind} agent '{agent_id}' was not found"))
     }
 }
 
 /// Removes the dormant supervisor and retained router inventory together.
-async fn unregister_runtime_agent(
-    state: &ServerState,
-    agent_id: &str,
-) -> Result<(), (StatusCode, String)> {
-    state
-        .watchdog_registry
-        .remove_stopped(agent_id)
-        .map_err(internal_error)?;
+async fn unregister_runtime_agent(state: &ServerState, agent_id: &str) -> Result<(), ApiError> {
+    state.watchdog_registry.remove_stopped(agent_id).await?;
     state
         .router_ref
         .request(|reply| {
@@ -350,10 +301,7 @@ async fn unregister_runtime_agent(
         })
         .await
         .map_err(|error| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to unregister managed inventory: {error}"),
-            )
+            ApiError::internal(format!("Failed to unregister managed inventory: {error}"))
         })
 }
 
@@ -361,7 +309,7 @@ async fn unregister_runtime_agent(
 async fn stop_for_configuration_change(
     state: &ServerState,
     agent_id: &str,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     let Some(handle) = state.watchdog_registry.lookup(agent_id) else {
         // A retry after persist+remove must not 404 just because the supervisor is already gone.
         return Ok(());
@@ -370,7 +318,7 @@ async fn stop_for_configuration_change(
         Ok(Ok(())) => Ok(()),
         // A dead supervisor channel means the previous attempt already tore the task down.
         Ok(Err(_)) => Ok(()),
-        Err(_) => Err((
+        Err(_) => Err(ApiError::status(
             StatusCode::GATEWAY_TIMEOUT,
             format!("Timed out stopping managed agent: {agent_id}"),
         )),
@@ -383,27 +331,26 @@ async fn persist_ssh_replacement(
     old_id: &str,
     new_id: &str,
     config: &SshBackedAgentConfig,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     match find_ssh_agent(state, old_id).await {
         Ok(_) => {
             return edit_ssh_agent(&state.config_path, old_id, Some(config))
                 .await
                 .map_err(internal_error);
         }
-        Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+        Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
         Err(error) => return Err(error),
     }
     if new_id != old_id {
         match find_ssh_agent(state, new_id).await {
             Ok(_) => return Ok(()),
-            Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
             Err(error) => return Err(error),
         }
     }
-    Err((
-        StatusCode::NOT_FOUND,
-        format!("Managed SSH agent '{old_id}' was not found"),
-    ))
+    Err(ApiError::not_found(format!(
+        "Managed SSH agent '{old_id}' was not found"
+    )))
 }
 
 /// Writes the local replacement only when the previous identity is still in TOML so retries stay idempotent.
@@ -412,34 +359,33 @@ async fn persist_local_replacement(
     old_id: &str,
     new_id: &str,
     config: &LocalAgentConfig,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), ApiError> {
     match find_local_agent(state, old_id).await {
         Ok(_) => {
             return edit_local_agent(&state.config_path, old_id, Some(config))
                 .await
                 .map_err(internal_error);
         }
-        Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+        Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
         Err(error) => return Err(error),
     }
     if new_id != old_id {
         match find_local_agent(state, new_id).await {
             Ok(_) => return Ok(()),
-            Err((status, _)) if status == StatusCode::NOT_FOUND => {}
+            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
             Err(error) => return Err(error),
         }
     }
-    Err((
-        StatusCode::NOT_FOUND,
-        format!("Managed local agent '{old_id}' was not found"),
-    ))
+    Err(ApiError::not_found(format!(
+        "Managed local agent '{old_id}' was not found"
+    )))
 }
 
 /// Registers the replacement supervisor unless a previous attempt already spawned it.
 async fn ensure_ssh_agent_registered(
     state: &ServerState,
     config: SshBackedAgentConfig,
-) -> Result<redoor_protocol::ids::AgentId, (StatusCode, String)> {
+) -> Result<redoor_protocol::ids::AgentId, ApiError> {
     let agent_id = watchdog::supervisor_key(&AgentConfig::SshBacked(config.clone()));
     if state.watchdog_registry.lookup(&agent_id).is_some() {
         // Persist succeeded and the supervisor survived; only router inventory may still be missing.
@@ -456,10 +402,7 @@ async fn ensure_ssh_agent_registered(
             })
             .await
             .map_err(|error| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to register managed inventory: {error}"),
-                )
+                ApiError::internal(format!("Failed to register managed inventory: {error}"))
             })?;
         return Ok(agent_id.into());
     }
@@ -478,7 +421,7 @@ async fn ensure_ssh_agent_registered(
 async fn ensure_local_agent_registered(
     state: &ServerState,
     config: LocalAgentConfig,
-) -> Result<redoor_protocol::ids::AgentId, (StatusCode, String)> {
+) -> Result<redoor_protocol::ids::AgentId, ApiError> {
     let agent_id = watchdog::supervisor_key(&AgentConfig::Local(config.clone()));
     if state.watchdog_registry.lookup(&agent_id).is_some() {
         // Persist succeeded and the supervisor survived; only router inventory may still be missing.
@@ -495,10 +438,7 @@ async fn ensure_local_agent_registered(
             })
             .await
             .map_err(|error| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to register managed inventory: {error}"),
-                )
+                ApiError::internal(format!("Failed to register managed inventory: {error}"))
             })?;
         return Ok(agent_id.into());
     }
@@ -518,10 +458,10 @@ async fn find_ssh_agent_for_update(
     state: &ServerState,
     old_id: &str,
     new_id: &str,
-) -> Result<SshBackedAgentConfig, (StatusCode, String)> {
+) -> Result<SshBackedAgentConfig, ApiError> {
     match find_ssh_agent(state, old_id).await {
         Ok(config) => Ok(config),
-        Err((status, _)) if status == StatusCode::NOT_FOUND && new_id != old_id => {
+        Err(error) if error.status_code() == StatusCode::NOT_FOUND && new_id != old_id => {
             find_ssh_agent(state, new_id).await
         }
         Err(error) => Err(error),
@@ -533,10 +473,10 @@ async fn find_local_agent_for_update(
     state: &ServerState,
     old_id: &str,
     new_id: &str,
-) -> Result<LocalAgentConfig, (StatusCode, String)> {
+) -> Result<LocalAgentConfig, ApiError> {
     match find_local_agent(state, old_id).await {
         Ok(config) => Ok(config),
-        Err((status, _)) if status == StatusCode::NOT_FOUND && new_id != old_id => {
+        Err(error) if error.status_code() == StatusCode::NOT_FOUND && new_id != old_id => {
             find_local_agent(state, new_id).await
         }
         Err(error) => Err(error),
@@ -547,13 +487,12 @@ async fn find_local_agent_for_update(
 async fn find_ssh_agent(
     state: &ServerState,
     agent_id: &str,
-) -> Result<SshBackedAgentConfig, (StatusCode, String)> {
+) -> Result<SshBackedAgentConfig, ApiError> {
     match find_configured_agent(state, agent_id).await? {
         Some(AgentConfig::SshBacked(config)) => Ok(config),
-        Some(AgentConfig::Local(_)) | None => Err((
-            StatusCode::NOT_FOUND,
-            format!("Managed SSH agent '{agent_id}' was not found"),
-        )),
+        Some(AgentConfig::Local(_)) | None => Err(ApiError::not_found(format!(
+            "Managed SSH agent '{agent_id}' was not found"
+        ))),
     }
 }
 
@@ -561,13 +500,12 @@ async fn find_ssh_agent(
 async fn find_local_agent(
     state: &ServerState,
     agent_id: &str,
-) -> Result<LocalAgentConfig, (StatusCode, String)> {
+) -> Result<LocalAgentConfig, ApiError> {
     match find_configured_agent(state, agent_id).await? {
         Some(AgentConfig::Local(config)) => Ok(config),
-        Some(AgentConfig::SshBacked(_)) | None => Err((
-            StatusCode::NOT_FOUND,
-            format!("Managed local agent '{agent_id}' was not found"),
-        )),
+        Some(AgentConfig::SshBacked(_)) | None => Err(ApiError::not_found(format!(
+            "Managed local agent '{agent_id}' was not found"
+        ))),
     }
 }
 
@@ -575,7 +513,7 @@ async fn find_local_agent(
 async fn find_configured_agent(
     state: &ServerState,
     agent_id: &str,
-) -> Result<Option<AgentConfig>, (StatusCode, String)> {
+) -> Result<Option<AgentConfig>, ApiError> {
     let config = parse_config_file(&state.config_path)
         .await
         .map_err(internal_error)?;
@@ -586,28 +524,22 @@ async fn find_configured_agent(
 }
 
 /// Rejects a new identity that would collide with any retained inventory row.
-async fn ensure_unique_agent_id(
-    state: &ServerState,
-    agent_id: &str,
-) -> Result<(), (StatusCode, String)> {
-    let existing = list_agent_snapshots(state)
-        .await
-        .map_err(|error| (error.status_code(), error.to_string()))?;
+async fn ensure_unique_agent_id(state: &ServerState, agent_id: &str) -> Result<(), ApiError> {
+    let existing = list_agent_snapshots(state).await?;
     if existing
         .iter()
         .any(|agent| agent.id.to_string() == agent_id)
     {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("Agent '{agent_id}' already exists"),
-        ));
+        return Err(ApiError::conflict(format!(
+            "Agent '{agent_id}' already exists"
+        )));
     }
     Ok(())
 }
 
 /// Maps unexpected persistence/runtime failures to one consistent REST error shape.
-fn internal_error(error: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+fn internal_error(error: impl std::fmt::Display) -> ApiError {
+    ApiError::internal(error.to_string())
 }
 
 /// Builds the public dormant projection shared by create and update responses.
@@ -658,13 +590,15 @@ fn validate_local_update_request(request: UpdateLocalAgentRequest) -> LocalAgent
 }
 
 /// Normalizes optional text and rejects values that would create unusable TOML entries.
-fn validate_request(request: CreateSshAgentRequest) -> Result<SshBackedAgentConfig, String> {
+fn validate_request(request: CreateSshAgentRequest) -> Result<SshBackedAgentConfig, ApiError> {
     let target = request.target.trim().to_string();
     if target.is_empty() {
-        return Err("SSH target is required".to_string());
+        return Err(ApiError::bad_request("SSH target is required"));
     }
     if request.ssh_port == Some(0) {
-        return Err("SSH port must be between 1 and 65535".to_string());
+        return Err(ApiError::bad_request(
+            "SSH port must be between 1 and 65535",
+        ));
     }
     Ok(SshBackedAgentConfig {
         target,
@@ -679,7 +613,9 @@ fn validate_request(request: CreateSshAgentRequest) -> Result<SshBackedAgentConf
 }
 
 /// Applies common SSH validation to the distinct update wire type.
-fn validate_update_request(request: UpdateSshAgentRequest) -> Result<SshBackedAgentConfig, String> {
+fn validate_update_request(
+    request: UpdateSshAgentRequest,
+) -> Result<SshBackedAgentConfig, ApiError> {
     validate_request(CreateSshAgentRequest {
         target: request.target,
         username: request.username,

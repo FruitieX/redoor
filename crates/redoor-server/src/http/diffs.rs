@@ -88,7 +88,8 @@ async fn download_editable_file(
         },
     )
     .await?;
-    let read = stream.read_bounded(capacity).await.map_err(|message| {
+    let read = stream.read_bounded(capacity).await.map_err(|error| {
+        let message = error.0;
         if message.is_empty() {
             ApiError::bad_request(format!("Failed to download {}", endpoint.path))
         } else {

@@ -95,6 +95,22 @@ fn command_status(kind: &CommandErrorKind) -> StatusCode {
     }
 }
 
+impl From<crate::watchdog::WatchdogError> for ApiError {
+    /// A configuration change racing a start is a conflict; every other lifecycle failure
+    /// means the supervisor is gone, which is a server-side fault.
+    fn from(error: crate::watchdog::WatchdogError) -> Self {
+        let status = match error {
+            crate::watchdog::WatchdogError::StillRunning => StatusCode::CONFLICT,
+            crate::watchdog::WatchdogError::SupervisorStopped { .. }
+            | crate::watchdog::WatchdogError::AcknowledgementDropped { .. }
+            | crate::watchdog::WatchdogError::AlreadyRegistered { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        Self::status(status, error.to_string())
+    }
+}
+
 impl IntoResponse for ApiError {
     /// Renders the standard `{ "error": ... }` body every client parses.
     fn into_response(self) -> Response {

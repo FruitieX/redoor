@@ -3,9 +3,10 @@
 use std::path::Path;
 use std::process::Stdio;
 
+use redoor_core::bounded_tail::read_bounded_tail;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Caps browser-bound SSH diagnostics while retaining the final, usually actionable lines.
@@ -397,8 +398,8 @@ impl SshHost {
             .stderr
             .take()
             .expect("script requires piped ssh stderr");
-        let stdout_handle = tokio::spawn(read_bounded_tail(stdout));
-        let stderr_handle = tokio::spawn(read_bounded_tail(stderr));
+        let stdout_handle = tokio::spawn(read_bounded_tail(stdout, MAX_SSH_DIAGNOSTIC_BYTES));
+        let stderr_handle = tokio::spawn(read_bounded_tail(stderr, MAX_SSH_DIAGNOSTIC_BYTES));
         let write_result = stdin.write_all(script.as_bytes()).await;
         // Closing stdin tells the remote shell that the complete script has arrived.
         drop(stdin);
@@ -539,7 +540,7 @@ impl SshHost {
             Ok::<_, std::io::Error>(())
         });
         // Drain stderr while the child runs so a full pipe cannot block exit.
-        let stderr_handle = tokio::spawn(read_bounded_tail(stderr));
+        let stderr_handle = tokio::spawn(read_bounded_tail(stderr, MAX_SSH_DIAGNOSTIC_BYTES));
 
         let status = child.wait().await?;
         let stderr_bytes = join_diagnostic_reader(stderr_handle, "stderr").await?;
@@ -594,23 +595,6 @@ impl SshHost {
             stderr_trim
         );
         Ok(())
-    }
-}
-
-/// Drains a child pipe while retaining only the final diagnostic bytes in memory.
-async fn read_bounded_tail(mut reader: impl AsyncRead + Unpin) -> Result<Vec<u8>, std::io::Error> {
-    let mut tail = Vec::with_capacity(MAX_SSH_DIAGNOSTIC_BYTES);
-    let mut chunk = [0_u8; 4096];
-    loop {
-        let read = reader.read(&mut chunk).await?;
-        if read == 0 {
-            return Ok(tail);
-        }
-        tail.extend_from_slice(&chunk[..read]);
-        if tail.len() > MAX_SSH_DIAGNOSTIC_BYTES {
-            let excess = tail.len() - MAX_SSH_DIAGNOSTIC_BYTES;
-            tail.drain(..excess);
-        }
     }
 }
 

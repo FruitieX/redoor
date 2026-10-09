@@ -453,9 +453,7 @@ async fn run_named_relay(
         .ok()
         .filter(|token| !token.is_empty())
         .unwrap_or(parsed.agent_token);
-    redoor_server::ssh::run_relay(relay, token, agent_app_name, paths.clone())
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    redoor_server::ssh::relay::run_relay(relay, token, agent_app_name, paths.clone()).await?;
     Ok(ExitCode::SUCCESS)
 }
 

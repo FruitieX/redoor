@@ -10,4 +10,4 @@ mod one_time_token_registry;
 pub mod ssh;
 pub mod startup;
 mod terminal_registry;
-pub mod watchdog;
+mod watchdog;

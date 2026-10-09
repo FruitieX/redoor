@@ -806,7 +806,7 @@ async fn read_file(
     let page = stream
         .read_bounded(limit)
         .await
-        .map_err(|error| op(error, id))?;
+        .map_err(|error| op(error.0, id))?;
     // Dropping the stream cancels the agent if it still streams the look-ahead byte.
     drop(stream);
     let (bytes, more) = (page.data, page.overflowed);
@@ -1211,25 +1211,28 @@ async fn managed_agent(
     let agent_id = AgentId::from(device);
     let snapshot = crate::http::agents::managed_agent_snapshot(state, &agent_id)
         .await
-        .map_err(|(_, error)| op(error.error, id))?;
+        .map_err(|error| op(error.to_string(), id))?;
     let watchdog = state
         .watchdog_registry
         .lookup(&snapshot.name)
         .ok_or_else(|| op("Managed supervisor unavailable", id))?;
     if start {
-        watchdog.start().map_err(|error| op(error, id))?;
+        watchdog
+            .start()
+            .await
+            .map_err(|error| op(error.to_string(), id))?;
         crate::http::agents::apply_managed_snapshot(state, agent_id, watchdog.snapshot())
             .await
-            .map_err(|error| op(error, id))?;
+            .map_err(|error| op(error.to_string(), id))?;
         Ok(json!({"device_id":device,"accepted":true,"poll_device":true}))
     } else {
         tokio::time::timeout(std::time::Duration::from_secs(10), watchdog.shutdown())
             .await
             .map_err(|_| op("Timed out stopping managed agent", id))?
-            .map_err(|error| op(error, id))?;
+            .map_err(|error| op(error.to_string(), id))?;
         crate::http::agents::apply_managed_snapshot(state, agent_id, watchdog.snapshot())
             .await
-            .map_err(|error| op(error, id))?;
+            .map_err(|error| op(error.to_string(), id))?;
         Ok(json!({"device_id":device,"cleanup_complete":true}))
     }
 }

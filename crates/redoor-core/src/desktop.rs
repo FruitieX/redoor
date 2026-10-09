@@ -114,12 +114,34 @@ fn open_browser_env_allows(value: Option<&str>) -> bool {
     !value.is_some_and(|value| value.eq_ignore_ascii_case("off"))
 }
 
+/// Why a desktop launch failed; the agent maps `NoDesktop` to its own wording.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// This process has no graphical session to open things in.
+    #[error("No graphical desktop is available")]
+    NoDesktop,
+    /// The platform launcher could not be started.
+    #[error("Failed to start {program}: {source}")]
+    Launch {
+        /// Launcher executable (`xdg-open`, `open`, ...).
+        program: &'static str,
+        /// Spawn failure.
+        source: std::io::Error,
+    },
+    /// The launcher ran but reported failure.
+    #[error("{program} exited with status {status}")]
+    Failed {
+        /// Launcher executable.
+        program: &'static str,
+        /// Its exit status.
+        status: std::process::ExitStatus,
+    },
+}
+
 /// Opens a URL or filesystem path with the platform launcher for the detected desktop.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub async fn open_with_desktop(target: &str) -> Result<(), String> {
-    let Some(desktop_environment) = detect_desktop_environment() else {
-        return Err("No graphical desktop is available".to_string());
-    };
+pub async fn open_with_desktop(target: &str) -> Result<(), OpenError> {
+    let desktop_environment = detect_desktop_environment().ok_or(OpenError::NoDesktop)?;
     let program = desktop_open_program(desktop_environment);
     let status = Command::new(program)
         .arg(target)
@@ -128,18 +150,18 @@ pub async fn open_with_desktop(target: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .status()
         .await
-        .map_err(|error| format!("Failed to start {program}: {error}"))?;
+        .map_err(|source| OpenError::Launch { program, source })?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{program} exited with status {status}"))
+        Err(OpenError::Failed { program, status })
     }
 }
 
 /// Reports opening as unavailable where no desktop launcher is supported.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub async fn open_with_desktop(_target: &str) -> Result<(), String> {
-    Err("No graphical desktop is available".to_string())
+pub async fn open_with_desktop(_target: &str) -> Result<(), OpenError> {
+    Err(OpenError::NoDesktop)
 }
 
 /// First-run browser hint shown above the login form via the URL fragment.

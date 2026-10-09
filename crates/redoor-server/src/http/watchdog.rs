@@ -10,7 +10,7 @@
 use crate::actors::router::{
     ApplyManagedLifecycleRequest, RegisterManagedAgentRequest, RouterHandle, RouterMsg,
 };
-use crate::watchdog::{SnapshotCallback, SpawnFn, WatchdogRegistry, spawn_supervisor};
+use crate::watchdog::{SnapshotCallback, SpawnError, SpawnFn, WatchdogRegistry, spawn_supervisor};
 use anyhow::Result;
 use redoor_core::log;
 use redoor_protocol::ids::AgentId;
@@ -127,7 +127,7 @@ impl ManagedLauncher {
                     &launcher.agent_token,
                 )
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(SpawnError::Spawn)
             }
         });
         match diagnostic_log {
@@ -173,76 +173,18 @@ impl ManagedLauncher {
         &self,
         config: &redoor_core::config::SshBackedAgentConfig,
         status: crate::watchdog::ProvisioningStatusSink,
-    ) -> Result<Child, String> {
-        let redoor_port = self.redoor_port;
-        let attempt_start = std::time::Instant::now();
-        log!(
-            Level::Debug,
-            "Managed SSH spawn attempt started: target={}, ssh_server_port={}, name={:?}, remote_bin={:?}, home={:?}, redoor_port={}, has_password={}",
-            config.target,
-            config
-                .ssh_port
-                .map(|port| port.to_string())
-                .unwrap_or_else(|| "ssh-config".to_string()),
-            config.name,
-            config.remote_bin,
-            config.home,
-            redoor_port,
-            config.password.is_some()
-        );
-        let prepared = match crate::ssh::prepare_ssh_backed_agent(
-            config,
-            redoor_port,
-            &self.agent_token,
-            &self.provision,
-            &status,
-        )
-        .await
-        {
-            Ok(prepared) => {
-                log!(
-                    Level::Debug,
-                    "Managed SSH prepare succeeded: target={}, elapsed={:?}",
-                    config.target,
-                    attempt_start.elapsed()
-                );
-                prepared
-            }
-            Err(error) => {
-                redoor_core::log_failure!(
-                    Level::Error,
-                    "ssh prepare failed, will retry next cycle: target={}, elapsed={:?}, error={:#}",
-                    config.target,
-                    attempt_start.elapsed(),
-                    error
-                );
-                return Err(error.to_string());
-            }
-        };
+    ) -> Result<Child, SpawnError> {
+        let prepared = self
+            .provision
+            .prepare_managed(config, self.redoor_port, &self.agent_token, &status)
+            .await
+            .map_err(SpawnError::Provision)?;
         // ExitOnForwardFailure makes an occupied random remote port terminate the
         // child; the supervisor's next cycle calls this again with a new port.
-        let spawn_start = std::time::Instant::now();
-        let result = prepared
+        prepared
             .spawn_managed(&status)
             .await
-            .map_err(|e| e.to_string());
-        match &result {
-            Ok(child) => log!(
-                Level::Debug,
-                "Managed SSH child spawned: target={}, elapsed={:?}, child_id={:?}",
-                config.target,
-                spawn_start.elapsed(),
-                child.id()
-            ),
-            Err(error) => redoor_core::log_failure!(
-                Level::Error,
-                "Managed SSH child spawn failed: target={}, elapsed={:?}, error={:#}",
-                config.target,
-                spawn_start.elapsed(),
-                error
-            ),
-        }
-        result
+            .map_err(SpawnError::Spawn)
     }
 }
 

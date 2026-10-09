@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 
@@ -30,6 +29,63 @@ const STABLE_RUNTIME: Duration = Duration::from_secs(30);
 const STARTUP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bounds browser-visible subprocess output so repeated failures cannot grow API responses.
 const MAX_EXIT_DIAGNOSTIC_BYTES: u64 = 8 * 1024;
+/// Supervisor mailbox size; senders wait (rather than grow memory) while a child is reaped.
+const SUPERVISOR_COMMAND_CAPACITY: usize = 16;
+
+/// Why one spawn attempt produced no child.
+///
+/// Typed instead of a string so logs keep the failure class while the browser only sees
+/// the transport's own actionable text via [`SpawnError::user_message`].
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnError {
+    /// Preparing the target (SSH probe, binary install) failed before any child existed.
+    #[error("Preparing the agent failed: {0}")]
+    Provision(#[source] crate::ssh::ProvisionError),
+    /// The child process itself could not be started.
+    #[error("Starting the agent process failed: {0}")]
+    Spawn(#[source] std::io::Error),
+}
+
+impl SpawnError {
+    /// Text for the lifecycle UI: the underlying reason without the internal classification.
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::Provision(error) => error.to_string(),
+            Self::Spawn(error) => error.to_string(),
+        }
+    }
+}
+
+/// Lifecycle control failures, mapped to HTTP statuses by the REST layer.
+#[derive(Debug, thiserror::Error)]
+pub enum WatchdogError {
+    /// The supervisor task is gone (removed or crashed), so it cannot act on the request.
+    #[error("Watchdog supervisor stopped: {key}")]
+    SupervisorStopped {
+        /// Supervisor key (effective agent name).
+        key: String,
+    },
+    /// The supervisor ended before acknowledging a shutdown or retry it had accepted.
+    #[error("Watchdog {operation} acknowledgement dropped: {key}")]
+    AcknowledgementDropped {
+        /// `shutdown` or `retry`.
+        operation: &'static str,
+        /// Supervisor key (effective agent name).
+        key: String,
+    },
+    /// Another supervisor already owns this name.
+    #[error("Watchdog key already registered: key={key}")]
+    AlreadyRegistered {
+        /// Supervisor key (effective agent name).
+        key: String,
+    },
+    /// Configuration may only change while the managed agent is stopped.
+    #[error("Managed agent must be stopped before its configuration can change")]
+    StillRunning,
+}
+
+/// Result of one spawn attempt.
+type SpawnResult = Result<Child, SpawnError>;
 
 /// Non-blocking sink so long SSH prepare/spawn work can publish inventory lines immediately.
 #[derive(Clone)]
@@ -54,9 +110,7 @@ impl ProvisioningStatusSink {
 /// Spawn strategy kept transport-agnostic so local and SSH-backed agents share lifecycle code.
 pub struct SpawnFn {
     inner: Arc<
-        dyn Fn(
-                ProvisioningStatusSink,
-            ) -> futures_util::future::BoxFuture<'static, Result<Child, String>>
+        dyn Fn(ProvisioningStatusSink) -> futures_util::future::BoxFuture<'static, SpawnResult>
             + Send
             + Sync,
     >,
@@ -69,7 +123,7 @@ impl SpawnFn {
     pub fn new<F, Fut>(f: F) -> Self
     where
         F: Fn(ProvisioningStatusSink) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Result<Child, String>> + Send + 'static,
+        Fut: std::future::Future<Output = SpawnResult> + Send + 'static,
     {
         Self {
             inner: Arc::new(move |status| Box::pin(f(status))),
@@ -94,7 +148,7 @@ impl SpawnFn {
     fn spawn(
         &self,
         status: ProvisioningStatusSink,
-    ) -> futures_util::future::BoxFuture<'static, Result<Child, String>> {
+    ) -> futures_util::future::BoxFuture<'static, SpawnResult> {
         (self.inner)(status)
     }
 }
@@ -137,11 +191,11 @@ pub type SnapshotCallback = Arc<dyn Fn(WatchdogSnapshot) + Send + Sync>;
 enum SupervisorCommand {
     Start,
     Retry {
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<()>,
     },
     Remove,
     Shutdown {
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<()>,
     },
     Connected {
         socket_id: SocketId,
@@ -155,7 +209,7 @@ enum SupervisorCommand {
 #[derive(Clone)]
 pub struct WatchdogHandle {
     key: String,
-    commands: mpsc::UnboundedSender<SupervisorCommand>,
+    commands: mpsc::Sender<SupervisorCommand>,
     snapshot: Arc<Mutex<WatchdogSnapshot>>,
     callback: SnapshotCallback,
 }
@@ -176,17 +230,29 @@ impl WatchdogHandle {
         &self.key
     }
 
+    /// Reserves one mailbox slot, waiting while the supervisor is busy reaping a child.
+    ///
+    /// Reserving before taking the snapshot lock lets the generation bump and the send
+    /// happen atomically under that (synchronous) lock.
+    async fn reserve(&self) -> Result<mpsc::Permit<'_, SupervisorCommand>, WatchdogError> {
+        self.commands
+            .reserve()
+            .await
+            .map_err(|_| WatchdogError::SupervisorStopped {
+                key: self.key.clone(),
+            })
+    }
+
     /// Requests desired-running and immediately publishes an optimistic starting state.
-    pub fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> Result<(), WatchdogError> {
+        let permit = self.reserve().await?;
         let should_publish = {
             let mut snapshot = self.snapshot.lock().expect("watchdog snapshot poisoned");
             if snapshot.desired_running {
                 false
             } else {
                 snapshot.attempt_generation = snapshot.attempt_generation.wrapping_add(1);
-                self.commands
-                    .send(SupervisorCommand::Start)
-                    .map_err(|_| format!("Watchdog supervisor stopped: {}", self.key))?;
+                permit.send(SupervisorCommand::Start);
                 snapshot.desired_running = true;
                 snapshot.status = AgentConnectionStatus::Starting;
                 snapshot.connection_issue = None;
@@ -202,60 +268,64 @@ impl WatchdogHandle {
     }
 
     /// Waits until startup/backoff is canceled and any owned child is killed and reaped.
-    pub async fn shutdown(&self) -> Result<(), String> {
+    pub async fn shutdown(&self) -> Result<(), WatchdogError> {
         let (reply, response) = oneshot::channel();
+        let permit = self.reserve().await?;
         {
             let mut snapshot = self.snapshot.lock().expect("watchdog snapshot poisoned");
             snapshot.desired_running = false;
             snapshot.attempt_generation = snapshot.attempt_generation.wrapping_add(1);
-            self.commands
-                .send(SupervisorCommand::Shutdown { reply })
-                .map_err(|_| format!("Watchdog supervisor stopped: {}", self.key))?;
+            permit.send(SupervisorCommand::Shutdown { reply });
         }
         response
             .await
-            .map_err(|_| format!("Watchdog shutdown acknowledgement dropped: {}", self.key))?
+            .map_err(|_| WatchdogError::AcknowledgementDropped {
+                operation: "shutdown",
+                key: self.key.clone(),
+            })
     }
 
     /// Fences registrations from the old attempt until its work is canceled and a fresh cycle starts.
-    pub async fn retry_startup(&self) -> Result<(), String> {
+    pub async fn retry_startup(&self) -> Result<(), WatchdogError> {
         let (reply, response) = oneshot::channel();
+        let permit = self.reserve().await?;
         {
             let mut snapshot = self.snapshot.lock().expect("watchdog snapshot poisoned");
             // Registration commits share this lock, so work from the canceled attempt
             // cannot become authoritative while the supervisor is cleaning it up.
             snapshot.desired_running = false;
             snapshot.attempt_generation = snapshot.attempt_generation.wrapping_add(1);
-            self.commands
-                .send(SupervisorCommand::Retry { reply })
-                .map_err(|_| format!("Watchdog supervisor stopped: {}", self.key))?;
+            permit.send(SupervisorCommand::Retry { reply });
         }
         response
             .await
-            .map_err(|_| format!("Watchdog retry acknowledgement dropped: {}", self.key))?
+            .map_err(|_| WatchdogError::AcknowledgementDropped {
+                operation: "retry",
+                key: self.key.clone(),
+            })
     }
 
     /// Marks a matching managed registration and rejects connections after shutdown intent.
-    pub fn mark_connected(&self, socket_id: SocketId) -> Option<u64> {
+    pub async fn mark_connected(&self, socket_id: SocketId) -> Option<u64> {
+        let permit = self.reserve().await.ok()?;
         let snapshot = self.snapshot.lock().expect("watchdog snapshot poisoned");
         if !snapshot.desired_running {
             return None;
         }
         let attempt_generation = snapshot.attempt_generation;
-        self.commands
-            .send(SupervisorCommand::Connected {
-                socket_id,
-                attempt_generation,
-            })
-            .is_ok()
-            .then_some(attempt_generation)
+        permit.send(SupervisorCommand::Connected {
+            socket_id,
+            attempt_generation,
+        });
+        Some(attempt_generation)
     }
 
     /// Reports socket teardown while letting the supervisor ignore stale generations.
-    pub fn mark_disconnected(&self, socket_id: SocketId) {
+    pub async fn mark_disconnected(&self, socket_id: SocketId) {
         let _ = self
             .commands
-            .send(SupervisorCommand::Disconnected(socket_id));
+            .send(SupervisorCommand::Disconnected(socket_id))
+            .await;
     }
 
     /// Runs a registration commit while shutdown is unable to revoke desired-running.
@@ -277,8 +347,11 @@ impl WatchdogHandle {
     }
 
     /// Requests restart only if the stale WebSocket is still the current generation.
-    pub fn signal_stale(&self, socket_id: SocketId) {
-        let _ = self.commands.send(SupervisorCommand::Stale(socket_id));
+    pub async fn signal_stale(&self, socket_id: SocketId) {
+        let _ = self
+            .commands
+            .send(SupervisorCommand::Stale(socket_id))
+            .await;
     }
 
     /// Mutates the live snapshot under one lock so progress reports cannot drop sibling fields.
@@ -373,17 +446,24 @@ impl WatchdogRegistry {
     }
 
     /// Removes a dormant supervisor after callers verify it has no running intent.
-    pub fn remove_stopped(&self, key: &str) -> Result<()> {
-        let mut map = self.inner.lock().expect("watchdog registry poisoned");
-        let Some(handle) = map.get(key) else {
-            // A retry after a persist-then-remove failure must complete remaining cleanup.
-            return Ok(());
+    ///
+    /// The map entry is removed under the registry lock; the `Remove` command is sent
+    /// afterwards because waiting for mailbox space must not hold a std mutex.
+    pub async fn remove_stopped(&self, key: &str) -> Result<(), WatchdogError> {
+        let handle = {
+            let mut map = self.inner.lock().expect("watchdog registry poisoned");
+            let Some(handle) = map.get(key) else {
+                // A retry after a persist-then-remove failure must complete remaining cleanup.
+                return Ok(());
+            };
+            if handle.snapshot().desired_running {
+                return Err(WatchdogError::StillRunning);
+            }
+            map.remove(key)
         };
-        if handle.snapshot().desired_running {
-            bail!("Managed agent must be stopped before its configuration can change");
+        if let Some(handle) = handle {
+            let _ = handle.commands.send(SupervisorCommand::Remove).await;
         }
-        let _ = handle.commands.send(SupervisorCommand::Remove);
-        map.remove(key);
         Ok(())
     }
 
@@ -392,12 +472,12 @@ impl WatchdogRegistry {
         &self,
         key: String,
         callback: SnapshotCallback,
-    ) -> Result<(WatchdogHandle, mpsc::UnboundedReceiver<SupervisorCommand>)> {
+    ) -> Result<(WatchdogHandle, mpsc::Receiver<SupervisorCommand>), WatchdogError> {
         let mut map = self.inner.lock().expect("watchdog registry poisoned");
         if map.contains_key(&key) {
-            bail!("Watchdog key already registered: key={key}");
+            return Err(WatchdogError::AlreadyRegistered { key });
         }
-        let (commands, receiver) = mpsc::unbounded_channel();
+        let (commands, receiver) = mpsc::channel(SUPERVISOR_COMMAND_CAPACITY);
         let handle = WatchdogHandle {
             key: key.clone(),
             commands,
@@ -415,7 +495,7 @@ pub fn spawn_supervisor(
     spawn: SpawnFn,
     registry: &WatchdogRegistry,
     callback: SnapshotCallback,
-) -> Result<tokio::task::JoinHandle<()>> {
+) -> Result<tokio::task::JoinHandle<()>, WatchdogError> {
     let (watchdog, commands) = registry.register(key.clone(), callback)?;
     log!(Level::Info, "Watchdog supervisor registered: key={}", key);
     Ok(tokio::spawn(run_supervisor(key, spawn, watchdog, commands)))
@@ -432,20 +512,20 @@ enum IdleWait {
 /// Waits for start commands while acknowledging harmless shutdowns in the dormant state.
 async fn wait_until_running(
     watchdog: &WatchdogHandle,
-    commands: &mut mpsc::UnboundedReceiver<SupervisorCommand>,
+    commands: &mut mpsc::Receiver<SupervisorCommand>,
 ) -> IdleWait {
     while let Some(command) = commands.recv().await {
         match command {
             SupervisorCommand::Start => return IdleWait::Start,
             SupervisorCommand::Retry { reply } => {
                 publish_fresh_start(watchdog);
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(());
                 return IdleWait::Start;
             }
             SupervisorCommand::Remove => return IdleWait::Exit,
             SupervisorCommand::Shutdown { reply } => {
                 publish_stopped(watchdog);
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(());
             }
             SupervisorCommand::Connected { .. }
             | SupervisorCommand::Disconnected(_)
@@ -460,7 +540,7 @@ async fn run_supervisor(
     key: String,
     spawn: SpawnFn,
     watchdog: WatchdogHandle,
-    mut commands: mpsc::UnboundedReceiver<SupervisorCommand>,
+    mut commands: mpsc::Receiver<SupervisorCommand>,
 ) {
     loop {
         match wait_until_running(&watchdog, &mut commands).await {
@@ -535,7 +615,7 @@ struct CycleResult {
 async fn run_started_cycle(
     spawn: &SpawnFn,
     watchdog: &WatchdogHandle,
-    commands: &mut mpsc::UnboundedReceiver<SupervisorCommand>,
+    commands: &mut mpsc::Receiver<SupervisorCommand>,
     attempt_generation: u64,
 ) -> CycleResult {
     let diagnostic_log_offset = diagnostic_log_len(spawn.diagnostic_log.as_deref()).await;
@@ -567,14 +647,13 @@ async fn run_started_cycle(
             .await
         }
         Err(error) => {
-            let diagnostic = anyhow::Error::msg(error.clone());
-            redoor_core::log_failure!(
-                Level::Error,
-                "Watchdog spawn failed: key={}, error={}",
-                watchdog.key(),
-                diagnostic
+            let issue = error.user_message();
+            redoor_core::log_error!(
+                anyhow::Error::new(error),
+                "Watchdog spawn failed: key={}",
+                watchdog.key()
             );
-            publish_issue(watchdog, attempt_generation, error);
+            publish_issue(watchdog, attempt_generation, issue);
             CycleResult {
                 action: CommandAction::Continue,
                 was_connected: false,
@@ -591,12 +670,12 @@ fn handle_pre_spawn_command(
     match command {
         Some(SupervisorCommand::Shutdown { reply }) => {
             publish_stopped(watchdog);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(());
             CommandAction::Stop
         }
         Some(SupervisorCommand::Retry { reply }) => {
             publish_fresh_start(watchdog);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(());
             CommandAction::Restart
         }
         Some(SupervisorCommand::Connected {
@@ -621,7 +700,7 @@ fn handle_pre_spawn_command(
 async fn wait_for_child(
     mut child: Child,
     watchdog: &WatchdogHandle,
-    commands: &mut mpsc::UnboundedReceiver<SupervisorCommand>,
+    commands: &mut mpsc::Receiver<SupervisorCommand>,
     diagnostic_log: Option<&Path>,
     diagnostic_log_offset: u64,
     process_name: &str,
@@ -630,10 +709,12 @@ async fn wait_for_child(
     // Tokio closes Child::stdin when wait() is polled. Managed SSH agents retain
     // that pipe so the remote process sees EOF only when this watchdog cycle ends.
     let _retained_stdin = child.stdin.take();
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| tokio::spawn(read_bounded_tail(stderr)));
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        tokio::spawn(redoor_core::bounded_tail::read_bounded_tail(
+            stderr,
+            MAX_EXIT_DIAGNOSTIC_BYTES as usize,
+        ))
+    });
     let startup_timeout = tokio::time::sleep(STARTUP_CONNECTION_TIMEOUT);
     tokio::pin!(startup_timeout);
     let mut connected = false;
@@ -681,13 +762,13 @@ async fn handle_running_command(
         Some(SupervisorCommand::Shutdown { reply }) => {
             kill_and_reap(child).await;
             publish_stopped(watchdog);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(());
             RunningCommandAction::Finish(CommandAction::Stop)
         }
         Some(SupervisorCommand::Retry { reply }) => {
             kill_and_reap(child).await;
             publish_fresh_start(watchdog);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(());
             RunningCommandAction::Finish(CommandAction::Restart)
         }
         Some(SupervisorCommand::Connected {
@@ -739,7 +820,7 @@ async fn handle_running_command(
 /// Waits through restart backoff while allowing shutdown to win immediately.
 async fn wait_for_restart(
     watchdog: &WatchdogHandle,
-    commands: &mut mpsc::UnboundedReceiver<SupervisorCommand>,
+    commands: &mut mpsc::Receiver<SupervisorCommand>,
     backoff: Duration,
 ) -> CommandAction {
     let delay = tokio::time::sleep(backoff);
@@ -765,12 +846,12 @@ fn apply_restart_command(
     match command {
         Some(SupervisorCommand::Shutdown { reply }) => {
             publish_stopped(watchdog);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(());
             CommandAction::Stop
         }
         Some(SupervisorCommand::Retry { reply }) => {
             publish_fresh_start(watchdog);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(());
             CommandAction::Restart
         }
         Some(SupervisorCommand::Remove) => {
@@ -920,23 +1001,6 @@ async fn format_exit_issue(
     issue
 }
 
-/// Drains a process pipe while retaining only the tail needed for a useful UI error.
-async fn read_bounded_tail(mut reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
-    let mut tail = Vec::with_capacity(MAX_EXIT_DIAGNOSTIC_BYTES as usize);
-    let mut chunk = [0_u8; 4096];
-    loop {
-        let read = reader.read(&mut chunk).await?;
-        if read == 0 {
-            return Ok(tail);
-        }
-        tail.extend_from_slice(&chunk[..read]);
-        if tail.len() > MAX_EXIT_DIAGNOSTIC_BYTES as usize {
-            let excess = tail.len() - MAX_EXIT_DIAGNOSTIC_BYTES as usize;
-            tail.drain(..excess);
-        }
-    }
-}
-
 /// Resolves a completed stderr reader without replacing the process status on read failure.
 async fn read_child_diagnostic(
     reader: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
@@ -1035,7 +1099,7 @@ mod tests {
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()
-                        .map_err(|error| error.to_string())
+                        .map_err(SpawnError::Spawn)
                 }),
                 &registry,
                 callback(),
@@ -1044,10 +1108,16 @@ mod tests {
         );
 
         // The first removal must drop the handle so replacement can register the same key.
-        registry.remove_stopped("removed").expect("first remove");
+        registry
+            .remove_stopped("removed")
+            .await
+            .expect("first remove");
         assert!(registry.lookup("removed").is_none());
         // A retry after a partial persist-then-remove must not fail just because the handle is gone.
-        registry.remove_stopped("removed").expect("retry remove");
+        registry
+            .remove_stopped("removed")
+            .await
+            .expect("retry remove");
     }
 
     #[tokio::test]
@@ -1066,7 +1136,7 @@ mod tests {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
-                    .map_err(|error| error.to_string())
+                    .map_err(SpawnError::Spawn)
             }
         });
         let registry = WatchdogRegistry::new();
@@ -1080,8 +1150,8 @@ mod tests {
         // The initial public state makes the dormant agent visible to clients.
         assert_eq!(handle.snapshot().status, AgentConnectionStatus::Stopped);
 
-        handle.start().expect("first start accepted");
-        handle.start().expect("duplicate start accepted");
+        handle.start().await.expect("first start accepted");
+        handle.start().await.expect("duplicate start accepted");
         wait_until(|| count.load(Ordering::SeqCst) == 1).await;
         // Duplicate UI/direct-route requests must not create concurrent children.
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -1103,7 +1173,7 @@ mod tests {
                     let observed_spawn = observed_spawn.clone();
                     async move {
                         observed_spawn.fetch_add(1, Ordering::SeqCst);
-                        std::future::pending::<Result<Child, String>>().await
+                        std::future::pending::<SpawnResult>().await
                     }
                 }),
                 &registry,
@@ -1112,14 +1182,14 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("pending").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         wait_until(|| spawn_count.load(Ordering::SeqCst) == 1).await;
 
         let shutdown_handle = handle.clone();
         let shutdown = tokio::spawn(async move { shutdown_handle.shutdown().await });
         wait_until(|| !handle.snapshot().desired_running).await;
         // Once shutdown intent wins, a socket parsed earlier cannot register late.
-        assert!(handle.mark_connected(SocketId::new()).is_none());
+        assert!(handle.mark_connected(SocketId::new()).await.is_none());
         shutdown
             .await
             .expect("shutdown task should complete")
@@ -1143,7 +1213,7 @@ mod tests {
                     async move {
                         let attempt = observed_spawns.fetch_add(1, Ordering::SeqCst) + 1;
                         status.report(format!("attempt-{attempt}"));
-                        std::future::pending::<Result<Child, String>>().await
+                        std::future::pending::<SpawnResult>().await
                     }
                 }),
                 &registry,
@@ -1152,7 +1222,7 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("retry-pending").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         wait_until(|| spawn_count.load(Ordering::SeqCst) == 1).await;
         publish_issue(
             &handle,
@@ -1164,6 +1234,7 @@ mod tests {
         // Queueing registration first models a connection that completed as cancellation began.
         let canceled_generation = handle
             .mark_connected(late_socket)
+            .await
             .expect("old attempt should initially admit registration");
         handle
             .retry_startup()
@@ -1218,7 +1289,7 @@ mod tests {
                             .stdout(Stdio::null())
                             .stderr(Stdio::null())
                             .spawn()
-                            .map_err(|error| error.to_string())?;
+                            .map_err(SpawnError::Spawn)?;
                         if attempt == 0 {
                             observed_pid.store(child.id().unwrap_or(0) as usize, Ordering::SeqCst);
                         }
@@ -1231,7 +1302,7 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("retry-child").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         wait_until(|| first_pid.load(Ordering::SeqCst) > 0).await;
         let pid = first_pid.load(Ordering::SeqCst);
 
@@ -1262,7 +1333,9 @@ mod tests {
                     let observed_spawns = observed_spawns.clone();
                     async move {
                         observed_spawns.fetch_add(1, Ordering::SeqCst);
-                        Err("missing executable".to_string())
+                        Err(SpawnError::Spawn(std::io::Error::other(
+                            "missing executable",
+                        )))
                     }
                 }),
                 &registry,
@@ -1271,7 +1344,7 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("broken").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         wait_until(|| handle.snapshot().connection_issue.is_some()).await;
 
         // Spawn failures remain actionable while retry intent stays active.
@@ -1330,7 +1403,7 @@ mod tests {
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|error| error.to_string())
+                .map_err(SpawnError::Spawn)
         })
         .with_process_name("SSH process");
         let _guard = SupervisorGuard(
@@ -1339,7 +1412,7 @@ mod tests {
         );
         let handle = registry.lookup("ssh-diagnostic").expect("managed handle");
 
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         wait_until(|| handle.snapshot().connection_issue.is_some()).await;
         let issue = handle
             .snapshot()
@@ -1370,7 +1443,7 @@ mod tests {
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()
-                        .map_err(|error| error.to_string())
+                        .map_err(SpawnError::Spawn)
                 }),
                 &registry,
                 Arc::new(move |snapshot| {
@@ -1383,7 +1456,7 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("generation").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         publish_issue(
             &handle,
             handle.snapshot().attempt_generation,
@@ -1392,11 +1465,11 @@ mod tests {
         let old_socket = SocketId::new();
         let new_socket = SocketId::new();
         let fence_socket = SocketId::new();
-        assert!(handle.mark_connected(old_socket.clone()).is_some());
-        assert!(handle.mark_connected(new_socket.clone()).is_some());
+        assert!(handle.mark_connected(old_socket.clone()).await.is_some());
+        assert!(handle.mark_connected(new_socket.clone()).await.is_some());
         wait_until(|| handle.snapshot().socket_id.as_ref() == Some(&new_socket)).await;
-        handle.mark_disconnected(old_socket);
-        assert!(handle.mark_connected(fence_socket.clone()).is_some());
+        handle.mark_disconnected(old_socket).await;
+        assert!(handle.mark_connected(fence_socket.clone()).await.is_some());
         wait_until(|| {
             snapshots
                 .lock()
@@ -1452,7 +1525,7 @@ mod tests {
                             .stdout(Stdio::null())
                             .stderr(Stdio::null())
                             .spawn()
-                            .map_err(|error| error.to_string())
+                            .map_err(SpawnError::Spawn)
                     }
                 }),
                 &registry,
@@ -1461,20 +1534,25 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("stale-generation").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         wait_until(|| spawn_count.load(Ordering::SeqCst) == 1).await;
         let old_socket = SocketId::new();
         let replacement_socket = SocketId::new();
         let fence_socket = SocketId::new();
         // Managed registrations must be accepted while the supervisor is desired-running.
-        assert!(handle.mark_connected(old_socket.clone()).is_some());
+        assert!(handle.mark_connected(old_socket.clone()).await.is_some());
         // A replacement registration must supersede the old socket generation.
-        assert!(handle.mark_connected(replacement_socket.clone()).is_some());
+        assert!(
+            handle
+                .mark_connected(replacement_socket.clone())
+                .await
+                .is_some()
+        );
         wait_until(|| handle.snapshot().socket_id.as_ref() == Some(&replacement_socket)).await;
 
-        handle.signal_stale(old_socket);
+        handle.signal_stale(old_socket).await;
         // This connection acts as a queue fence after the stale event without pre-checking state.
-        assert!(handle.mark_connected(fence_socket.clone()).is_some());
+        assert!(handle.mark_connected(fence_socket.clone()).await.is_some());
         wait_until(|| handle.snapshot().socket_id.as_ref() == Some(&fence_socket)).await;
 
         // The replaced socket's late stale event must not terminate the healthy child.
@@ -1482,7 +1560,7 @@ mod tests {
         // Ignoring an old generation must not publish a misleading lifecycle issue.
         assert_eq!(handle.snapshot().connection_issue, None);
 
-        handle.signal_stale(fence_socket);
+        handle.signal_stale(fence_socket).await;
         wait_until(|| {
             handle.snapshot().connection_issue.as_deref() == Some("Agent connection went stale")
         })
@@ -1518,7 +1596,9 @@ mod tests {
                             wait_first.notify_one();
                             hold_first.notified().await;
                         }
-                        Err(format!("spawn failed {attempt}"))
+                        Err(SpawnError::Spawn(std::io::Error::other(format!(
+                            "spawn failed {attempt}"
+                        ))))
                     }
                 }),
                 &registry,
@@ -1527,7 +1607,7 @@ mod tests {
             .expect("register"),
         );
         let handle = registry.lookup("status").expect("managed handle");
-        handle.start().expect("start accepted");
+        handle.start().await.expect("start accepted");
         first_spawn.notified().await;
 
         // Progress published during the first cycle must stay visible until the next attempt.
@@ -1561,5 +1641,44 @@ mod tests {
             ["step-1"]
         );
         handle.shutdown().await.expect("shutdown acknowledged");
+    }
+
+    /// A full supervisor mailbox makes lifecycle events wait instead of growing memory or
+    /// silently dropping a disconnect the supervisor must see.
+    #[tokio::test]
+    async fn full_mailbox_backpressures_instead_of_dropping() {
+        let registry = WatchdogRegistry::new();
+        let (handle, mut commands) = registry.register("busy".into(), callback()).unwrap();
+        for _ in 0..SUPERVISOR_COMMAND_CAPACITY {
+            handle.mark_disconnected(SocketId::new()).await;
+        }
+        let blocked_socket = SocketId::new();
+        let mut blocked = std::pin::pin!(handle.mark_disconnected(blocked_socket.clone()));
+        // The bounded mailbox is full, so the next event must wait for the supervisor.
+        assert!(futures_util::poll!(&mut blocked).is_pending());
+        commands.recv().await.expect("a queued command");
+        blocked.await;
+        let mut last = None;
+        while let Ok(command) = commands.try_recv() {
+            last = Some(command);
+        }
+        // Once space frees up the waiting event is delivered, last and intact.
+        assert!(matches!(
+            last,
+            Some(SupervisorCommand::Disconnected(socket)) if socket == blocked_socket
+        ));
+    }
+
+    /// Spawn failures keep their class for logs but show only the transport text in the UI.
+    #[test]
+    fn spawn_error_user_message_omits_internal_classification() {
+        let error = SpawnError::Spawn(std::io::Error::other("ssh: not found"));
+        // Logs name what failed.
+        assert_eq!(
+            error.to_string(),
+            "Starting the agent process failed: ssh: not found"
+        );
+        // Browser text stays exactly the underlying, actionable reason.
+        assert_eq!(error.user_message(), "ssh: not found");
     }
 }

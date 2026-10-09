@@ -107,15 +107,12 @@ pub(super) async fn list_accounts() -> CommandResult {
 pub(super) async fn open_path(path: String) -> CommandResult {
     match redoor_core::desktop::open_with_desktop(&path).await {
         Ok(()) => CommandResult::OpenPath,
-        Err(message) => {
-            // Agent-facing wording: operators care that this host cannot open paths, not the launcher probe.
-            let message = if message.contains("No graphical desktop") {
-                "Agent does not have access to a graphical desktop".to_string()
-            } else {
-                message
-            };
-            CommandResult::error(CommandErrorKind::Internal, message)
-        }
+        // Agent-facing wording: operators care that this host cannot open paths, not the launcher probe.
+        Err(redoor_core::desktop::OpenError::NoDesktop) => CommandResult::error(
+            CommandErrorKind::Internal,
+            "Agent does not have access to a graphical desktop".to_string(),
+        ),
+        Err(error) => CommandResult::error(CommandErrorKind::Internal, error.to_string()),
     }
 }
 

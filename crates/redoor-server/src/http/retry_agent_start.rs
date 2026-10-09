@@ -3,19 +3,15 @@
 use axum::{
     Json,
     extract::{Path, State as AxumState},
-    http::StatusCode,
-    response::IntoResponse,
 };
-use redoor_protocol::{
-    api::{ErrorResponse, agents::RetryAgentStartResponse},
-    ids::AgentId,
-};
+use redoor_protocol::{api::agents::RetryAgentStartResponse, ids::AgentId};
 
 use super::{
     agents::{
-        apply_managed_snapshot, evict_managed_snapshot, list_agent_snapshots,
-        managed_agent_snapshot,
+        apply_managed_snapshot, current_agent_snapshot, evict_managed_snapshot,
+        managed_agent_snapshot, managed_watchdog,
     },
+    error::ApiError,
     state::ServerState,
 };
 
@@ -23,23 +19,12 @@ use super::{
 pub(crate) async fn retry_agent_start_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
+) -> Result<Json<RetryAgentStartResponse>, ApiError> {
     // Configuration replacement and lifecycle controls must resolve against one supervisor identity.
     let _edit_guard = state.config_edit_lock.lock().await;
     let agent_id = AgentId::from(agent);
-    let snapshot = match managed_agent_snapshot(&state, &agent_id).await {
-        Ok(snapshot) => snapshot,
-        Err((status, error)) => return (status, Json(error)).into_response(),
-    };
-    let Some(watchdog) = state.watchdog_registry.lookup(&snapshot.name) else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Managed supervisor unavailable: {agent_id}"),
-            }),
-        )
-            .into_response();
-    };
+    let snapshot = managed_agent_snapshot(&state, &agent_id).await?;
+    let watchdog = managed_watchdog(&state, &snapshot)?;
 
     let mut retry_snapshot = watchdog.snapshot();
     retry_snapshot.status = redoor_protocol::api::agents::AgentConnectionStatus::Starting;
@@ -50,45 +35,11 @@ pub(crate) async fn retry_agent_start_handler(
         watchdog.retry_startup(),
         evict_managed_snapshot(&state, agent_id.clone(), retry_snapshot),
     );
-    match retry_result {
-        Ok(()) => {}
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error }),
-            )
-                .into_response();
-        }
-    }
-    if let Err(error) = eviction_result {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error }),
-        )
-            .into_response();
-    }
+    retry_result?;
+    eviction_result?;
 
-    if let Err(error) = apply_managed_snapshot(&state, agent_id.clone(), watchdog.snapshot()).await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse { error }),
-        )
-            .into_response();
-    }
-    match list_agent_snapshots(&state).await {
-        Ok(agents) => match agents.into_iter().find(|agent| agent.id == agent_id) {
-            Some(agent) => {
-                (StatusCode::OK, Json(RetryAgentStartResponse { agent })).into_response()
-            }
-            None => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Managed inventory disappeared: {agent_id}"),
-                }),
-            )
-                .into_response(),
-        },
-        Err(error) => error.into_response(),
-    }
+    apply_managed_snapshot(&state, agent_id.clone(), watchdog.snapshot()).await?;
+    Ok(Json(RetryAgentStartResponse {
+        agent: current_agent_snapshot(&state, &agent_id).await?,
+    }))
 }
