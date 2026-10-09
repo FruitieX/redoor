@@ -479,3 +479,102 @@ Items 5–8 of Phase 3.
     agent configuration handlers; these are the natural next `ApiError`/`thiserror` conversions.
   - `ROUTER_REPLY_TIMEOUT` and the call deadlines are constants; `RuntimeContext` could carry them
     if tests ever need shorter values.
+
+### Phase 4 – Infrastructure (done)
+
+- Item 1 (errors/exits): `main` is a plain `fn main() -> ExitCode` that builds the Tokio runtime,
+  runs the selected role (`anyhow::Result<ExitCode>`), prints a failure once with `{:#}` and
+  shuts the runtime down in the background (a blocking stdin reader must not keep a finished
+  process alive). `run_utility`/`run_role` exit paths, the server's dozen `eprintln!` +
+  `process::exit` blocks, the bind `panic!` and the serve `unwrap` are gone; `PidFile` removes its
+  claim in `Drop`. The agent returns `AgentExit::{Shutdown, Rejected}` instead of exiting on a
+  server error; askpass returns an `ExitCode`. Typed errors where callers match or map:
+  `ConfigError` (core), `WatchdogError` and `SpawnError` (watchdog), `ProvisionError` (ssh),
+  `OpenError` (desktop; the agent matches `NoDesktop` instead of a substring),
+  `SubprocessError` (core), `InvalidLogSetting` (logging), `AgentStreamError` (output stream);
+  `From<WatchdogError> for ApiError`. The managed-agent start/shutdown/retry routes, the
+  `managed_agent_snapshot`/`apply_managed_snapshot` helpers and all agent configuration
+  handlers now return `ApiError` (no more `(StatusCode, String)` tuples). No `Box<dyn Error>`
+  remains.
+- Item 2 (startup split, `redoor-server/src/startup.rs`): `ConfigLocation::find_or_bootstrap`,
+  pure `ServerConfig::resolve(args, ServerEnvironment, file, path, paths)` (unit tests for CLI >
+  env > file > default, invalid env, missing `[server]`), `ServerRuntime::build` (logging,
+  auth/MCP storage, actors, listener, inventory, each failure with context) and
+  `serve_until_restart` (stops managed children before the re-exec). `config::AuthMode
+  { Configured { username, password }, #[cfg(linux)] SystemAccount }` replaces the optional
+  username/password pair; `LoginCredentials` and both `unreachable!`s are gone. Agent side:
+  `locate_config` (shared by daemon preparation and startup) + `AgentSettings::resolve`
+  (unit-tested precedence).
+- Item 3 (config): `config/file.rs` holds serde `Raw*` structs with `deny_unknown_fields`, read
+  with `toml_edit::de` (the `serde` feature), plus one `validate` pass producing the public types.
+  `parse_config_file(&Path)`; `toml_edit::DocumentMut` only in `edit.rs`. Error texts: syntax,
+  unknown keys and wrong types come from serde with file, line and key snippet; semantic errors
+  are `Invalid config file '<path>': <key path + reason>`; the `server.agent_token` migration
+  hint is kept. New tests: unknown managed-agent key, duplicate managed names, enum vocabulary.
+- Item 4 (services, `crates/redoor/src/service/`): `ServiceBackend` trait (install, uninstall,
+  ensure_installed, start/stop/restart/enable/disable, status, render_definition) with
+  `SystemdBackend` and `LaunchdBackend`; one dispatcher, one install help text, one
+  `ServiceState { installed, enabled, runtime: ServiceRuntime }` formatter (status lines are
+  unchanged), one not-installed message builder. Root systemd installs keep the `redoor` system
+  user, chown and log directory; launchd keeps the Local Network re-signing repair. Both backends
+  compile on Linux and macOS. `redoor_core::subprocess::run_checked(program, args, verbose)` and
+  `redoor_core::paths::home()` replace the per-module copies (also used by trash and the agent).
+- Item 5 (runtime context): `redoor_core::runtime::RuntimeContext { paths: AppPaths, ws_timeouts }`
+  built once in `main`; `AppPaths` (app name, home, cache root, root flag) owns every
+  per-application path (data, cache, default config, log dir, process/relay logs) and
+  `AppPaths::for_home` isolates tests. Removed globals: `APP_NAME` (and its silent env fallback;
+  clap's `env` is the only source), websocket `TIMEOUTS` (`WebSocketTimeouts::keepalive_interval`
+  is a method; server handlers/session and the agent profile carry the timings),
+  `AGENT_LOADED_CONFIG_PATH` (now `AgentServices::loaded_config_path`), `BINARY_PROVISION_LOCK`
+  (`BinaryCache` owns its lock and is shared by upgrades and SSH via `ProvisionContext`),
+  `LAUNCH_PARENT` (`LaunchParent::capture()` at the top of `main`, passed to the roles; the
+  duplicate `record_launch_parent()` in the relay path is gone). Managed agent registration is
+  `ManagedLauncher` (in `ServerState`). The `log!` macros write through a replaceable
+  `LoggerHandle` (`logging::install`); records logged before any sink go to stderr, so the ~50
+  `logging::init(None)` calls in unit tests and the "OnceLock cannot reset" helper are gone.
+- Item 6 (watchdog): `SpawnFn` returns `Result<Child, SpawnError>` (`Provision(ProvisionError) |
+  Spawn(io::Error)`, `user_message()` keeps the browser text identical); bounded supervisor
+  mailbox of 16 — `start`/`shutdown`/`retry_startup`/`mark_connected` reserve a permit before
+  taking the snapshot lock so generation bumps stay atomic, the lifecycle events became `async`
+  and wait instead of dropping; `remove_stopped` sends `Remove` after releasing the registry
+  lock. `redoor_core::bounded_tail::read_bounded_tail(reader, limit)` replaces both copies.
+- Item 7 (SSH): `ssh/prepare.rs` (`PreparedSshBackedAgent`, `RandomRemotePort`, and
+  `Preparation { config, destination, relay options, provision, status }` whose `run` is split
+  into `ssh_host`, `install_binary` → `force_upload` / `trust_operator_binary` /
+  `sniff_and_ensure`, and `run_options`); `ssh/relay.rs` (`run_relay` validation + `Relay` with
+  `prepare_until_ready`, `run_attempt` → `AttemptOutcome`, and a testable `Backoff`). Askpass
+  re-entry is unchanged.
+- Item 8 (dependencies): `fs2` → std `File::lock` (toolchain 1.97; the CLI already locked in
+  `spawn_blocking`, MCP tokens in a blocking task). `rand_core`/`OsRng` → `getrandom` 0.4 (already
+  pulled by uuid) for secrets and argon2 salts (`SaltString::encode_b64`), so argon2 runs without
+  `rand`, core no longer depends on argon2, and getrandom 0.2 left the tree. core/agent use `url`
+  instead of reqwest; reqwest without `charset`. `tokio-tungstenite` 0.29 and `tower-http` 0.6
+  (the versions axum/reqwest use) and `sha2` 0.11 (rust-embed's) removed the duplicate
+  tungstenite, sha1, sha2, rand and tower-http copies. tokio is no longer `full`: each crate lists
+  its features, only the binary enables `rt-multi-thread`. TLS stays rustls + aws-lc-rs only.
+  Android and macOS type-check clean with the Phase 2 stub-toolchain recipe.
+- Deviations:
+  - Legacy keys (`agent.ws_address`, `dir`) are separate raw fields rather than `serde(alias)`:
+    an alias would turn "both set" into serde's generic duplicate-field error instead of the
+    explicit "cannot both be set; use ..." message.
+  - Stricter config: `[[agents]]` rows now reject unknown keys and wrongly typed values (they were
+    silently ignored), and duplicate effective managed-agent names fail at parse time, so the
+    restart pre-validation catches them too.
+  - Install/uninstall messages use the shared description (`Installed Systemd unit '…' at …`,
+    `Uninstalled LaunchAgent '…'`); status lines and not-installed errors are unchanged.
+  - The `watchdog` module is crate-private; `ProvisionError` is `pub(crate)`.
+  - `process_control` keeps its `libc::flock` PID-file lock (not fs2); converting the tokio
+    handle to std and back around every lock buys nothing.
+- Remaining globals and why: the `log!` sink slot and `LOG_LEVEL` (macros are used everywhere;
+  the sink is injectable), `identity::EXTERNAL_IP` (process-lifetime cache of a network lookup),
+  `safe_fs::EFFECTIVE_USER_HOME` (passwd lookup of an identity that cannot change),
+  `ownership::NSS_LOCK` (NSS calls are not thread-safe process-wide), the agent's static
+  move-cleanup semaphores (process-wide bound on background deletions). Intentional
+  `process::exit`s remain only for a failed re-exec and for the parent-death hook (an orphan must
+  not keep running and has nothing to unwind into).
+- Tests: full `pn test` green on the first run, no flakes (integration 179 s, Playwright 312 s).
+  `REDOOR_SSH_TEST=1 pn integration-test tests/real-ssh.test.ts` also passed (relays and managed
+  SSH; the password-only cases skip without `REDOOR_SSH_TEST_PASSWORD`).
+- Remaining `Result<_, String>`: clap value parsers and `FromStr` impls (clap's convention), and
+  agent command internals (download sources, platform mounts/accounts) whose string is the wire
+  error message.
