@@ -563,6 +563,25 @@ describe("Smart Move API", () => {
         });
     });
 
+    it("rejects sources that are neither files nor directories", async () => {
+        const destPath = tempFiles.tempFile({ suffix: ".txt" });
+
+        // The shared transfer service names the requested operation in its rejection.
+        await expect(
+            sourceAgent.moveTo(
+                { agent: sourceAgent.id, path: destPath },
+                "/dev/null",
+            ),
+        ).rejects.toMatchObject({
+            status: 400,
+            message: "Move supports regular files and directories only",
+        });
+        // Rejection happens before any destination is created.
+        await expect(fs.stat(destPath)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
     it("rejects identical endpoints before starting work", async () => {
         const sourcePath = tempFiles.create("same endpoint", {
             suffix: ".txt",
