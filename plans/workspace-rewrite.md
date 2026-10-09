@@ -297,3 +297,104 @@ in the "Log" section below.
     the transfer-link check, `upload_kind()` for upload flows (done), `lane == Output` for
     output-stream flows (the `streaming::start` command/tracking validation still uses
     `matches!`), and `cancel_scope == Request` to decide whether `cancel_transfer` is meaningful.
+
+### Phase 3a – Router data path (done)
+
+Items 1–4 of Phase 3, plus the pre-existing MCP rate-limit failure. Items 5–8 are part B.
+
+- Item 1 (`RouterHandle::send`): returns `RouterSendError::{Full, Stopped}` instead of folding a
+  full mailbox into the shutdown error. Every async caller now uses `send_async` (agent
+  registration and `TransferProgressUpdate` in the session, MCP read cancellation, the former
+  chunk completions). `request()` no longer sends a best-effort prune on timeout.
+- Item 5 (MCP 429): the limiter is correctly keyed per credential. The retention test shared
+  `deviceToken` with the preceding workflow test, which (with a 20 ms expiry poll worth ~100
+  requests) spent the 120/min budget, so its first call failed in every file run. A dedicated
+  credential then exposed a second latent cause: ten parallel admissions on one credential exceed
+  its concurrency cap of eight. The test now owns two credentials (the retention ceiling it checks
+  is global) and polls expiry every 100 ms. No limits were changed.
+- Item 3 (data path, `actors/router/streams.rs`): the router admits, tracks lifecycle and cancels;
+  payload never enters its mailbox (the 1024 mailbox now carries control messages only).
+  - `StreamLease { id, link: AgentLink, cancel: CancellationToken, bytes: Arc<AtomicU64>, fault }`
+    is shared by the router and the data path. `AgentLink` holds the priority lane (credit
+    grants), the transfer lane and the negotiated credit flag.
+  - `ConnectionStreams` (per control session: inbound slots + outbound credit gates behind short
+    `std::sync::Mutex`es) is created by the session at registration, stored in
+    `AgentConnection.streams`, returned to the transfer socket by `RegisterTransferConnection`, and
+    used by the session to apply agent credit grants without the router.
+  - Inbound (download, exec, copy source): `deliver()` in the transfer reader looks up the slot and
+    `try_send`s; only terminal frames (`StreamEnd { outcome: Completed | Failed | Overflow,
+    delivered, received_bytes }`) go to the router as `InboundStreamEnded`. Consumers use
+    `OutputReceiver::recv()` (cancel safe; counts drained bytes, returns credit).
+  - Outbound (upload, edit, copy destination): `OutboundStream::send_frames()` writes directly to
+    the agent's transfer lane after spending credit; producer failures go to the router as
+    `OutboundStreamFailed { LaneClosed | ProducerAborted(msg) }`. The edit commit terminal is still
+    a router decision, sent by a router-spawned task (caller drop cannot strand it).
+  - Remote copies run a `CopyForwarder` task (source `OutputReceiver` -> destination
+    `OutboundStream`); it owns destination chunk numbering and sends the abort frame when the
+    router fails the copy (`lease.fail(reason)`).
+  - Progress is pulled from the lease atomics on `GetTransferProgress`, before terminal
+    transitions, and on the 250 ms tick (which also drives throttled UI refreshes and prunes
+    abandoned command replies — no per-message `retain`).
+- Item 2 (credit protocol):
+  - Negotiation: agents send `supports_stream_credit: true` in `agent_register` (optional, default
+    false); the server confirms with `stream_credit: true` in `transfer_socket_open` (omitted when
+    false). Both directions switch together per control session. Missing capability (fake test
+    agents, old agents) or missing confirmation (old servers) keeps the old behavior: the reader
+    waits for a depth-one consumer, the agent never waits for credit.
+  - Messages: `ServerToAgent::StreamCredit { request_id, frames }` (`{"type":"stream_credit",...}`,
+    priority lane) for agent-to-server streams; `AgentToServer::StreamCredit { request_id, frames }`
+    (agent control lane) for server-to-agent streams. Grants for finished streams are ignored.
+  - Window: `STREAM_CREDIT_WINDOW_FRAMES = 4` non-terminal frames of up to 64 KiB in flight per
+    stream; receivers return credit in batches of `STREAM_CREDIT_BATCH_FRAMES = 2` as the consumer
+    drains (server: when the HTTP/copy consumer receives; agent: after the upload sink staged the
+    chunk). Receive queues hold `window + 1` frames: the terminal frame (last or error) never spends
+    credit, so cancellation acknowledgements cannot wait for a grant. Shared `CreditGate`
+    (semaphore, grants clamped to the window) and `CreditLedger` live in `redoor-core::stream_credit`.
+  - Overflow is a per-stream protocol violation: the server fails that stream (consumer gets an
+    error frame, exec terminal gets `Error`, agent gets `cancel_transfer`); the agent unroutes that
+    upload so its worker fails. The socket and other streams continue.
+  - Agent side: `StreamWriter::with_credit` (gate registered in `AgentServices::output_credits`,
+    RAII removal), `UploadRoutes::open(.., credited)`, `Responder::stream_credit`.
+- Item 4 (flow table, `actors/router/flows.rs`): `FlowTable { by_request: HashMap<RequestId, FlowId>,
+  flows: HashMap<FlowId, Flow> }`, `enum Flow { Command, Output, Upload, Copy(Box<_>) }`,
+  `OutputPhase::{Streaming, Canceling}`, `UploadPhase::{AwaitingReady, Streaming, Committing,
+  Publishing, Canceling { explicit }}`, `CopyPhase::{Local, Remote(Box<RemoteCopy>),
+  DeletingSource}` with `RemoteStage::{AwaitingDestination { source_command }, Streaming,
+  Canceling { source_acked, dest_acked }}`; a move is `CopyFlow { then: Some(DeleteSource) }`.
+  `route_response` is one index lookup. Agent loss (control or transfer) is one `extract_if` pass
+  (`fail_agent_flows(agent, AgentLoss::{Control, Transfer(reason)})`) plus per-flow settlement.
+  All router code is methods on `RouterState` (agents, cleanup, output, progress, ui,
+  transfers/{upload, copy, move}); every handler is synchronous and `clippy::unused_async` is
+  enabled for the whole server crate (one watchdog function fixed).
+- Tests: Rust unit tests for the credit gate/ledger, stream tables (stalled consumer, overflow,
+  stopped streams, uncredited fallback, outbound credit), output/upload/copy flows, the copy
+  forwarder with a stalled destination, agent writer and upload overflow; the extended
+  `slow_upload_send_does_not_block_unrelated_router_work` also stalls a download consumer and
+  checks an exec stream still flows. New `tests/stream-isolation.test.ts` stalls a 64 MiB download
+  body and requires another download and an exec to complete (it times out on the pre-change code).
+- Deviations / behavior notes:
+  - `FlowId` is the first request id of a flow; there is no `UploadPhase::Done` (a flow is removed
+    when its terminal result is routed).
+  - `ExecuteStreamRequest` replies with an `OutputReceiver` and `StartUploadRequest` with an
+    `OutboundStream` (both carry the request id); `chunk_sender`/`rest_cancel_sender` are gone. An
+    explicit download cancel stops the lease, so the body ends after at most the already queued
+    frames (instead of immediately).
+  - Download progress counts bytes the consumer drained (resume offsets stay accurate); completion
+    records every byte the reader queued, so unknown-size archives complete with their full size.
+  - Copy teardown on failure cancels a source that has not finished (previously a lost or failed
+    destination left the source streaming into nothing). A copy source that answers on the control
+    lane with an error now fails the copy (previously it hung). A remote copy canceled after its
+    source already finished counts that completion as the source's acknowledgement (previously it
+    could stay `Canceling`). A move without a captured source identity is rejected instead of
+    panicking the router.
+  - A closed transfer lane seen by a producer is settled by the transfer-socket cleanup (copy
+    forwarder) or `OutboundStreamFailed` (HTTP uploads).
+- Notes for part B:
+  - `OutputReceiver` (lease + credit) is the natural core of `OutputStream::open`; `AgentUpload` +
+    `OutboundStream` of `TransferService`. `OutputCancelGuard`/`UploadCancelGuard` still live in HTTP.
+  - JSON is still built in the router (`AgentConnection::send_to_lane`, `queue_priority_cancel`) and
+    in the data path (`AgentLink::grant`); typed `Outbound` should cover `StreamCredit` too.
+  - `supports_stream_credit` belongs in the `AgentCapabilities` struct; every
+    `RegisterAgentRequest` literal (tests included) now needs `streams: ConnectionStreams`.
+  - Abandoned command replies are pruned by the tick; `AgentClient` timeouts should still send a
+    cancel to the agent. `{:?}` error strings remain in exec/raw/MCP handlers.
