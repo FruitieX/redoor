@@ -67,9 +67,26 @@ struct RawAgentSection {
     log_format: Option<String>,
 }
 
+/// Keys `RawAgentEntry` reads. Unknown keys in `[[agents]]` rows are ignored (with a
+/// warning) rather than rejected: managed rows are also written by the UI and older
+/// releases silently ignored extra keys, so a file shared across versions must keep loading.
+/// Keep in sync with the fields below.
+pub(super) const AGENT_ENTRY_KEYS: [&str; 10] = [
+    "local",
+    "target",
+    "username",
+    "ssh_port",
+    "name",
+    "remote_bin",
+    "home",
+    "dir",
+    "log",
+    "password",
+];
+
 /// One `[[agents]]` row; the union of SSH and local keys because `local` selects the kind.
+/// Not `deny_unknown_fields`: see [`AGENT_ENTRY_KEYS`].
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawAgentEntry {
     #[serde(default)]
     local: bool,
@@ -145,7 +162,6 @@ impl RawConfig {
             .enumerate()
             .map(|(index, entry)| entry.validate(index))
             .collect::<Result<Vec<_>, _>>()?;
-        reject_duplicate_agent_names(&agents)?;
         let mut relays: Vec<RelayConfig> = Vec::with_capacity(self.relays.len());
         for (index, relay) in self.relays.into_iter().enumerate() {
             let relay = relay.validate(index)?;
@@ -165,7 +181,10 @@ impl RawConfig {
 }
 
 /// Rejects two managed rows that would register under one name, before any supervisor exists.
-fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
+///
+/// Not part of `validate`: only the server registers managed agents, so other roles reading
+/// the same file (logs, relays, service install) must not fail on it.
+pub(super) fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
     let mut names = HashSet::new();
     for agent in agents {
         let name = match agent {

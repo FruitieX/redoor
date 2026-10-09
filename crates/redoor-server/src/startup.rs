@@ -46,6 +46,8 @@ const LOG_FORMAT_ENV: &str = "REDOOR_SERVER_LOG_FORMAT";
 pub async fn run_server(args: CoordinatorArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     let location = ConfigLocation::find_or_bootstrap(args.config.clone(), &runtime.paths).await?;
     let file = redoor_core::config::parse_config_file(&location.path).await?;
+    // Only the server registers managed agents, so only it rejects colliding names.
+    file.ensure_unique_agent_names(&location.path)?;
     let config = ServerConfig::resolve(
         &args,
         &ServerEnvironment::from_process(),

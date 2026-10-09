@@ -23,6 +23,7 @@ pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;
 
+use crate::log;
 use crate::logging::LogFormat;
 use redoor_protocol::wire::log::Level;
 
@@ -298,11 +299,58 @@ fn parse_config_str(path: &Path, content: &str) -> Result<RedoorConfig, ConfigEr
             path: path.to_path_buf(),
             message: error.to_string().trim_end().to_string(),
         })?;
-    raw.validate()
+    let config = raw
+        .validate()
         .map_err(|file::Invalid(message)| ConfigError::Invalid {
             path: path.to_path_buf(),
             message,
+        })?;
+    for key in unknown_agent_entry_keys(content) {
+        log!(
+            Level::Warning,
+            "Ignoring unknown key '{}' in config file '{}'",
+            key,
+            path.display()
+        );
+    }
+    Ok(config)
+}
+
+/// Key paths (`agents[N].key`) in `[[agents]]` rows that no field reads. Serde ignores them
+/// silently, so this second look at the already validated document makes typos visible.
+fn unknown_agent_entry_keys(content: &str) -> Vec<String> {
+    let Ok(document) = content.parse::<toml_edit::DocumentMut>() else {
+        return Vec::new();
+    };
+    let Some(rows) = document
+        .get("agents")
+        .and_then(toml_edit::Item::as_array_of_tables)
+    else {
+        return Vec::new();
+    };
+    rows.iter()
+        .enumerate()
+        .flat_map(|(index, row)| {
+            row.iter()
+                .filter(|(key, _)| !file::AGENT_ENTRY_KEYS.contains(key))
+                .map(move |(key, _)| format!("agents[{index}].{key}"))
         })
+        .collect()
+}
+
+impl RedoorConfig {
+    /// Rejects `[[agents]]` rows that would register under the same effective name.
+    ///
+    /// Only the server registers managed agents, so only its startup and restart
+    /// pre-validation call this; other roles reading the file keep working.
+    pub fn ensure_unique_agent_names(&self, path: &Path) -> Result<(), ConfigError> {
+        file::reject_duplicate_agent_names(&self.agents).map_err(|file::Invalid(message)| {
+            ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message,
+            }
+        })
+    }
 }
 
 /// Returns the named relay or an actionable error listing the missing identity.
@@ -1338,33 +1386,83 @@ server = "http://redoor.example.com"
         }
     }
 
-    /// Serde rejects misspelled managed-agent keys with their line instead of ignoring them.
+    /// Unknown managed-agent keys are ignored (older releases did) and reported by path, so a
+    /// file written by a newer release still loads while typos stay visible.
     #[test]
-    fn unknown_managed_agent_key_points_at_the_line() {
-        let error = parse_config_str(
-            Path::new("/etc/redoor/config.toml"),
-            r#"agent_token = "t"
+    fn unknown_managed_agent_keys_are_ignored_and_reported() {
+        let content = r#"agent_token = "t"
 [[agents]]
 target = "host"
 remotebin = "/opt/redoor"
+[[agents]]
+local = true
+future_option = 1
+"#;
+        let config = parse_config_str(Path::new("/etc/redoor/config.toml"), content)
+            .expect("unknown [[agents]] keys must not make the file unreadable");
+        // Both rows still load with their known settings.
+        assert_eq!(config.agents.len(), 2);
+        // Each ignored key is reported with its row so the operator can find it.
+        assert_eq!(
+            unknown_agent_entry_keys(content),
+            vec![
+                "agents[0].remotebin".to_string(),
+                "agents[1].future_option".to_string()
+            ]
+        );
+    }
+
+    /// Every key the row parser reads is in the known-key list, so none of them is reported as
+    /// ignored (guards the list against drifting from `RawAgentEntry`).
+    #[test]
+    fn known_managed_agent_keys_are_not_reported() {
+        let content = r#"agent_token = "t"
+[[agents]]
+local = false
+target = "host"
+username = "u"
+ssh_port = 22
+name = "n"
+remote_bin = "/opt/redoor"
+home = "/srv"
+log = "/tmp/a.log"
+password = "p"
+[[agents]]
+local = true
+name = "l"
+dir = "/srv"
+"#;
+        parse_config_str(Path::new("config.toml"), content).expect("valid rows parse");
+        assert_eq!(unknown_agent_entry_keys(content), Vec::<String>::new());
+    }
+
+    /// Unknown keys elsewhere keep failing with their line, as they always did.
+    #[test]
+    fn unknown_server_key_points_at_the_line() {
+        let error = parse_config_str(
+            Path::new("/etc/redoor/config.toml"),
+            r#"agent_token = "t"
+[server]
+prot = 3000
 "#,
         )
-        .expect_err("a misspelled key must not be silently ignored");
+        .expect_err("a misspelled [server] key must not be silently ignored");
         let message = error.to_string();
-        // The file path tells operators which config was rejected.
+        // The file path and the offending key with its location make the typo actionable.
         assert!(message.contains("/etc/redoor/config.toml"), "{message}");
-        // The offending key and its location make the typo actionable.
         assert!(
-            message.contains("remotebin") && message.contains("line 4"),
+            message.contains("prot") && message.contains("line 3"),
             "{message}"
         );
     }
 
-    /// Two rows that would register under one name fail at parse time, before any supervisor.
+    /// Duplicate managed names do not make the file unreadable for other roles, but the server
+    /// check rejects them before any supervisor exists.
     #[test]
-    fn duplicate_managed_agent_names_are_rejected() {
-        let error = parse_config_str(
-            Path::new("config.toml"),
+    fn duplicate_managed_agent_names_fail_only_the_server_check() {
+        let path = Path::new("config.toml");
+        let config = parse_config_str(
+            path,
             r#"agent_token = "t"
 [[agents]]
 target = "deploy@web"
@@ -1372,7 +1470,10 @@ target = "deploy@web"
 target = "web"
 "#,
         )
-        .expect_err("both rows default to the name 'web'");
+        .expect("parsing alone must accept duplicate names, as older releases did");
+        let error = config
+            .ensure_unique_agent_names(path)
+            .expect_err("both rows default to the name 'web'");
         // The message names the colliding identity and how to resolve it.
         assert!(
             error
