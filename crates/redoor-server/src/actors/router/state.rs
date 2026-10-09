@@ -1,11 +1,11 @@
 use super::flows::FlowTable;
 use super::streams::ConnectionStreams;
+use crate::actors::lanes::ControlLanes;
 use crate::log_registry::LogRegistry;
 use crate::terminal_registry::TerminalRegistry;
-use axum::extract::ws::Message as WsMessage;
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
 use redoor_protocol::wire::policy::UploadKind;
-use redoor_protocol::wire::stream::StreamPayloadKind;
+use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
 use redoor_protocol::{
     api::{agents::AgentConnectionStatus, transfers::TransferProgressEntry},
     wire::{
@@ -22,7 +22,7 @@ pub struct TransferConnection {
     /// Distinguishes the current transfer socket from stale teardown events.
     pub socket_id: SocketId,
     /// Keeps a slow transfer peer from causing unbounded payload buffering.
-    pub outgoing_binary: tokio::sync::mpsc::Sender<WsMessage>,
+    pub outgoing_binary: tokio::sync::mpsc::Sender<StreamChunk>,
     /// Lets control or transfer replacement stop both socket halves promptly.
     pub shutdown: tokio::sync::watch::Sender<bool>,
 }
@@ -36,10 +36,8 @@ pub struct AgentConnection {
     pub agent_name: String,
     /// Unique websocket session identifier for logging.
     pub socket_id: SocketId,
-    /// Bounded lane for commands and session bootstraps subject to admission control.
-    pub outgoing_commands: tokio::sync::mpsc::Sender<WsMessage>,
-    /// Reserved lane for cancellation and connection lifecycle frames.
-    pub outgoing_priority: tokio::sync::mpsc::Sender<WsMessage>,
+    /// Typed command lane (admission-controlled) and priority lane (cancels, lifecycle).
+    pub lanes: ControlLanes,
     /// Secret accepted only while this control connection remains authoritative.
     pub transfer_token: String,
     /// Payload transport may be absent briefly while the agent reconnects it.

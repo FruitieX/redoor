@@ -283,9 +283,7 @@ impl RouterState {
                 request_id,
                 allowed,
             };
-            if !connection.send_priority_message(decision.clone()) {
-                connection.send_message(decision);
-            }
+            connection.lanes.try_priority_or_command(decision);
         }
         if allowed {
             self.notify_transfer_refresh_immediately();
@@ -331,9 +329,9 @@ impl RouterState {
         let (agent_id, request_id) = (upload.agent_id.clone(), upload.request_id);
         self.mark_transfer_errored(request_id.as_transfer_id(), message);
         if let Some(connection) = self.agents.by_id.get(&agent_id) {
-            if !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id }) {
-                connection.send_message(ServerToAgent::CancelTransfer { request_id });
-            }
+            connection
+                .lanes
+                .try_priority_or_command(ServerToAgent::CancelTransfer { request_id });
         } else if let Some(Flow::Upload(upload)) = self.flows.remove(flow_id) {
             // No control owner remains that could acknowledge cancellation.
             self.release_upload(&upload);
@@ -460,7 +458,7 @@ mod tests {
         ids::TransferId,
         wire::command::{Command, MoveSourceIdentity},
     };
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::oneshot;
 
     /// Builds isolated router state for upload transition tests.
     fn router_state() -> RouterState {
@@ -475,7 +473,11 @@ mod tests {
     fn lease(request_id: RequestId) -> StreamLease {
         StreamLease::new(
             request_id,
-            AgentLink::new(mpsc::channel(1).0, None, false),
+            AgentLink::new(
+                crate::actors::lanes::ControlLanes::bounded(1, 1).0,
+                None,
+                false,
+            ),
             0,
         )
     }

@@ -1,3 +1,4 @@
+use crate::actors::lanes::{ControlLaneReceivers, ControlLanes};
 use crate::actors::router::{
     ConnectionStreams, RegisterAgentRequest, RouteResponse, RouteTransferReadyRequest,
     RouterHandle, RouterMsg, TransferProgressUpdateRequest,
@@ -14,7 +15,7 @@ use redoor_protocol::{
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 use subtle::ConstantTimeEq;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 /// Per-agent command backlog allowed before REST admission fails fast.
 pub(crate) const CONTROL_COMMAND_QUEUE_CAPACITY: usize = 64;
@@ -28,13 +29,29 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
     bool::from(left_digest.ct_eq(&right_digest))
 }
 
-/// Converts a lane receive result into the next outbound websocket frame while
-/// tracking when that lane has closed.
-fn take_outbound_message(message: Option<WsMessage>, lane_closed: &mut bool) -> Option<WsMessage> {
-    match message {
-        Some(message) => Some(message),
-        None => {
-            *lane_closed = true;
+/// Converts a lane receive result into the next outbound frame while tracking when that lane
+/// has closed.
+fn take_outbound_frame(
+    frame: Option<ServerToAgent>,
+    lane_closed: &mut bool,
+) -> Option<ServerToAgent> {
+    if frame.is_none() {
+        *lane_closed = true;
+    }
+    frame
+}
+
+/// Encodes one typed control frame for the socket; this writer is the only place the
+/// server-to-agent control protocol becomes JSON.
+fn encode_frame(frame: &ServerToAgent) -> Option<WsMessage> {
+    match serde_json::to_string(frame) {
+        Ok(json) => Some(WsMessage::Text(json.into())),
+        Err(error) => {
+            redoor_core::log_failure!(
+                Level::Error,
+                "Failed to serialize control frame for agent: error={}",
+                error
+            );
             None
         }
     }
@@ -52,10 +69,8 @@ struct SessionRuntime {
     /// the socket exists before the remote agent has announced which logical
     /// agent identity it should be associated with.
     agent_id: Option<AgentId>,
-    /// Admits ordinary commands into a bounded per-agent backlog.
-    outgoing_commands: mpsc::Sender<WsMessage>,
-    /// Reserves socket output capacity for cancellation and lifecycle traffic.
-    outgoing_priority: mpsc::Sender<WsMessage>,
+    /// Typed command and priority lanes this session's writer drains.
+    lanes: ControlLanes,
 
     /// Populated after `AgentRegister` if the registered agent name has a
     /// matching watchdog supervisor. The stale check uses this to signal
@@ -94,15 +109,9 @@ impl SessionRuntime {
                         agent_name,
                         self.socket_id
                     );
-                    let _ = self.outgoing_priority.try_send(WsMessage::Text(
-                        serde_json::to_string(&ServerToAgent::Error {
-                            message: "Invalid agent token".to_string(),
-                        })
-                        .unwrap_or_else(|_| {
-                            r#"{"type":"error","message":"Invalid agent token"}"#.to_string()
-                        })
-                        .into(),
-                    ));
+                    let _ = self.lanes.try_priority(ServerToAgent::Error {
+                        message: "Invalid agent token".to_string(),
+                    });
                     return;
                 }
 
@@ -122,15 +131,9 @@ impl SessionRuntime {
                             "Rejecting managed agent registration while stopped: agent_name={}",
                             agent_name
                         );
-                        let _ = self.outgoing_priority.try_send(WsMessage::Text(
-                            serde_json::to_string(&ServerToAgent::Error {
-                                message: "Managed agent is intentionally stopped".to_string(),
-                            })
-                            .unwrap_or_else(|_| {
-                                r#"{"type":"error","message":"Managed agent is intentionally stopped"}"#.to_string()
-                            })
-                            .into(),
-                        ));
+                        let _ = self.lanes.try_priority(ServerToAgent::Error {
+                            message: "Managed agent is intentionally stopped".to_string(),
+                        });
                         self.watchdog = None;
                         return;
                     };
@@ -154,8 +157,7 @@ impl SessionRuntime {
                         agent_id: agent_id.clone(),
                         agent_name,
                         socket_id: self.socket_id.clone(),
-                        outgoing_commands: self.outgoing_commands.clone(),
-                        outgoing_priority: self.outgoing_priority.clone(),
+                        lanes: self.lanes.clone(),
                         identity,
                         capabilities,
                         watchdog: self.watchdog.clone(),
@@ -359,17 +361,20 @@ pub async fn handle_websocket(
     agent_token: String,
 ) {
     let (mut sender, mut receiver) = socket.split::<WsMessage>();
-    let (tx_out_commands, mut rx_out_commands) =
-        mpsc::channel::<WsMessage>(CONTROL_COMMAND_QUEUE_CAPACITY);
-    let (tx_out_priority, mut rx_out_priority) =
-        mpsc::channel::<WsMessage>(CONTROL_PRIORITY_QUEUE_CAPACITY);
+    let (lanes, receivers) = ControlLanes::bounded(
+        CONTROL_COMMAND_QUEUE_CAPACITY,
+        CONTROL_PRIORITY_QUEUE_CAPACITY,
+    );
+    let ControlLaneReceivers {
+        commands: mut rx_out_commands,
+        priority: mut rx_out_priority,
+    } = receivers;
 
     let mut runtime = SessionRuntime {
         socket_id: socket_id.clone(),
         router_ref,
         agent_id: None,
-        outgoing_commands: tx_out_commands,
-        outgoing_priority: tx_out_priority,
+        lanes,
         watchdog: None,
         agent_token,
         streams: None,
@@ -407,13 +412,13 @@ pub async fn handle_websocket(
                     }
                     continue;
                 }
-                message = rx_out_priority.recv(), if !priority_closed => take_outbound_message(message, &mut priority_closed),
-                message = rx_out_commands.recv(), if !commands_closed => take_outbound_message(message, &mut commands_closed),
+                frame = rx_out_priority.recv(), if !priority_closed => take_outbound_frame(frame, &mut priority_closed),
+                frame = rx_out_commands.recv(), if !commands_closed => take_outbound_frame(frame, &mut commands_closed),
                 // Both bounded lanes are closed, so no future application frames can be produced.
                 else => break,
             };
 
-            let Some(message) = next_message else {
+            let Some(message) = next_message.as_ref().and_then(encode_frame) else {
                 continue;
             };
 
@@ -492,6 +497,23 @@ pub async fn handle_websocket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
+
+    /// The writer's encoding is the wire format the agent parses.
+    #[test]
+    fn writer_encodes_typed_frames_as_protocol_json() {
+        let frame = ServerToAgent::CancelTransfer {
+            request_id: redoor_protocol::ids::RequestId::new(5),
+        };
+        let Some(WsMessage::Text(text)) = encode_frame(&frame) else {
+            panic!("control frames are text messages");
+        };
+        // Agents and fake test agents decode exactly this tag and field.
+        assert_eq!(
+            text.as_str(),
+            r#"{"type":"cancel_transfer","request_id":5}"#
+        );
+    }
 
     /// Exercises session dispatch under backpressure so completion cleanup cannot be lost.
     #[tokio::test]
@@ -503,14 +525,12 @@ mod tests {
             .expect("router mailbox filled");
         let agent_id = AgentId::from("agent");
         let request_id = redoor_protocol::ids::RequestId::new(42);
-        let (outgoing_commands, _outgoing_commands_receiver) = mpsc::channel(1);
-        let (outgoing_priority, _outgoing_priority_receiver) = mpsc::channel(1);
+        let (lanes, _receivers) = ControlLanes::bounded(1, 1);
         let mut runtime = SessionRuntime {
             socket_id: SocketId::new(),
             router_ref,
             agent_id: Some(agent_id.clone()),
-            outgoing_commands,
-            outgoing_priority,
+            lanes,
             watchdog: None,
             agent_token: "token".to_string(),
             streams: None,
@@ -553,14 +573,12 @@ mod tests {
             .send(RouterMsg::CheckPendingUiRefresh)
             .expect("router mailbox filled");
         let socket_id = SocketId::new();
-        let (outgoing_commands, _outgoing_commands_receiver) = mpsc::channel(1);
-        let (outgoing_priority, _outgoing_priority_receiver) = mpsc::channel(1);
+        let (lanes, _receivers) = ControlLanes::bounded(1, 1);
         let runtime = SessionRuntime {
             socket_id: socket_id.clone(),
             router_ref,
             agent_id: Some(AgentId::from("agent")),
-            outgoing_commands,
-            outgoing_priority,
+            lanes,
             watchdog: None,
             agent_token: "token".to_string(),
             streams: None,

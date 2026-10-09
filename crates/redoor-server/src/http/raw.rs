@@ -337,85 +337,24 @@ pub(crate) async fn create_one_time_token_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        actors::router::{
-            ConnectionStreams, RegisterAgentRequest, RegisterTransferConnectionRequest, RouterMsg,
-        },
-        log_registry::LogRegistry,
-        terminal_registry::TerminalRegistry,
-    };
-    use futures_util::StreamExt;
+    use crate::{actors::router::RouterMsg, http::fake_agent::FakeAgent};
     use redoor_protocol::{
         api::transfers::TransferProgressState,
-        ids::{ChunkIndex, SocketId},
+        ids::ChunkIndex,
         wire::{
             ServerToAgent,
-            command::Command,
             stream::{StreamChunk, StreamPayloadKind},
         },
-    };
-    use tokio::{
-        sync::{mpsc, watch},
-        time::{Duration, timeout},
     };
 
     /// Dropping an HTTP body must cancel even when the agent never sends another chunk.
     #[tokio::test]
     async fn body_drop_cancels_download_without_subsequent_chunk() {
-        let _ = redoor_core::logging::init(None).await;
-        let (router_ref, router_task) =
-            crate::actors::router::spawn_router(TerminalRegistry::new(), LogRegistry::new());
-        let agent_id = AgentId::from("body-drop-agent");
-        let (text_sender, mut text_receiver) = mpsc::channel(64);
-        let (priority_sender, mut priority_receiver) = mpsc::channel(16);
-        let (binary_sender, _binary_receiver) = mpsc::channel(1);
-        // The transfer reader's stream tables, kept to inject agent frames without a socket.
-        let streams = ConnectionStreams::new(agent_id.clone(), false);
-
-        router_ref
-            .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
-                &agent_id,
-                text_sender,
-                priority_sender,
-                streams.clone(),
-            )))
-            .await
-            .expect("agent registration queued");
-        let transfer_token = match priority_receiver
-            .recv()
-            .await
-            .expect("transfer token queued")
-        {
-            axum::extract::ws::Message::Text(text) => {
-                match serde_json::from_str::<ServerToAgent>(&text)
-                    .expect("valid transfer bootstrap")
-                {
-                    ServerToAgent::TransferSocketOpen { token, .. } => token,
-                    other => panic!("unexpected bootstrap message: {other:?}"),
-                }
-            }
-            other => panic!("unexpected bootstrap frame: {other:?}"),
-        };
-        let (shutdown_sender, _shutdown_receiver) = watch::channel(false);
-        router_ref
-            .request(|reply| {
-                RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                    agent_id: agent_id.clone(),
-                    token: transfer_token,
-                    socket_id: SocketId::new(),
-                    outgoing_binary: binary_sender,
-                    shutdown: shutdown_sender,
-                    reply,
-                })
-            })
-            .await
-            .expect("transfer registration request completed")
-            .expect("transfer registration accepted");
-
+        let mut agent = FakeAgent::connect().await;
         let path = "/tmp/stalled.bin".to_string();
-        let output = OutputStream::open(
-            &router_ref,
-            agent_id.clone(),
+        let mut body = OutputStream::open(
+            &agent.router,
+            agent.agent_id.clone(),
             Command::RawDownload {
                 path: path.clone(),
                 range_start: None,
@@ -430,24 +369,14 @@ mod tests {
         )
         .await
         .expect("download start accepted");
-        let request_id = output.request_id();
-        let command_request_id = match text_receiver.recv().await.expect("download command queued")
-        {
-            axum::extract::ws::Message::Text(text) => {
-                match serde_json::from_str::<ServerToAgent>(&text).expect("valid download command")
-                {
-                    ServerToAgent::Command { request_id, .. } => request_id,
-                    other => panic!("unexpected command message: {other:?}"),
-                }
-            }
-            other => panic!("unexpected command frame: {other:?}"),
-        };
+        let request_id = body.request_id();
+        let (command_request_id, _) = agent.next_command().await;
         // Returning the exact command id lets the body cancel the router-owned transfer.
         assert_eq!(request_id, command_request_id);
 
         // An uncredited agent's reader hands the frame over directly, without the router.
         let deliver = tokio::spawn({
-            let streams = streams.clone();
+            let streams = agent.streams.clone();
             async move {
                 streams
                     .deliver(StreamChunk {
@@ -461,7 +390,6 @@ mod tests {
                     .await
             }
         });
-        let mut body = output;
         ensure_download_started(&mut body, &path)
             .await
             .expect("first chunk starts body");
@@ -477,22 +405,13 @@ mod tests {
 
         drop(body);
 
-        let cancel_request_id = match timeout(Duration::from_secs(1), priority_receiver.recv())
-            .await
-            .expect("body drop should promptly reach the agent")
-            .expect("cancel message queued")
-        {
-            axum::extract::ws::Message::Text(text) => {
-                match serde_json::from_str::<ServerToAgent>(&text).expect("valid cancel command") {
-                    ServerToAgent::CancelTransfer { request_id } => request_id,
-                    other => panic!("unexpected cancellation message: {other:?}"),
-                }
-            }
-            other => panic!("unexpected cancellation frame: {other:?}"),
-        };
         // The agent receives cancellation for the stalled request without a follow-up chunk.
-        assert_eq!(cancel_request_id, request_id);
-        let progress = router_ref
+        assert!(matches!(
+            agent.next_priority().await,
+            ServerToAgent::CancelTransfer { request_id: canceled } if canceled == request_id
+        ));
+        let progress = agent
+            .router
             .request(|reply| RouterMsg::GetTransferProgress { reply })
             .await
             .expect("progress request completed");
@@ -503,11 +422,5 @@ mod tests {
             .expect("download progress retained");
         // Terminal progress proves router state no longer remains indefinitely active.
         assert!(matches!(transfer.state, TransferProgressState::Errored));
-
-        router_ref
-            .send_async(RouterMsg::Shutdown)
-            .await
-            .expect("router shutdown queued");
-        router_task.await.expect("router task joined");
     }
 }

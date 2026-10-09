@@ -8,7 +8,6 @@ use super::messages::{
 };
 use super::state::{AgentConnection, KnownAgent, RouterState, TransferConnection};
 use super::streams::AgentLink;
-use axum::extract::ws::Message as WsMessage;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::CancelScope;
@@ -27,8 +26,7 @@ impl AgentConnection {
             agent_id: request.agent_id,
             agent_name: request.agent_name,
             socket_id: request.socket_id,
-            outgoing_commands: request.outgoing_commands,
-            outgoing_priority: request.outgoing_priority,
+            lanes: request.lanes,
             transfer_token: uuid::Uuid::new_v4().to_string(),
             transfer: None,
             connected_at: UnixTimestampSeconds::new(jiff::Timestamp::now().as_second()),
@@ -41,7 +39,7 @@ impl AgentConnection {
     /// Lanes a stream of this connection uses without going through the router.
     pub(crate) fn link(&self) -> AgentLink {
         AgentLink::new(
-            self.outgoing_priority.clone(),
+            self.lanes.clone(),
             self.transfer
                 .as_ref()
                 .map(|transfer| transfer.outgoing_binary.clone()),
@@ -49,45 +47,26 @@ impl AgentConnection {
         )
     }
 
-    /// Serializes and admits one ordinary command or bootstrap onto the bounded lane.
+    /// Admits one ordinary command or bootstrap onto the bounded command lane.
     pub(crate) fn send_message(&self, message: ServerToAgent) -> bool {
-        self.send_to_lane(message, &self.outgoing_commands)
+        self.report_admission(self.lanes.try_command(message))
     }
 
     /// Queues lifecycle or cancellation traffic independently of command admission.
     pub(crate) fn send_priority_message(&self, message: ServerToAgent) -> bool {
-        self.send_to_lane(message, &self.outgoing_priority)
+        self.report_admission(self.lanes.try_priority(message))
     }
 
-    /// Serializes one message before attempting non-blocking admission to a bounded lane.
-    fn send_to_lane(
-        &self,
-        message: ServerToAgent,
-        lane: &tokio::sync::mpsc::Sender<WsMessage>,
-    ) -> bool {
-        match serde_json::to_string(&message) {
-            Ok(json) => {
-                if lane.try_send(WsMessage::Text(json.into())).is_err() {
-                    log!(
-                        Level::Warning,
-                        "Failed to queue text message for agent: socket_id={}",
-                        self.socket_id
-                    );
-                    false
-                } else {
-                    true
-                }
-            }
-            Err(error) => {
-                redoor_core::log_failure!(
-                    Level::Error,
-                    "Failed to serialize message for agent: socket_id={}, error={}",
-                    self.socket_id,
-                    error
-                );
-                false
-            }
+    /// Logs a frame a saturated or closed lane refused, so dropped work is visible.
+    fn report_admission(&self, admitted: bool) -> bool {
+        if !admitted {
+            log!(
+                Level::Warning,
+                "Failed to queue control frame for agent: socket_id={}",
+                self.socket_id
+            );
         }
+        admitted
     }
 
     /// Returns the payload transport without ever falling back to the control socket.
@@ -139,7 +118,7 @@ impl RouterState {
             // Confirms credit only to agents that advertised it, so both ends switch together.
             stream_credit: connection.streams.credit(),
         };
-        let transfer_open_sender = connection.outgoing_priority.clone();
+        let transfer_open_lanes = connection.lanes.clone();
         let known = self
             .agents
             .known_by_id
@@ -170,9 +149,7 @@ impl RouterState {
         self.agents.by_id.insert(agent_id, connection);
         self.notify_agents_changed();
 
-        if let Ok(message) = serde_json::to_string(&transfer_open) {
-            let _ = transfer_open_sender.try_send(WsMessage::Text(message.into()));
-        }
+        let _ = transfer_open_lanes.try_priority(transfer_open);
     }
 
     /// Marks inventory fully ready only after both control and payload sockets are live.
@@ -249,7 +226,7 @@ impl RouterState {
         }
 
         let agent_id = request.agent_id.clone();
-        let rejection_sender = request.outgoing_priority.clone();
+        let rejection_lanes = request.lanes.clone();
         let accepted = match request.watchdog.clone() {
             Some(watchdog) => {
                 request
@@ -268,12 +245,9 @@ impl RouterState {
             }
         };
         if !accepted {
-            let rejection = serde_json::to_string(&ServerToAgent::Error {
+            let _ = rejection_lanes.try_priority(ServerToAgent::Error {
                 message: "Managed agent is intentionally stopped".to_string(),
             });
-            if let Ok(rejection) = rejection {
-                let _ = rejection_sender.try_send(WsMessage::Text(rejection.into()));
-            }
             log!(
                 Level::Warning,
                 "Ignoring managed registration that lost a shutdown race: agent_id={}",
@@ -681,6 +655,7 @@ impl RouterState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actors::lanes::ControlLanes;
     use crate::actors::router::state::RouterState;
     use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
     use tokio::sync::{mpsc, oneshot, watch};
@@ -695,12 +670,10 @@ mod tests {
 
     /// Inserts one authoritative control connection and returns its issued transfer token.
     fn insert_control(state: &mut RouterState, agent_id: &str) -> String {
-        let (command_sender, _command_receiver) = mpsc::channel(64);
-        let (priority_sender, _priority_receiver) = mpsc::channel(16);
+        let (lanes, _receivers) = ControlLanes::bounded(64, 16);
         let request = RegisterAgentRequest::for_test(
             &AgentId::from(agent_id),
-            command_sender,
-            priority_sender,
+            lanes,
             super::super::streams::ConnectionStreams::new(AgentId::from(agent_id), false),
         );
         state.commit_registration(request);
@@ -1016,18 +989,16 @@ mod tests {
         redoor_core::logging::init(None).await.unwrap();
         let mut state = test_state();
         let agent_id = AgentId::from("bounded-agent");
-        let (command_sender, mut command_receiver) = mpsc::channel(1);
-        let (priority_sender, mut priority_receiver) = mpsc::channel(1);
+        let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
-            command_sender,
-            priority_sender,
+            lanes,
             super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
         ));
         // Remove the lifecycle bootstrap so the reserved lane is available for cancellation.
         assert!(matches!(
-            priority_receiver.recv().await,
-            Some(WsMessage::Text(_))
+            receivers.priority.recv().await,
+            Some(ServerToAgent::TransferSocketOpen { .. })
         ));
 
         let (first_reply, first_receiver) = oneshot::channel();
@@ -1071,13 +1042,16 @@ mod tests {
         );
         // Priority admission succeeds despite the unread ordinary command frame.
         assert!(matches!(
-            priority_receiver.recv().await,
-            Some(WsMessage::Text(_))
+            receivers.priority.recv().await,
+            Some(ServerToAgent::CancelTransfer { .. })
         ));
         // The ordinary queue remains bounded to its single admitted frame.
         assert!(matches!(
-            command_receiver.recv().await,
-            Some(WsMessage::Text(_))
+            receivers.commands.recv().await,
+            Some(ServerToAgent::Command {
+                command: redoor_protocol::wire::command::Command::GetAgentDetails,
+                ..
+            })
         ));
     }
 }

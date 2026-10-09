@@ -1,11 +1,11 @@
 //! A scripted agent connected to a real router, for unit tests of the HTTP service layer.
 
+use crate::actors::lanes::ControlLanes;
 use crate::actors::router::{
     ConnectionStreams, RegisterAgentRequest, RegisterTransferConnectionRequest, RouteResponse,
     RouterHandle, RouterMsg, spawn_router,
 };
 use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
-use axum::extract::ws::Message as WsMessage;
 use redoor_protocol::{
     ids::{AgentId, RequestId, SocketId},
     wire::{ServerToAgent, command::Command, command::CommandResult, stream::StreamChunk},
@@ -17,10 +17,10 @@ use tokio::sync::{mpsc, watch};
 pub(crate) struct FakeAgent {
     pub(crate) router: RouterHandle,
     pub(crate) agent_id: AgentId,
-    pub(crate) commands: mpsc::Receiver<WsMessage>,
-    pub(crate) priority: mpsc::Receiver<WsMessage>,
+    pub(crate) commands: mpsc::Receiver<ServerToAgent>,
+    pub(crate) priority: mpsc::Receiver<ServerToAgent>,
     /// Kept open so server-to-agent payload frames have somewhere to go.
-    _transfer: mpsc::Receiver<WsMessage>,
+    _transfer: mpsc::Receiver<StreamChunk>,
     pub(crate) streams: ConnectionStreams,
     _transfer_shutdown: watch::Receiver<bool>,
 }
@@ -31,15 +31,14 @@ impl FakeAgent {
         let _ = redoor_core::logging::init(None).await;
         let (router, _task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
         let agent_id = AgentId::from("fake-agent");
-        let (commands_sender, commands) = mpsc::channel(16);
-        let (priority_sender, mut priority) = mpsc::channel(16);
+        let (lanes, receivers) = ControlLanes::bounded(16, 16);
+        let (commands, mut priority) = (receivers.commands, receivers.priority);
         let (transfer_sender, transfer) = mpsc::channel(16);
         let streams = ConnectionStreams::new(agent_id.clone(), false);
         router
             .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
                 &agent_id,
-                commands_sender,
-                priority_sender,
+                lanes,
                 streams.clone(),
             )))
             .await
@@ -75,11 +74,8 @@ impl FakeAgent {
     }
 
     /// Reads the next control frame of one lane.
-    pub(crate) async fn next(lane: &mut mpsc::Receiver<WsMessage>) -> ServerToAgent {
-        match lane.recv().await.expect("lane open") {
-            WsMessage::Text(text) => serde_json::from_str(&text).unwrap(),
-            other => panic!("unexpected frame: {other:?}"),
-        }
+    pub(crate) async fn next(lane: &mut mpsc::Receiver<ServerToAgent>) -> ServerToAgent {
+        lane.recv().await.expect("lane open")
     }
 
     /// Reads the next command the server sent.

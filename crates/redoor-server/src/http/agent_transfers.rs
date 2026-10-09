@@ -44,7 +44,7 @@ async fn run_transfer_socket(mut socket: WebSocket, router: RouterHandle) {
         return;
     };
     let (outgoing_binary, mut binary_receiver) =
-        mpsc::channel::<WsMessage>(TRANSFER_OUTBOUND_QUEUE_CAPACITY);
+        mpsc::channel::<StreamChunk>(TRANSFER_OUTBOUND_QUEUE_CAPACITY);
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let registration = router
         .request(|reply| {
@@ -178,10 +178,11 @@ async fn read_transfer_frames(
     }
 }
 
-/// Drains only binary payload frames and pings independently of the control writer.
+/// Drains payload frames and pings independently of the control writer; the only place
+/// server-to-agent stream frames are encoded for the socket.
 async fn write_transfer_frames(
     writer: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
-    receiver: &mut mpsc::Receiver<WsMessage>,
+    receiver: &mut mpsc::Receiver<StreamChunk>,
     shutdown: &mut watch::Receiver<bool>,
 ) {
     let mut ping = redoor_core::websocket::keepalive_interval();
@@ -189,14 +190,12 @@ async fn write_transfer_frames(
         let message = tokio::select! {
             _ = shutdown.changed() => break,
             _ = ping.tick() => Some(WsMessage::Ping(bytes::Bytes::new())),
-            message = receiver.recv() => message,
+            chunk = receiver.recv() => chunk.map(|chunk| WsMessage::Binary(chunk.to_bytes().into())),
         };
         let Some(message) = message else {
             break;
         };
-        if !matches!(message, WsMessage::Binary(_) | WsMessage::Ping(_))
-            || writer.send(message).await.is_err()
-        {
+        if writer.send(message).await.is_err() {
             break;
         }
     }

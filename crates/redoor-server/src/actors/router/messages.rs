@@ -1,8 +1,8 @@
 use super::RouterError;
 use super::state::CopyContentKind;
 use super::streams::{ConnectionStreams, OutboundStream, OutputReceiver, StreamEnd};
+use crate::actors::lanes::ControlLanes;
 use crate::watchdog::WatchdogSnapshot;
-use axum::extract::ws::Message as WsMessage;
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
 use redoor_protocol::wire::log::LogStreamId;
 use redoor_protocol::wire::terminal::{TerminalId, TerminalSize};
@@ -38,10 +38,8 @@ pub struct RegisterAgentRequest {
     pub agent_name: String,
     /// Unique websocket session identifier for this connection.
     pub socket_id: SocketId,
-    /// Bounded lane that admits ordinary commands without growing behind a slow socket.
-    pub outgoing_commands: tokio::sync::mpsc::Sender<WsMessage>,
-    /// Reserved lane that keeps lifecycle and cancellation frames independent of command load.
-    pub outgoing_priority: tokio::sync::mpsc::Sender<WsMessage>,
+    /// Typed command and priority lanes drained by the session writer.
+    pub lanes: ControlLanes,
     /// Platform, account, start directory and binary announced at registration.
     pub identity: AgentIdentity,
     /// Optional protocol features announced at registration.
@@ -184,8 +182,8 @@ pub struct RegisterTransferConnectionRequest {
     pub token: String,
     /// Unique socket identity used to reject stale teardown.
     pub socket_id: SocketId,
-    /// Bounded lane used only for binary stream frames.
-    pub outgoing_binary: tokio::sync::mpsc::Sender<WsMessage>,
+    /// Bounded lane of stream frames, encoded only by the transfer socket writer.
+    pub outgoing_binary: tokio::sync::mpsc::Sender<redoor_protocol::wire::stream::StreamChunk>,
     /// Stops an older or control-orphaned transfer task promptly.
     pub shutdown: tokio::sync::watch::Sender<bool>,
     /// Confirms that router state owns the connection before payload is accepted, and hands
@@ -467,16 +465,14 @@ impl RegisterAgentRequest {
     /// stream credit, which follows the given stream tables.
     pub(crate) fn for_test(
         agent_id: &AgentId,
-        outgoing_commands: tokio::sync::mpsc::Sender<WsMessage>,
-        outgoing_priority: tokio::sync::mpsc::Sender<WsMessage>,
+        lanes: ControlLanes,
         streams: ConnectionStreams,
     ) -> Self {
         Self {
             agent_id: agent_id.clone(),
             agent_name: agent_id.to_string(),
             socket_id: SocketId::new(),
-            outgoing_commands,
-            outgoing_priority,
+            lanes,
             identity: AgentIdentity {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
@@ -510,8 +506,7 @@ mod tests {
     fn entry() -> AgentListEntry {
         let registration = RegisterAgentRequest::for_test(
             &AgentId::from("a"),
-            tokio::sync::mpsc::channel(1).0,
-            tokio::sync::mpsc::channel(1).0,
+            ControlLanes::bounded(1, 1).0,
             ConnectionStreams::new(AgentId::from("a"), true),
         );
         AgentListEntry {

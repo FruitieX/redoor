@@ -312,8 +312,8 @@ impl RouterState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actors::lanes::ControlLanes;
     use crate::actors::router::messages::AgentListEntry;
-    use axum::extract::ws::Message as WsMessage;
     use redoor_protocol::ids::{AgentId, ChunkIndex, RequestId, SocketId};
     use redoor_protocol::wire::command::{Command, CommandResult};
     use redoor_protocol::wire::exec::{ExecEvent, ExecRequest};
@@ -350,16 +350,11 @@ mod tests {
         );
     }
 
-    /// Reads the next control frame queued for the fake agent.
+    /// Reads the next typed control frame queued for the fake agent.
     async fn next_control(
-        lane: &mut mpsc::Receiver<WsMessage>,
+        lane: &mut mpsc::Receiver<redoor_protocol::wire::ServerToAgent>,
     ) -> redoor_protocol::wire::ServerToAgent {
-        match lane.recv().await.expect("control frame queued") {
-            WsMessage::Text(text) => {
-                serde_json::from_str(&text).expect("control frame is valid server JSON")
-            }
-            other => panic!("unexpected websocket frame: {other:?}"),
-        }
+        lane.recv().await.expect("control frame queued")
     }
 
     /// Builds one agent frame for an inbound stream.
@@ -380,9 +375,9 @@ mod tests {
 
         let (router_ref, router_task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
 
-        let (text_tx, mut text_rx) = mpsc::channel::<WsMessage>(64);
-        let (priority_tx, mut priority_rx) = mpsc::channel::<WsMessage>(16);
-        let (binary_tx, mut binary_rx) = mpsc::channel::<WsMessage>(1);
+        let (lanes, receivers) = ControlLanes::bounded(64, 16);
+        let (mut text_rx, mut priority_rx) = (receivers.commands, receivers.priority);
+        let (binary_tx, mut binary_rx) = mpsc::channel::<StreamChunk>(1);
         let agent_id = AgentId::from("agent-1");
         // A credit-capable agent, so the reader never waits on any stream's consumer.
         let streams = ConnectionStreams::new(agent_id.clone(), true);
@@ -390,8 +385,7 @@ mod tests {
         router_ref
             .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest::for_test(
                 &agent_id,
-                text_tx,
-                priority_tx,
+                lanes,
                 streams.clone(),
             )))
             .await
@@ -613,8 +607,9 @@ mod tests {
         assert!(exec_output.recv().await.is_some_and(|chunk| chunk.is_last));
 
         let first_frame = binary_rx.recv().await.expect("first binary frame queued");
-        assert!(
-            matches!(first_frame, WsMessage::Binary(_)),
+        assert_eq!(
+            first_frame.data,
+            vec![1, 2, 3, 4],
             "the first queued frame should be the upload chunk we intentionally used to fill the lane"
         );
 
@@ -668,15 +663,11 @@ mod tests {
 
         let second_frame = binary_rx.recv().await.expect("second binary frame queued");
         // Draining the held data frame gives the router-owned terminal send lane capacity.
-        assert!(matches!(second_frame, WsMessage::Binary(_)));
-        let terminal_frame = timeout(Duration::from_secs(1), binary_rx.recv())
+        assert_eq!(second_frame.data, vec![5, 6, 7, 8]);
+        let terminal = timeout(Duration::from_secs(1), binary_rx.recv())
             .await
             .expect("router-owned terminal should not depend on the dropped HTTP task")
             .expect("terminal binary frame queued");
-        let WsMessage::Binary(terminal_bytes) = terminal_frame else {
-            panic!("edit terminal must use the binary transfer lane");
-        };
-        let terminal = StreamChunk::from_bytes(&terminal_bytes).expect("terminal frame decodes");
         // Empty last-frame delivery proves the router retained terminal ownership after caller drop.
         assert!(terminal.is_last && terminal.data.is_empty());
 

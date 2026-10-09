@@ -36,24 +36,11 @@ impl AgentConnection {
         &self,
         request_id: RequestId,
     ) -> Result<Option<tokio::task::JoinHandle<()>>, RouterError> {
-        let json = serde_json::to_string(&ServerToAgent::CancelTransfer { request_id })
-            .expect("Cancellation contains only a request id");
-        let frame = axum::extract::ws::Message::Text(json.into());
-        match self.outgoing_priority.try_send(frame) {
-            Ok(()) => Ok(None),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err(RouterError::ControlQueueFull {
-                    agent_id: self.agent_id.to_string(),
-                })
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(frame)) => {
-                let priority = self.outgoing_priority.clone();
-                Ok(Some(tokio::spawn(async move {
-                    // Closure after admission is settled by connection teardown.
-                    let _ = priority.send(frame).await;
-                })))
-            }
-        }
+        self.lanes
+            .queue_priority(ServerToAgent::CancelTransfer { request_id })
+            .map_err(|_| RouterError::ControlQueueFull {
+                agent_id: self.agent_id.to_string(),
+            })
     }
 }
 
@@ -356,8 +343,8 @@ mod tests {
     use super::super::messages::RegisterAgentRequest;
     use super::super::streams::{ConnectionStreams, OutputReceiver};
     use super::*;
+    use crate::actors::lanes::ControlLanes;
     use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
-    use axum::extract::ws::Message as WsMessage;
     use redoor_protocol::ids::{AgentId, ChunkIndex, SocketId};
     use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
     use tokio::sync::{mpsc, oneshot, watch};
@@ -365,8 +352,8 @@ mod tests {
     /// Keeps lane receivers alive so tests can exercise real admission pressure.
     struct Fixture {
         state: RouterState,
-        commands: mpsc::Receiver<WsMessage>,
-        priority: mpsc::Receiver<WsMessage>,
+        commands: mpsc::Receiver<ServerToAgent>,
+        priority: mpsc::Receiver<ServerToAgent>,
         streams: ConnectionStreams,
         agent: AgentId,
     }
@@ -381,11 +368,10 @@ mod tests {
                 LogRegistry::new(),
             );
             let agent = AgentId::from("output-test");
-            let (commands, command_receiver) = mpsc::channel(1);
-            let (priority, priority_receiver) = mpsc::channel(1);
+            let (lanes, receivers) = ControlLanes::bounded(1, 1);
             let streams = ConnectionStreams::new(agent.clone(), credit);
             let mut connection = AgentConnection::from_register_request(
-                RegisterAgentRequest::for_test(&agent, commands, priority, streams.clone()),
+                RegisterAgentRequest::for_test(&agent, lanes, streams.clone()),
             );
             let (binary, _binary_receiver) = mpsc::channel(1);
             connection.transfer = Some(super::super::state::TransferConnection {
@@ -396,8 +382,8 @@ mod tests {
             state.agents.by_id.insert(agent.clone(), connection);
             Self {
                 state,
-                commands: command_receiver,
-                priority: priority_receiver,
+                commands: receivers.commands,
+                priority: receivers.priority,
                 streams,
                 agent,
             }
@@ -474,26 +460,21 @@ mod tests {
         let (mut output, terminal) = fixture.exec().await;
         let id = output.request_id();
         let connection = &fixture.state.agents.by_id[&fixture.agent];
-        connection
-            .outgoing_commands
-            .try_send(WsMessage::Text("occupied".into()))
-            .unwrap();
-        connection
-            .outgoing_priority
-            .try_send(WsMessage::Text("occupied".into()))
-            .unwrap();
+        let occupied = || ServerToAgent::Error {
+            message: "occupied".to_string(),
+        };
+        assert!(connection.lanes.try_command(occupied()));
+        assert!(connection.lanes.try_priority(occupied()));
         // Saturation accepts retained intent; repeated DELETE must not enqueue another task.
         assert_eq!(fixture.cancel(id), Ok(true));
         assert_eq!(fixture.cancel(id), Ok(true));
         assert!(terminal.borrow().is_none());
         // Releasing priority capacity delivers cancellation while ordinary commands stay full.
         fixture.priority.recv().await.unwrap();
-        let WsMessage::Text(json) = fixture.priority.recv().await.unwrap() else {
-            panic!("Expected cancel frame");
-        };
-        assert!(
-            matches!(serde_json::from_str::<ServerToAgent>(&json).unwrap(), ServerToAgent::CancelTransfer { request_id } if request_id == id)
-        );
+        assert!(matches!(
+            fixture.priority.recv().await,
+            Some(ServerToAgent::CancelTransfer { request_id }) if request_id == id
+        ));
         assert!(fixture.priority.try_recv().is_err());
         // The stopped stream ends for the consumer without waiting for more output.
         assert!(output.recv().await.is_none());
@@ -522,17 +503,20 @@ mod tests {
             }))
         ));
         assert!(terminal.borrow().is_none());
-        let (priority, mut receiver) = mpsc::channel(1);
+        let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         fixture
             .state
             .agents
             .by_id
             .get_mut(&fixture.agent)
             .unwrap()
-            .outgoing_priority = priority;
+            .lanes = lanes;
         // The same execution remains cancelable once delivery is available again.
         assert_eq!(fixture.cancel(id), Ok(true));
-        assert!(receiver.recv().await.is_some());
+        assert!(matches!(
+            receivers.priority.recv().await,
+            Some(ServerToAgent::CancelTransfer { request_id }) if request_id == id
+        ));
     }
 
     /// Output queued before a cancel is still drained, then the consumer sees the end.
@@ -671,15 +655,16 @@ mod tests {
     async fn credit_overflow_fails_stream_and_cancels_worker() {
         let mut fixture = Fixture::new(true).await;
         // Room for the cancel and the credit grants the drained frames return.
-        let (priority, priority_receiver) = mpsc::channel(16);
+        let (lanes, receivers) = ControlLanes::bounded(1, 16);
         fixture
             .state
             .agents
             .by_id
             .get_mut(&fixture.agent)
             .unwrap()
-            .outgoing_priority = priority;
-        fixture.priority = priority_receiver;
+            .lanes = lanes;
+        fixture.commands = receivers.commands;
+        fixture.priority = receivers.priority;
         let (mut output, terminal) = fixture.exec().await;
         let id = output.request_id();
         for _ in 0..=redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES + 1 {
@@ -688,7 +673,7 @@ mod tests {
         // The worker is told to stop because its frames are no longer routed.
         assert!(matches!(
             fixture.priority.try_recv(),
-            Ok(WsMessage::Text(_))
+            Ok(ServerToAgent::CancelTransfer { request_id }) if request_id == id
         ));
         // The independent terminal lane reports the violation.
         assert!(matches!(&*terminal.borrow(), Some(ExecEvent::Error { .. })));

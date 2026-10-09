@@ -7,7 +7,7 @@
 //! to the router. With per-stream credit the transfer reader also never waits for a consumer,
 //! so one stalled HTTP client cannot freeze the other streams sharing its agent's socket.
 
-use axum::extract::ws::Message as WsMessage;
+use crate::actors::lanes::ControlLanes;
 use redoor_core::stream_credit::{CreditGate, CreditLedger};
 use redoor_protocol::{
     ids::{AgentId, ChunkIndex, RequestId},
@@ -34,10 +34,10 @@ const UNCREDITED_QUEUE_FRAMES: usize = 1;
 /// What a stream needs to reach its agent without asking the router.
 #[derive(Clone, Debug)]
 pub struct AgentLink {
-    /// Priority control lane used for credit grants, which must not queue behind commands.
-    priority: mpsc::Sender<WsMessage>,
+    /// Control lanes; credit grants use the priority lane so they never queue behind commands.
+    control: ControlLanes,
     /// Payload lane for server-to-agent frames; absent when the transfer socket is down.
-    transfer: Option<mpsc::Sender<WsMessage>>,
+    transfer: Option<mpsc::Sender<StreamChunk>>,
     /// Whether this control session negotiated per-stream credit.
     credit: bool,
 }
@@ -45,12 +45,12 @@ pub struct AgentLink {
 impl AgentLink {
     /// Captures the lanes of one control session and its current transfer socket.
     pub(crate) fn new(
-        priority: mpsc::Sender<WsMessage>,
-        transfer: Option<mpsc::Sender<WsMessage>>,
+        control: ControlLanes,
+        transfer: Option<mpsc::Sender<StreamChunk>>,
         credit: bool,
     ) -> Self {
         Self {
-            priority,
+            control,
             transfer,
             credit,
         }
@@ -59,10 +59,10 @@ impl AgentLink {
     /// Returns credit for frames a consumer drained, waiting for priority-lane capacity so a
     /// grant is never lost (a lost grant would shrink the window for the rest of the stream).
     async fn grant(&self, request_id: RequestId, frames: u32) {
-        let message = ServerToAgent::StreamCredit { request_id, frames };
-        if let Ok(json) = serde_json::to_string(&message) {
-            let _ = self.priority.send(WsMessage::Text(json.into())).await;
-        }
+        let _ = self
+            .control
+            .send_priority(ServerToAgent::StreamCredit { request_id, frames })
+            .await;
     }
 }
 
@@ -428,7 +428,7 @@ impl OutputReceiver {
 impl ConnectionStreams {
     /// Opens an inbound stream on a detached link so consumer tests need no router.
     pub(crate) fn open_detached(&self, request_id: RequestId) -> OutputReceiver {
-        let link = AgentLink::new(mpsc::channel(1).0, None, false);
+        let link = AgentLink::new(ControlLanes::bounded(1, 1).0, None, false);
         self.open_inbound(StreamLease::new(request_id, link, 0))
     }
 }
@@ -449,7 +449,7 @@ pub enum OutboundError {
 #[derive(Clone, Debug)]
 pub struct OutboundStream {
     lease: StreamLease,
-    transfer: Option<mpsc::Sender<WsMessage>>,
+    transfer: Option<mpsc::Sender<StreamChunk>>,
     credit: Option<CreditGate>,
 }
 
@@ -517,11 +517,10 @@ impl OutboundStream {
             chunk.data.len() as u64
         };
         let transfer = self.transfer.as_ref().ok_or(OutboundError::LaneClosed)?;
-        let frame = WsMessage::Binary(chunk.to_bytes().into());
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(OutboundError::Stopped),
-            result = transfer.send(frame) => result.map_err(|_| OutboundError::LaneClosed)?,
+            result = transfer.send(chunk) => result.map_err(|_| OutboundError::LaneClosed)?,
         }
         self.lease.bytes.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
@@ -543,9 +542,7 @@ impl OutboundStream {
             .payload_kind(payload_kind)
             .is_error(true);
         if let Some(chunk) = StreamChunkFrames::new(request).next() {
-            let _ = transfer
-                .send(WsMessage::Binary(chunk.to_bytes().into()))
-                .await;
+            let _ = transfer.send(chunk).await;
         }
     }
 
@@ -561,13 +558,13 @@ mod tests {
     use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
 
     /// Builds a session's tables plus the priority lane its credit grants use.
-    fn session(credit: bool) -> (ConnectionStreams, AgentLink, mpsc::Receiver<WsMessage>) {
-        let (priority, grants) = mpsc::channel(16);
+    fn session(credit: bool) -> (ConnectionStreams, AgentLink, mpsc::Receiver<ServerToAgent>) {
+        let (lanes, receivers) = ControlLanes::bounded(16, 16);
         let agent = AgentId::from("agent");
         (
             ConnectionStreams::new(agent.clone(), credit),
-            AgentLink::new(priority, None, credit),
-            grants,
+            AgentLink::new(lanes, None, credit),
+            receivers.priority,
         )
     }
 
@@ -630,14 +627,11 @@ mod tests {
         // The batch is returned when the consumer asks for more, before it waits again.
         assert!(grants.try_recv().is_err());
         let next = tokio::spawn(async move { receiver.recv().await });
-        let WsMessage::Text(grant) = grants.recv().await.unwrap() else {
-            panic!("credit grants are control text frames");
-        };
         // Two drained frames complete one batch, returned for this stream on the control lane.
-        assert_eq!(
-            grant.as_str(),
-            r#"{"type":"stream_credit","request_id":3,"frames":2}"#
-        );
+        assert!(matches!(
+            grants.recv().await,
+            Some(ServerToAgent::StreamCredit { request_id, frames: 2 }) if request_id == RequestId::new(3)
+        ));
         // Progress counts what the consumer drained, not what the reader merely queued.
         assert_eq!(lease.bytes(), 32);
         next.abort();
@@ -694,9 +688,8 @@ mod tests {
     #[tokio::test]
     async fn outbound_stream_spends_credit_and_stops_promptly() {
         let streams = ConnectionStreams::new(AgentId::from("agent"), true);
-        let (priority, _priority_rx) = mpsc::channel(1);
         let (transfer, mut lane) = mpsc::channel(64);
-        let link = AgentLink::new(priority, Some(transfer), true);
+        let link = AgentLink::new(ControlLanes::bounded(1, 1).0, Some(transfer), true);
         let lease = StreamLease::new(RequestId::new(7), link, 0);
         let outbound = OutboundStream::new(lease.clone(), streams.open_outbound(lease.id));
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {

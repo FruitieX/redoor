@@ -352,13 +352,12 @@ impl RouterState {
             if source_started
                 && !remote.source_finished
                 && let Some(source) = self.agents.by_id.get(source_agent_id)
-                && !source.send_priority_message(ServerToAgent::CancelTransfer {
-                    request_id: remote.source_id(),
-                })
             {
-                source.send_message(ServerToAgent::CancelTransfer {
-                    request_id: remote.source_id(),
-                });
+                source
+                    .lanes
+                    .try_priority_or_command(ServerToAgent::CancelTransfer {
+                        request_id: remote.source_id(),
+                    });
             }
         } else {
             remote.dest.lease().stop();
@@ -710,11 +709,11 @@ impl RouterState {
             }
         };
         for (agent_id, request_id) in targets {
-            if let Some(connection) = self.agents.by_id.get(&agent_id)
-                && !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
-            {
+            if let Some(connection) = self.agents.by_id.get(&agent_id) {
                 // Falling back to the command lane is slower but must not lose cleanup.
-                connection.send_message(ServerToAgent::CancelTransfer { request_id });
+                connection
+                    .lanes
+                    .try_priority_or_command(ServerToAgent::CancelTransfer { request_id });
             }
         }
         Ok(())
@@ -751,17 +750,17 @@ impl RouterState {
 mod tests {
     use super::super::super::streams::{AgentLink, ConnectionStreams};
     use super::*;
-    use axum::extract::ws::Message as WsMessage;
+    use crate::actors::lanes::ControlLanes;
     use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
     use tokio::sync::mpsc;
 
     /// Builds one credited agent session with an observable transfer lane.
-    fn agent(name: &str) -> (ConnectionStreams, AgentLink, mpsc::Receiver<WsMessage>) {
+    fn agent(name: &str) -> (ConnectionStreams, AgentLink, mpsc::Receiver<StreamChunk>) {
         let (transfer, lane) = mpsc::channel(64);
         let agent = AgentId::from(name);
         (
             ConnectionStreams::new(agent.clone(), true),
-            AgentLink::new(mpsc::channel(16).0, Some(transfer), true),
+            AgentLink::new(ControlLanes::bounded(16, 16).0, Some(transfer), true),
             lane,
         )
     }
@@ -824,10 +823,7 @@ mod tests {
         assert_eq!(forwarded, STREAM_CREDIT_WINDOW_FRAMES as usize);
         // Failing the copy makes the forwarder abort the destination worker.
         dest.lease().fail("Agent disconnected: source".to_string());
-        let WsMessage::Binary(abort) = dest_lane.recv().await.unwrap() else {
-            panic!("abort frames use the binary transfer lane");
-        };
-        let abort = StreamChunk::from_bytes(&abort).unwrap();
+        let abort = dest_lane.recv().await.unwrap();
         assert!(abort.is_error && abort.data == b"Agent disconnected: source");
     }
 
@@ -859,8 +855,8 @@ mod tests {
         assert!(end.is_some_and(|end| end.delivered));
         forwarder.await.unwrap();
         let mut frames = Vec::new();
-        while let Ok(WsMessage::Binary(bytes)) = dest_lane.try_recv() {
-            frames.push(StreamChunk::from_bytes(&bytes).unwrap());
+        while let Ok(frame) = dest_lane.try_recv() {
+            frames.push(frame);
         }
         // Frames are renumbered for the destination stream and the last one stays terminal.
         assert_eq!(frames.len(), 2);
@@ -895,8 +891,13 @@ mod tests {
             total_bytes: 8,
             direction: TransferDirection::Copy,
         });
-        let detached =
-            |id| StreamLease::new(id, AgentLink::new(mpsc::channel(1).0, None, false), 0);
+        let detached = |id| {
+            StreamLease::new(
+                id,
+                AgentLink::new(ControlLanes::bounded(1, 1).0, None, false),
+                0,
+            )
+        };
         state.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
