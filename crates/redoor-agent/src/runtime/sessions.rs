@@ -7,8 +7,14 @@ use redoor_protocol::{
     ids::RequestId,
     wire::{log::Level, log::LogStreamId, terminal::TerminalId},
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use tokio_util::sync::CancellationToken;
+
+/// Bounds remembered early cancels. Cancels for requests that already finished also land
+/// here and are never consumed, so without a cap they would accumulate for the whole
+/// connection. A genuine early cancel is consumed within moments, long before 1024 newer
+/// tombstones could push it out.
+const MAX_EARLY_CANCELS: usize = 1024;
 
 /// Bounds dedicated terminal sockets and PTYs per agent.
 const MAX_TERMINALS: usize = 8;
@@ -20,7 +26,7 @@ pub(crate) struct Sessions {
     /// Every request-cancelable command (uploads, downloads, exec, copies, moves, restores).
     pub(crate) requests: CancelRegistry<RequestId>,
     /// Cancels that overtook their command on the independent priority lane.
-    pending_cancellations: HashSet<RequestId>,
+    pending_cancellations: EarlyCancels,
     /// Chunk and publication routing for upload workers.
     upload_routes: UploadRoutes,
     /// Dedicated terminal sockets; duplicates and excess sessions are rejected.
@@ -34,7 +40,7 @@ impl Sessions {
     pub(crate) fn new(upload_routes: UploadRoutes) -> Self {
         Self {
             requests: CancelRegistry::new(None),
-            pending_cancellations: HashSet::new(),
+            pending_cancellations: EarlyCancels::default(),
             upload_routes,
             terminals: CancelRegistry::new(Some(MAX_TERMINALS)),
             log_streams: CancelRegistry::new(Some(MAX_LOG_STREAMS)),
@@ -67,7 +73,7 @@ impl Sessions {
 
     /// Consumes a cancel that arrived before its command, if any.
     pub(crate) fn take_pending_cancel(&mut self, request_id: RequestId) -> bool {
-        self.pending_cancellations.remove(&request_id)
+        self.pending_cancellations.take(request_id)
     }
 
     /// Registers a request-cancelable command; an early cancel applies immediately.
@@ -95,7 +101,7 @@ impl Sessions {
         }
         // Priority traffic can overtake the command lane. Keep a tombstone so the worker
         // starts canceled instead of losing the request.
-        self.pending_cancellations.insert(request_id);
+        self.pending_cancellations.remember(request_id);
         log!(
             Level::Info,
             "Retained transfer cancel until command registration: request_id={}",
@@ -104,10 +110,81 @@ impl Sessions {
     }
 }
 
+/// Insertion-ordered tombstones of cancels that arrived before their command, capped at
+/// `MAX_EARLY_CANCELS` by forgetting the oldest.
+#[derive(Default)]
+struct EarlyCancels {
+    /// Tombstone -> insertion sequence, for lookup.
+    by_request: HashMap<RequestId, u64>,
+    /// Insertion sequence -> tombstone, so the oldest is found without a scan.
+    by_age: BTreeMap<u64, RequestId>,
+    next_sequence: u64,
+}
+
+impl EarlyCancels {
+    /// Remembers a cancel, evicting the oldest tombstone once the cap is reached.
+    fn remember(&mut self, request_id: RequestId) {
+        if self.by_request.contains_key(&request_id) {
+            return;
+        }
+        if self.by_request.len() >= MAX_EARLY_CANCELS
+            && let Some((_, oldest)) = self.by_age.pop_first()
+        {
+            self.by_request.remove(&oldest);
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.by_request.insert(request_id, sequence);
+        self.by_age.insert(sequence, request_id);
+    }
+
+    /// Consumes the tombstone of `request_id`; returns whether it was present.
+    fn take(&mut self, request_id: RequestId) -> bool {
+        match self.by_request.remove(&request_id) {
+            Some(sequence) => {
+                self.by_age.remove(&sequence);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forgets every tombstone when the connection that issued them ends.
+    fn clear(&mut self) {
+        self.by_request.clear();
+        self.by_age.clear();
+    }
+
+    /// Number of remembered tombstones.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.by_request.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    /// Cancels for already finished requests must not grow the tombstones without bound,
+    /// while the newest (the ones that can still meet their command) are kept.
+    #[test]
+    fn early_cancel_tombstones_are_bounded() {
+        let mut sessions = Sessions::new(UploadRoutes::default());
+        let total = MAX_EARLY_CANCELS as u64 + 10;
+        for id in 0..total {
+            sessions.cancel_request(RequestId::new(id));
+        }
+        // The cap holds no matter how many unmatched cancels arrive.
+        assert_eq!(sessions.pending_cancellations.len(), MAX_EARLY_CANCELS);
+        // The oldest tombstones were evicted first.
+        assert!(!sessions.take_pending_cancel(RequestId::new(0)));
+        // A recent early cancel still applies when its command arrives.
+        assert!(sessions.take_pending_cancel(RequestId::new(total - 1)));
+        // Consuming a tombstone frees its slot.
+        assert_eq!(sessions.pending_cancellations.len(), MAX_EARLY_CANCELS - 1);
+    }
 
     /// Verifies the early-cancel tombstone survives until the command registers.
     #[tokio::test]

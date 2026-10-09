@@ -107,17 +107,13 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     })
 }
 
-/// Imports a missing daemon config before detaching closes the invoking terminal's stdin.
-pub async fn prepare_daemon_config(args: &AgentArgs, paths: &AppPaths) -> Result<()> {
-    locate_config(args, paths).await.map(|_| ())
-}
-
 /// Finds the TOML file this agent should read, importing it from stdin when required.
 ///
 /// An explicit `--config` must exist unless it can be imported; the conventional path is
 /// optional so fully CLI/env-configured agents need neither HOME nor a file. Shared by
-/// daemon preparation (which must import before stdin is detached) and normal startup.
-async fn locate_config(args: &AgentArgs, paths: &AppPaths) -> Result<Option<PathBuf>> {
+/// daemon preparation (which must import before detaching closes the invoking terminal's
+/// stdin) and normal startup.
+pub async fn locate_config(args: &AgentArgs, paths: &AppPaths) -> Result<Option<PathBuf>> {
     let (path, explicit) = match &args.config {
         Some(path) => (PathBuf::from(path), true),
         None => match paths.default_config_path() {

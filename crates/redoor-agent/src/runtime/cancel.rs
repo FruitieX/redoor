@@ -17,6 +17,17 @@ pub(crate) enum RegisterError {
     Full,
 }
 
+impl RegisterError {
+    /// Short reason for rejection logs, so operators can tell a replayed bootstrap from a
+    /// session limit.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Duplicate => "already running",
+            Self::Full => "session limit reached",
+        }
+    }
+}
+
 /// Mutable registry contents guarded by one mutex so registration and revocation are atomic.
 struct RegistryState<K> {
     /// Connection-scoped parent; cancelling it stops every generation created from it.

@@ -363,7 +363,8 @@ async fn run_agent_command(
         None => {
             let daemon = args.run.daemon;
             if daemon {
-                redoor_agent::prepare_daemon_config(&args.run, paths).await?;
+                // Import a missing config now: detaching closes the terminal's stdin.
+                redoor_agent::locate_config(&args.run, paths).await?;
             }
             return run_role(ProcessSlot::Agent, daemon, &context, parent, || {
                 redoor_agent::run(args.run, context.clone())

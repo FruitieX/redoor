@@ -407,7 +407,9 @@ impl std::io::Write for ChannelTarWriter {
 /// Directory archive produced by a blocking tar writer, plus an optional size walk.
 pub(crate) struct TarDirectorySource {
     receiver: mpsc::Receiver<Vec<u8>>,
-    archive: JoinHandle<()>,
+    /// The blocking tar writer; its result is the only way to tell a finished archive from
+    /// one that stopped half-way (both just drop the block sender). `None` once joined.
+    archive: Option<JoinHandle<Result<(), String>>>,
     size_measure: Option<JoinHandle<()>>,
 }
 
@@ -456,33 +458,52 @@ impl TarDirectorySource {
                 sender,
                 runtime: tokio::runtime::Handle::current(),
             };
-            if let Err(error) = write_directory_tar(writer, &source_path, include_root) {
-                redoor_core::log_failure!(
-                    Level::Error,
-                    "Tar directory streaming failed: path={}, error={}",
-                    source_path.display(),
-                    error
-                );
-            }
+            write_directory_tar(writer, &source_path, include_root)
+                .map(drop)
+                .map_err(|error| {
+                    redoor_core::log_failure!(
+                        Level::Error,
+                        "Tar directory streaming failed: path={}, error={:#}",
+                        source_path.display(),
+                        error
+                    );
+                    format!("Failed to archive directory: {error:#}")
+                })
         });
         Ok(Self {
             receiver,
-            archive,
+            archive: Some(archive),
             size_measure,
         })
     }
 }
 
 impl ByteSource for TarDirectorySource {
-    /// Yields the next block the archive writer produced.
+    /// Yields the next block the archive writer produced, and at the end of the blocks the
+    /// writer's outcome, so a truncated archive ends with an error frame instead of `is_last`.
     async fn next_block(&mut self) -> Result<Option<Vec<u8>>, String> {
-        Ok(self.receiver.recv().await)
+        if let Some(block) = self.receiver.recv().await {
+            return Ok(Some(block));
+        }
+        let Some(archive) = self.archive.as_mut() else {
+            return Ok(None);
+        };
+        // Awaiting by reference keeps this cancellation safe: `finish` joins it otherwise.
+        let outcome = archive.await;
+        self.archive = None;
+        match outcome {
+            Ok(Ok(())) => Ok(None),
+            Ok(Err(message)) => Err(message),
+            Err(error) => Err(format!("Directory archive task failed: {error}")),
+        }
     }
 
     /// Closes the pipe so a still-running writer fails fast, then joins both producers.
     async fn finish(self) {
         drop(self.receiver);
-        let _ = self.archive.await;
+        if let Some(archive) = self.archive {
+            let _ = archive.await;
+        }
         if let Some(size_measure) = self.size_measure {
             let _ = size_measure.await;
         }
@@ -754,6 +775,44 @@ mod tests {
         // The source's own message becomes the terminal error frame.
         assert!(frames[0].is_error);
         assert_eq!(frames[0].data, b"Failed to read file: boom");
+    }
+
+    /// A directory the tar writer cannot finish (here: a socket member) must end the source
+    /// with an error, never with `Ok(None)`, or the truncated archive is reported complete.
+    #[tokio::test]
+    async fn tar_source_surfaces_a_failed_archive_writer() {
+        let temp_dir = TempDir::create();
+        let source_root = temp_dir.path().join("tar-fails-midway");
+        tokio::fs::create_dir_all(&source_root).await.unwrap();
+        tokio::fs::write(source_root.join("a.txt"), vec![1u8; 64 * 1024])
+            .await
+            .unwrap();
+        // Sorted after the regular file, so the writer fails after streaming some blocks.
+        let _socket = std::os::unix::net::UnixListener::bind(source_root.join("z.sock")).unwrap();
+        let (responder, _frames) = Responder::recording(RequestId::new(3), 4);
+        let mut source = TarDirectorySource::open(
+            source_root.to_str().unwrap(),
+            false,
+            responder,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the directory itself is readable");
+        let mut streamed = 0;
+        let outcome = loop {
+            match source.next_block().await {
+                Ok(Some(block)) => streamed += block.len(),
+                other => break other,
+            }
+        };
+        // Some of the archive was produced before the failure.
+        assert!(streamed > 0);
+        // The writer's error is the terminal outcome, naming the offending entry.
+        let Err(message) = outcome else {
+            panic!("a truncated archive must not end successfully: {outcome:?}");
+        };
+        assert!(message.contains("z.sock"), "{message}");
+        source.finish().await;
     }
 
     /// Failed range seeks must not retain cancellation handles after the worker exits.

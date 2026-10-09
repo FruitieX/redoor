@@ -172,7 +172,7 @@ impl UploadDriver {
     /// Runs the upload: announce readiness, stage chunks, then commit or abort.
     ///
     /// Owns the ordering every upload must follow on cancellation or failure: stop staging,
-    /// discard staging output, unregister the chunk route and request, and only then let the
+    /// unroute chunks, discard staging output, unregister the request, and only then let the
     /// dispatcher send the terminal response.
     pub(crate) async fn run<S: UploadSink>(self, prepared: Result<S, AgentCommandError>) -> Reply {
         let mut sink = match prepared {
@@ -257,8 +257,12 @@ impl UploadDriver {
             }
             UploadStop::Failed(error) => error.into(),
         };
-        sink.abort().await;
+        // Unroute before the possibly slow abort: a registered route with an undrained queue
+        // would block an uncredited transfer reader on this worker, and the reader would later
+        // answer for it a second time. Late frames for an unrouted request are dropped.
         drop(route);
+        drop(chunks);
+        sink.abort().await;
         drop(self.ctx);
         Reply::Result(result)
     }
@@ -432,7 +436,7 @@ impl UploadRoutes {
                         path
                     );
                     // Unrouting closes the worker's queue; it fails with its own response.
-                    self.remove(request_id, serial);
+                    let _ = self.remove(request_id, serial);
                     return;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
@@ -443,13 +447,17 @@ impl UploadRoutes {
         if delivered {
             return;
         }
+        // A worker unroutes itself before it stops reading and answers on its own; only a
+        // worker that vanished while still routed (an abnormal exit) needs an answer here.
+        if !self.remove(request_id, serial) {
+            return;
+        }
         log!(
             Level::Warning,
             "Upload worker dropped before chunk delivery: request_id={}, path={}",
             request_id,
             path
         );
-        self.remove(request_id, serial);
         let _ = Responder::new(control.clone(), agent_id.clone(), request_id)
             .respond(CommandResult::error(
                 CommandErrorKind::Internal,
@@ -458,16 +466,18 @@ impl UploadRoutes {
             .await;
     }
 
-    /// Removes a route only if it is still the registration identified by `serial`.
-    fn remove(&self, request_id: RequestId, serial: u64) {
+    /// Removes a route only if it is still the registration identified by `serial`; returns
+    /// whether it was.
+    fn remove(&self, request_id: RequestId, serial: u64) -> bool {
         let mut table = self.table();
-        if table
+        let current = table
             .routes
             .get(&request_id)
-            .is_some_and(|route| route.serial == serial)
-        {
+            .is_some_and(|route| route.serial == serial);
+        if current {
             table.routes.remove(&request_id);
         }
+        current
     }
 
     /// Registers the waiter for the router's publication decision.
@@ -513,7 +523,7 @@ pub(crate) struct RouteGuard {
 impl Drop for RouteGuard {
     /// Unroutes this worker without disturbing a newer route for the same id.
     fn drop(&mut self) {
-        self.routes.remove(self.request_id, self.serial);
+        let _ = self.routes.remove(self.request_id, self.serial);
     }
 }
 
@@ -529,6 +539,9 @@ mod tests {
         routes: UploadRoutes,
         registry: CancelRegistry<RequestId>,
         request_id: RequestId,
+        /// When set, `abort` reports that it started and then waits to be released, modelling
+        /// slow staging cleanup.
+        slow_abort: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
     }
 
     impl RecordingSink {
@@ -563,9 +576,13 @@ mod tests {
             Ok(CommandResult::RawUpload)
         }
 
-        /// Records staging cleanup.
-        async fn abort(self) {
+        /// Records staging cleanup, optionally stalling until the test releases it.
+        async fn abort(mut self) {
             self.record("abort");
+            if let Some((started, release)) = self.slow_abort.take() {
+                let _ = started.send(());
+                let _ = release.await;
+            }
         }
     }
 
@@ -580,6 +597,11 @@ mod tests {
 
     /// Starts a raw-upload driver over a recording sink.
     fn start() -> Harness {
+        start_with(None)
+    }
+
+    /// Starts a raw-upload driver whose sink may stall in `abort`.
+    fn start_with(slow_abort: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>) -> Harness {
         let request_id = RequestId::new(5);
         let (mut ctx, frames) = CommandCtx::detached(request_id);
         let registry = CancelRegistry::new(None);
@@ -593,6 +615,7 @@ mod tests {
             routes: routes.clone(),
             registry: registry.clone(),
             request_id,
+            slow_abort,
         };
         let task = tokio::spawn(
             UploadDriver::new(UploadKind::RawUpload, "/tmp/dest".to_string(), ctx).run(Ok(sink)),
@@ -641,10 +664,10 @@ mod tests {
         harness.registry.cancel(&RequestId::new(5));
         let result = result(harness.task.await.unwrap());
 
-        // Staging is discarded while the request is still routed and cancelable, never after.
+        // Staging is discarded after unrouting but while the request is still cancelable.
         assert_eq!(
             *harness.events.lock().unwrap(),
-            vec!["abort routed=true registered=true".to_string()]
+            vec!["abort routed=false registered=true".to_string()]
         );
         // The terminal response follows unregistration so late cancels become harmless.
         assert!(!harness.registry.contains(&RequestId::new(5)));
@@ -654,6 +677,36 @@ mod tests {
             result,
             CommandResult::Error { kind: CommandErrorKind::InvalidInput, message } if message == "Upload canceled by server"
         ));
+    }
+
+    /// A slow abort must not stall an uncredited transfer reader on this worker's full queue,
+    /// and the reader must not answer for a worker that answers itself.
+    #[tokio::test]
+    async fn slow_abort_neither_blocks_the_reader_nor_double_answers() {
+        let (started, abort_started) = oneshot::channel();
+        let (release, abort_release) = oneshot::channel();
+        let mut harness = start_with(Some((started, abort_release)));
+        harness.frames.recv().await.unwrap();
+        harness.registry.cancel(&RequestId::new(5));
+        abort_started.await.unwrap();
+        let (control, mut control_frames) = mpsc::channel(4);
+        // More frames than the queue holds: with the route still registered the reader would
+        // wait forever for a worker that is busy aborting.
+        for _ in 0..=CHUNK_QUEUE_CAPACITY {
+            harness
+                .routes
+                .route_frame(
+                    &frame(StreamPayloadKind::RawFile, false),
+                    &control,
+                    &AgentId::from("test-agent"),
+                )
+                .await;
+        }
+        let _ = release.send(());
+        let result = result(harness.task.await.unwrap());
+        // The worker's own cancellation result is the only answer.
+        assert!(matches!(result, CommandResult::Error { .. }));
+        assert!(control_frames.try_recv().is_err());
     }
 
     /// Verifies protocol corruption aborts staging like a cancellation.
@@ -676,7 +729,7 @@ mod tests {
         // A corrupt stream must discard staging exactly like a cancellation.
         assert_eq!(
             *harness.events.lock().unwrap(),
-            vec!["abort routed=true registered=true".to_string()]
+            vec!["abort routed=false registered=true".to_string()]
         );
         // The mismatch is reported as invalid input rather than an internal failure.
         assert!(matches!(

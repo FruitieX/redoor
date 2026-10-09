@@ -570,13 +570,17 @@ impl AgentRuntime {
             );
             return;
         }
-        let Ok(registration) = self.sessions.terminals.register(terminal_id.clone()) else {
-            log!(
-                Level::Warning,
-                "Rejected duplicate terminal bootstrap: terminal_id={}",
-                terminal_id.0
-            );
-            return;
+        let registration = match self.sessions.terminals.register(terminal_id.clone()) {
+            Ok(registration) => registration,
+            Err(error) => {
+                log!(
+                    Level::Warning,
+                    "Rejected terminal bootstrap ({}): terminal_id={}",
+                    error.reason(),
+                    terminal_id.0
+                );
+                return;
+            }
         };
         let connection = self.connection.clone();
         tokio::spawn(async move {
@@ -604,13 +608,17 @@ impl AgentRuntime {
 
     /// Starts one dedicated log-stream socket whose registration lives as long as its task.
     fn start_log_stream(&mut self, log_stream_id: LogStreamId, token: String) {
-        let Ok(registration) = self.sessions.log_streams.register(log_stream_id.clone()) else {
-            log!(
-                Level::Warning,
-                "Rejected duplicate or excess log stream bootstrap: log_stream_id={}",
-                log_stream_id.0
-            );
-            return;
+        let registration = match self.sessions.log_streams.register(log_stream_id.clone()) {
+            Ok(registration) => registration,
+            Err(error) => {
+                log!(
+                    Level::Warning,
+                    "Rejected log stream bootstrap ({}): log_stream_id={}",
+                    error.reason(),
+                    log_stream_id.0
+                );
+                return;
+            }
         };
         let connection = self.connection.clone();
         tokio::spawn(async move {
@@ -644,7 +652,8 @@ impl AgentRuntime {
         );
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            enqueue_reconnect(handle).await;
+            // Awaits bounded mailbox capacity so a due reconnect cannot be silently discarded.
+            let _ = handle.send(AgentMsg::Connect).await;
         });
     }
 
@@ -825,11 +834,6 @@ impl AgentRuntime {
     }
 }
 
-/// Awaits bounded mailbox capacity so a due reconnect cannot be silently discarded.
-async fn enqueue_reconnect(handle: AgentHandle) {
-    let _ = handle.send(AgentMsg::Connect).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,7 +967,7 @@ mod tests {
         handle
             .try_send(AgentMsg::ExitWithError)
             .expect("mailbox saturation setup should fill its only slot");
-        let reconnect = enqueue_reconnect(handle);
+        let reconnect = handle.send(AgentMsg::Connect);
         tokio::pin!(reconnect);
 
         // Pending while full proves a due reconnect waits instead of using a lossy try-send.
@@ -974,7 +978,7 @@ mod tests {
             receiver.recv().await,
             Some(AgentMsg::ExitWithError)
         ));
-        reconnect.await;
+        reconnect.await.expect("mailbox stays open");
         // Freeing capacity must release the awaited timer send and preserve the reconnect attempt.
         assert!(matches!(receiver.recv().await, Some(AgentMsg::Connect)));
     }

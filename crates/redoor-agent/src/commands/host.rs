@@ -33,8 +33,8 @@ pub(super) async fn agent_info() -> CommandResult {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
 
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    // Load and uptime are cheap OS reads; a full `System` refresh would scan every process
+    // on an async worker for nothing.
     let load_avg = System::load_average();
     let load_average = (load_avg.one, load_avg.five, load_avg.fifteen);
     let system_uptime = System::uptime();
@@ -60,8 +60,8 @@ pub(super) async fn get_agent_details(loaded_config_path: &str) -> CommandResult
     // Empty when the agent was launched without a TOML file (CLI/env only).
     let config_path = loaded_config_path.to_string();
 
-    let mut sys = System::new_all();
-    sys.refresh_all();
+    // Load and uptime are cheap OS reads; a full `System` refresh would scan every process
+    // on an async worker for nothing.
     let load_avg = System::load_average();
     let system_uptime = System::uptime();
     let host = HostIdentity::current();
