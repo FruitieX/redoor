@@ -69,6 +69,19 @@ const agentRoot = join(temporaryDirectory, "agent-root");
 
 const secondAgentRoot = join(temporaryDirectory, "agent-root-two");
 
+/** Full operator scope set shared by the device tokens. */
+const operatorScopes = [
+    "devices:read",
+    "files:read",
+    "files:write",
+    "files:delete",
+    "commands:execute",
+    "agents:manage",
+];
+
+/** Every device the operator tokens may reach. */
+const operatorDevices = [testDeviceId, secondDeviceId, managedDeviceId];
+
 type RawMcpRequest = {
     jsonrpc: string;
     id: string;
@@ -229,27 +242,18 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
     });
     await Promise.all([secondRegistered, secondTransferred]);
 
-    const scopes = [
-        "devices:read",
-        "files:read",
-        "files:write",
-        "files:delete",
-        "commands:execute",
-        "agents:manage",
-    ];
-
     deviceToken = (
         await createToken({
             name: "device operator",
-            scopes,
-            devices: [testDeviceId, secondDeviceId, managedDeviceId],
+            scopes: operatorScopes,
+            devices: operatorDevices,
         })
     ).token;
     secondDeviceToken = (
         await createToken({
             name: "other device operator",
-            scopes,
-            devices: [testDeviceId, secondDeviceId, managedDeviceId],
+            scopes: operatorScopes,
+            devices: operatorDevices,
         })
     ).token;
 }, 30_000);
@@ -599,7 +603,20 @@ describe("stateless authenticated MCP", () => {
     });
 
     it("bounds retained output, cancels background execution, and keeps searches independent", async () => {
-        const client = createMcpTestClient({ endpoint, token: deviceToken });
+        // The per-credential rolling request budget is shared by every test using the same
+        // token, so this request-heavy test owns credentials instead of inheriting the budget
+        // the preceding workflow test already spent.
+        const [primary, peer] = await Promise.all(
+            ["retention operator", "retention peer"].map((name) =>
+                createToken({
+                    name,
+                    scopes: operatorScopes,
+                    devices: operatorDevices,
+                }),
+            ),
+        );
+        const client = createMcpTestClient({ endpoint, token: primary.token });
+        const peerClient = createMcpTestClient({ endpoint, token: peer.token });
 
         const large = await client.callTool("run_command", {
             device_id: testDeviceId,
@@ -616,9 +633,13 @@ describe("stateless authenticated MCP", () => {
             output_truncated: true,
         });
 
+        // Ten parallel admissions exceed one credential's concurrency cap of eight, so they are
+        // split across two credentials; the retention ceiling under test is global anyway.
         const quotaOperations = await Promise.all(
-            Array.from({ length: 10 }, () =>
-                client.callTool<JsonObject & { operation_id: string }>(
+            Array.from({ length: 10 }, (_, index) =>
+                (index % 2 === 0 ? client : peerClient).callTool<
+                    JsonObject & { operation_id: string }
+                >(
                     "run_command",
                     {
                         device_id: testDeviceId,
@@ -648,15 +669,19 @@ describe("stateless authenticated MCP", () => {
             throw new Error("Quota operation missing");
         let expired = false;
 
-        for (let attempt = 0; attempt < 200 && !expired; attempt += 1) {
+        // Every poll spends the credential's request budget, so poll the two-second retention
+        // boundary at a modest rate instead of spending most of the per-minute budget on it.
+        for (let attempt = 0; attempt < 100 && !expired; attempt += 1) {
             try {
-                await client.getOperation(expiringOperationId);
+                // Operations are addressable only by their owning credential; the last parallel
+                // admission (odd index) belongs to the peer client.
+                await peerClient.getOperation(expiringOperationId);
             } catch (error) {
                 expired = String(error).includes("(404)");
             }
 
             if (!expired)
-                await new Promise<void>((resolve) => setTimeout(resolve, 20));
+                await new Promise<void>((resolve) => setTimeout(resolve, 100));
         }
 
         // Terminal metadata and its private spool disappear at the configured retention boundary.
