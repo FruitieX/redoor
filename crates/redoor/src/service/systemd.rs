@@ -157,18 +157,22 @@ impl SystemdBackend {
 }
 
 impl ServiceBackend for SystemdBackend {
+    /// Used in `redoor <role> systemd ...` guidance.
     fn manager(&self) -> &'static str {
         "systemd"
     }
 
+    /// Matches the established `Systemd unit ...` status prefix.
     fn describe(&self) -> String {
         format!("Systemd unit '{}'", self.unit)
     }
 
+    /// Enabled units start with the machine (user units via lingering).
     fn autostart_trigger(&self) -> &'static str {
         "boot"
     }
 
+    /// System units differ from user units in identity and install target.
     fn render_definition(&self, binary: &Path, config_path: &Path) -> String {
         render_unit(
             self.role,
@@ -179,6 +183,8 @@ impl ServiceBackend for SystemdBackend {
         )
     }
 
+    /// Root installs also prepare the service account, config ownership and log directory;
+    /// user installs enable lingering so the service survives logout.
     async fn install(&self, config_path: &Path, start: bool) -> Result<PathBuf> {
         if !self.user {
             self.prepare_system_install(config_path).await?;
@@ -208,6 +214,8 @@ impl ServiceBackend for SystemdBackend {
         Ok(unit_path)
     }
 
+    /// Stops and disables units the manager still knows even when the file is gone, so
+    /// orphans are cleaned up too.
     async fn uninstall(&self) -> Result<bool> {
         let installed = self.unit_file_exists().await?;
         let manager_knows_unit = !matches!(self.load_state().await?.as_str(), "" | "not-found");
@@ -233,18 +241,22 @@ impl ServiceBackend for SystemdBackend {
         Ok(installed)
     }
 
+    /// Uses the manager's load state so a unit installed elsewhere still counts.
     async fn ensure_installed(&self) -> Result<()> {
         validate_unit_load_state(&self.unit, self.role, self.user, &self.load_state().await?)
     }
 
+    /// Starts the unit in this scope.
     async fn start(&self) -> Result<()> {
         self.systemctl(&["start", &self.unit]).await
     }
 
+    /// Stops the unit but leaves it enabled for the next boot.
     async fn stop(&self) -> Result<()> {
         self.systemctl(&["stop", &self.unit]).await
     }
 
+    /// Reloads first so an edited unit file takes effect.
     async fn restart(&self) -> Result<()> {
         self.systemctl(&["daemon-reload"])
             .await
@@ -252,10 +264,12 @@ impl ServiceBackend for SystemdBackend {
         self.systemctl(&["restart", &self.unit]).await
     }
 
+    /// Enables the unit for future boots.
     async fn enable(&self) -> Result<()> {
         self.systemctl(&["enable", &self.unit]).await
     }
 
+    /// `--now` lets systemd stop and disable in one transaction.
     async fn disable(&self, now: bool) -> Result<()> {
         if now {
             self.systemctl(&["disable", "--now", &self.unit]).await
@@ -264,6 +278,7 @@ impl ServiceBackend for SystemdBackend {
         }
     }
 
+    /// Combines the unit file, `systemctl show` and `is-enabled` into the shared state.
     async fn status(&self) -> Result<ServiceState> {
         let installed = self.unit_file_exists().await?;
         let output = self

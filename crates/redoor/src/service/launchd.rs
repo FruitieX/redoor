@@ -209,18 +209,22 @@ impl LaunchdBackend {
 }
 
 impl ServiceBackend for LaunchdBackend {
+    /// Used in `redoor <role> launchd ...` guidance.
     fn manager(&self) -> &'static str {
         "launchd"
     }
 
+    /// Matches the established `LaunchAgent ...` status prefix.
     fn describe(&self) -> String {
         format!("LaunchAgent '{}'", self.label)
     }
 
+    /// Enabled LaunchAgents start when the user logs in.
     fn autostart_trigger(&self) -> &'static str {
         "login"
     }
 
+    /// Renders the plist with this label and the pinned config.
     fn render_definition(&self, binary: &Path, config_path: &Path) -> String {
         render_plist(
             self.role,
@@ -231,6 +235,7 @@ impl ServiceBackend for LaunchdBackend {
         )
     }
 
+    /// Unloads an older definition first so launchd never keeps a stale plist in memory.
     async fn install(&self, config_path: &Path, start: bool) -> Result<PathBuf> {
         let binary = super::current_binary().await?;
         let content = self.render_definition(&binary, config_path);
@@ -263,6 +268,7 @@ impl ServiceBackend for LaunchdBackend {
         Ok(plist_path)
     }
 
+    /// Reports success when either the plist or a loaded job existed.
     async fn uninstall(&self) -> Result<bool> {
         let loaded = self.is_loaded().await?;
         if loaded {
@@ -285,6 +291,7 @@ impl ServiceBackend for LaunchdBackend {
         Ok(installed || loaded)
     }
 
+    /// The plist on disk is the source of truth for LaunchAgents.
     async fn ensure_installed(&self) -> Result<()> {
         if self.plist_exists().await? {
             return Ok(());
@@ -296,6 +303,7 @@ impl ServiceBackend for LaunchdBackend {
         ))
     }
 
+    /// Kickstarts a loaded job, bootstraps an unloaded one, and leaves a running one alone.
     async fn start(&self) -> Result<()> {
         match self.loaded_state().await? {
             Some(state) if state.running => Ok(()),
@@ -304,6 +312,7 @@ impl ServiceBackend for LaunchdBackend {
         }
     }
 
+    /// Unloading is how launchd stops a job; the plist stays for the next login.
     async fn stop(&self) -> Result<()> {
         if self.is_loaded().await? {
             self.bootout().await?;
@@ -311,6 +320,7 @@ impl ServiceBackend for LaunchdBackend {
         Ok(())
     }
 
+    /// Bootout + bootstrap re-reads the plist.
     async fn restart(&self) -> Result<()> {
         if self.is_loaded().await? {
             self.bootout()
@@ -320,10 +330,12 @@ impl ServiceBackend for LaunchdBackend {
         self.bootstrap().await
     }
 
+    /// Clears the disabled override for this label.
     async fn enable(&self) -> Result<()> {
         self.launchctl(&["enable", &self.target()]).await
     }
 
+    /// Sets the disabled override, optionally unloading the job now.
     async fn disable(&self, now: bool) -> Result<()> {
         self.launchctl(&["disable", &self.target()])
             .await
@@ -334,6 +346,7 @@ impl ServiceBackend for LaunchdBackend {
         Ok(())
     }
 
+    /// Combines the plist, `launchctl print` and the disabled overrides into the shared state.
     async fn status(&self) -> Result<ServiceState> {
         let installed = self.plist_exists().await?;
         let runtime = match self.loaded_state().await? {

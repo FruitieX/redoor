@@ -38,6 +38,7 @@ pub(crate) async fn ui_websocket_handler(
     ws.on_upgrade(move |socket| handle_ui_socket(socket, state.router_ref, timeouts))
 }
 
+/// Gives the new agent connection its own socket id and hands it to the session actor.
 async fn handle_socket(
     socket: WebSocket,
     router_ref: actors::router::RouterHandle,
@@ -104,6 +105,7 @@ async fn wait_for_ui_disconnect(receiver: &mut futures_util::stream::SplitStream
     }
 }
 
+/// Streams UI events to one browser until it disconnects or the router stops.
 async fn handle_ui_socket(
     socket: WebSocket,
     router_ref: actors::router::RouterHandle,

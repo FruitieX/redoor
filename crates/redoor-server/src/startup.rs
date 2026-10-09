@@ -194,15 +194,13 @@ impl ServerConfig {
             LOG_LEVEL_ENV,
             env.log_level.as_deref(),
             server.log_level,
-        )
-        .map_err(anyhow::Error::msg)?;
+        )?;
         let log_format = redoor_core::logging::resolve_format_sources(
             args.log_format,
             LOG_FORMAT_ENV,
             env.log_format.as_deref(),
             server.log_format,
-        )
-        .map_err(anyhow::Error::msg)?;
+        )?;
         Ok(Self {
             config_path,
             port: args.port.or(server.port).unwrap_or(DEFAULT_PORT),

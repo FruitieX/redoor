@@ -212,14 +212,12 @@ impl AgentSettings {
             args.log_level,
             "REDOOR_AGENT_LOG_LEVEL",
             agent_section.log_level,
-        )
-        .map_err(anyhow::Error::msg)?;
+        )?;
         let log_format = redoor_core::logging::resolve_initial_format(
             args.log_format,
             "REDOOR_AGENT_LOG_FORMAT",
             agent_section.log_format,
-        )
-        .map_err(anyhow::Error::msg)?;
+        )?;
 
         Ok(Self {
             ws_address,

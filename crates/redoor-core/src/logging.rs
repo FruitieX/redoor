@@ -429,12 +429,26 @@ pub fn set_level(level: Level) {
     LOG_LEVEL.store(level as u8, Ordering::Relaxed);
 }
 
+/// A role-specific logging environment variable holds a value the setting does not accept.
+///
+/// Rejected rather than ignored so a typo cannot silently fall back to the TOML value.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("Invalid {variable} value {value:?}: {reason}")]
+pub struct InvalidLogSetting {
+    /// Environment variable name.
+    variable: String,
+    /// Raw value found there.
+    value: String,
+    /// Accepted vocabulary.
+    reason: String,
+}
+
 /// Resolves CLI, role-specific environment, TOML, then the info default.
 pub fn resolve_initial_level(
     cli: Option<Level>,
     role_env_name: &str,
     toml: Option<Level>,
-) -> std::result::Result<Level, String> {
+) -> std::result::Result<Level, InvalidLogSetting> {
     resolve_level_sources(
         cli,
         role_env_name,
@@ -451,14 +465,16 @@ pub fn resolve_level_sources(
     role_env_name: &str,
     role_env: Option<&str>,
     toml: Option<Level>,
-) -> std::result::Result<Level, String> {
+) -> std::result::Result<Level, InvalidLogSetting> {
     if let Some(level) = cli {
         return Ok(level);
     }
     if let Some(value) = role_env {
-        return value
-            .parse::<Level>()
-            .map_err(|error| format!("Invalid {role_env_name} value {value:?}: {error}"));
+        return value.parse::<Level>().map_err(|reason| InvalidLogSetting {
+            variable: role_env_name.to_string(),
+            value: value.to_string(),
+            reason,
+        });
     }
     Ok(toml.unwrap_or_default())
 }
@@ -468,7 +484,7 @@ pub fn resolve_initial_format(
     cli: Option<LogFormat>,
     role_env_name: &str,
     toml: Option<LogFormat>,
-) -> std::result::Result<LogFormat, String> {
+) -> std::result::Result<LogFormat, InvalidLogSetting> {
     resolve_format_sources(
         cli,
         role_env_name,
@@ -485,14 +501,18 @@ pub fn resolve_format_sources(
     role_env_name: &str,
     role_env: Option<&str>,
     toml: Option<LogFormat>,
-) -> std::result::Result<LogFormat, String> {
+) -> std::result::Result<LogFormat, InvalidLogSetting> {
     if let Some(format) = cli {
         return Ok(format);
     }
     if let Some(value) = role_env {
         return value
             .parse::<LogFormat>()
-            .map_err(|error| format!("Invalid {role_env_name} value {value:?}: {error}"));
+            .map_err(|reason| InvalidLogSetting {
+                variable: role_env_name.to_string(),
+                value: value.to_string(),
+                reason,
+            });
     }
     Ok(toml.unwrap_or_default())
 }
