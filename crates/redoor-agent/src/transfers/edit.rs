@@ -336,7 +336,7 @@ mod tests {
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
     use redoor_protocol::{
-        ids::{AgentId, ChunkIndex},
+        ids::ChunkIndex,
         wire::{policy::UploadKind, stream::StreamChunk, stream::StreamPayloadKind},
     };
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -647,7 +647,6 @@ mod tests {
                     }
                     .to_bytes(),
                     &control,
-                    &AgentId::from("agent-1"),
                 )
                 .await;
         }

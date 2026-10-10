@@ -15,7 +15,7 @@ pub const CHUNK_SIZE: usize = 64 * 1024;
 /// multiplexing among concurrent streams sharing one persistent transfer socket.
 pub const MAX_TRANSFER_FRAME_PAYLOAD_BYTES: usize = 64 * 1024;
 
-/// Non-terminal frames a receiver initially allows in flight per credited stream.
+/// Non-terminal frames a receiver initially allows in flight per stream.
 ///
 /// Together with the 64 KiB frame size this bounds the memory one stream can occupy on its
 /// receiver to `(window + 1)` frames, independently of how many streams share a socket.
@@ -24,7 +24,7 @@ pub const STREAM_CREDIT_WINDOW_FRAMES: u32 = 4;
 ///
 /// Must not exceed the window, or a drained receiver could hold back credit the sender needs.
 pub const STREAM_CREDIT_BATCH_FRAMES: u32 = 2;
-/// Receive queue depth for a credited stream: the full window plus the one terminal frame,
+/// Receive queue depth of a stream: the full window plus the one terminal frame,
 /// which is exempt from credit so cancellation and completion can never wait for a grant.
 pub const STREAM_CREDIT_QUEUE_FRAMES: usize = STREAM_CREDIT_WINDOW_FRAMES as usize + 1;
 

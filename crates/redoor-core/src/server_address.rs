@@ -1,8 +1,10 @@
 //! Shared parsing for redoor server addresses used by the agent and relay.
 //!
 //! Operators may pass `http(s)://` or `ws(s)://` URLs. HTTP schemes are
-//! normalized to WebSocket schemes, and the WebSocket path is always `/ws`.
+//! normalized to WebSocket schemes, and the WebSocket path is always the agent endpoint
+//! (`/api/v1/agent/ws`); the legacy `/ws` path is accepted so existing configs keep working.
 
+use redoor_protocol::wire::handshake::AGENT_WS_PATH;
 use std::fmt;
 use std::str::FromStr;
 
@@ -18,7 +20,7 @@ pub struct ServerAddress {
 }
 
 impl ServerAddress {
-    /// Parses a server URL and emits a warning when a non-`/ws` path is rewritten.
+    /// Parses a server URL and emits a warning when an unknown path is rewritten.
     pub fn parse_with_warning(value: &str) -> Result<Self, String> {
         let (address, warning) = parse_server_address(value)?;
         if let Some(warning) = warning {
@@ -51,18 +53,18 @@ impl ServerAddress {
         }
     }
 
-    /// Canonical WebSocket URL the agent connects to (`…/ws`).
+    /// Canonical WebSocket URL the agent connects to (`…/api/v1/agent/ws`).
     pub fn websocket_url(&self) -> String {
         let scheme = if self.secure { "wss" } else { "ws" };
         let omit_port = (!self.secure && self.port == 80) || (self.secure && self.port == 443);
         if omit_port {
             if self.host.contains(':') {
-                format!("{scheme}://[{}]/ws", self.host)
+                format!("{scheme}://[{}]{AGENT_WS_PATH}", self.host)
             } else {
-                format!("{scheme}://{}/ws", self.host)
+                format!("{scheme}://{}{AGENT_WS_PATH}", self.host)
             }
         } else {
-            format!("{scheme}://{}/ws", self.authority())
+            format!("{scheme}://{}{AGENT_WS_PATH}", self.authority())
         }
     }
 }
@@ -142,8 +144,9 @@ fn parse_server_address(value: &str) -> Result<(ServerAddress, Option<String>), 
     let path = url.path();
     let warning = match path {
         "" | "/" | "/ws" => None,
+        known if known == AGENT_WS_PATH => None,
         other => Some(format!(
-            "server path '{other}' is ignored; WebSocket path is always /ws"
+            "server path '{other}' is ignored; WebSocket path is always {AGENT_WS_PATH}"
         )),
     };
 
@@ -165,49 +168,49 @@ mod tests {
         let cases = [
             (
                 "https://redoor.example.com",
-                "wss://redoor.example.com/ws",
+                "wss://redoor.example.com/api/v1/agent/ws",
                 true,
                 443,
             ),
             (
                 "https://redoor.example.com:443",
-                "wss://redoor.example.com/ws",
+                "wss://redoor.example.com/api/v1/agent/ws",
                 true,
                 443,
             ),
             (
                 "http://redoor.example.com:8888",
-                "ws://redoor.example.com:8888/ws",
+                "ws://redoor.example.com:8888/api/v1/agent/ws",
                 false,
                 8888,
             ),
             (
                 "http://redoor.example.com",
-                "ws://redoor.example.com/ws",
+                "ws://redoor.example.com/api/v1/agent/ws",
                 false,
                 80,
             ),
             (
                 "wss://redoor.example.com",
-                "wss://redoor.example.com/ws",
+                "wss://redoor.example.com/api/v1/agent/ws",
                 true,
                 443,
             ),
             (
                 "wss://redoor.example.com:443",
-                "wss://redoor.example.com/ws",
+                "wss://redoor.example.com/api/v1/agent/ws",
                 true,
                 443,
             ),
             (
                 "ws://redoor.example.com:8888",
-                "ws://redoor.example.com:8888/ws",
+                "ws://redoor.example.com:8888/api/v1/agent/ws",
                 false,
                 8888,
             ),
             (
                 "ws://redoor.example.com",
-                "ws://redoor.example.com/ws",
+                "ws://redoor.example.com/api/v1/agent/ws",
                 false,
                 80,
             ),
@@ -224,16 +227,38 @@ mod tests {
         }
     }
 
-    /// Forces an unexpected path onto `/ws` so operators cannot invent endpoints.
+    /// Forces an unexpected path onto the agent endpoint so operators cannot invent endpoints.
     #[test]
     fn rewrites_non_ws_paths_with_warning() {
         let (address, warning) = super::parse_server_address("https://redoor.example.com/custom")
             .expect("URL with path should still parse");
 
-        assert_eq!(address.websocket_url(), "wss://redoor.example.com/ws");
-        let warning = warning.expect("non-/ws paths must warn");
+        // Unknown paths are replaced by the one endpoint the server serves to agents.
+        assert_eq!(
+            address.websocket_url(),
+            "wss://redoor.example.com/api/v1/agent/ws"
+        );
+        let warning = warning.expect("unknown paths must warn");
+        // The warning names both the ignored and the effective path.
         assert!(warning.contains("/custom"));
-        assert!(warning.contains("/ws"));
+        assert!(warning.contains("/api/v1/agent/ws"));
+    }
+
+    /// Keeps configs written for the old endpoint and URLs naming the new one warning-free.
+    #[test]
+    fn accepts_legacy_and_current_agent_paths_silently() {
+        for input in [
+            "wss://redoor.example.com/ws",
+            "wss://redoor.example.com/api/v1/agent/ws",
+        ] {
+            let (address, warning) = super::parse_server_address(input).expect("known path");
+            // Both spellings name the agent endpoint, so nothing was rewritten unexpectedly.
+            assert_eq!(warning, None);
+            assert_eq!(
+                address.websocket_url(),
+                "wss://redoor.example.com/api/v1/agent/ws"
+            );
+        }
     }
 
     /// Keeps IPv6 destinations unambiguous for both SSH forwards and WSS authorities.
@@ -246,7 +271,10 @@ mod tests {
         assert_eq!(address.host(), "2001:db8::10");
         assert_eq!(address.port(), 4000);
         assert_eq!(address.authority(), "[2001:db8::10]:4000");
-        assert_eq!(address.websocket_url(), "ws://[2001:db8::10]:4000/ws");
+        assert_eq!(
+            address.websocket_url(),
+            "ws://[2001:db8::10]:4000/api/v1/agent/ws"
+        );
     }
 
     /// Rejects bare host:port so relay and agent share one URL-shaped contract.

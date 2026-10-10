@@ -95,16 +95,16 @@ impl Drop for CreditRegistration {
 /// Frames one request's output onto the shared transfer socket in chunk order.
 ///
 /// Every outbound payload frame of downloads and exec output leaves through
-/// [`StreamWriter::send_frames`], which is also where the per-stream credit gate sits when the
-/// server confirmed credit: a non-terminal frame is sent only after spending one frame of
-/// credit, so a slow consumer on the server stalls only this writer.
+/// [`StreamWriter::send_frames`], which is also where the per-stream credit gate sits: a
+/// non-terminal frame is sent only after spending one frame of credit, so a slow consumer on
+/// the server stalls only this writer.
 pub(crate) struct StreamWriter {
     transfer: mpsc::Sender<WsMessage>,
     request_id: RequestId,
     payload_kind: StreamPayloadKind,
     next_index: ChunkIndex,
-    /// Present when the server grants credit for this connection.
-    credit: Option<CreditRegistration>,
+    /// Credit granted by the server for this stream.
+    credit: CreditRegistration,
 }
 
 impl StreamWriter {
@@ -113,20 +113,27 @@ impl StreamWriter {
         transfer: mpsc::Sender<WsMessage>,
         request_id: RequestId,
         payload_kind: StreamPayloadKind,
+        credit: CreditRegistration,
     ) -> Self {
         Self {
             transfer,
             request_id,
             payload_kind,
             next_index: ChunkIndex::new(0),
-            credit: None,
+            credit,
         }
     }
 
-    /// Makes every non-terminal frame wait for server-granted credit.
-    pub(crate) fn with_credit(mut self, credit: CreditRegistration) -> Self {
-        self.credit = Some(credit);
-        self
+    /// Builds a raw-file writer with its own full credit window, for tests that do not
+    /// exercise grants.
+    #[cfg(test)]
+    pub(crate) fn for_test(transfer: mpsc::Sender<WsMessage>, request_id: RequestId) -> Self {
+        Self::new(
+            transfer,
+            request_id,
+            StreamPayloadKind::RawFile,
+            OutputCredits::default().register(request_id),
+        )
     }
 
     /// Sends payload bytes; `is_last` marks the successful end of the stream.
@@ -156,7 +163,7 @@ impl StreamWriter {
 
     /// Reframes one logical chunk into websocket-sized frames while preserving order.
     ///
-    /// Each send first spends credit (non-terminal frames of credited streams only) and then
+    /// Each send first spends credit (non-terminal frames only) and then
     /// waits for the depth-one transfer queue. Callers race these waits against cancellation,
     /// so neither a stalled consumer nor socket backpressure can hide a cancel request.
     async fn send_frames(&mut self, request: StreamChunkFrameRequest<'_>) -> bool {
@@ -164,10 +171,7 @@ impl StreamWriter {
             stream::StreamChunkFrames::new(request.starting_chunk_index(self.next_index));
         while let Some(chunk) = frames.next() {
             let next_index = frames.next_chunk_index();
-            if let Some(credit) = &self.credit
-                && chunk.consumes_credit()
-                && !credit.gate.acquire().await
-            {
+            if chunk.consumes_credit() && !self.credit.gate.acquire().await {
                 self.next_index = next_index;
                 return false;
             }
@@ -208,8 +212,12 @@ mod tests {
         let credits = OutputCredits::default();
         let request_id = RequestId::new(5);
         let (transfer, mut receiver) = mpsc::channel(64);
-        let mut writer = StreamWriter::new(transfer, request_id, StreamPayloadKind::RawFile)
-            .with_credit(credits.register(request_id));
+        let mut writer = StreamWriter::new(
+            transfer,
+            request_id,
+            StreamPayloadKind::RawFile,
+            credits.register(request_id),
+        );
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
             assert!(writer.send(b"x", false).await);
         }

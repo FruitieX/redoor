@@ -7,6 +7,7 @@ mod binaries;
 pub mod http;
 mod log_registry;
 mod one_time_token_registry;
+mod protocol_mismatches;
 pub mod ssh;
 pub mod startup;
 mod terminal_registry;

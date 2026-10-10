@@ -7,11 +7,13 @@ use super::flows::{CommandFlow, Flow};
 use super::messages::{
     AgentListEntry, ApplyManagedLifecycleRequest, ExecuteCommandRequest, OpenAgentLogStreamRequest,
     OpenTerminalRequest, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterTransferConnectionRequest, RouteResponse, UnregisterManagedAgentRequest,
+    RegisterTransferConnectionRequest, RegistrationRejection, RouteResponse,
+    UnregisterManagedAgentRequest,
 };
 use super::state::{AgentConnection, KnownAgent, RouterState, TransferConnection};
 use super::streams::AgentLink;
 use redoor_core::log;
+use redoor_protocol::wire::handshake::RejectReason;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::CancelScope;
 use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
@@ -46,7 +48,6 @@ impl AgentConnection {
             self.transfer
                 .as_ref()
                 .map(|transfer| transfer.outgoing_binary.clone()),
-            self.streams.credit(),
         )
     }
 
@@ -106,7 +107,10 @@ impl RouterState {
     ///
     /// Public status stays non-Connected until the payload socket attaches so clients
     /// that gate on `Connected` do not start transfers during the normal handshake window.
-    fn commit_registration(&mut self, request: RegisterAgentRequest) {
+    /// `welcome` is queued before anything else on the priority lane, so it is always the
+    /// first frame the agent reads.
+    fn commit_registration(&mut self, mut request: RegisterAgentRequest) {
+        let reply = request.reply.take();
         log!(
             Level::Info,
             "Agent registered: agent_id={}, agent_name={}, socket_id={}",
@@ -116,10 +120,11 @@ impl RouterState {
         );
         let agent_id = request.agent_id.clone();
         let connection = AgentConnection::from_register_request(request);
+        let welcome = ServerToAgent::Welcome {
+            connection_id: connection.socket_id.clone(),
+        };
         let transfer_open = ServerToAgent::TransferSocketOpen {
             token: connection.transfer_token.clone(),
-            // Confirms credit only to agents that advertised it, so both ends switch together.
-            stream_credit: connection.streams.credit(),
         };
         let transfer_open_lanes = connection.lanes.clone();
         let known = self
@@ -152,7 +157,22 @@ impl RouterState {
         self.agents.by_id.insert(agent_id, connection);
         self.notify_agents_changed();
 
+        let _ = transfer_open_lanes.try_priority(welcome);
         let _ = transfer_open_lanes.try_priority(transfer_open);
+        if let Some(reply) = reply {
+            let _ = reply.send(Ok(()));
+        }
+    }
+
+    /// Refuses a `hello`: queues `rejected` for the agent and tells its session to close.
+    fn reject_registration(request: RegisterAgentRequest, reason: RejectReason, message: String) {
+        let _ = request.lanes.try_priority(ServerToAgent::Rejected {
+            reason,
+            message: message.clone(),
+        });
+        if let Some(reply) = request.reply {
+            let _ = reply.send(Err(RegistrationRejection { reason, message }));
+        }
     }
 
     /// Marks inventory fully ready only after both control and payload sockets are live.
@@ -175,7 +195,7 @@ impl RouterState {
     fn release_connection(&mut self, connection: AgentConnection, notice: Option<&str>) {
         connection.shutdown_transfer();
         if let Some(message) = notice {
-            let _ = connection.send_priority_message(ServerToAgent::Error {
+            let _ = connection.send_priority_message(ServerToAgent::Evicted {
                 message: message.to_string(),
             });
         }
@@ -195,66 +215,88 @@ impl RouterState {
         }
     }
 
-    /// Registers a connected agent, replacing any existing connection with the same name.
+    /// Registers a connected agent, replacing an existing connection of the same agent.
     ///
     /// When the SSH tunnel drops without a clean TCP close, the server may not detect the old
-    /// session's disconnect for a long time. Rejecting the new connection in that window would
-    /// make the agent permanently unreachable until the TCP timeout fires. Instead, the new
-    /// connection takes over the name and the old session is cleaned up. The stale session's
-    /// later `UnregisterAgent` is ignored because its `socket_id` will not match.
+    /// session's disconnect for a long time. Rejecting the reconnect in that window would make
+    /// the agent permanently unreachable until the TCP timeout fires. Instead, the new
+    /// connection takes over and the old session is evicted. The stale session's later
+    /// `UnregisterAgent` is ignored because its `socket_id` will not match.
+    ///
+    /// A *different* agent id claiming a name that a live agent uses is refused instead, so
+    /// one agent can never silently take over another one's inventory row.
     pub(crate) fn register_agent(&mut self, request: RegisterAgentRequest) {
-        // Token validation happens in the session layer before this message is enqueued, so
-        // name takeover here is only reachable with a valid agent_token.
-        let existing_agent_id = self
+        // The token was validated during the websocket upgrade, so takeover here is only
+        // reachable with a valid agent_token.
+        let name_owner = self
             .agents
             .by_id
-            .iter()
-            .find(|(_, info)| info.agent_name == request.agent_name)
-            .map(|(id, _)| id.clone());
-        if let Some(old_agent_id) = existing_agent_id {
+            .values()
+            .find(|info| info.agent_name == request.agent_name)
+            .map(|info| info.agent_id.clone());
+        if let Some(owner) = name_owner.filter(|owner| owner != &request.agent_id) {
             log!(
                 Level::Warning,
-                "Replacing stale agent connection: agent_name={}, old_agent_id={}, new_agent_id={}",
+                "Rejecting agent whose name is used by another live agent: agent_name={}, agent_id={}, owner_agent_id={}",
                 request.agent_name,
-                old_agent_id,
-                request.agent_id
+                request.agent_id,
+                owner
             );
-            if let Some(old_connection) = self.agents.by_id.remove(&old_agent_id) {
-                self.forget_connection(&old_agent_id);
-                self.release_connection(
-                    old_connection,
-                    Some("Connection replaced by a new agent with the same name"),
-                );
-            }
+            let message = format!(
+                "Agent name '{}' is already used by connected agent '{}'",
+                request.agent_name, owner
+            );
+            Self::reject_registration(request, RejectReason::DuplicateName, message);
+            return;
+        }
+        if let Some(old_connection) = self.agents.by_id.remove(&request.agent_id) {
+            log!(
+                Level::Warning,
+                "Replacing stale agent connection: agent_name={}, agent_id={}, old_socket_id={}, socket_id={}",
+                request.agent_name,
+                request.agent_id,
+                old_connection.socket_id,
+                request.socket_id
+            );
+            self.forget_connection(&request.agent_id);
+            self.release_connection(
+                old_connection,
+                Some("Connection replaced by a new connection of the same agent"),
+            );
         }
 
-        let agent_id = request.agent_id.clone();
-        let rejection_lanes = request.lanes.clone();
-        let accepted = match request.watchdog.clone() {
-            Some(watchdog) => {
-                request
-                    .watchdog_attempt_generation
-                    .is_some_and(|attempt_generation| {
-                        watchdog
-                            .while_current_attempt(attempt_generation, || {
-                                self.commit_registration(request)
-                            })
-                            .is_some()
-                    })
-            }
-            None => {
-                self.commit_registration(request);
-                true
-            }
+        let Some(watchdog) = request.watchdog.clone() else {
+            self.commit_registration(request);
+            return;
         };
-        if !accepted {
-            let _ = rejection_lanes.try_priority(ServerToAgent::Error {
-                message: "Managed agent is intentionally stopped".to_string(),
-            });
+        let Some(attempt_generation) = request.watchdog_attempt_generation else {
+            Self::reject_registration(
+                request,
+                RejectReason::Stopped,
+                "Managed agent is intentionally stopped".to_string(),
+            );
+            return;
+        };
+        // The closure consumes the request only when the attempt is still current, so the
+        // rejection path below gets it back otherwise.
+        let mut pending = Some(request);
+        let committed = watchdog
+            .while_current_attempt(attempt_generation, || {
+                if let Some(request) = pending.take() {
+                    self.commit_registration(request);
+                }
+            })
+            .is_some();
+        if let Some(request) = pending.filter(|_| !committed) {
             log!(
                 Level::Warning,
-                "Ignoring managed registration that lost a shutdown race: agent_id={}",
-                agent_id
+                "Rejecting managed registration that lost a shutdown race: agent_id={}",
+                request.agent_id
+            );
+            Self::reject_registration(
+                request,
+                RejectReason::Stopped,
+                "Managed agent is intentionally stopped".to_string(),
             );
         }
     }
@@ -308,25 +350,24 @@ impl RouterState {
         if request.reply.is_closed() {
             log!(
                 Level::Warning,
-                "Ignoring cancelled transfer registration: agent_id={}, socket_id={}",
-                request.agent_id,
+                "Ignoring cancelled transfer registration: socket_id={}",
                 request.socket_id
             );
             let _ = request.shutdown.send(true);
             return;
         }
-        let Some(connection) = self.agents.by_id.get_mut(&request.agent_id) else {
+        let Some(agent_id) = self.transfer_token_owner(&request.token) else {
             let _ = request
                 .reply
                 .send(Err(RouterError::TransferAuthenticationFailed));
             return;
         };
-        if !transfer_tokens_match(&connection.transfer_token, &request.token) {
+        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
             let _ = request
                 .reply
                 .send(Err(RouterError::TransferAuthenticationFailed));
             return;
-        }
+        };
         // Evict the old payload lane before installing the replacement so cleanup cannot race
         // with new traffic on the incoming socket.
         if let Some(previous) = connection.transfer.take() {
@@ -334,18 +375,18 @@ impl RouterState {
             log!(
                 Level::Info,
                 "Transfer socket replaced: agent_id={}, old_socket_id={}, socket_id={}",
-                request.agent_id,
+                agent_id,
                 previous.socket_id,
                 request.socket_id
             );
             // The agent already cleared workers tied to the old socket, and the old socket's
             // unregister will be ignored as stale, so its flows must fail here.
             self.lose_transfer(
-                &request.agent_id,
-                format!("Transfer connection replaced: {}", request.agent_id),
+                &agent_id,
+                format!("Transfer connection replaced: {}", agent_id),
             );
         }
-        let Some(connection) = self.agents.by_id.get_mut(&request.agent_id) else {
+        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
             let _ = request.shutdown.send(true);
             let _ = request
                 .reply
@@ -361,12 +402,24 @@ impl RouterState {
         log!(
             Level::Info,
             "Transfer socket registered: agent_id={}, socket_id={}",
-            request.agent_id,
+            agent_id,
             request.socket_id
         );
         // Promote only here so Connected means transfers can succeed, not merely control is up.
-        self.mark_agent_transfer_ready(&request.agent_id);
-        let _ = request.reply.send(Ok(streams));
+        self.mark_agent_transfer_ready(&agent_id);
+        let _ = request.reply.send(Ok((agent_id, streams)));
+    }
+
+    /// Finds the live connection that issued a transfer token.
+    ///
+    /// Every connection is compared so the time taken does not reveal which token matched.
+    pub(crate) fn transfer_token_owner(&self, token: &str) -> Option<AgentId> {
+        self.agents
+            .by_id
+            .values()
+            .filter(|connection| transfer_tokens_match(&connection.transfer_token, token))
+            .map(|connection| connection.agent_id.clone())
+            .last()
     }
 
     /// Fails payload flows of an agent whose transfer socket is gone and resets its streams.
@@ -547,8 +600,7 @@ impl RouterState {
         };
         let cancelable = request.command.policy().cancel_scope == CancelScope::Request;
         if !agent_connection.send_message(ServerToAgent::Command {
-            agent_id: request.agent_id.clone(),
-            request_id,
+            id: request_id,
             command: request.command,
         }) {
             let _ = request.reply.send(CommandResult::error(
@@ -698,7 +750,7 @@ mod tests {
         let request = RegisterAgentRequest::for_test(
             &AgentId::from(agent_id),
             lanes,
-            super::super::streams::ConnectionStreams::new(AgentId::from(agent_id), false),
+            super::super::streams::ConnectionStreams::new(AgentId::from(agent_id)),
         );
         state.commit_registration(request);
         state.agents.by_id[&AgentId::from(agent_id)]
@@ -769,6 +821,92 @@ mod tests {
         state.ui.refresh_check_task.abort();
     }
 
+    /// A different agent id claiming a live agent's name is refused instead of taking over.
+    #[tokio::test]
+    async fn duplicate_name_from_another_agent_id_is_rejected() {
+        let mut state = test_state();
+        let (owner_lanes, _owner_receivers) = ControlLanes::bounded(4, 4);
+        state.register_agent(RegisterAgentRequest::for_test(
+            &AgentId::from("owner"),
+            owner_lanes,
+            super::super::streams::ConnectionStreams::new(AgentId::from("owner")),
+        ));
+        let (lanes, mut receivers) = ControlLanes::bounded(4, 4);
+        let mut request = RegisterAgentRequest::for_test(
+            &AgentId::from("impostor"),
+            lanes,
+            super::super::streams::ConnectionStreams::new(AgentId::from("impostor")),
+        );
+        request.agent_name = "owner".to_string();
+        let (reply, decision) = oneshot::channel();
+        request.reply = Some(reply);
+
+        state.register_agent(request);
+
+        // The session learns about the refusal so it can close the socket.
+        assert!(matches!(
+            decision.await.unwrap(),
+            Err(RegistrationRejection {
+                reason: RejectReason::DuplicateName,
+                ..
+            })
+        ));
+        // The agent reads `rejected` as its first and only frame.
+        assert!(matches!(
+            receivers.priority.try_recv(),
+            Ok(ServerToAgent::Rejected {
+                reason: RejectReason::DuplicateName,
+                ..
+            })
+        ));
+        // The live owner keeps its connection and the impostor gets none.
+        assert!(state.agents.by_id.contains_key(&AgentId::from("owner")));
+        assert!(!state.agents.by_id.contains_key(&AgentId::from("impostor")));
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// A reconnect of the same agent replaces its stale connection and evicts the old one.
+    #[tokio::test]
+    async fn reconnect_of_the_same_agent_evicts_the_previous_connection() {
+        let mut state = test_state();
+        let agent_id = AgentId::from("agent");
+        let (old_lanes, mut old_receivers) = ControlLanes::bounded(4, 4);
+        state.register_agent(RegisterAgentRequest::for_test(
+            &agent_id,
+            old_lanes,
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
+        ));
+        let (new_lanes, mut new_receivers) = ControlLanes::bounded(4, 4);
+        let replacement = RegisterAgentRequest::for_test(
+            &agent_id,
+            new_lanes,
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
+        );
+        let replacement_socket = replacement.socket_id.clone();
+
+        state.register_agent(replacement);
+
+        let old_frames: Vec<_> =
+            std::iter::from_fn(|| old_receivers.priority.try_recv().ok()).collect();
+        // The replaced process is told to exit instead of lingering as a zombie.
+        assert!(matches!(
+            old_frames.last(),
+            Some(ServerToAgent::Evicted { .. })
+        ));
+        // The reconnect is welcomed like any first connection.
+        assert!(matches!(
+            new_receivers.priority.try_recv(),
+            Ok(ServerToAgent::Welcome { connection_id }) if connection_id == replacement_socket
+        ));
+        // Routing now belongs to the replacement session.
+        assert!(
+            state
+                .agents
+                .is_current_session(&agent_id, &replacement_socket)
+        );
+        state.ui.refresh_check_task.abort();
+    }
+
     /// The tick's pruning of a command whose caller left must stop the agent's work just like
     /// explicit abandonment; otherwise whichever path ran first decided whether it was canceled.
     #[tokio::test]
@@ -779,9 +917,13 @@ mod tests {
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
             lanes,
-            super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
         ));
-        // Drain the transfer bootstrap queued by registration.
+        // Drain the welcome and transfer bootstrap queued by registration.
+        assert!(matches!(
+            receivers.priority.try_recv(),
+            Ok(ServerToAgent::Welcome { .. })
+        ));
         assert!(matches!(
             receivers.priority.try_recv(),
             Ok(ServerToAgent::TransferSocketOpen { .. })
@@ -800,7 +942,7 @@ mod tests {
         // Only the request-scoped command is canceled; the other is just forgotten.
         assert!(matches!(
             receivers.priority.try_recv(),
-            Ok(ServerToAgent::CancelTransfer { request_id })
+            Ok(ServerToAgent::Cancel { id: request_id })
                 if request_id == redoor_protocol::ids::RequestId::new(11)
         ));
         assert!(receivers.priority.try_recv().is_err());
@@ -851,14 +993,16 @@ mod tests {
         assert_eq!(state.agents.known_by_id[&agent_id].socket_id, None);
     }
 
+    /// Reply of a transfer registration: the owning agent and its stream tables.
+    type TransferReply = Result<(AgentId, super::super::streams::ConnectionStreams), RouterError>;
+
     /// Creates a transfer registration request and exposes its shutdown observer.
     fn transfer_request(
-        agent_id: &str,
         token: String,
         socket_id: redoor_protocol::ids::SocketId,
     ) -> (
         RegisterTransferConnectionRequest,
-        oneshot::Receiver<Result<super::super::streams::ConnectionStreams, RouterError>>,
+        oneshot::Receiver<TransferReply>,
         watch::Receiver<bool>,
     ) {
         let (binary_sender, _binary_receiver) = mpsc::channel(1);
@@ -866,7 +1010,6 @@ mod tests {
         let (reply, reply_receiver) = oneshot::channel();
         (
             RegisterTransferConnectionRequest {
-                agent_id: AgentId::from(agent_id),
                 token,
                 socket_id,
                 outgoing_binary: binary_sender,
@@ -895,7 +1038,7 @@ mod tests {
         );
 
         let socket_id = redoor_protocol::ids::SocketId::new();
-        let (request, reply, _shutdown) = transfer_request("agent", token, socket_id);
+        let (request, reply, _shutdown) = transfer_request(token, socket_id);
         state.register_transfer(request);
         assert!(reply.await.expect("transfer reply delivered").is_ok());
         // Connected is reserved for the moment both sockets can serve work.
@@ -917,7 +1060,7 @@ mod tests {
         let token = insert_control(&mut state, "agent");
         let first_socket = redoor_protocol::ids::SocketId::new();
         let (wrong_request, wrong_reply, _wrong_shutdown) =
-            transfer_request("agent", "wrong-token".to_string(), first_socket.clone());
+            transfer_request("wrong-token".to_string(), first_socket.clone());
         state.register_transfer(wrong_request);
         // Rejecting a wrong token proves stale or unauthenticated processes cannot attach.
         assert!(matches!(
@@ -932,14 +1075,14 @@ mod tests {
         );
 
         let (first_request, first_reply, first_shutdown) =
-            transfer_request("agent", token.clone(), first_socket.clone());
+            transfer_request(token.clone(), first_socket.clone());
         state.register_transfer(first_request);
         // The current session token must install the payload connection successfully.
         assert!(first_reply.await.expect("first reply delivered").is_ok());
 
         let replacement_socket = redoor_protocol::ids::SocketId::new();
         let (replacement_request, replacement_reply, _replacement_shutdown) =
-            transfer_request("agent", token, replacement_socket.clone());
+            transfer_request(token, replacement_socket.clone());
         state.register_transfer(replacement_request);
         // Replacement is acknowledged only after router state owns the new socket.
         assert!(
@@ -967,7 +1110,7 @@ mod tests {
         let token = insert_control(&mut state, "agent");
         let first_socket = redoor_protocol::ids::SocketId::new();
         let (first_request, first_reply, _first_shutdown) =
-            transfer_request("agent", token.clone(), first_socket);
+            transfer_request(token.clone(), first_socket);
         state.register_transfer(first_request);
         assert!(first_reply.await.expect("first reply delivered").is_ok());
 
@@ -1003,14 +1146,14 @@ mod tests {
                 ready: None,
                 stream: super::super::streams::OutboundStream::new(
                     super::super::streams::StreamLease::new(upload_id, link, 0),
-                    None,
+                    redoor_core::stream_credit::CreditGate::default(),
                 ),
             }),
         );
 
         let replacement_socket = redoor_protocol::ids::SocketId::new();
         let (replacement_request, replacement_reply, _replacement_shutdown) =
-            transfer_request("agent", token, replacement_socket);
+            transfer_request(token, replacement_socket);
         state.register_transfer(replacement_request);
         assert!(
             replacement_reply
@@ -1020,8 +1163,9 @@ mod tests {
         );
 
         // Stale unregister is ignored after replacement, so cleanup must happen here.
-        assert!(state.flows.id_for(download_id).is_none());
-        assert!(state.flows.id_for(upload_id).is_none());
+        let agent = AgentId::from("agent");
+        assert!(state.flows.id_for(&agent, download_id).is_none());
+        assert!(state.flows.id_for(&agent, upload_id).is_none());
         // The download consumer observes the lost payload path as an error, not a clean end.
         assert!(
             download_receiver
@@ -1045,13 +1189,13 @@ mod tests {
         let token = insert_control(&mut state, "agent");
         let live_socket = redoor_protocol::ids::SocketId::new();
         let (live_request, live_reply, _live_shutdown) =
-            transfer_request("agent", token.clone(), live_socket.clone());
+            transfer_request(token.clone(), live_socket.clone());
         state.register_transfer(live_request);
         assert!(live_reply.await.expect("live reply delivered").is_ok());
 
         let cancelled_socket = redoor_protocol::ids::SocketId::new();
         let (cancelled_request, cancelled_reply, cancelled_shutdown) =
-            transfer_request("agent", token, cancelled_socket);
+            transfer_request(token, cancelled_socket);
         // Dropping the reply models the socket handler's request timeout path,
         // which exits without ever sending UnregisterTransferConnection.
         drop(cancelled_reply);
@@ -1076,7 +1220,7 @@ mod tests {
         let mut state = test_state();
         let unknown_socket = redoor_protocol::ids::SocketId::new();
         let (unknown_request, unknown_reply, _unknown_shutdown) =
-            transfer_request("missing", "unknown-token".to_string(), unknown_socket);
+            transfer_request("unknown-token".to_string(), unknown_socket);
         state.register_transfer(unknown_request);
         // Unknown identities use the same generic rejection as bad tokens to avoid disclosure.
         assert!(matches!(
@@ -1086,7 +1230,7 @@ mod tests {
 
         let token = insert_control(&mut state, "agent");
         let current_socket = redoor_protocol::ids::SocketId::new();
-        let (request, reply, _shutdown) = transfer_request("agent", token, current_socket.clone());
+        let (request, reply, _shutdown) = transfer_request(token, current_socket.clone());
         state.register_transfer(request);
         // Setup must succeed before exercising stale teardown behavior.
         assert!(reply.await.expect("registration reply delivered").is_ok());
@@ -1109,13 +1253,18 @@ mod tests {
     async fn full_control_queue_rejects_commands_and_preserves_priority_lane() {
         let mut state = test_state();
         let agent_id = AgentId::from("bounded-agent");
-        let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
+        // Room for the welcome and the transfer bootstrap that registration queues.
+        let (lanes, mut receivers) = ControlLanes::bounded(1, 2);
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
             lanes,
-            super::super::streams::ConnectionStreams::new(agent_id.clone(), false),
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
         ));
         // Remove the lifecycle bootstrap so the reserved lane is available for cancellation.
+        assert!(matches!(
+            receivers.priority.recv().await,
+            Some(ServerToAgent::Welcome { .. })
+        ));
         assert!(matches!(
             receivers.priority.recv().await,
             Some(ServerToAgent::TransferSocketOpen { .. })
@@ -1155,15 +1304,13 @@ mod tests {
         ));
 
         let connection = &state.agents.by_id[&agent_id];
-        assert!(
-            connection.send_priority_message(ServerToAgent::CancelTransfer {
-                request_id: redoor_protocol::ids::RequestId::new(99),
-            })
-        );
+        assert!(connection.send_priority_message(ServerToAgent::Cancel {
+            id: redoor_protocol::ids::RequestId::new(99),
+        }));
         // Priority admission succeeds despite the unread ordinary command frame.
         assert!(matches!(
             receivers.priority.recv().await,
-            Some(ServerToAgent::CancelTransfer { .. })
+            Some(ServerToAgent::Cancel { .. })
         ));
         // The ordinary queue remains bounded to its single admitted frame.
         assert!(matches!(

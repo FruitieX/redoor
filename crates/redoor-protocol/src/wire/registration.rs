@@ -1,6 +1,6 @@
-//! What an agent announces about itself when its control session registers.
+//! What an agent announces about itself in the `hello` that opens its connection.
 //!
-//! The same two values travel from the wire (`agent_register`, flattened so the JSON keeps its
+//! The same two values travel from the wire (`hello`, flattened so the JSON keeps its
 //! flat field names) through the router's live connection and retained inventory to the REST
 //! projection, instead of a dozen loose fields copied between four structs.
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Who the agent process is: platform, account, start directory and binary.
 ///
-/// Fixed for one control session; a reconnect may report a different identity (an upgraded
+/// Fixed for one connection; a reconnect may report a different identity (an upgraded
 /// binary, a different account), which replaces the previous one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentIdentity {
@@ -52,9 +52,6 @@ pub struct AgentCapabilities {
     /// Can move filesystem entries to its platform trash.
     #[serde(default)]
     pub supports_move_to_trash: bool,
-    /// Implements per-stream credit in both transfer directions.
-    #[serde(default)]
-    pub supports_stream_credit: bool,
 }
 
 impl AgentCapabilities {

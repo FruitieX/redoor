@@ -380,16 +380,14 @@ mod tests {
         let deliver = tokio::spawn({
             let streams = agent.streams.clone();
             async move {
-                streams
-                    .deliver(StreamChunk {
-                        request_id,
-                        chunk_index: ChunkIndex::new(0),
-                        is_last: false,
-                        is_error: false,
-                        payload_kind: StreamPayloadKind::RawFile,
-                        data: vec![b'a'],
-                    })
-                    .await
+                streams.deliver(StreamChunk {
+                    request_id,
+                    chunk_index: ChunkIndex::new(0),
+                    is_last: false,
+                    is_error: false,
+                    payload_kind: StreamPayloadKind::RawFile,
+                    data: vec![b'a'],
+                })
             }
         });
         ensure_download_started(&mut body, &path)
@@ -410,7 +408,7 @@ mod tests {
         // The agent receives cancellation for the stalled request without a follow-up chunk.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::CancelTransfer { request_id: canceled } if canceled == request_id
+            ServerToAgent::Cancel { id: canceled ,} if canceled == request_id
         ));
         let progress = agent
             .router

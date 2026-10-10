@@ -23,8 +23,8 @@ pub use messages::{
     CommitDirectUploadRequest, ExecuteCommandRequest, ExecuteStreamRequest,
     OpenAgentLogStreamRequest, OpenTerminalRequest, OutboundFailure, OutboundFailureReason,
     OutputStreamTracking, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterTransferConnectionRequest, RegisterUiSubscriberRequest, RouteResponse,
-    RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest,
+    RegisterTransferConnectionRequest, RegisterUiSubscriberRequest, RegistrationRejection,
+    RouteResponse, RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest,
     TransferProgressUpdateRequest, UnregisterManagedAgentRequest, UploadStartOutcome,
 };
 pub use state::CopyContentKind;
@@ -180,7 +180,7 @@ impl RouterState {
 
     /// Routes an agent's final command response to the flow that owns its request id.
     fn route_response(&mut self, response: RouteResponse) {
-        let Some(flow_id) = self.flows.id_for(response.request_id) else {
+        let Some(flow_id) = self.flows.id_for(&response.agent_id, response.request_id) else {
             log!(
                 Level::Warning,
                 "No pending response found for request_id={}",
@@ -206,7 +206,7 @@ impl RouterState {
 
     /// Settles an inbound stream whose terminal frame the transfer reader saw.
     fn route_stream_end(&mut self, end: StreamEnd) {
-        let Some(flow_id) = self.flows.id_for(end.request_id) else {
+        let Some(flow_id) = self.flows.id_for(&end.agent_id, end.request_id) else {
             return;
         };
         self.sync_progress();
@@ -219,7 +219,7 @@ impl RouterState {
 
     /// Applies an agent's progress report to the download or local copy it belongs to.
     fn route_progress_update(&mut self, request: TransferProgressUpdateRequest) {
-        let Some(flow_id) = self.flows.id_for(request.request_id) else {
+        let Some(flow_id) = self.flows.id_for(&request.agent_id, request.request_id) else {
             return;
         };
         match self.flows.get(flow_id) {
@@ -256,6 +256,9 @@ impl RouterState {
     fn handle(&mut self, message: RouterMsg) {
         match message {
             RouterMsg::RegisterAgent(request) => self.register_agent(request),
+            RouterMsg::AuthorizeTransferToken { token, reply } => {
+                let _ = reply.send(self.transfer_token_owner(&token).is_some());
+            }
             RouterMsg::RegisterTransferConnection(request) => self.register_transfer(request),
             RouterMsg::UnregisterTransferConnection {
                 agent_id,
@@ -413,8 +416,8 @@ mod tests {
         let (mut text_rx, mut priority_rx) = (receivers.commands, receivers.priority);
         let (binary_tx, mut binary_rx) = mpsc::channel::<StreamChunk>(1);
         let agent_id = AgentId::from("agent-1");
-        // A credit-capable agent, so the reader never waits on any stream's consumer.
-        let streams = ConnectionStreams::new(agent_id.clone(), true);
+        // Every stream is credited, so the reader never waits on any stream's consumer.
+        let streams = ConnectionStreams::new(agent_id.clone());
 
         let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
         let socket_id = registration.socket_id.clone();
@@ -423,22 +426,19 @@ mod tests {
             .await
             .expect("agent registered");
 
+        // The welcome is always the first frame the agent reads.
+        assert!(matches!(
+            next_control(&mut priority_rx).await,
+            redoor_protocol::wire::ServerToAgent::Welcome { .. }
+        ));
         let transfer_token = match next_control(&mut priority_rx).await {
-            redoor_protocol::wire::ServerToAgent::TransferSocketOpen {
-                token,
-                stream_credit,
-            } => {
-                // The advertised capability is confirmed so both directions use credit.
-                assert!(stream_credit);
-                token
-            }
+            redoor_protocol::wire::ServerToAgent::TransferSocketOpen { token } => token,
             other => panic!("unexpected control message: {other:?}"),
         };
         let (transfer_shutdown, _transfer_shutdown_rx) = watch::channel(false);
         router_ref
             .request(|reply| {
                 RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                    agent_id: agent_id.clone(),
                     token: transfer_token,
                     socket_id: SocketId::from(Uuid::from_u128(2)),
                     outgoing_binary: binary_tx,
@@ -471,7 +471,7 @@ mod tests {
                 .await
         });
         let request_id = match next_control(&mut text_rx).await {
-            redoor_protocol::wire::ServerToAgent::Command { request_id, .. } => request_id,
+            redoor_protocol::wire::ServerToAgent::Command { id, .. } => id,
             other => panic!("unexpected control message: {other:?}"),
         };
         let upload = upload_start
@@ -562,7 +562,6 @@ mod tests {
                     supports_native_open: true,
                     supports_trash: true,
                     supports_move_to_trash: true,
-                    supports_stream_credit: true,
                 },
             }]
         );
@@ -590,7 +589,7 @@ mod tests {
             .expect("download admission rpc succeeded")
             .expect("download admitted");
         let download_id = match next_control(&mut text_rx).await {
-            redoor_protocol::wire::ServerToAgent::Command { request_id, .. } => request_id,
+            redoor_protocol::wire::ServerToAgent::Command { id, .. } => id,
             other => panic!("unexpected control message: {other:?}"),
         };
         let (terminal, _terminal_rx) = watch::channel(None);
@@ -616,12 +615,8 @@ mod tests {
         let _ = next_control(&mut text_rx).await;
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
             // The transfer reader hands frames to the stalled download without waiting.
-            let routed = timeout(
-                Duration::from_millis(250),
-                streams.deliver(agent_frame(download_id, false, vec![0; 1024])),
-            )
-            .await
-            .expect("a stalled consumer must not block the transfer reader");
+            // Delivery is synchronous, so a stalled consumer can never block the reader.
+            let routed = streams.deliver(agent_frame(download_id, false, vec![0; 1024]));
             assert!(routed.is_none());
         }
         let exec_event = serde_json::to_vec(&ExecEvent::Exit {
@@ -629,13 +624,10 @@ mod tests {
             signal: None,
         })
         .unwrap();
-        timeout(
-            Duration::from_millis(250),
-            streams.deliver(agent_frame(exec_output.request_id(), true, exec_event)),
-        )
-        .await
-        .expect("exec output must not queue behind the stalled download")
-        .expect("exec terminal frame is reported to the router");
+        // Exec output is not queued behind the stalled download.
+        streams
+            .deliver(agent_frame(exec_output.request_id(), true, exec_event))
+            .expect("exec terminal frame is reported to the router");
         // The exec consumer receives its output although the download consumer never read.
         assert!(exec_output.recv().await.is_some_and(|chunk| chunk.is_last));
 

@@ -71,8 +71,7 @@ impl RouterState {
             connection.streams.open_outbound(request_id),
         );
         if !connection.send_message(ServerToAgent::Command {
-            agent_id: request.agent_id.clone(),
-            request_id,
+            id: request_id,
             command: request.command,
         }) {
             connection.streams.close_outbound(request_id);
@@ -113,7 +112,7 @@ impl RouterState {
                 self.notify_transfer_refresh();
             }
             if let Some(connection) = self.agents.by_id.get(&request.agent_id) {
-                connection.send_priority_message(ServerToAgent::CancelTransfer { request_id });
+                connection.send_priority_message(ServerToAgent::Cancel { id: request_id });
             }
         }
     }
@@ -211,7 +210,7 @@ impl RouterState {
 
     /// Releases the HTTP producer once the agent worker exists, or starts a copy's source.
     pub(crate) fn mark_transfer_ready(&mut self, agent_id: AgentId, request_id: RequestId) {
-        let Some(flow_id) = self.flows.id_for(request_id) else {
+        let Some(flow_id) = self.flows.id_for(&agent_id, request_id) else {
             return;
         };
         match self.flows.get_mut(flow_id) {
@@ -239,7 +238,7 @@ impl RouterState {
         agent_id: &AgentId,
         request_id: RequestId,
     ) -> bool {
-        let Some(flow_id) = self.flows.id_for(request_id) else {
+        let Some(flow_id) = self.flows.id_for(agent_id, request_id) else {
             return false;
         };
         // Remote copies own their destination's progress and cancellation under the public
@@ -279,8 +278,8 @@ impl RouterState {
     pub(crate) fn begin_upload_publication(&mut self, agent_id: AgentId, request_id: RequestId) {
         let allowed = self.authorize_publication(&agent_id, request_id);
         if let Some(connection) = self.agents.by_id.get(&agent_id) {
-            let decision = ServerToAgent::UploadPublicationDecision {
-                request_id,
+            let decision = ServerToAgent::PublishDecision {
+                id: request_id,
                 allowed,
             };
             connection.lanes.try_priority_or_command(decision);
@@ -292,7 +291,7 @@ impl RouterState {
 
     /// Records a producer-side failure of an upload stream.
     pub(crate) fn fail_outbound_stream(&mut self, failure: OutboundFailure) {
-        let Some(flow_id) = self.flows.id_for(failure.request_id) else {
+        let Some(flow_id) = self.flows.id_for(&failure.agent_id, failure.request_id) else {
             return;
         };
         let Some(Flow::Upload(upload)) = self.flows.get(flow_id) else {
@@ -331,7 +330,7 @@ impl RouterState {
         if let Some(connection) = self.agents.by_id.get(&agent_id) {
             connection
                 .lanes
-                .try_priority_or_command(ServerToAgent::CancelTransfer { request_id });
+                .try_priority_or_command(ServerToAgent::Cancel { id: request_id });
         } else if let Some(Flow::Upload(upload)) = self.flows.remove(flow_id) {
             // No control owner remains that could acknowledge cancellation.
             self.release_upload(&upload);
@@ -473,11 +472,7 @@ mod tests {
     fn lease(request_id: RequestId) -> StreamLease {
         StreamLease::new(
             request_id,
-            AgentLink::new(
-                crate::actors::lanes::ControlLanes::bounded(1, 1).0,
-                None,
-                false,
-            ),
+            AgentLink::new(crate::actors::lanes::ControlLanes::bounded(1, 1).0, None),
             0,
         )
     }
@@ -505,7 +500,10 @@ mod tests {
                 phase: UploadPhase::Streaming,
                 completion: Some(completion),
                 ready: None,
-                stream: OutboundStream::new(lease(request_id), None),
+                stream: OutboundStream::new(
+                    lease(request_id),
+                    redoor_core::stream_credit::CreditGate::default(),
+                ),
             }),
         );
         completion_receiver
@@ -548,7 +546,10 @@ mod tests {
                     }),
                     phase: CopyPhase::Remote(Box::new(RemoteCopy {
                         source: lease(source_id),
-                        dest: OutboundStream::new(lease(destination_id), None),
+                        dest: OutboundStream::new(
+                            lease(destination_id),
+                            redoor_core::stream_credit::CreditGate::default(),
+                        ),
                         stage: RemoteStage::Streaming,
                         source_finished: false,
                     })),
@@ -690,7 +691,12 @@ mod tests {
             TransferProgressState::Errored
         ));
         // Terminal mismatch handling must release the flow.
-        assert!(state.flows.id_for(request_id).is_none());
+        assert!(
+            state
+                .flows
+                .id_for(&AgentId::from("agent-1"), request_id)
+                .is_none()
+        );
         state.ui.refresh_check_task.abort();
     }
 

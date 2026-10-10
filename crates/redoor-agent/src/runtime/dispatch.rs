@@ -11,7 +11,7 @@ use crate::commands::RunCommand;
 use crate::commands::ctx::{AgentServices, CommandCtx, Reply};
 use redoor_core::{log, log_error};
 use redoor_protocol::{
-    ids::{AgentId, RequestId},
+    ids::RequestId,
     wire::{
         command::{Command, CommandErrorKind, CommandResult},
         log::Level,
@@ -29,13 +29,10 @@ const MAX_CONCURRENT_COMMANDS: usize = 32;
 
 /// Connection resources a command may use, captured when it is dispatched.
 pub(crate) struct DispatchLink<'a> {
-    pub(crate) agent_id: &'a AgentId,
     pub(crate) control: &'a ControlSender,
     pub(crate) transfer: Option<&'a mpsc::Sender<WsMessage>>,
     /// Cancelled when the control connection ends.
     pub(crate) scope: &'a CancellationToken,
-    /// Whether the server confirmed per-stream credit for this control connection.
-    pub(crate) stream_credit: bool,
 }
 
 /// Owns every running command of the current control connection.
@@ -76,13 +73,12 @@ impl Dispatcher {
         let canceled_early = sessions.take_pending_cancel(request_id);
         log!(
             Level::Info,
-            "Command received: agent_id={}, request_id={}, command={}",
-            link.agent_id,
+            "Command received: request_id={}, command={}",
             request_id,
             command.summary()
         );
         let policy = command.policy();
-        let responder = Responder::new(link.control.clone(), link.agent_id.clone(), request_id);
+        let responder = Responder::new(link.control.clone(), request_id);
         let transfer = link.transfer.cloned();
         if policy.requires_transfer() && transfer.is_none() {
             let _ = responder
@@ -123,7 +119,6 @@ impl Dispatcher {
             registration,
             transfer,
             services: self.services.clone(),
-            stream_credit: link.stream_credit,
         };
         let task = Self::execute(command, policy, ctx, self.exclusive.clone());
         if is_upload {
@@ -247,7 +242,6 @@ mod tests {
     struct Fixture {
         dispatcher: Dispatcher,
         sessions: Sessions,
-        agent_id: AgentId,
         control: ControlSender,
         frames: mpsc::Receiver<OutboundFrame>,
         transfer: Option<mpsc::Sender<WsMessage>>,
@@ -273,7 +267,6 @@ mod tests {
                 Self {
                     dispatcher: Dispatcher::new(services),
                     sessions,
-                    agent_id: AgentId::from("agent"),
                     control,
                     frames,
                     transfer,
@@ -286,11 +279,9 @@ mod tests {
         /// Dispatches one command over the fixture's lanes.
         async fn dispatch(&mut self, request_id: u64, command: Command) {
             let link = DispatchLink {
-                agent_id: &self.agent_id,
                 control: &self.control,
                 transfer: self.transfer.as_ref(),
                 scope: &self.scope,
-                stream_credit: false,
             };
             self.dispatcher
                 .dispatch(

@@ -171,7 +171,7 @@ pub(crate) struct AgentProfile {
     pub(crate) agent_name: String,
     /// Immutable absolute directory used when the UI opens this agent.
     pub(crate) default_directory: String,
-    /// Shared secret presented during registration so the server can reject impostors.
+    /// Shared secret presented during the websocket upgrade so the server can reject impostors.
     pub(crate) token: String,
     /// Keepalive and stale-detection timings chosen at process start.
     pub(crate) ws_timeouts: redoor_core::websocket::WebSocketTimeouts,
@@ -299,7 +299,7 @@ impl AgentRuntime {
         match message {
             AgentMsg::Connect => {
                 if self.control.sender().is_none() {
-                    self.connect(handle).await;
+                    return self.connect(handle).await;
                 }
             }
             AgentMsg::WebSocketMessage {
@@ -464,7 +464,7 @@ impl AgentRuntime {
                 ) else {
                     return;
                 };
-                let _ = Responder::new(control.clone(), self.profile.agent_id.clone(), request_id)
+                let _ = Responder::new(control.clone(), request_id)
                     .respond(CommandResult::error(
                         CommandErrorKind::InvalidInput,
                         format!("Agent could not parse command: {error}"),
@@ -477,47 +477,56 @@ impl AgentRuntime {
     /// Handles one typed server frame; the match is exhaustive so new frames cannot be dropped.
     async fn handle_server_frame(&mut self, handle: AgentHandle, frame: ServerToAgent) {
         match frame {
-            ServerToAgent::TransferSocketOpen {
-                token,
-                stream_credit,
-            } => {
-                self.control.confirm_stream_credit(stream_credit);
+            ServerToAgent::Welcome { connection_id } => {
+                log!(
+                    Level::Info,
+                    "Server accepted the agent: agent_id={}, connection_id={}",
+                    self.profile.agent_id,
+                    connection_id
+                );
+            }
+            ServerToAgent::Rejected { reason, message } => {
+                log_error!(
+                    anyhow::anyhow!("{message} ({reason:?})"),
+                    "Server rejected the agent"
+                );
+                let _ = handle.try_send(AgentMsg::ExitWithError);
+            }
+            ServerToAgent::Evicted { message } => {
+                log_error!(
+                    anyhow::Error::msg(message),
+                    "Server ended this agent's connection"
+                );
+                let _ = handle.try_send(AgentMsg::ExitWithError);
+            }
+            ServerToAgent::TransferSocketOpen { token } => {
                 self.begin_transfer_connection(handle, token);
             }
-            ServerToAgent::StreamCredit { request_id, frames } => self
+            ServerToAgent::Credit { stream, frames } => self
                 .dispatcher
                 .services()
                 .output_credits
-                .grant(request_id, frames),
-            ServerToAgent::Command {
-                request_id,
-                command,
-                ..
-            } => {
+                .grant(stream, frames),
+            ServerToAgent::Command { id, command } => {
                 let Some(control) = self.control.sender() else {
                     return;
                 };
                 let link = DispatchLink {
-                    agent_id: &self.profile.agent_id,
                     control,
                     transfer: self.transfer.sender(),
                     scope: self.control.scope(),
-                    stream_credit: self.control.stream_credit(),
                 };
                 self.dispatcher
-                    .dispatch(request_id, command, link, &mut self.sessions)
+                    .dispatch(id, command, link, &mut self.sessions)
                     .await;
             }
-            ServerToAgent::UploadPublicationDecision {
-                request_id,
-                allowed,
-            } => self
+            ServerToAgent::PublishDecision { id, allowed } => self
                 .dispatcher
                 .services()
                 .upload_routes
-                .resolve_publication(request_id, allowed),
-            ServerToAgent::CancelTransfer { request_id } => {
-                self.sessions.cancel_request(request_id);
+                .resolve_publication(id, allowed),
+            ServerToAgent::Cancel { id } => {
+                self.sessions.cancel_request(id);
             }
             ServerToAgent::TerminalOpen {
                 terminal_id,
@@ -529,10 +538,6 @@ impl AgentRuntime {
                 log_stream_id,
                 token,
             } => self.start_log_stream(log_stream_id, token),
-            ServerToAgent::Error { message } => {
-                log_error!(anyhow::Error::msg(message), "Server reported an error");
-                let _ = handle.try_send(AgentMsg::ExitWithError);
-            }
         }
     }
 
@@ -544,7 +549,6 @@ impl AgentRuntime {
         let transfer_generation = self.transfer.begin(token.clone());
         spawn_transfer_connection(TransferConnectContext {
             connection: self.connection.clone(),
-            agent_id: self.profile.agent_id.clone(),
             token,
             control_generation: self.control.generation(),
             transfer_generation,
@@ -714,7 +718,11 @@ impl AgentRuntime {
     }
 
     /// Opens a websocket connection and wires the connection tasks into the runtime channels.
-    async fn connect(&mut self, handle: AgentHandle) {
+    ///
+    /// Returns an exit when the server refused the upgrade for a reason no retry can fix
+    /// (wrong token, incompatible protocol), so a misconfigured agent stops with a clear error
+    /// instead of reconnecting forever.
+    async fn connect(&mut self, handle: AgentHandle) -> Option<AgentExit> {
         log!(
             Level::Info,
             "Attempting to connect to {} as agent '{}'",
@@ -725,14 +733,22 @@ impl AgentRuntime {
         let stale_timeout = self.profile.ws_timeouts.stale_timeout;
         let connection_result = tokio::time::timeout(
             stale_timeout,
-            self.connection.connect(self.connection.server_url()),
+            self.connection
+                .connect_authenticated(self.connection.server_url(), &self.profile.token),
         )
         .await;
-        let (ws_stream, _response) = match connection_result {
+        let ws_stream = match connection_result {
             Ok(Ok(connected)) => connected,
+            Ok(Err(error)) if error.is_fatal() => {
+                log_error!(
+                    anyhow::Error::new(error),
+                    "Server refused the agent connection; not retrying"
+                );
+                return Some(AgentExit::Rejected);
+            }
             Ok(Err(error)) => {
                 self.schedule_reconnect(handle, &format!("Connection failed: {error:#}"));
-                return;
+                return None;
             }
             Err(_) => {
                 self.schedule_reconnect(
@@ -741,7 +757,7 @@ impl AgentRuntime {
                         "Connection failed: WebSocket connection attempt timed out after {stale_timeout:?}"
                     ),
                 );
-                return;
+                return None;
             }
         };
         self.reconnect_attempts = 0;
@@ -790,10 +806,9 @@ impl AgentRuntime {
 
         let host = HostIdentity::current();
         let trash = &self.dispatcher.services().trash;
-        let register = AgentToServer::AgentRegister {
+        let hello = AgentToServer::Hello {
             agent_id: self.profile.agent_id.clone(),
             agent_name: self.profile.agent_name.clone(),
-            token: self.profile.token.clone(),
             identity: AgentIdentity {
                 os: host.os,
                 arch: host.arch,
@@ -814,23 +829,21 @@ impl AgentRuntime {
                 supports_trash: trash.supports_inventory,
                 // macOS supports the native move without Redoor inventory or restore support.
                 supports_move_to_trash: trash.supports_move,
-                // Lets the server isolate streams sharing the transfer socket with per-stream credit.
-                supports_stream_credit: true,
             },
         };
-        // Do not log the message body: it includes the agent token secret.
         log!(
             Level::Info,
-            "Sending agent registration message: agent_id={}, agent_name={}",
+            "Sending hello: agent_id={}, agent_name={}",
             self.profile.agent_id,
             self.profile.agent_name
         );
-        if let Err(error) = control_tx.send(OutboundFrame::message(register)).await {
+        if let Err(error) = control_tx.send(OutboundFrame::message(hello)).await {
             log_error!(
                 anyhow::anyhow!("control lane closed: {error}"),
-                "Failed to send agent registration"
+                "Failed to send hello"
             );
         }
+        None
     }
 }
 
@@ -1034,8 +1047,7 @@ mod tests {
         runtime
             .handle_server_text(
                 handle,
-                r#"{"type":"command","agent_id":"agent","request_id":11,"command":{"type":"FromTheFuture"}}"#
-                    .to_string(),
+                r#"{"type":"command","id":11,"command":{"type":"FromTheFuture"}}"#.to_string(),
             )
             .await;
 
@@ -1044,10 +1056,9 @@ mod tests {
         assert!(matches!(
             frame.as_message(),
             Some(AgentToServer::CommandResponse {
-                request_id,
+                id,
                 result: CommandResult::Error { kind: CommandErrorKind::InvalidInput, .. },
-                ..
-            }) if request_id.0 == 11
+            }) if id.0 == 11
         ));
     }
 
@@ -1061,8 +1072,7 @@ mod tests {
             .handle_server_frame(
                 handle.clone(),
                 ServerToAgent::Command {
-                    agent_id: AgentId::from("agent"),
-                    request_id: redoor_protocol::ids::RequestId::new(1),
+                    id: redoor_protocol::ids::RequestId::new(1),
                     command: redoor_protocol::wire::command::Command::RawDownload {
                         path: "/dev/zero".to_string(),
                         range_start: None,

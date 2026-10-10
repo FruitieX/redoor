@@ -125,23 +125,21 @@ mod tests {
     /// A slow HTTP consumer can have buffered output when the independent fallback arrives.
     #[tokio::test]
     async fn fallback_drains_buffered_output_before_single_terminal_event() {
-        let streams = ConnectionStreams::new(AgentId::from("test"), false);
+        let streams = ConnectionStreams::new(AgentId::from("test"));
         let receiver = streams.open_detached(RequestId::new(1));
         let output = ExecEvent::Stdout {
             data: b"trailing output".to_vec(),
         };
         let mut data = serde_json::to_vec(&output).unwrap();
         data.push(b'\n');
-        streams
-            .deliver(StreamChunk {
-                request_id: RequestId::new(1),
-                chunk_index: ChunkIndex::new(0),
-                is_last: false,
-                is_error: false,
-                payload_kind: StreamPayloadKind::RawFile,
-                data,
-            })
-            .await;
+        streams.deliver(StreamChunk {
+            request_id: RequestId::new(1),
+            chunk_index: ChunkIndex::new(0),
+            is_last: false,
+            is_error: false,
+            payload_kind: StreamPayloadKind::RawFile,
+            data,
+        });
         let (terminal, terminal_receiver) = tokio::sync::watch::channel(None);
         terminal.send_replace(Some(ExecEvent::TimedOut));
         // The router's fallback closes the stream without a terminal frame.

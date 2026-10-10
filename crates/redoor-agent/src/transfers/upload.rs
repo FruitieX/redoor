@@ -10,7 +10,7 @@ use crate::runtime::responder::{ControlSender, Responder};
 use redoor_core::log;
 use redoor_core::stream_credit::CreditLedger;
 use redoor_protocol::{
-    ids::{AgentId, RequestId},
+    ids::RequestId,
     wire::{
         command::{CommandErrorKind, CommandResult},
         log::Level,
@@ -180,12 +180,7 @@ impl UploadDriver {
             Err(error) => return Reply::Result(error.into()),
         };
         let request_id = self.ctx.responder.request_id();
-        let credited = self.ctx.stream_credit;
-        let (route, mut chunks) = self
-            .ctx
-            .services
-            .upload_routes
-            .open(request_id, &self.path, credited);
+        let (route, mut chunks) = self.ctx.services.upload_routes.open(request_id, &self.path);
         // Readiness is sent only after the route exists so no chunk can arrive unroutable.
         let _ = self.ctx.responder.transfer_ready().await;
 
@@ -215,7 +210,7 @@ impl UploadDriver {
             }
             // Credit returns only after staging, so a slow destination throttles just this
             // upload's sender instead of the shared transfer socket.
-            if credited && let Some(frames) = ledger.drained(consumed_credit) {
+            if let Some(frames) = ledger.drained(consumed_credit) {
                 let _ = self.ctx.responder.stream_credit(frames).await;
             }
             if is_last {
@@ -257,9 +252,9 @@ impl UploadDriver {
             }
             UploadStop::Failed(error) => error.into(),
         };
-        // Unroute before the possibly slow abort: a registered route with an undrained queue
-        // would block an uncredited transfer reader on this worker, and the reader would later
-        // answer for it a second time. Late frames for an unrouted request are dropped.
+        // Unroute before the possibly slow abort so the reader drops late frames instead of
+        // queueing them for a worker that stopped reading. Late frames for an unrouted request
+        // are dropped.
         drop(route);
         drop(chunks);
         sink.abort().await;
@@ -327,9 +322,8 @@ impl UploadDriver {
 struct UploadRoute {
     serial: u64,
     path: String,
+    /// Never awaited by the socket reader; the server's credit bounds what it may hold.
     chunks: mpsc::Sender<StreamChunk>,
-    /// Credited routes are never awaited by the socket reader; the server's credit bounds them.
-    credited: bool,
 }
 
 /// Shared routing tables guarded together so clearing them is atomic.
@@ -359,13 +353,12 @@ impl UploadRoutes {
 
     /// Registers a chunk route for `request_id`; the guard removes it on drop.
     ///
-    /// `credited` routes rely on the server honoring per-stream credit, which is what lets the
+    /// The route relies on the server honoring per-stream credit, which is what lets the
     /// transfer reader enqueue without ever waiting on this worker.
     pub(crate) fn open(
         &self,
         request_id: RequestId,
         path: &str,
-        credited: bool,
     ) -> (RouteGuard, mpsc::Receiver<StreamChunk>) {
         let (chunks, receiver) = mpsc::channel(CHUNK_QUEUE_CAPACITY);
         let mut table = self.table();
@@ -377,7 +370,6 @@ impl UploadRoutes {
                 serial,
                 path: path.to_string(),
                 chunks,
-                credited,
             },
         );
         (
@@ -392,16 +384,10 @@ impl UploadRoutes {
 
     /// Delivers one binary frame to its upload worker.
     ///
-    /// Credited routes are filled with `try_send`: the server never has more than the window
-    /// plus the terminal frame outstanding, so a full queue is a protocol violation that fails
-    /// only this upload while the reader keeps serving every other stream. Uncredited routes
-    /// (older servers) wait for queue capacity, which backpressures the whole socket.
-    pub(crate) async fn route_frame(
-        &self,
-        bytes: &[u8],
-        control: &ControlSender,
-        agent_id: &AgentId,
-    ) {
+    /// Routes are filled with `try_send`: the server never has more than the window plus the
+    /// terminal frame outstanding, so a full queue is a protocol violation that fails only
+    /// this upload while the reader keeps serving every other stream.
+    pub(crate) async fn route_frame(&self, bytes: &[u8], control: &ControlSender) {
         let chunk = match StreamChunk::from_bytes(bytes) {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -414,38 +400,28 @@ impl UploadRoutes {
             }
         };
         let request_id = chunk.request_id;
-        let route = self.table().routes.get(&request_id).map(|route| {
-            (
-                route.serial,
-                route.path.clone(),
-                route.chunks.clone(),
-                route.credited,
-            )
-        });
-        let Some((serial, path, chunks, credited)) = route else {
+        let route = self
+            .table()
+            .routes
+            .get(&request_id)
+            .map(|route| (route.serial, route.path.clone(), route.chunks.clone()));
+        let Some((serial, path, chunks)) = route else {
             return;
         };
-        let delivered = if credited {
-            match chunks.try_send(chunk) {
-                Ok(()) => true,
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    log!(
-                        Level::Warning,
-                        "Upload exceeded its flow-control credit: request_id={}, path={}",
-                        request_id,
-                        path
-                    );
-                    // Unrouting closes the worker's queue; it fails with its own response.
-                    let _ = self.remove(request_id, serial);
-                    return;
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
+        match chunks.try_send(chunk) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                log!(
+                    Level::Warning,
+                    "Upload exceeded its flow-control credit: request_id={}, path={}",
+                    request_id,
+                    path
+                );
+                // Unrouting closes the worker's queue; it fails with its own response.
+                let _ = self.remove(request_id, serial);
+                return;
             }
-        } else {
-            chunks.send(chunk).await.is_ok()
-        };
-        if delivered {
-            return;
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
         }
         // A worker unroutes itself before it stops reading and answers on its own; only a
         // worker that vanished while still routed (an abnormal exit) needs an answer here.
@@ -458,7 +434,7 @@ impl UploadRoutes {
             request_id,
             path
         );
-        let _ = Responder::new(control.clone(), agent_id.clone(), request_id)
+        let _ = Responder::new(control.clone(), request_id)
             .respond(CommandResult::error(
                 CommandErrorKind::Internal,
                 "Upload worker is no longer available",
@@ -679,8 +655,8 @@ mod tests {
         ));
     }
 
-    /// A slow abort must not stall an uncredited transfer reader on this worker's full queue,
-    /// and the reader must not answer for a worker that answers itself.
+    /// A slow abort must not stall the transfer reader on this worker's full queue, and the
+    /// reader must not answer for a worker that answers itself.
     #[tokio::test]
     async fn slow_abort_neither_blocks_the_reader_nor_double_answers() {
         let (started, abort_started) = oneshot::channel();
@@ -691,15 +667,11 @@ mod tests {
         abort_started.await.unwrap();
         let (control, mut control_frames) = mpsc::channel(4);
         // More frames than the queue holds: with the route still registered the reader would
-        // wait forever for a worker that is busy aborting.
+        // report a credit violation for a worker that is busy aborting.
         for _ in 0..=CHUNK_QUEUE_CAPACITY {
             harness
                 .routes
-                .route_frame(
-                    &frame(StreamPayloadKind::RawFile, false),
-                    &control,
-                    &AgentId::from("test-agent"),
-                )
+                .route_frame(&frame(StreamPayloadKind::RawFile, false), &control)
                 .await;
         }
         let _ = release.send(());
@@ -718,11 +690,7 @@ mod tests {
 
         harness
             .routes
-            .route_frame(
-                &frame(StreamPayloadKind::Tar, false),
-                &control,
-                &AgentId::from("test-agent"),
-            )
+            .route_frame(&frame(StreamPayloadKind::Tar, false), &control)
             .await;
         let result = result(harness.task.await.unwrap());
 
@@ -750,11 +718,7 @@ mod tests {
 
         harness
             .routes
-            .route_frame(
-                &frame(StreamPayloadKind::RawFile, true),
-                &control,
-                &AgentId::from("test-agent"),
-            )
+            .route_frame(&frame(StreamPayloadKind::RawFile, true), &control)
             .await;
         let result = result(harness.task.await.unwrap());
 
@@ -771,22 +735,21 @@ mod tests {
         assert!(matches!(result, CommandResult::RawUpload));
     }
 
-    /// A credited route never makes the reader wait: overflow unroutes only that upload.
+    /// A route never makes the reader wait: overflow unroutes only that upload.
     #[tokio::test]
-    async fn credited_route_overflow_fails_only_that_upload() {
+    async fn route_overflow_fails_only_that_upload() {
         let routes = UploadRoutes::default();
         let (control, _control_frames) = mpsc::channel(1);
-        let agent = AgentId::from("test-agent");
-        let (_guard, mut chunks) = routes.open(RequestId::new(5), "/stalled", true);
-        let (_other_guard, mut other_chunks) = routes.open(RequestId::new(6), "/other", true);
+        let (_guard, mut chunks) = routes.open(RequestId::new(5), "/stalled");
+        let (_other_guard, mut other_chunks) = routes.open(RequestId::new(6), "/other");
         for _ in 0..CHUNK_QUEUE_CAPACITY {
             routes
-                .route_frame(&frame(StreamPayloadKind::RawFile, false), &control, &agent)
+                .route_frame(&frame(StreamPayloadKind::RawFile, false), &control)
                 .await;
         }
         // The queue is full and the worker is stalled; this frame exceeds any honest credit.
         routes
-            .route_frame(&frame(StreamPayloadKind::RawFile, false), &control, &agent)
+            .route_frame(&frame(StreamPayloadKind::RawFile, false), &control)
             .await;
         // The violating upload is unrouted so its worker fails instead of the socket stalling.
         assert!(!routes.contains(RequestId::new(5)));
@@ -798,9 +761,7 @@ mod tests {
         assert_eq!(queued, CHUNK_QUEUE_CAPACITY);
         let mut other = StreamChunk::from_bytes(&frame(StreamPayloadKind::RawFile, false)).unwrap();
         other.request_id = RequestId::new(6);
-        routes
-            .route_frame(&other.to_bytes(), &control, &agent)
-            .await;
+        routes.route_frame(&other.to_bytes(), &control).await;
         // An unrelated upload on the same socket keeps receiving frames.
         assert_eq!(
             other_chunks.recv().await.map(|chunk| chunk.request_id),

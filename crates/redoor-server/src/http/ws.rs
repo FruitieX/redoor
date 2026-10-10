@@ -1,7 +1,6 @@
-//! Websocket entry points for agent control connections and browser UI events.
+//! Websocket entry point for browser UI events.
 
 use crate::actors;
-use crate::watchdog::WatchdogRegistry;
 use axum::{
     extract::{
         State as AxumState,
@@ -12,24 +11,9 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use redoor_core::websocket::WebSocketTimeouts;
 use redoor_protocol::api::ui_events::UiEvent;
-use redoor_protocol::ids::SocketId;
 use uuid::Uuid;
 
 use super::state::ServerState;
-
-/// Route: `GET /ws`
-pub(crate) async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    let router_ref = state.router_ref;
-    let watchdog_registry = state.watchdog_registry;
-    let agent_token = state.auth.agent_token().to_string();
-    let timeouts = state.runtime.ws_timeouts;
-    ws.on_upgrade(move |socket| {
-        handle_socket(socket, router_ref, watchdog_registry, agent_token, timeouts)
-    })
-}
 
 /// Route: `GET /api/v1/ui/ws`
 pub(crate) async fn ui_websocket_handler(
@@ -38,26 +22,6 @@ pub(crate) async fn ui_websocket_handler(
 ) -> impl IntoResponse {
     let timeouts = state.runtime.ws_timeouts;
     ws.on_upgrade(move |socket| handle_ui_socket(socket, state.router_ref, timeouts))
-}
-
-/// Gives the new agent connection its own socket id and hands it to the session actor.
-async fn handle_socket(
-    socket: WebSocket,
-    router_ref: actors::router::RouterHandle,
-    watchdog_registry: WatchdogRegistry,
-    agent_token: String,
-    timeouts: WebSocketTimeouts,
-) {
-    let socket_id = SocketId::new();
-    actors::session::handle_websocket(
-        socket,
-        socket_id,
-        router_ref,
-        watchdog_registry,
-        agent_token,
-        timeouts,
-    )
-    .await;
 }
 
 /// Relays UI events from the router to the websocket until either side closes.

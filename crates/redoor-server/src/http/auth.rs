@@ -246,7 +246,7 @@ impl AuthState {
         Ok(auth)
     }
 
-    /// Shared secret that agents must present when registering over `/ws`.
+    /// Shared secret that agents must present when upgrading their websocket connection.
     pub(crate) fn agent_token(&self) -> &str {
         &self.agent_token
     }
@@ -517,6 +517,7 @@ fn is_public_path(path: &str) -> bool {
         .and_then(|remainder| remainder.strip_suffix("/agent/ws"))
         .is_some_and(|stream_id| !stream_id.is_empty() && !stream_id.contains('/'));
     path == "/ws"
+        || path == redoor_protocol::wire::handshake::AGENT_WS_PATH
         || path == "/api/v1/agent-transfer/ws"
         || is_agent_terminal_socket
         || is_agent_log_socket
@@ -839,6 +840,10 @@ mod tests {
         ));
         // The exact payload socket must reach its session-token handshake without a browser cookie.
         assert!(is_public_path("/api/v1/agent-transfer/ws"));
+        // The agent endpoint authenticates with the agent token during the upgrade instead.
+        assert!(is_public_path("/api/v1/agent/ws"));
+        // Neighboring agent paths must not inherit the exception.
+        assert!(!is_public_path("/api/v1/agent/ws/extra"));
         // Neighboring transfer paths must not inherit the public authentication exception.
         assert!(!is_public_path("/api/v1/agent-transfer/ws/extra"));
         // The browser-owned endpoint must remain protected by normal session authentication.

@@ -348,7 +348,7 @@ mod tests {
         // A consumer that vanished must not leave the agent streaming into nothing.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::CancelTransfer { request_id } if request_id == id
+            ServerToAgent::Cancel { id: request_id } if request_id == id
         ));
 
         let mut stream = download(&mut agent).await;
@@ -369,9 +369,9 @@ mod tests {
         let delivery = tokio::spawn({
             let streams = agent.streams.clone();
             async move {
-                streams.deliver(frame(id, b"", false, false)).await;
-                streams.deliver(frame(id, b"abc", false, false)).await;
-                streams.deliver(frame(id, b"disk gone", false, true)).await
+                streams.deliver(frame(id, b"", false, false));
+                streams.deliver(frame(id, b"abc", false, false));
+                streams.deliver(frame(id, b"disk gone", false, true))
             }
         });
         // Empty frames carry nothing for the HTTP body and are skipped.
@@ -392,8 +392,8 @@ mod tests {
         let delivery = tokio::spawn({
             let streams = agent.streams.clone();
             async move {
-                streams.deliver(frame(id, b"abcd", false, false)).await;
-                streams.deliver(frame(id, b"efgh", false, false)).await;
+                streams.deliver(frame(id, b"abcd", false, false));
+                streams.deliver(frame(id, b"efgh", false, false));
             }
         });
         let read = stream.read_bounded(6).await.unwrap();
@@ -406,7 +406,7 @@ mod tests {
         // Stopping early cancels the agent, which may still be producing.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::CancelTransfer { request_id } if request_id == id
+            ServerToAgent::Cancel { id: request_id } if request_id == id
         ));
     }
 }

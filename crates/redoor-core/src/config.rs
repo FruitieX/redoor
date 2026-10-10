@@ -229,7 +229,7 @@ pub struct ServerSection {
 /// to the computer hostname.
 #[derive(Debug, Clone, Default)]
 pub struct AgentSection {
-    /// Redoor server URL (`http(s)://` or `ws(s)://`); path optional and forced to `/ws`.
+    /// Redoor server URL (`http(s)://` or `ws(s)://`); path optional and forced to the agent endpoint.
     pub server: Option<String>,
     /// Registration name; defaults to the hostname.
     pub name: Option<String>,
@@ -246,7 +246,7 @@ pub struct AgentSection {
 /// Full parsed config file shared by server and agent processes.
 #[derive(Debug, Clone)]
 pub struct RedoorConfig {
-    /// Shared secret agents present when registering over `/ws`.
+    /// Shared secret agents present when upgrading their websocket connection.
     pub agent_token: String,
     /// Present when the file configures a server process.
     pub server: Option<ServerSection>,

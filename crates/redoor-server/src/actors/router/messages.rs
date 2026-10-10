@@ -32,6 +32,14 @@ pub enum CancelPublicTransferError {
     Delivery(RouterError),
 }
 
+/// Why the router refused an agent's `hello`; the router has already queued the matching
+/// `rejected` frame on the session's lanes when the session receives this.
+#[derive(Debug, Clone)]
+pub struct RegistrationRejection {
+    pub reason: redoor_protocol::wire::handshake::RejectReason,
+    pub message: String,
+}
+
 /// Payload for registering one websocket-backed agent session with the router.
 pub struct RegisterAgentRequest {
     /// Stable agent identifier used as the router registry key.
@@ -50,8 +58,11 @@ pub struct RegisterAgentRequest {
     pub watchdog: Option<crate::watchdog::WatchdogHandle>,
     /// Fences router commit against retry invalidating the parsed registration.
     pub watchdog_attempt_generation: Option<u64>,
-    /// Payload stream tables of this control session, created with the negotiated credit mode.
+    /// Payload stream tables of this control session.
     pub streams: ConnectionStreams,
+    /// Tells the session whether the router accepted the agent, so a refused socket can be
+    /// closed after its `rejected` frame was flushed; absent in unit tests.
+    pub reply: Option<RouterReply<Result<(), RegistrationRejection>>>,
 }
 
 /// Retained inventory projection used by REST, tabs, and management controls.
@@ -178,9 +189,8 @@ pub struct ApplyManagedLifecycleRequest {
 
 /// Requests that a payload socket attach to the current control connection.
 pub struct RegisterTransferConnectionRequest {
-    /// Agent identity submitted by the transfer handshake.
-    pub agent_id: AgentId,
-    /// Session-scoped secret submitted by the transfer handshake.
+    /// Per-connection secret the socket presented during its upgrade; it identifies the
+    /// control connection (and thereby the agent) the socket belongs to.
     pub token: String,
     /// Unique socket identity used to reject stale teardown.
     pub socket_id: SocketId,
@@ -189,8 +199,8 @@ pub struct RegisterTransferConnectionRequest {
     /// Stops an older or control-orphaned transfer task promptly.
     pub shutdown: tokio::sync::watch::Sender<bool>,
     /// Confirms that router state owns the connection before payload is accepted, and hands
-    /// the socket the stream tables its reader delivers frames into.
-    pub reply: RouterReply<Result<ConnectionStreams, RouterError>>,
+    /// the socket its agent and the stream tables its reader delivers frames into.
+    pub reply: RouterReply<Result<(AgentId, ConnectionStreams), RouterError>>,
 }
 
 /// Confirms destination upload setup before payload producers are allowed to run.
@@ -399,6 +409,12 @@ pub struct OpenAgentLogStreamRequest {
 /// Enumerates router work so live streams and lifecycle controls share explicit lanes.
 pub enum RouterMsg {
     RegisterAgent(RegisterAgentRequest),
+    /// Checks a transfer socket's upgrade token before the upgrade is accepted, so a socket
+    /// with a stale or forged token is refused with `401` instead of being opened.
+    AuthorizeTransferToken {
+        token: String,
+        reply: RouterReply<bool>,
+    },
     RegisterTransferConnection(RegisterTransferConnectionRequest),
     UnregisterTransferConnection {
         agent_id: AgentId,
@@ -473,8 +489,7 @@ pub enum RouterMsg {
 
 #[cfg(test)]
 impl RegisterAgentRequest {
-    /// A plain registration for router and HTTP unit tests; capabilities are all on except
-    /// stream credit, which follows the given stream tables.
+    /// A plain registration for router and HTTP unit tests with every capability on.
     pub(crate) fn for_test(
         agent_id: &AgentId,
         lanes: ControlLanes,
@@ -500,11 +515,11 @@ impl RegisterAgentRequest {
                 supports_native_open: true,
                 supports_trash: true,
                 supports_move_to_trash: true,
-                supports_stream_credit: streams.credit(),
             },
             watchdog: None,
             watchdog_attempt_generation: None,
             streams,
+            reply: None,
         }
     }
 }
@@ -519,7 +534,7 @@ mod tests {
         let registration = RegisterAgentRequest::for_test(
             &AgentId::from("a"),
             ControlLanes::bounded(1, 1).0,
-            ConnectionStreams::new(AgentId::from("a"), true),
+            ConnectionStreams::new(AgentId::from("a")),
         );
         AgentListEntry {
             id: AgentId::from("a"),

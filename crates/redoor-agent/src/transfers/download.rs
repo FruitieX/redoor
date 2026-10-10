@@ -693,11 +693,7 @@ mod tests {
         DownloadDriver::new(
             "Raw download",
             "/tmp/file".to_string(),
-            StreamWriter::new(
-                transfer,
-                RequestId::new(9),
-                redoor_protocol::wire::stream::StreamPayloadKind::RawFile,
-            ),
+            StreamWriter::for_test(transfer, RequestId::new(9)),
             registration,
         )
         .run(Ok(source))
@@ -832,11 +828,7 @@ mod tests {
         DownloadDriver::new(
             "Raw download",
             "Cargo.toml".to_string(),
-            StreamWriter::new(
-                transfer,
-                RequestId::new(1),
-                redoor_protocol::wire::stream::StreamPayloadKind::RawFile,
-            ),
+            StreamWriter::for_test(transfer, RequestId::new(1)),
             registration,
         )
         .run(opened)

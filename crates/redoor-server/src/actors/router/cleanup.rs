@@ -113,11 +113,9 @@ impl RouterState {
             agent_id,
             request_id
         );
-        if !connection.send_priority_message(ServerToAgent::CancelTransfer { request_id })
-            && explicit
-        {
+        if !connection.send_priority_message(ServerToAgent::Cancel { id: request_id }) && explicit {
             // An accepted user cancel must not be lost to a momentarily full priority lane.
-            connection.send_message(ServerToAgent::CancelTransfer { request_id });
+            connection.send_message(ServerToAgent::Cancel { id: request_id });
         }
     }
 
@@ -127,7 +125,7 @@ impl RouterState {
         request_id: RequestId,
         agent_id: AgentId,
     ) -> Result<bool, RouterError> {
-        let Some(flow_id) = self.flows.id_for(request_id) else {
+        let Some(flow_id) = self.flows.id_for(&agent_id, request_id) else {
             return Ok(false);
         };
         let Some(Flow::Output(flow)) = self.flows.get(flow_id) else {
@@ -145,7 +143,7 @@ impl RouterState {
     ///
     /// Copies are canceled only through their public id because both agents must settle.
     pub(crate) fn cancel_transfer(&mut self, request_id: RequestId, agent_id: AgentId) {
-        let Some(flow_id) = self.flows.id_for(request_id) else {
+        let Some(flow_id) = self.flows.id_for(&agent_id, request_id) else {
             log!(
                 Level::Warning,
                 "Transfer not found for cancel request: request_id={}",

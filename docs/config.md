@@ -37,7 +37,7 @@ Unknown top-level keys and unknown keys inside `[server]` / `[agent]` are reject
 
 | Key           | Type   | Required | Description                                                                                    |
 | ------------- | ------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `agent_token` | string | yes      | Shared registration secret. Agents present this when connecting over `/ws`. Must be non-empty. |
+| `agent_token` | string | yes      | Shared agent secret. Agents present it as a bearer token when they open their websocket (`/api/v1/agent/ws`). Must be non-empty. |
 
 ```toml
 agent_token = "long-private-secret"
@@ -90,7 +90,7 @@ Used by a standalone `redoor agent` process (and by systemd/launchd agent units)
 
 | Key          | Type   | Default                     | Description                                                                                                                                  |
 | ------------ | ------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`     | string | none (required to connect)  | Redoor server URL (`http(s)://` or `ws(s)://`). Path is optional and forced to `/ws`. Override with positional `SERVER` / `REDOOR_AGENT_WS`. |
+| `server`     | string | none (required to connect)  | Redoor server URL (`http(s)://` or `ws(s)://`). Path is optional and forced to the agent endpoint `/api/v1/agent/ws` (the legacy `/ws` is accepted). Override with positional `SERVER` / `REDOOR_AGENT_WS`. |
 | `name`       | string | computer hostname           | Device name shown in the UI and remote CLI. Override with `--name` / `REDOOR_AGENT_NAME`.                                                    |
 | `home`       | string | process user home directory | Home directory opened in the UI; does not limit filesystem access. Override with `--home` / `REDOOR_AGENT_HOME`.                             |
 | `log`        | string | platform default\*          | Agent log file path. Override with `--log` / `REDOOR_AGENT_LOG`.                                                                             |

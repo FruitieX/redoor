@@ -140,7 +140,7 @@ pub async fn locate_config(args: &AgentArgs, paths: &AppPaths) -> Result<Option<
 
 /// Fully resolved agent launch settings after applying source precedence.
 struct AgentSettings {
-    /// Canonical `ws(s)://…/ws` URL after normalizing the operator-supplied server address.
+    /// Canonical agent endpoint URL after normalizing the operator-supplied server address.
     ws_address: String,
     /// Optional physical TCP endpoint used when a tunnel differs from the logical server URL.
     connect_address: Option<String>,
@@ -322,7 +322,7 @@ log = "/tmp/file.log"
         )
         .expect("settings should resolve");
         // Explicit CLI values must override the shared TOML.
-        assert_eq!(settings.ws_address, "ws://cli.example:5000/ws");
+        assert_eq!(settings.ws_address, "ws://cli.example:5000/api/v1/agent/ws");
         assert_eq!(settings.name, "cli-name");
         // Values absent on the CLI come from the file rather than defaults.
         assert_eq!(settings.token, "file-token");

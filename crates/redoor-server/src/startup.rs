@@ -312,6 +312,7 @@ impl ServerRuntime {
             log_registry,
             one_time_token_registry: OneTimeTokenRegistry::new(),
             upload_requests: crate::http::upload_requests::UploadRequests::default(),
+            protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches::default(),
             auth,
             machine_tokens,
             mcp,

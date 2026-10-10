@@ -1,5 +1,8 @@
 //! Agent endpoint for the persistent payload-only transfer socket that carries binary
 //! stream frames apart from control traffic.
+//!
+//! The socket authenticates during the upgrade with the per-connection token from
+//! `transfer_socket_open`, so an unauthenticated socket never exists.
 
 use crate::actors::router::{
     ConnectionStreams, RegisterTransferConnectionRequest, RouterHandle, RouterMsg,
@@ -9,56 +12,73 @@ use axum::{
         State as AxumState,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use redoor_core::log;
 use redoor_protocol::{
-    ids::{AgentId, SocketId},
+    ids::SocketId,
     wire::{
+        handshake::PROTOCOL,
         log::Level,
         stream::StreamChunk,
-        transfer::{
-            MAX_TRANSFER_HANDSHAKE_TEXT_BYTES, MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES,
-            TRANSFER_AUTHENTICATION_TIMEOUT, TRANSFER_OUTBOUND_QUEUE_CAPACITY,
-            TransferSocketHandshake,
-        },
+        transfer::{MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES, TRANSFER_OUTBOUND_QUEUE_CAPACITY},
     },
 };
 use tokio::sync::{mpsc, watch};
 
+use super::agent_ws::{bearer_token, offers_protocol};
 use super::state::ServerState;
 
 /// Upgrades the exact public agent payload route with transfer-sized frame limits.
 pub(crate) async fn agent_transfer_websocket_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     AxumState(state): AxumState<ServerState>,
-) -> impl IntoResponse {
-    ws.max_message_size(MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES)
+) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !offers_protocol(&headers) {
+        return StatusCode::UPGRADE_REQUIRED.into_response();
+    }
+    let authorized = state
+        .router_ref
+        .request(|reply| RouterMsg::AuthorizeTransferToken {
+            token: token.clone(),
+            reply,
+        })
+        .await;
+    if !matches!(authorized, Ok(true)) {
+        log!(Level::Warning, "Transfer socket upgrade rejected");
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    ws.protocols([PROTOCOL])
+        .max_message_size(MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES)
         .max_frame_size(MAX_TRANSFER_WEBSOCKET_MESSAGE_BYTES)
         .on_upgrade(move |socket| {
-            run_transfer_socket(socket, state.router_ref, state.runtime.ws_timeouts)
+            run_transfer_socket(socket, token, state.router_ref, state.runtime.ws_timeouts)
         })
 }
 
-/// Authenticates and runs one persistent payload socket without exposing credential details.
+/// Registers and runs one persistent payload socket.
+///
+/// The token was checked before the upgrade, but the connection it belonged to may have been
+/// replaced since, so registration validates it once more and closes the socket otherwise.
 async fn run_transfer_socket(
     mut socket: WebSocket,
+    token: String,
     router: RouterHandle,
     timeouts: redoor_core::websocket::WebSocketTimeouts,
 ) {
     let socket_id = SocketId::new();
-    let Some((agent_id, token)) = authenticate_transfer_socket(&mut socket, &socket_id).await
-    else {
-        return;
-    };
     let (outgoing_binary, mut binary_receiver) =
         mpsc::channel::<StreamChunk>(TRANSFER_OUTBOUND_QUEUE_CAPACITY);
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let registration = router
         .request(|reply| {
             RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                agent_id: agent_id.clone(),
                 token,
                 socket_id: socket_id.clone(),
                 outgoing_binary,
@@ -67,10 +87,10 @@ async fn run_transfer_socket(
             })
         })
         .await;
-    let Ok(Ok(streams)) = registration else {
+    let Ok(Ok((agent_id, streams))) = registration else {
         log!(
             Level::Warning,
-            "Transfer socket authentication rejected: socket_id={}",
+            "Transfer socket registration rejected: socket_id={}",
             socket_id
         );
         let _ = socket.send(WsMessage::Close(None)).await;
@@ -79,7 +99,7 @@ async fn run_transfer_socket(
 
     log!(
         Level::Info,
-        "Transfer socket authentication accepted: agent_id={}, socket_id={}",
+        "Transfer socket accepted: agent_id={}, socket_id={}",
         agent_id,
         socket_id
     );
@@ -99,51 +119,11 @@ async fn run_transfer_socket(
         .await;
 }
 
-/// Accepts exactly one small text authentication frame within the resource timeout.
-async fn authenticate_transfer_socket(
-    socket: &mut WebSocket,
-    socket_id: &SocketId,
-) -> Option<(AgentId, String)> {
-    let frame = match tokio::time::timeout(TRANSFER_AUTHENTICATION_TIMEOUT, socket.recv()).await {
-        Ok(Some(Ok(frame))) => frame,
-        _ => {
-            log!(
-                Level::Warning,
-                "Transfer socket authentication timed out or ended: socket_id={}",
-                socket_id
-            );
-            return None;
-        }
-    };
-    let WsMessage::Text(text) = frame else {
-        log!(
-            Level::Warning,
-            "Transfer socket rejected non-text authentication: socket_id={}",
-            socket_id
-        );
-        return None;
-    };
-    if text.len() > MAX_TRANSFER_HANDSHAKE_TEXT_BYTES {
-        return None;
-    }
-    match serde_json::from_str::<TransferSocketHandshake>(&text) {
-        Ok(TransferSocketHandshake::Authenticate { agent_id, token }) => Some((agent_id, token)),
-        Err(_) => {
-            log!(
-                Level::Warning,
-                "Transfer socket rejected malformed authentication: socket_id={}",
-                socket_id
-            );
-            None
-        }
-    }
-}
-
 /// Hands binary frames straight to their streams' consumers.
 ///
 /// Payload never passes through the router: only a stream's terminal frame is reported to
-/// it. For agents with per-stream credit the reader never waits on a consumer, so a stalled
-/// HTTP client or copy destination cannot freeze the other streams sharing this socket.
+/// it. Every stream is credited, so the reader never waits on a consumer and a stalled HTTP
+/// client or copy destination cannot freeze the other streams sharing this socket.
 async fn read_transfer_frames(
     reader: &mut futures_util::stream::SplitStream<WebSocket>,
     router: &RouterHandle,
@@ -164,7 +144,7 @@ async fn read_transfer_frames(
                 let Ok(chunk) = StreamChunk::from_bytes(&bytes) else {
                     break;
                 };
-                if let Some(end) = streams.deliver(chunk).await
+                if let Some(end) = streams.deliver(chunk)
                     && router
                         .send_async(RouterMsg::InboundStreamEnded(end))
                         .await

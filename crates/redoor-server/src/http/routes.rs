@@ -14,6 +14,7 @@ use super::{
     },
     agent_logs::{agent_logs_websocket_handler, browser_agent_logs_websocket_handler},
     agent_transfers::agent_transfer_websocket_handler,
+    agent_ws::{agent_websocket_handler, legacy_agent_websocket_handler},
     agents::{
         accounts_handler, chmod_path_handler, chown_path_handler, content_grep_handler,
         directory_size_handler, echo_agent_handler, file_search_agent_handler,
@@ -33,6 +34,7 @@ use super::{
     },
     logs::server_logs_websocket_handler,
     moves::move_file_handler,
+    protocol_mismatches::list_protocol_mismatches_handler,
     raw::{create_one_time_token_handler, raw_agent_handler, upload::raw_agent_put_handler},
     restart::restart_server_handler,
     retry_agent_start::retry_agent_start_handler,
@@ -44,7 +46,7 @@ use super::{
     trash::{empty_trash_handler, list_trash_handler, restore_trash_handler},
     ui::ui_service,
     user_state::{get_user_state_handler, update_user_state_handler},
-    ws::{ui_websocket_handler, websocket_handler},
+    ws::ui_websocket_handler,
 };
 
 /// Builds public login/agent entry points and protects every browser-facing API route.
@@ -53,7 +55,12 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
     let mcp_router = super::mcp::router(server_state.clone());
 
     let browser_router = Router::new()
-        .route("/ws", get(websocket_handler))
+        .route("/api/v1/agent/ws", get(agent_websocket_handler))
+        .route("/ws", get(legacy_agent_websocket_handler))
+        .route(
+            "/api/v1/protocol-mismatches",
+            get(list_protocol_mismatches_handler),
+        )
         .route(
             "/api/v1/agent-transfer/ws",
             get(agent_transfer_websocket_handler),

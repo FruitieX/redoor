@@ -502,7 +502,7 @@ mod tests {
         // Completed extraction must not begin even a merge before router authorization.
         assert!(matches!(
             frames.recv().await.unwrap().as_message(),
-            Some(AgentToServer::UploadPublicationRequest { .. })
+            Some(AgentToServer::PublishRequest { .. })
         ));
         // Simulate cancellation winning in the router before its separate cancel control arrives.
         routes.resolve_publication(RequestId::new(4), false);

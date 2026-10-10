@@ -25,7 +25,11 @@ pub async fn spawn_local_agent(
     agent_token: &str,
 ) -> std::io::Result<tokio::process::Child> {
     let name = config.name.clone().unwrap_or_else(default_local_agent_name);
-    let ws_url = format!("ws://localhost:{}/ws", redoor_port);
+    let ws_url = format!(
+        "ws://localhost:{}{}",
+        redoor_port,
+        redoor_protocol::wire::handshake::AGENT_WS_PATH
+    );
 
     let bin = std::env::current_exe()
         .map_err(|e| with_context(e, "Failed to determine redoor binary path"))?;

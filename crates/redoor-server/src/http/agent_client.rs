@@ -331,7 +331,7 @@ mod tests {
         // The agent is told to stop exactly the abandoned request.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::CancelTransfer { request_id: canceled } if canceled == request_id
+            ServerToAgent::Cancel { id: canceled ,} if canceled == request_id
         ));
     }
 

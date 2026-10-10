@@ -3,34 +3,34 @@
 
 use crate::actors::lanes::{ControlLaneReceivers, ControlLanes};
 use crate::actors::router::{
-    ConnectionStreams, RegisterAgentRequest, RouteResponse, RouteTransferReadyRequest,
-    RouterHandle, RouterMsg, TransferProgressUpdateRequest,
+    ConnectionStreams, RegisterAgentRequest, RegistrationRejection, RouteResponse,
+    RouteTransferReadyRequest, RouterHandle, RouterMsg, TransferProgressUpdateRequest,
 };
 use crate::watchdog::{WatchdogHandle, WatchdogRegistry};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use redoor_core::log;
+use redoor_protocol::wire::handshake::RejectReason;
 use redoor_protocol::wire::log::Level;
+use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
     ids::{AgentId, SocketId},
     wire::{AgentToServer, ServerToAgent},
 };
-use sha2::{Digest, Sha256};
-use std::time::Instant;
-use subtle::ConstantTimeEq;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 /// Per-agent command backlog allowed before REST admission fails fast.
 pub(crate) const CONTROL_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// Lifecycle and cancellation traffic has independent capacity from ordinary commands.
 const CONTROL_PRIORITY_QUEUE_CAPACITY: usize = 16;
-
-/// Constant-time string equality so invalid tokens do not leak length via timing.
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    let left_digest = Sha256::digest(left.as_bytes());
-    let right_digest = Sha256::digest(right.as_bytes());
-    bool::from(left_digest.ct_eq(&right_digest))
-}
+/// How long an authenticated socket may stay silent before its `hello`.
+///
+/// The token was already checked during the upgrade, so this only bounds how long a stuck or
+/// buggy client can hold a socket that does not speak for any agent.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a refused connection may take to flush its `rejected` frame before it is dropped.
+const REJECTION_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Converts a lane receive result into the next outbound frame while tracking when that lane
 /// has closed.
@@ -60,6 +60,24 @@ fn encode_frame(frame: &ServerToAgent) -> Option<WsMessage> {
     }
 }
 
+/// The identity fields of an agent's `hello`, unpacked from the wire frame.
+struct Hello {
+    agent_id: AgentId,
+    agent_name: String,
+    identity: AgentIdentity,
+    capabilities: AgentCapabilities,
+}
+
+/// Whether the read loop keeps serving the socket after one frame.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionStep {
+    Continue,
+    /// The peer broke the protocol; drop the socket right away.
+    Close,
+    /// The `hello` was refused; flush the queued `rejected` frame, then close.
+    Rejected,
+}
+
 /// Runtime state held for one websocket-backed agent session.
 struct SessionRuntime {
     /// Identifies the websocket connection so the router can map routed work back
@@ -68,171 +86,176 @@ struct SessionRuntime {
     /// Provides the actor handle used to register the session and forward control
     /// and streaming messages into the routing layer.
     router_ref: RouterHandle,
-    /// Remains absent until the websocket sends `AgentToServer::AgentRegister`, because
-    /// the socket exists before the remote agent has announced which logical
-    /// agent identity it should be associated with.
+    /// Absent until the router accepted this connection's `hello`; afterwards every frame is
+    /// attributed to this agent, because frames themselves carry no identity.
     agent_id: Option<AgentId>,
     /// Typed command and priority lanes this session's writer drains.
     lanes: ControlLanes,
 
-    /// Populated after `AgentRegister` if the registered agent name has a
-    /// matching watchdog supervisor. The stale check uses this to signal
-    /// the supervisor when the WebSocket goes silent. Stays `None` for
-    /// agents that aren't supervised (e.g. manually-spawned external
-    /// agents), whose stale sockets are closed without restarting a process.
+    /// Populated after `hello` if the agent name has a matching watchdog supervisor. The stale
+    /// check uses this to signal the supervisor when the WebSocket goes silent. Stays `None`
+    /// for agents that aren't supervised (e.g. manually-spawned external agents), whose stale
+    /// sockets are closed without restarting a process.
     watchdog: Option<WatchdogHandle>,
-    /// Expected top-level `agent_token`; registration without this secret is rejected.
-    agent_token: String,
     /// Payload stream tables of the registered session; credit the agent returns for
     /// server-to-agent streams is applied here directly, never through the router mailbox.
     streams: Option<ConnectionStreams>,
 }
 
 impl SessionRuntime {
-    /// Registers the agent with the router once the websocket announces itself.
+    /// Handles one control frame: `hello` before registration, everything else after it.
     async fn handle_control_message(
         &mut self,
         message: AgentToServer,
         watchdog_registry: &WatchdogRegistry,
-    ) {
-        match message {
-            AgentToServer::AgentRegister {
-                agent_id,
-                agent_name,
-                token,
-                identity,
-                capabilities,
-            } => {
-                // Reject impostors before name takeover: an unauthenticated client
-                // that only knows an agent name must not replace a live connection.
-                if !constant_time_eq(&token, &self.agent_token) {
-                    log!(
-                        Level::Warning,
-                        "Rejecting agent registration with invalid token: agent_name={}, socket_id={}",
+    ) -> SessionStep {
+        match (self.agent_id.clone(), message) {
+            (
+                None,
+                AgentToServer::Hello {
+                    agent_id,
+                    agent_name,
+                    identity,
+                    capabilities,
+                },
+            ) => {
+                self.register(
+                    Hello {
+                        agent_id,
                         agent_name,
-                        self.socket_id
-                    );
-                    let _ = self.lanes.try_priority(ServerToAgent::Error {
-                        message: "Invalid agent token".to_string(),
-                    });
-                    return;
-                }
-
-                // Look up the supervisor for this agent name BEFORE
-                // moving `agent_name` into the registration payload so
-                // the registry still has access to it. A `None` result
-                // is fine: it just means the agent is not supervised by
-                // the watchdog (e.g. an external agent spawned outside
-                // the server) and stale cleanup has no process to restart.
-                self.watchdog = watchdog_registry.lookup(&agent_name);
-                let mut watchdog_attempt_generation = None;
-                if let Some(watchdog) = self.watchdog.as_ref() {
-                    let Some(attempt_generation) =
-                        watchdog.mark_connected(self.socket_id.clone()).await
-                    else {
-                        log!(
-                            Level::Warning,
-                            "Rejecting managed agent registration while stopped: agent_name={}",
-                            agent_name
-                        );
-                        let _ = self.lanes.try_priority(ServerToAgent::Error {
-                            message: "Managed agent is intentionally stopped".to_string(),
-                        });
-                        self.watchdog = None;
-                        return;
-                    };
-                    watchdog_attempt_generation = Some(attempt_generation);
-                    log!(
-                        Level::Debug,
-                        "Session linked to watchdog supervisor: agent_name={}",
-                        agent_name
-                    );
-                }
-
-                let capabilities = capabilities.normalized();
-                let streams =
-                    ConnectionStreams::new(agent_id.clone(), capabilities.supports_stream_credit);
-                self.streams = Some(streams.clone());
-                // Registration installs the routing entry every later frame depends on, so a
-                // momentarily full mailbox must delay it rather than silently drop it.
-                if let Err(error) = self
-                    .router_ref
-                    .send_async(RouterMsg::RegisterAgent(RegisterAgentRequest {
-                        agent_id: agent_id.clone(),
-                        agent_name,
-                        socket_id: self.socket_id.clone(),
-                        lanes: self.lanes.clone(),
                         identity,
                         capabilities,
-                        watchdog: self.watchdog.clone(),
-                        watchdog_attempt_generation,
-                        streams,
-                    }))
-                    .await
-                {
-                    redoor_core::log_failure!(
-                        Level::Error,
-                        "Failed to queue agent registration: agent_id={}, socket_id={}, error={}",
-                        agent_id,
-                        self.socket_id,
-                        error
-                    );
-                }
-                self.agent_id = Some(agent_id);
+                    },
+                    watchdog_registry,
+                )
+                .await
             }
-            other => match self.agent_id.clone() {
-                Some(agent_id) => self.handle_agent_frame(agent_id, other).await,
-                None => log!(
+            (None, other) => {
+                log!(
                     Level::Warning,
-                    "Ignoring agent frame before successful registration: socket_id={}, frame={}",
+                    "Closing agent socket that sent a frame before hello: socket_id={}, frame={}",
                     self.socket_id,
                     other.kind()
-                ),
-            },
+                );
+                SessionStep::Close
+            }
+            (Some(_), AgentToServer::Hello { .. }) => {
+                log!(
+                    Level::Warning,
+                    "Closing agent socket that sent a second hello: socket_id={}",
+                    self.socket_id
+                );
+                SessionStep::Close
+            }
+            (Some(agent_id), other) => {
+                self.handle_agent_frame(agent_id, other).await;
+                SessionStep::Continue
+            }
         }
     }
 
-    /// Handles a frame from a session whose registration was accepted.
-    ///
-    /// Frames carry their own `agent_id`, but it is never trusted: the session's registered
-    /// id (bound to a valid `agent_token`) is what the router checks ownership against, so a
-    /// client cannot answer or steer another agent's requests by naming that agent.
-    async fn handle_agent_frame(&mut self, agent_id: AgentId, message: AgentToServer) {
-        if let Some(claimed) = message.claimed_agent_id()
-            && claimed != &agent_id
-        {
+    /// Links the watchdog supervisor and asks the router to accept the agent.
+    async fn register(
+        &mut self,
+        hello: Hello,
+        watchdog_registry: &WatchdogRegistry,
+    ) -> SessionStep {
+        // Look up the supervisor for this agent name. A `None` result is fine: it just means
+        // the agent is not supervised by the watchdog (e.g. an external agent spawned outside
+        // the server) and stale cleanup has no process to restart.
+        self.watchdog = watchdog_registry.lookup(&hello.agent_name);
+        let mut watchdog_attempt_generation = None;
+        if let Some(watchdog) = self.watchdog.as_ref() {
+            let Some(attempt_generation) = watchdog.mark_connected(self.socket_id.clone()).await
+            else {
+                log!(
+                    Level::Warning,
+                    "Rejecting managed agent while stopped: agent_name={}",
+                    hello.agent_name
+                );
+                self.watchdog = None;
+                let _ = self.lanes.try_priority(ServerToAgent::Rejected {
+                    reason: RejectReason::Stopped,
+                    message: "Managed agent is intentionally stopped".to_string(),
+                });
+                return SessionStep::Rejected;
+            };
+            watchdog_attempt_generation = Some(attempt_generation);
             log!(
-                Level::Warning,
-                "Agent frame names a different agent than its session; using the session's: socket_id={}, session_agent_id={}, frame_agent_id={}",
-                self.socket_id,
-                agent_id,
-                claimed
+                Level::Debug,
+                "Session linked to watchdog supervisor: agent_name={}",
+                hello.agent_name
             );
         }
-        match message {
-            AgentToServer::AgentRegister { .. } => {}
-            AgentToServer::AgentUnregister { .. } => {
-                if let Some(watchdog) = self.watchdog.as_ref() {
+        let agent_id = hello.agent_id.clone();
+        let streams = ConnectionStreams::new(agent_id.clone());
+        let (socket_id, lanes, watchdog) = (
+            self.socket_id.clone(),
+            self.lanes.clone(),
+            self.watchdog.clone(),
+        );
+        let registered_streams = streams.clone();
+        // Registration installs the routing entry every later frame depends on, so a
+        // momentarily full mailbox must delay it rather than silently drop it.
+        let decision = self
+            .router_ref
+            .request(move |reply| {
+                RouterMsg::RegisterAgent(RegisterAgentRequest {
+                    agent_id: hello.agent_id,
+                    agent_name: hello.agent_name,
+                    socket_id,
+                    lanes,
+                    identity: hello.identity,
+                    capabilities: hello.capabilities.normalized(),
+                    watchdog,
+                    watchdog_attempt_generation,
+                    streams: registered_streams,
+                    reply: Some(reply),
+                })
+            })
+            .await;
+        match decision {
+            Ok(Ok(())) => {
+                self.streams = Some(streams);
+                self.agent_id = Some(agent_id);
+                SessionStep::Continue
+            }
+            Ok(Err(RegistrationRejection { reason, message })) => {
+                log!(
+                    Level::Warning,
+                    "Agent hello rejected: agent_id={}, socket_id={}, reason={:?}, message={}",
+                    agent_id,
+                    self.socket_id,
+                    reason,
+                    message
+                );
+                if let Some(watchdog) = self.watchdog.take() {
                     watchdog.mark_disconnected(self.socket_id.clone());
                 }
-                if let Err(error) = self
-                    .router_ref
-                    .send_async(RouterMsg::UnregisterAgent {
-                        agent_id: agent_id.clone(),
-                        socket_id: self.socket_id.clone(),
-                    })
-                    .await
-                {
-                    redoor_core::log_failure!(
-                        Level::Error,
-                        "Failed to queue explicit agent cleanup: agent_id={}, socket_id={}, error={}",
-                        agent_id,
-                        self.socket_id,
-                        error
-                    );
-                }
+                SessionStep::Rejected
             }
-            AgentToServer::TransferReady { request_id, .. } => {
+            Err(error) => {
+                redoor_core::log_failure!(
+                    Level::Error,
+                    "Failed to register agent: agent_id={}, socket_id={}, error={}",
+                    agent_id,
+                    self.socket_id,
+                    error
+                );
+                SessionStep::Close
+            }
+        }
+    }
+
+    /// Handles a frame from a session whose `hello` was accepted.
+    ///
+    /// Frames carry no agent id: the session's registered id (bound to an authenticated
+    /// upgrade) is the only identity the router checks ownership against, so a client cannot
+    /// answer or steer another agent's requests.
+    async fn handle_agent_frame(&mut self, agent_id: AgentId, message: AgentToServer) {
+        match message {
+            AgentToServer::Hello { .. } => {}
+            AgentToServer::TransferReady { id } => {
                 // TransferReady is a one-shot gate for uploads/copies. try_send would
                 // permanently drop readiness when the router mailbox is full, leaving
                 // the transfer stuck until client timeout with no cleanup path.
@@ -241,7 +264,7 @@ impl SessionRuntime {
                     .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
                         agent_id: agent_id.clone(),
                         socket_id: self.socket_id.clone(),
-                        request_id,
+                        request_id: id,
                     }))
                     .await
                 {
@@ -249,14 +272,12 @@ impl SessionRuntime {
                         Level::Error,
                         "Failed to queue transfer readiness: agent_id={}, request_id={}, error={}",
                         agent_id,
-                        request_id,
+                        id,
                         error
                     );
                 }
             }
-            AgentToServer::CommandResponse {
-                request_id, result, ..
-            } => {
+            AgentToServer::CommandResponse { id, result } => {
                 // Terminal responses release pending requests and transfer state, so
                 // temporary mailbox pressure must never discard their cleanup signal.
                 if let Err(error) = self
@@ -264,7 +285,7 @@ impl SessionRuntime {
                     .send_async(RouterMsg::RouteResponse(RouteResponse {
                         agent_id: agent_id.clone(),
                         socket_id: self.socket_id.clone(),
-                        request_id,
+                        request_id: id,
                         result,
                     }))
                     .await
@@ -273,31 +294,30 @@ impl SessionRuntime {
                         Level::Error,
                         "Failed to queue command response: agent_id={}, request_id={}, error={}",
                         agent_id,
-                        request_id,
+                        id,
                         error
                     );
                 }
             }
-            AgentToServer::UploadPublicationRequest { request_id, .. } => {
+            AgentToServer::PublishRequest { id } => {
                 let _ = self
                     .router_ref
                     .send_async(RouterMsg::BeginUploadPublication {
                         agent_id,
                         socket_id: self.socket_id.clone(),
-                        request_id,
+                        request_id: id,
                     })
                     .await;
             }
-            AgentToServer::StreamCredit { request_id, frames } => {
+            AgentToServer::Credit { stream, frames } => {
                 if let Some(streams) = &self.streams {
-                    streams.grant_outbound(request_id, frames);
+                    streams.grant_outbound(stream, frames);
                 }
             }
-            AgentToServer::TransferProgressUpdate {
-                request_id,
+            AgentToServer::TransferProgress {
+                id,
                 transferred_bytes,
                 total_bytes,
-                ..
             } => {
                 // Late archive totals and local copy progress arrive once or rarely, so waiting
                 // for mailbox capacity is cheap while dropping them would leave stale progress.
@@ -307,7 +327,7 @@ impl SessionRuntime {
                         TransferProgressUpdateRequest {
                             agent_id,
                             socket_id: self.socket_id.clone(),
-                            request_id,
+                            request_id: id,
                             transferred_bytes,
                             total_bytes,
                         },
@@ -344,18 +364,25 @@ impl SessionRuntime {
     }
 
     /// Dispatches one inbound websocket frame to the appropriate handler.
-    /// Returns `false` when the session should stop (e.g. router rejected
-    /// a binary chunk), so the caller can break out of its read loop.
     async fn handle_ws_message(
         &mut self,
         message: WsMessage,
         watchdog_registry: &WatchdogRegistry,
-    ) -> bool {
+    ) -> SessionStep {
         match message {
             WsMessage::Text(text) => match serde_json::from_str::<AgentToServer>(&text) {
                 Ok(message) => {
                     self.handle_control_message(message, watchdog_registry)
                         .await
+                }
+                Err(error) if self.agent_id.is_none() => {
+                    log!(
+                        Level::Warning,
+                        "Closing agent socket whose first frame is not a hello: socket_id={}, error={}",
+                        self.socket_id,
+                        error
+                    );
+                    SessionStep::Close
                 }
                 Err(error) => {
                     redoor_core::log_failure!(
@@ -364,6 +391,7 @@ impl SessionRuntime {
                         text,
                         error
                     );
+                    SessionStep::Continue
                 }
             },
             WsMessage::Binary(_) => {
@@ -372,22 +400,20 @@ impl SessionRuntime {
                     "Binary frame on control socket: socket_id={}",
                     self.socket_id
                 );
-                return false;
+                SessionStep::Close
             }
-            _ => {}
+            _ => SessionStep::Continue,
         }
-        true
     }
 }
 
-/// Entry point for a new WebSocket connection. Splits the socket into send/receive
-/// halves and wires them to the router using explicit Tokio channels.
+/// Entry point for a new, already authenticated agent connection. Splits the socket into
+/// send/receive halves and wires them to the router using explicit Tokio channels.
 pub async fn handle_websocket(
     socket: WebSocket,
     socket_id: SocketId,
     router_ref: RouterHandle,
     watchdog_registry: WatchdogRegistry,
-    agent_token: String,
     timeouts: redoor_core::websocket::WebSocketTimeouts,
 ) {
     let (mut sender, mut receiver) = socket.split::<WsMessage>();
@@ -406,7 +432,6 @@ pub async fn handle_websocket(
         agent_id: None,
         lanes,
         watchdog: None,
-        agent_token,
         streams: None,
     };
 
@@ -417,7 +442,7 @@ pub async fn handle_websocket(
     // broken connection.
     let (writer_done_tx, mut writer_done_rx) = oneshot::channel::<()>();
 
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         let mut commands_closed = false;
         let mut priority_closed = false;
         let mut ping_interval = timeouts.keepalive_interval();
@@ -444,7 +469,10 @@ pub async fn handle_websocket(
                 frame = rx_out_priority.recv(), if !priority_closed => take_outbound_frame(frame, &mut priority_closed),
                 frame = rx_out_commands.recv(), if !commands_closed => take_outbound_frame(frame, &mut commands_closed),
                 // Both bounded lanes are closed, so no future application frames can be produced.
-                else => break,
+                else => {
+                    let _ = sender.send(WsMessage::Close(None)).await;
+                    break;
+                }
             };
 
             let Some(message) = next_message.as_ref().and_then(encode_frame) else {
@@ -470,17 +498,27 @@ pub async fn handle_websocket(
     // connection is half-open (e.g. SSH tunnel died without a TCP
     // close). Managed sessions also ask their watchdog to restart the subprocess.
     let mut last_seen = Instant::now();
+    let opened_at = Instant::now();
     let mut stale_check = tokio::time::interval(timeouts.stale_check_interval);
     stale_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Burn the first immediate tick so the first stale check fires one
     // interval from now rather than immediately at session start.
     stale_check.tick().await;
 
+    let mut rejected = false;
     loop {
         tokio::select! {
             biased;
             _ = &mut writer_done_rx => break,
             _ = stale_check.tick() => {
+                if runtime.agent_id.is_none() && opened_at.elapsed() > HELLO_TIMEOUT {
+                    log!(
+                        Level::Warning,
+                        "Closing agent socket that sent no hello: socket_id={}",
+                        socket_id
+                    );
+                    break;
+                }
                 if last_seen.elapsed() > timeouts.stale_timeout {
                     if let Some(watchdog) = runtime.watchdog.as_ref() {
                         log!(
@@ -510,8 +548,13 @@ pub async fn handle_websocket(
                     // stale timer. The dispatch below happens before
                     // we drop the frame so the runtime can act on it.
                     last_seen = Instant::now();
-                    if !runtime.handle_ws_message(message, &watchdog_registry).await {
-                        break;
+                    match runtime.handle_ws_message(message, &watchdog_registry).await {
+                        SessionStep::Continue => {}
+                        SessionStep::Close => break,
+                        SessionStep::Rejected => {
+                            rejected = true;
+                            break;
+                        }
                     }
                 }
                 _ => break,
@@ -520,28 +563,38 @@ pub async fn handle_websocket(
     }
 
     runtime.shutdown().await;
-    writer_task.abort();
+    if rejected {
+        // The session held the last lane senders, so the writer flushes the queued `rejected`
+        // frame, closes the socket and ends; the agent then exits instead of reconnecting.
+        if tokio::time::timeout(REJECTION_FLUSH_TIMEOUT, &mut writer_task)
+            .await
+            .is_err()
+        {
+            writer_task.abort();
+        }
+    } else {
+        writer_task.abort();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redoor_protocol::ids::RequestId;
+    use redoor_protocol::wire::command::CommandResult;
     use tokio::sync::mpsc;
 
     /// The writer's encoding is the wire format the agent parses.
     #[test]
     fn writer_encodes_typed_frames_as_protocol_json() {
-        let frame = ServerToAgent::CancelTransfer {
-            request_id: redoor_protocol::ids::RequestId::new(5),
+        let frame = ServerToAgent::Cancel {
+            id: RequestId::new(5),
         };
         let Some(WsMessage::Text(text)) = encode_frame(&frame) else {
             panic!("control frames are text messages");
         };
         // Agents and fake test agents decode exactly this tag and field.
-        assert_eq!(
-            text.as_str(),
-            r#"{"type":"cancel_transfer","request_id":5}"#
-        );
+        assert_eq!(text.as_str(), r#"{"type":"cancel","id":5}"#);
     }
 
     /// Builds a session runtime over a capturing router mailbox.
@@ -554,54 +607,47 @@ mod tests {
             agent_id,
             lanes,
             watchdog: None,
-            agent_token: "token".to_string(),
             streams: None,
         };
         (runtime, receiver)
     }
 
-    /// An unauthenticated socket must not reach the router with agent frames: otherwise any
-    /// client of the public `/ws` endpoint could resolve or steer pending requests.
+    /// A socket that has not said hello must not reach the router with agent frames, and the
+    /// protocol violation closes it: otherwise an authenticated but unidentified socket could
+    /// resolve or steer pending requests of whichever agent it guessed.
     #[tokio::test]
-    async fn unregistered_session_forwards_no_agent_frames() {
-        let (mut runtime, mut receiver) = capture_session(None);
+    async fn frames_before_hello_close_the_socket() {
         let watchdog_registry = WatchdogRegistry::new();
-        let request_id = redoor_protocol::ids::RequestId::new(1);
-        let agent_id = AgentId::from("victim");
+        let request_id = RequestId::new(1);
         for frame in [
             AgentToServer::CommandResponse {
-                agent_id: agent_id.clone(),
-                request_id,
-                result: redoor_protocol::wire::command::CommandResult::RawUpload,
+                id: request_id,
+                result: CommandResult::RawUpload,
             },
-            AgentToServer::TransferReady {
-                agent_id: agent_id.clone(),
-                request_id,
-            },
-            AgentToServer::TransferProgressUpdate {
-                agent_id: agent_id.clone(),
-                request_id,
+            AgentToServer::TransferReady { id: request_id },
+            AgentToServer::TransferProgress {
+                id: request_id,
                 transferred_bytes: 1,
                 total_bytes: None,
             },
-            AgentToServer::UploadPublicationRequest {
-                agent_id: agent_id.clone(),
-                request_id,
-            },
-            AgentToServer::AgentUnregister {
-                agent_id: agent_id.clone(),
+            AgentToServer::PublishRequest { id: request_id },
+            AgentToServer::Credit {
+                stream: request_id,
+                frames: 1,
             },
         ] {
-            runtime
+            let (mut runtime, mut receiver) = capture_session(None);
+            let step = runtime
                 .handle_control_message(frame, &watchdog_registry)
                 .await;
+            // The socket is dropped instead of waiting for a hello that may never come.
+            assert_eq!(step, SessionStep::Close);
+            // Nothing may be queued for the router before the hello was accepted.
+            assert!(receiver.try_recv().is_err());
         }
-        // Nothing may be queued for the router before a registration with a valid token.
-        assert!(receiver.try_recv().is_err());
     }
 
-    /// A registered session routes frames under its own agent id, never the one a frame
-    /// claims, so an authenticated agent cannot impersonate another.
+    /// A registered session routes frames under its own agent id, because frames carry none.
     #[tokio::test]
     async fn registered_session_routes_frames_under_its_own_agent_id() {
         let own = AgentId::from("own");
@@ -610,9 +656,8 @@ mod tests {
         runtime
             .handle_control_message(
                 AgentToServer::CommandResponse {
-                    agent_id: AgentId::from("someone-else"),
-                    request_id: redoor_protocol::ids::RequestId::new(3),
-                    result: redoor_protocol::wire::command::CommandResult::RawUpload,
+                    id: RequestId::new(3),
+                    result: CommandResult::RawUpload,
                 },
                 &WatchdogRegistry::new(),
             )
@@ -625,6 +670,22 @@ mod tests {
         assert_eq!(response.socket_id, socket_id);
     }
 
+    /// A second hello on an accepted connection is a protocol violation, not a re-register.
+    #[tokio::test]
+    async fn second_hello_closes_the_socket() {
+        let (mut runtime, mut receiver) = capture_session(Some(AgentId::from("own")));
+        let hello: AgentToServer = serde_json::from_str(
+            r#"{"type":"hello","agent_id":"other","agent_name":"other","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"}}"#,
+        )
+        .unwrap();
+        let step = runtime
+            .handle_control_message(hello, &WatchdogRegistry::new())
+            .await;
+        // Switching identity mid-connection would let one agent speak for another.
+        assert_eq!(step, SessionStep::Close);
+        assert!(receiver.try_recv().is_err());
+    }
+
     /// Exercises session dispatch under backpressure so completion cleanup cannot be lost.
     #[tokio::test]
     async fn command_response_waits_for_router_capacity_before_routing() {
@@ -634,7 +695,7 @@ mod tests {
             .send(RouterMsg::CheckPendingUiRefresh)
             .expect("router mailbox filled");
         let agent_id = AgentId::from("agent");
-        let request_id = redoor_protocol::ids::RequestId::new(42);
+        let request_id = RequestId::new(42);
         let (lanes, _receivers) = ControlLanes::bounded(1, 1);
         let mut runtime = SessionRuntime {
             socket_id: SocketId::new(),
@@ -642,15 +703,13 @@ mod tests {
             agent_id: Some(agent_id.clone()),
             lanes,
             watchdog: None,
-            agent_token: "token".to_string(),
             streams: None,
         };
         let watchdog_registry = WatchdogRegistry::new();
         let response = runtime.handle_control_message(
             AgentToServer::CommandResponse {
-                agent_id: agent_id.clone(),
-                request_id,
-                result: redoor_protocol::wire::command::CommandResult::RawUpload,
+                id: request_id,
+                result: CommandResult::RawUpload,
             },
             &watchdog_registry,
         );
@@ -671,11 +730,12 @@ mod tests {
                 agent_id: received_agent_id,
                 request_id: received_request_id,
                 socket_id: _,
-                result: redoor_protocol::wire::command::CommandResult::RawUpload,
+                result: CommandResult::RawUpload,
             })) if received_agent_id == agent_id && received_request_id == request_id
         ));
     }
 
+    /// Verifies teardown waits for router capacity instead of dropping the unregistration.
     #[tokio::test]
     async fn shutdown_waits_for_router_capacity_before_unregistering_agent() {
         let (sender, mut receiver) = mpsc::channel(1);
@@ -691,7 +751,6 @@ mod tests {
             agent_id: Some(AgentId::from("agent")),
             lanes,
             watchdog: None,
-            agent_token: "token".to_string(),
             streams: None,
         };
 

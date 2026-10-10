@@ -7,13 +7,10 @@ use crate::transfers::upload::UploadRoutes;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use redoor_core::log;
-use redoor_protocol::{
-    ids::AgentId,
-    wire::{
-        log::Level,
-        transfer::{
-            TRANSFER_OUTBOUND_QUEUE_CAPACITY, TRANSFER_RECONNECT_DELAY, TransferSocketHandshake,
-        },
+use redoor_protocol::wire::{
+    log::Level,
+    transfer::{
+        AGENT_TRANSFER_WS_PATH, TRANSFER_OUTBOUND_QUEUE_CAPACITY, TRANSFER_RECONNECT_DELAY,
     },
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -22,7 +19,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 /// Derives the payload endpoint while preserving the configured authority and WebSocket scheme.
 pub(crate) fn transfer_url(server_url: &str) -> Result<url::Url> {
     let mut url = url::Url::parse(server_url).context("invalid agent websocket URL")?;
-    url.set_path("/api/v1/agent-transfer/ws");
+    url.set_path(AGENT_TRANSFER_WS_PATH);
     url.set_query(None);
     url.set_fragment(None);
     Ok(url)
@@ -31,7 +28,7 @@ pub(crate) fn transfer_url(server_url: &str) -> Result<url::Url> {
 /// Captures immutable connection inputs so setup never blocks the agent actor.
 pub(crate) struct TransferConnectContext {
     pub(crate) connection: AgentConnection,
-    pub(crate) agent_id: AgentId,
+    /// Per-connection secret from `transfer_socket_open`, presented during the upgrade.
     pub(crate) token: String,
     pub(crate) control_generation: u64,
     pub(crate) transfer_generation: u64,
@@ -59,17 +56,13 @@ pub(crate) fn spawn_transfer_connection(context: TransferConnectContext) {
     });
 }
 
-/// Authenticates one payload socket and runs bounded binary ingress and egress until either side ends.
+/// Opens one payload socket and runs bounded binary ingress and egress until either side ends.
+///
+/// The socket authenticates during the upgrade, so the server registers it (and may start
+/// admitting transfers) as soon as the upgrade succeeds. The writer is installed in the actor
+/// before the upgrade for the same reason.
 async fn run_transfer_connection(context: &TransferConnectContext) -> Result<()> {
     let url = transfer_url(context.connection.server_url())?;
-    let (mut socket, _) = context
-        .connection
-        .connect(url.as_str())
-        .await
-        .context("failed to connect transfer socket")?;
-
-    // Install the transfer sender in the actor before authenticating so the server cannot
-    // admit REST transfers while ws_transfer_tx is still None on this agent.
     let (sender, mut receiver) = mpsc::channel(TRANSFER_OUTBOUND_QUEUE_CAPACITY);
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
     let (installed_tx, installed_rx) = oneshot::channel();
@@ -89,25 +82,19 @@ async fn run_transfer_connection(context: &TransferConnectContext) -> Result<()>
         .await
         .context("agent actor dropped transfer install acknowledgement")?;
     if !installed {
-        // Stale generation: leave without authenticating so the server never registers this socket.
+        // Stale generation: never upgrade, so the server never registers this socket.
         return Ok(());
     }
 
-    let handshake = serde_json::to_string(&TransferSocketHandshake::Authenticate {
-        agent_id: context.agent_id.clone(),
-        token: context.token.clone(),
-    })
-    .context("failed to encode transfer authentication")?;
-    socket
-        .send(WsMessage::text(handshake))
+    let socket = context
+        .connection
+        .connect_authenticated(url.as_str(), &context.token)
         .await
-        .context("failed to send transfer authentication")?;
-
+        .context("failed to connect transfer socket")?;
     let (mut writer, mut reader) = socket.split();
     log!(
         Level::Info,
-        "Transfer socket connected: agent_id={}, generation={}",
-        context.agent_id,
+        "Transfer socket connected: generation={}",
         context.transfer_generation
     );
     let read = read_transfer_frames(&mut reader, context, shutdown_receiver.clone());
@@ -137,7 +124,7 @@ async fn read_transfer_frames(
             Some(Ok(WsMessage::Binary(bytes))) => {
                 context
                     .upload_routes
-                    .route_frame(&bytes, &context.control_sender, &context.agent_id)
+                    .route_frame(&bytes, &context.control_sender)
                     .await;
             }
             Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {}

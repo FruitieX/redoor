@@ -7,7 +7,7 @@
 
 use redoor_core::log;
 use redoor_protocol::{
-    ids::{AgentId, RequestId},
+    ids::RequestId,
     wire::{AgentToServer, command::CommandResult, log::Level},
 };
 use std::path::PathBuf;
@@ -128,16 +128,14 @@ pub(crate) struct ControlClosed;
 #[derive(Clone)]
 pub(crate) struct Responder {
     control: ControlSender,
-    agent_id: AgentId,
     request_id: RequestId,
 }
 
 impl Responder {
     /// Binds a responder to one request on the current control connection.
-    pub(crate) fn new(control: ControlSender, agent_id: AgentId, request_id: RequestId) -> Self {
+    pub(crate) fn new(control: ControlSender, request_id: RequestId) -> Self {
         Self {
             control,
-            agent_id,
             request_id,
         }
     }
@@ -161,16 +159,14 @@ impl Responder {
     pub(crate) async fn respond(&self, result: CommandResult) -> Result<(), ControlClosed> {
         log!(
             Level::Info,
-            "Command complete: agent_id={}, request_id={}, result={}",
-            self.agent_id,
+            "Command complete: request_id={}, result={}",
             self.request_id,
             result.summary()
         );
         let after_send = PostSend::for_result(&result);
         self.send(OutboundFrame {
             frame: ControlFrame::Message(Box::new(AgentToServer::CommandResponse {
-                agent_id: self.agent_id.clone(),
-                request_id: self.request_id,
+                id: self.request_id,
                 result,
             })),
             after_send,
@@ -184,41 +180,34 @@ impl Responder {
         transferred_bytes: u64,
         total_bytes: Option<u64>,
     ) -> Result<(), ControlClosed> {
-        self.send(OutboundFrame::message(
-            AgentToServer::TransferProgressUpdate {
-                agent_id: self.agent_id.clone(),
-                request_id: self.request_id,
-                transferred_bytes,
-                total_bytes,
-            },
-        ))
+        self.send(OutboundFrame::message(AgentToServer::TransferProgress {
+            id: self.request_id,
+            transferred_bytes,
+            total_bytes,
+        }))
         .await
     }
 
     /// Announces that an upload worker exists so the server may start sending chunks.
     pub(crate) async fn transfer_ready(&self) -> Result<(), ControlClosed> {
         self.send(OutboundFrame::message(AgentToServer::TransferReady {
-            agent_id: self.agent_id.clone(),
-            request_id: self.request_id,
+            id: self.request_id,
         }))
         .await
     }
 
     /// Asks the router to order publication of staged upload content against cancellation.
     pub(crate) async fn request_publication(&self) -> Result<(), ControlClosed> {
-        self.send(OutboundFrame::message(
-            AgentToServer::UploadPublicationRequest {
-                agent_id: self.agent_id.clone(),
-                request_id: self.request_id,
-            },
-        ))
+        self.send(OutboundFrame::message(AgentToServer::PublishRequest {
+            id: self.request_id,
+        }))
         .await
     }
 
     /// Returns per-stream credit for an upload after its worker staged the drained frames.
     pub(crate) async fn stream_credit(&self, frames: u32) -> Result<(), ControlClosed> {
-        self.send(OutboundFrame::message(AgentToServer::StreamCredit {
-            request_id: self.request_id,
+        self.send(OutboundFrame::message(AgentToServer::Credit {
+            stream: self.request_id,
             frames,
         }))
         .await
@@ -231,10 +220,7 @@ impl Responder {
         capacity: usize,
     ) -> (Self, mpsc::Receiver<OutboundFrame>) {
         let (control, frames) = mpsc::channel(capacity);
-        (
-            Self::new(control, AgentId::from("test-agent"), request_id),
-            frames,
-        )
+        (Self::new(control, request_id), frames)
     }
 }
 
@@ -275,7 +261,7 @@ mod tests {
         // Readiness names the request so the server can release its HTTP body producer.
         assert!(matches!(
             ready.as_message(),
-            Some(AgentToServer::TransferReady { request_id, .. }) if *request_id == RequestId::new(7)
+            Some(AgentToServer::TransferReady { id }) if *id == RequestId::new(7)
         ));
         let response = frames.recv().await.unwrap();
         // The terminal response is typed, so tests and the writer need no JSON parsing.

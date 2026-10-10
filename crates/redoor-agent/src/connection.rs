@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use redoor_protocol::wire::handshake::{AGENT_VERSION_HEADER, PROTOCOL, ProtocolMismatchResponse};
 use rustls::{
     DigitallySignedStruct, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -13,11 +14,95 @@ use rustls::{
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config, connect_async,
-    tungstenite::handshake::client::Response,
+    tungstenite::{
+        self,
+        client::IntoClientRequest,
+        handshake::client::{Request, Response},
+        http::{HeaderValue, StatusCode, header},
+    },
 };
 
 /// WebSocket stream type shared by every control and data-plane agent connection.
 pub(crate) type AgentSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// Why an authenticated upgrade failed.
+///
+/// A wrong token or an incompatible protocol cannot fix itself by retrying, so the runtime must
+/// tell these apart from transport errors to stop instead of looping on reconnects.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ConnectError {
+    /// The server answered `401`: the agent token is wrong.
+    #[error("the server rejected the agent token (401 Unauthorized)")]
+    Unauthorized,
+    /// The server answered `426`: it speaks a different protocol version.
+    #[error(
+        "the server speaks {server_protocol} (version {server_version}) but this agent speaks {agent_protocol}; upgrade the agent"
+    )]
+    ProtocolMismatch {
+        server_protocol: String,
+        server_version: String,
+        agent_protocol: &'static str,
+    },
+    /// Anything else (network, TLS, unexpected status); retrying may succeed.
+    #[error(transparent)]
+    Transport(#[from] anyhow::Error),
+}
+
+impl ConnectError {
+    /// Whether a later reconnect could succeed without operator action.
+    pub(crate) fn is_fatal(&self) -> bool {
+        !matches!(self, Self::Transport(_))
+    }
+
+    /// Classifies a non-`101` upgrade answer by its status and body.
+    fn from_http(response: &tungstenite::http::Response<Option<Vec<u8>>>) -> Self {
+        match response.status() {
+            StatusCode::UNAUTHORIZED => Self::Unauthorized,
+            StatusCode::UPGRADE_REQUIRED => {
+                let body = response
+                    .body()
+                    .as_deref()
+                    .and_then(|body| serde_json::from_slice::<ProtocolMismatchResponse>(body).ok());
+                Self::ProtocolMismatch {
+                    server_protocol: body
+                        .as_ref()
+                        .map(|body| body.server_protocol.clone())
+                        .unwrap_or_else(|| "an unknown protocol".to_string()),
+                    server_version: body
+                        .map(|body| body.server_version)
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    agent_protocol: PROTOCOL,
+                }
+            }
+            status => Self::Transport(anyhow::anyhow!(
+                "WebSocket upgrade was answered with HTTP {status}"
+            )),
+        }
+    }
+}
+
+/// Builds an upgrade request that authenticates with `token` and offers [`PROTOCOL`].
+fn authenticated_request(url: &str, token: &str) -> Result<Request> {
+    let mut request = url
+        .into_client_request()
+        .context("invalid agent websocket URL")?;
+    let headers = request.headers_mut();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("agent token is not a valid HTTP header value")?,
+    );
+    headers.insert(
+        header::SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static(PROTOCOL),
+    );
+    headers.insert(
+        AGENT_VERSION_HEADER,
+        HeaderValue::from_str(&redoor_core::identity::current_binary_identity().version)
+            .context("agent version is not a valid HTTP header value")?,
+    );
+    Ok(request)
+}
 
 /// Separates the logical WebSocket server identity from an optional tunnel TCP endpoint.
 #[derive(Clone, Debug)]
@@ -61,18 +146,45 @@ impl AgentConnection {
 
     /// Opens TCP through the tunnel when configured while retaining URL authority for TLS and HTTP.
     pub(crate) async fn connect(&self, url: &str) -> Result<(AgentSocket, Response)> {
-        let Some(connect_address) = &self.connect_address else {
-            return connect_async(url)
-                .await
-                .context("failed to connect to WebSocket server");
+        let request = url
+            .into_client_request()
+            .context("invalid agent websocket URL")?;
+        self.upgrade(request).await.map_err(|error| match error {
+            ConnectError::Transport(error) => error,
+            other => anyhow::Error::new(other),
+        })
+    }
+
+    /// Connects to an endpoint that authenticates during the upgrade with `token` and requires
+    /// the agent protocol, classifying rejections so the caller can stop retrying.
+    pub(crate) async fn connect_authenticated(
+        &self,
+        url: &str,
+        token: &str,
+    ) -> Result<AgentSocket, ConnectError> {
+        let request = authenticated_request(url, token)?;
+        let (socket, _response) = self.upgrade(request).await?;
+        Ok(socket)
+    }
+
+    /// Performs the upgrade directly or through the tunnel endpoint.
+    async fn upgrade(&self, request: Request) -> Result<(AgentSocket, Response), ConnectError> {
+        let result = match &self.connect_address {
+            None => connect_async(request).await,
+            Some(connect_address) => {
+                let tcp = TcpStream::connect(connect_address).await.with_context(|| {
+                    format!("failed to reach routed server through {connect_address}")
+                })?;
+                let connector = self.insecure_tls.then(insecure_connector);
+                client_async_tls_with_config(request, tcp, None, connector).await
+            }
         };
-        let tcp = TcpStream::connect(connect_address)
-            .await
-            .with_context(|| format!("failed to reach routed server through {connect_address}"))?;
-        let connector = self.insecure_tls.then(insecure_connector);
-        client_async_tls_with_config(url, tcp, None, connector)
-            .await
-            .context("TLS handshake or WebSocket upgrade failed")
+        result.map_err(|error| match error {
+            tungstenite::Error::Http(response) => ConnectError::from_http(&response),
+            other => ConnectError::Transport(
+                anyhow::Error::new(other).context("TLS handshake or WebSocket upgrade failed"),
+            ),
+        })
     }
 }
 
@@ -284,6 +396,90 @@ mod tests {
         assert!(result.is_err());
         // The server observing a client TLS alert confirms rejection happened during verification.
         assert!(server.await.unwrap().is_err());
+    }
+
+    /// Serves one raw HTTP answer to the next upgrade and returns the request it received.
+    async fn answer_upgrade(response: String) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/api/v1/agent/ws", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _peer) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap().to_lowercase()
+        });
+        (url, server)
+    }
+
+    /// Verifies a 401 is classified as a fatal token error and the upgrade carried credentials.
+    #[tokio::test]
+    async fn unauthorized_upgrade_is_fatal_and_carries_credentials() {
+        let (url, server) =
+            answer_upgrade("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n".into()).await;
+        let connection = AgentConnection::new(url.clone(), None, false).unwrap();
+
+        let error = connection
+            .connect_authenticated(&url, "secret-token")
+            .await
+            .expect_err("401 must fail the upgrade");
+
+        // A wrong token cannot fix itself, so the runtime must stop instead of reconnecting.
+        assert!(matches!(error, super::ConnectError::Unauthorized));
+        assert!(error.is_fatal());
+        let request = server.await.unwrap();
+        // The token travels in the upgrade, never in a websocket frame.
+        assert!(request.contains("authorization: bearer secret-token"));
+        // The agent offers exactly the protocol it implements.
+        assert!(request.contains("sec-websocket-protocol: redoor.v2"));
+        // The version header lets the server log which build was rejected.
+        assert!(request.contains("x-redoor-agent-version: "));
+    }
+
+    /// Verifies a 426 names both protocols so the operator knows which side to upgrade.
+    #[tokio::test]
+    async fn protocol_mismatch_is_fatal_and_names_both_versions() {
+        let body = r#"{"server_protocol":"redoor.v3","server_version":"9.9.9","message":"m"}"#;
+        let (url, _server) = answer_upgrade(format!(
+            "HTTP/1.1 426 Upgrade Required\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        ))
+        .await;
+        let connection = AgentConnection::new(url.clone(), None, false).unwrap();
+
+        let error = connection
+            .connect_authenticated(&url, "token")
+            .await
+            .expect_err("426 must fail the upgrade");
+
+        // Mismatched builds must not loop on reconnects.
+        assert!(error.is_fatal());
+        let message = error.to_string();
+        // The log line explains which protocol each side speaks and what to do.
+        assert!(message.contains("redoor.v3") && message.contains("redoor.v2"));
+        assert!(message.contains("upgrade the agent"));
+    }
+
+    /// Verifies ordinary failures stay retryable.
+    #[tokio::test]
+    async fn unexpected_status_is_retryable() {
+        let (url, _server) =
+            answer_upgrade("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".into())
+                .await;
+        let connection = AgentConnection::new(url.clone(), None, false).unwrap();
+
+        let error = connection
+            .connect_authenticated(&url, "token")
+            .await
+            .expect_err("503 must fail the upgrade");
+
+        // A restarting server or proxy hiccup must keep the reconnect loop going.
+        assert!(!error.is_fatal());
     }
 
     /// Rejects misuse of insecure mode before any reconnect loop starts.

@@ -71,8 +71,6 @@ pub(crate) struct CommandCtx {
     pub(crate) transfer: Option<mpsc::Sender<WsMessage>>,
     /// Shared long-lived facilities.
     pub(crate) services: AgentServices,
-    /// Whether the server confirmed per-stream credit for this control connection.
-    pub(crate) stream_credit: bool,
 }
 
 impl CommandCtx {
@@ -95,10 +93,12 @@ impl CommandCtx {
         let request_id = self.responder.request_id();
         match (self.transfer, self.registration) {
             (Some(transfer), Some(registration)) => {
-                let mut stream = StreamWriter::new(transfer, request_id, payload_kind);
-                if self.stream_credit {
-                    stream = stream.with_credit(self.services.output_credits.register(request_id));
-                }
+                let stream = StreamWriter::new(
+                    transfer,
+                    request_id,
+                    payload_kind,
+                    self.services.output_credits.register(request_id),
+                );
                 Ok(OutputLane {
                     stream,
                     registration,
@@ -128,7 +128,6 @@ impl CommandCtx {
                 registration: None,
                 transfer: None,
                 services: AgentServices::new(Trash::unsupported(), None),
-                stream_credit: false,
             },
             frames,
         )

@@ -64,8 +64,7 @@ impl RouterState {
             .get(&source_agent_id)
             .is_some_and(|source| {
                 source.send_message(ServerToAgent::Command {
-                    agent_id: source_agent_id.clone(),
-                    request_id: delete_id,
+                    id: delete_id,
                     command,
                 })
             });

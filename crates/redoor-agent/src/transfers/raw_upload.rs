@@ -222,7 +222,7 @@ mod tests {
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
     use redoor_protocol::{
-        ids::{AgentId, ChunkIndex},
+        ids::ChunkIndex,
         wire::{AgentToServer, policy::UploadKind, stream::StreamChunk, stream::StreamPayloadKind},
     };
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -273,13 +273,12 @@ mod tests {
                 }
                 .to_bytes(),
                 &control,
-                &AgentId::from("test-agent"),
             )
             .await;
         // Raw finalization must ask the router before changing the destination.
         assert!(matches!(
             frames.recv().await.unwrap().as_message(),
-            Some(AgentToServer::UploadPublicationRequest { .. })
+            Some(AgentToServer::PublishRequest { .. })
         ));
 
         // The post-body worker must retain cancellation ownership.

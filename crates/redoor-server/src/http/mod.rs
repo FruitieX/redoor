@@ -5,6 +5,7 @@ mod agent_configuration;
 mod agent_helpers;
 mod agent_logs;
 mod agent_transfers;
+mod agent_ws;
 mod agents;
 mod archive_upload;
 pub(crate) mod auth;
@@ -25,6 +26,7 @@ mod mcp_tokens;
 mod moves;
 #[cfg(target_os = "linux")]
 mod pam;
+mod protocol_mismatches;
 mod raw;
 mod restart;
 mod retry_agent_start;

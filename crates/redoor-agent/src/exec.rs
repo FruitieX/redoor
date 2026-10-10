@@ -197,10 +197,7 @@ mod tests {
     use crate::runtime::cancel::CancelRegistry;
     use crate::runtime::responder::Responder;
     use futures_util::poll;
-    use redoor_protocol::wire::{
-        command::CommandErrorKind,
-        stream::{StreamChunk, StreamPayloadKind},
-    };
+    use redoor_protocol::wire::{command::CommandErrorKind, stream::StreamChunk};
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_tungstenite::tungstenite::protocol::Message;
@@ -219,10 +216,7 @@ mod tests {
     async fn blocked_stream() -> (StreamWriter, mpsc::Receiver<Message>) {
         let (write, receiver) = mpsc::channel(1);
         write.send(Message::binary(vec![0])).await.unwrap();
-        (
-            StreamWriter::new(write, RequestId::new(41), StreamPayloadKind::RawFile),
-            receiver,
-        )
+        (StreamWriter::for_test(write, RequestId::new(41)), receiver)
     }
 
     /// A completed and reaped process must retain its remote status for arbitrarily slow consumers.
@@ -346,7 +340,7 @@ mod tests {
 
         let reply = run(
             invalid,
-            StreamWriter::new(write, RequestId::new(41), StreamPayloadKind::RawFile),
+            StreamWriter::for_test(write, RequestId::new(41)),
             registration,
         )
         .await;

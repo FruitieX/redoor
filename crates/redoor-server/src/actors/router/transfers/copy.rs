@@ -260,8 +260,7 @@ impl RouterState {
             .get(&request.source_agent_id)
             .is_some_and(|agent| {
                 agent.send_message(ServerToAgent::Command {
-                    agent_id: request.source_agent_id.clone(),
-                    request_id,
+                    id: request_id,
                     command,
                 })
             });
@@ -300,8 +299,7 @@ impl RouterState {
             .run(),
         );
         let queued = dest_agent.send_message(ServerToAgent::Command {
-            agent_id: request.dest_agent_id.clone(),
-            request_id: dest_id,
+            id: dest_id,
             command: request
                 .content_kind
                 .upload_command(request.dest_path.clone(), request.on_existing),
@@ -353,11 +351,9 @@ impl RouterState {
                 && !remote.source_finished
                 && let Some(source) = self.agents.by_id.get(source_agent_id)
             {
-                source
-                    .lanes
-                    .try_priority_or_command(ServerToAgent::CancelTransfer {
-                        request_id: remote.source_id(),
-                    });
+                source.lanes.try_priority_or_command(ServerToAgent::Cancel {
+                    id: remote.source_id(),
+                });
             }
         } else {
             remote.dest.lease().stop();
@@ -418,8 +414,7 @@ impl RouterState {
             .get(&source_agent_id)
             .is_some_and(|source| {
                 source.send_message(ServerToAgent::Command {
-                    agent_id: source_agent_id.clone(),
-                    request_id: source_id,
+                    id: source_id,
                     command: source_command,
                 })
             });
@@ -713,7 +708,7 @@ impl RouterState {
                 // Falling back to the command lane is slower but must not lose cleanup.
                 connection
                     .lanes
-                    .try_priority_or_command(ServerToAgent::CancelTransfer { request_id });
+                    .try_priority_or_command(ServerToAgent::Cancel { id: request_id });
             }
         }
         Ok(())
@@ -759,8 +754,8 @@ mod tests {
         let (transfer, lane) = mpsc::channel(64);
         let agent = AgentId::from(name);
         (
-            ConnectionStreams::new(agent.clone(), true),
-            AgentLink::new(ControlLanes::bounded(16, 16).0, Some(transfer), true),
+            ConnectionStreams::new(agent.clone()),
+            AgentLink::new(ControlLanes::bounded(16, 16).0, Some(transfer)),
             lane,
         )
     }
@@ -805,15 +800,12 @@ mod tests {
             assert!(
                 source_streams
                     .deliver(frame(RequestId::new(1), false))
-                    .await
                     .is_none()
             );
             tokio::task::yield_now().await;
         }
         // Unrelated streams of the source agent are still served by the same reader.
-        source_streams
-            .deliver(frame(RequestId::new(3), false))
-            .await;
+        source_streams.deliver(frame(RequestId::new(3), false));
         assert_eq!(other.recv().await.unwrap().request_id, RequestId::new(3));
         let mut forwarded = 0;
         while dest_lane.try_recv().is_ok() {
@@ -847,10 +839,8 @@ mod tests {
             }
             .run(),
         );
-        source_streams
-            .deliver(frame(RequestId::new(1), false))
-            .await;
-        let end = source_streams.deliver(frame(RequestId::new(1), true)).await;
+        source_streams.deliver(frame(RequestId::new(1), false));
+        let end = source_streams.deliver(frame(RequestId::new(1), true));
         // The router learns the source finished from the reader, independent of forwarding.
         assert!(end.is_some_and(|end| end.delivered));
         forwarder.await.unwrap();
@@ -890,13 +880,8 @@ mod tests {
             total_bytes: 8,
             direction: TransferDirection::Copy,
         });
-        let detached = |id| {
-            StreamLease::new(
-                id,
-                AgentLink::new(ControlLanes::bounded(1, 1).0, None, false),
-                0,
-            )
-        };
+        let detached =
+            |id| StreamLease::new(id, AgentLink::new(ControlLanes::bounded(1, 1).0, None), 0);
         state.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
@@ -907,7 +892,10 @@ mod tests {
                 then: None,
                 phase: CopyPhase::Remote(Box::new(RemoteCopy {
                     source: detached(source_id),
-                    dest: OutboundStream::new(detached(dest_id), None),
+                    dest: OutboundStream::new(
+                        detached(dest_id),
+                        redoor_core::stream_credit::CreditGate::default(),
+                    ),
                     stage: RemoteStage::Streaming,
                     source_finished: true,
                 })),
@@ -935,7 +923,12 @@ mod tests {
             state.progress.entries[&flow_id.as_transfer_id()].state,
             TransferProgressState::Canceled
         ));
-        assert!(state.flows.id_for(dest_id).is_none());
+        assert!(
+            state
+                .flows
+                .id_for(&AgentId::from("dest"), dest_id)
+                .is_none()
+        );
         state.ui.refresh_check_task.abort();
     }
 }

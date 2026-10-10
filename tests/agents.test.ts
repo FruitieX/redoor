@@ -17,15 +17,13 @@ import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import fs from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
-import WebSocket from "ws";
+import { FakeAgent } from "./fake-agent";
 import {
     ProcessManager,
-    TEST_AGENT_TOKEN,
     TempFileManager,
     startServerAndAgent,
     waitForLogMessage,
     waitForValue,
-    webSocketDataToString,
 } from "./test-utils";
 
 const AGENT_NAME = "test-agent";
@@ -87,6 +85,8 @@ let apiClient: ApiClient;
 
 let wsUrl: string;
 
+let serverPort: number;
+
 beforeAll(async () => {
     const started = await startServerAndAgent({
         processManager,
@@ -98,6 +98,7 @@ beforeAll(async () => {
     agentPid = started.agentPid;
     apiClient = started.apiClient;
     wsUrl = started.wsUrl;
+    serverPort = started.serverPort;
 }, 30000);
 
 afterEach(() => {
@@ -1235,36 +1236,18 @@ describe("Agents API", () => {
 
     it("disconnects a stale unmanaged agent", async () => {
         const unmanagedAgentName = "stale-unmanaged-test-agent";
-        const control = new WebSocket(wsUrl, { autoPong: false });
-        onTestFinished(() => control.close());
-        await new Promise<void>((resolve, reject) => {
-            control.once("open", resolve);
-            control.once("error", reject);
+
+        // Without automatic pongs the fixture looks like a half-open tunnel to the server.
+        const fixture = await FakeAgent.connect({
+            serverPort,
+            agentId: unmanagedAgentName,
+            hostname: "stale-host",
+            username: "stale-user",
+            autoPong: false,
+            openTransfer: false,
         });
-        control.send(
-            JSON.stringify({
-                type: "agent_register",
-                agent_id: unmanagedAgentName,
-                agent_name: unmanagedAgentName,
-                os: "linux",
-                arch: "x86_64",
-                hostname: "stale-host",
-                username: "stale-user",
-                cwd: "/tmp",
-                token: TEST_AGENT_TOKEN,
-                binary: {
-                    version: "0.0.0",
-                    git_rev: "test",
-                    git_dirty: false,
-                    version_dirty: false,
-                    build_mode: "debug",
-                    build_date: "unknown",
-                },
-                supports_self_exec: false,
-                supports_native_open: false,
-                supports_trash: false,
-            }),
-        );
+
+        onTestFinished(() => fixture.close());
 
         const connected = await waitForValue({
             timeoutMs: 4000,
@@ -1296,64 +1279,26 @@ describe("Agents API", () => {
         expect(disconnected.status).toBe("disconnected");
     });
 
-    it("ignores command responses from unauthenticated websocket clients", async () => {
+    it("resolves a request only with the answer of the agent it was sent to", async () => {
         const targetName = "forge-target-agent";
-        const target = new WebSocket(wsUrl);
+
+        const target = await FakeAgent.connect({
+            serverPort,
+            agentId: targetName,
+            hostname: "forge-host",
+            username: "forge-user",
+            openTransfer: false,
+        });
+
         onTestFinished(() => target.close());
-        const attacker = new WebSocket(wsUrl);
+
+        const attacker = await FakeAgent.connect({
+            serverPort,
+            agentId: "forge-attacker-agent",
+            openTransfer: false,
+        });
+
         onTestFinished(() => attacker.close());
-        await Promise.all(
-            [target, attacker].map(
-                (socket) =>
-                    new Promise<void>((resolve, reject) => {
-                        socket.once("open", resolve);
-                        socket.once("error", reject);
-                    }),
-            ),
-        );
-
-        const commandSchema = z.object({
-            type: z.literal("command"),
-            request_id: z.number(),
-            command: z.object({ type: z.literal("Echo") }),
-        });
-
-        const echoCommand = new Promise<number>((resolve) => {
-            target.on("message", (data) => {
-                const parsed = commandSchema.safeParse(
-                    JSON.parse(webSocketDataToString(data)),
-                );
-
-                if (parsed.success) {
-                    resolve(parsed.data.request_id);
-                }
-            });
-        });
-
-        target.send(
-            JSON.stringify({
-                type: "agent_register",
-                agent_id: targetName,
-                agent_name: targetName,
-                os: "linux",
-                arch: "x86_64",
-                hostname: "forge-host",
-                username: "forge-user",
-                cwd: "/tmp",
-                token: TEST_AGENT_TOKEN,
-                binary: {
-                    version: "0.0.0",
-                    git_rev: "test",
-                    git_dirty: false,
-                    version_dirty: false,
-                    build_mode: "debug",
-                    build_date: "unknown",
-                },
-                supports_self_exec: false,
-                supports_native_open: false,
-                supports_trash: false,
-            }),
-        );
 
         const registered = await waitForValue({
             description: "forge target fixture to register",
@@ -1365,40 +1310,38 @@ describe("Agents API", () => {
         });
 
         const echo = registered.echo("genuine");
-        const requestId = await echoCommand;
+        const { id } = await target.nextCommand("Echo");
 
-        const serverProcess = processManager.getProcess(serverPid);
+        // Request ids are scoped to one connection, so the attacker's answer with the same
+        // (sequential) id names a request that does not exist on its own connection.
+        attacker.respond(id, { type: "Echo", message: "forged" });
 
-        if (serverProcess === undefined) {
-            throw new Error("Server process is not tracked");
-        }
+        // The attacker's connection keeps working, so its frame really was processed first.
+        const attackerListed = await waitForValue({
+            description: "attacker fixture to register",
+            predicate: async () =>
+                (await apiClient.listAgents()).find(
+                    (agent) =>
+                        agent.name === "forge-attacker-agent" &&
+                        agent.connectionId !== null,
+                ),
+        });
 
-        const rejected = waitForLogMessage(
-            serverProcess,
-            /Ignoring agent frame before successful registration: .*frame=command_response/,
+        attacker.onCommand((command) => {
+            if (command.command.type === "Echo") {
+                attacker.respond(command.id, {
+                    type: "Echo",
+                    message: "attacker echo",
+                });
+            }
+        });
+        expect((await attackerListed.echo("probe")).message).toBe(
+            "attacker echo",
         );
 
-        // The attacker knows the agent id and the (sequential) request id but never registered.
-        attacker.send(
-            JSON.stringify({
-                type: "command_response",
-                agent_id: targetName,
-                request_id: requestId,
-                result: { type: "Echo", message: "forged" },
-            }),
-        );
-        await rejected;
+        target.respond(id, { type: "Echo", message: "genuine" });
 
-        target.send(
-            JSON.stringify({
-                type: "command_response",
-                agent_id: targetName,
-                request_id: requestId,
-                result: { type: "Echo", message: "genuine" },
-            }),
-        );
-
-        // Only the registered agent's answer may resolve the pending REST request.
+        // Only the agent the request was sent to may resolve the pending REST request.
         expect((await echo).message).toBe("genuine");
     });
 

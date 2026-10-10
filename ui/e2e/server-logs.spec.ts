@@ -196,25 +196,25 @@ test.describe.serial("Server logs", () => {
             const protocol =
                 window.location.protocol === "https:" ? "wss:" : "ws:";
 
+            // The pre-negotiation agent endpoint refuses every client and logs what it offered.
             const socket = new WebSocket(
                 `${protocol}//${window.location.host}/ws`,
+                [value],
             );
 
             await new Promise<void>((resolve, reject) => {
-                socket.addEventListener("open", () => resolve(), {
-                    once: true,
-                });
                 socket.addEventListener(
-                    "error",
-                    () => reject(new Error("agent test socket failed")),
+                    "open",
+                    () => reject(new Error("mismatched agent socket opened")),
                     { once: true },
                 );
+                socket.addEventListener("close", () => resolve(), {
+                    once: true,
+                });
             });
-            socket.send(`not-json-${value}`);
-            socket.close();
         }, marker);
 
-        // The unique malformed agent payload must reach the page through the logger broadcast path.
+        // The unique refused protocol must reach the page through the logger broadcast path.
         await expect(logRegion).toContainText(marker);
 
         const newestEntryTexts = await logRegion.evaluate((element) =>

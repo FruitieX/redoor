@@ -43,8 +43,11 @@ three role crates in the middle are siblings that cannot import each other.
 The contract between all parties, with no runtime dependencies (no tokio).
 
 - `wire/`: the agent websocket protocol.
+  - `handshake` holds the upgrade contract: the `redoor.v2` subprotocol, the agent endpoint
+    path, the `426` body and the protocol-mismatch types the UI lists.
   - `ServerToAgent` and `AgentToServer` are the control-socket envelopes, one per direction,
-    so each side's `match` is exhaustive.
+    so each side's `match` is exhaustive. No frame except `hello` carries an agent id: the
+    authenticated connection is the identity.
   - `Command` and `CommandResult` are the request and response payloads.
   - `Command::policy()` is the single table that classifies every command: which lane it
     uses, whether it needs the transfer socket, whether it is an upload, and how it is
@@ -52,7 +55,7 @@ The contract between all parties, with no runtime dependencies (no tokio).
   - `stream` defines the binary `StreamChunk` framing (64 KiB frames) used on the transfer
     socket. `exec`, `log`, `terminal` and `transfer` hold the feature-specific wire types.
   - `registration` holds `AgentIdentity` and `AgentCapabilities`, which are flattened into
-    the `agent_register` frame.
+    the `hello` frame.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
   transfers, git, mcp, ...).
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
@@ -93,7 +96,7 @@ The agent runtime and the implementation of every command.
     ranges and tar archives.
   - Cancel and failure always run in the same order: stop, clean up, unregister, respond.
   - `stream` is the per-request writer, and the only place payload frames leave the agent.
-    It waits for credit before each frame.
+    It waits for credit before each frame; every stream is credited.
 - `trash/`: a `TrashProvider` with freedesktop (Linux and Android/Termux), macOS and
   unsupported implementations.
 - `platform/`: mounts, accounts and identity, which keeps OS-specific code out of the
@@ -108,8 +111,11 @@ The agent runtime and the implementation of every command.
   - `services/`: `TransferService` (copy and move), `OutputStream` (downloads, diffs, exec)
     and `AgentUpload`. REST and MCP handlers are thin adapters over these.
 - `actors/`:
-  - `session`: one actor per agent control socket. It authenticates the registration and
-    bridges the socket to the router through bounded lanes.
+  - `agent_ws` (in `http/`): the agent endpoint. It checks the bearer token and the
+    subprotocol before accepting the upgrade, and remembers protocol-mismatched attempts
+    for `GET /api/v1/protocol-mismatches`.
+  - `session`: one actor per agent control socket. It requires `hello` as the first frame,
+    asks the router to accept it and bridges the socket to the router through bounded lanes.
   - `lanes`: the typed outbound lanes to one agent: a command lane and a priority lane.
   - `router/`: the single owner of agent registrations and in-flight work.
     - `flows`: one table where every request belongs to exactly one flow (command, output
@@ -183,12 +189,12 @@ Agents always open the connections. The server never dials an agent, so an agent
 behind NAT, on a phone (Termux) or on a host that is only reachable over SSH.
 
 - **Standalone agents** are started by the user or a service manager, and connect to the
-  server's `/ws` URL with an agent token.
+  server's `/api/v1/agent/ws` endpoint with the agent token.
 - **Managed local agents** are `[[agents]]` entries in the server config. The server's
   watchdog spawns them as child processes and restarts them with backoff.
 - **SSH-backed agents** are also watchdog-managed. The server runs `ssh -R
   <random-port>:<server>` and starts the agent on the remote host pointing at
-  `ws://localhost:<random-port>/ws`. What looks like a local connection on the remote host
+  `ws://localhost:<random-port>/api/v1/agent/ws`. What looks like a local connection on the remote host
   reaches the server through the tunnel. The token is passed on SSH stdin and the password
   through askpass, so neither appears on a command line. `redoor agent relay` runs the same
   mechanism without a server, for agents of a remote server.
@@ -215,7 +221,7 @@ flowchart LR
         browser["Browser socket"]
     end
 
-    rt <==>|"1. control socket /ws<br/>JSON frames"| session
+    rt <==>|"1. control socket /api/v1/agent/ws<br/>JSON frames"| session
     session <--> router
     workers <==>|"2. transfer socket<br/>/api/v1/agent-transfer/ws<br/>binary StreamChunks"| reader
     reader <--> consumers
@@ -226,10 +232,10 @@ flowchart LR
 
 Each agent keeps up to four kinds of websocket to the server:
 
-1. **Control socket (`/ws`)**: JSON frames only. It carries registration, commands, command
-   responses, cancels, stream credit, upload publication decisions and the requests to open
-   terminal or log sockets. It never carries file contents, so commands stay responsive
-   during large transfers.
+1. **Control socket (`/api/v1/agent/ws`)**: JSON frames only. It carries the `hello`,
+   commands, command responses, cancels, stream credit, upload publication decisions and the
+   requests to open terminal or log sockets. It never carries file contents, so commands
+   stay responsive during large transfers.
 2. **Transfer socket (`/api/v1/agent-transfer/ws`)**: binary `StreamChunk` frames tagged with
    their request id. It is persistent and shared by every upload, download, exec output and
    copy of that agent. Per-stream credit stops one stream from blocking the others.
@@ -238,7 +244,8 @@ Each agent keeps up to four kinds of websocket to the server:
 4. **Log sockets**: one short-lived socket per live log viewer, paired the same way.
 
 Sockets 2–4 are opened by the agent only when the server asks over the control socket, each
-time with a fresh one-time token. A stale or foreign connection therefore cannot attach to an
+time with a fresh one-time token. The transfer socket presents its token as a bearer
+credential during the upgrade. A stale or foreign connection therefore cannot attach to an
 agent's streams.
 
 ## Connection setup
@@ -246,29 +253,54 @@ agent's streams.
 ```mermaid
 sequenceDiagram
     participant A as Agent
+    participant H as Upgrade handler
     participant S as Session actor
     participant R as Router
 
-    A->>S: connect /ws
-    A->>S: agent_register {token, identity, capabilities}
-    Note over S: frames other than agent_register are<br/>ignored until registration succeeds
-    S->>R: register agent (with socket id)
-    R->>A: transfer_socket_open {token, stream_credit}<br/>(via the session's priority lane)
-    Note over R: a rejected registration gets an error frame instead
-    A->>R: connect /api/v1/agent-transfer/ws<br/>first frame: agent id + token
-    Note over A,R: the agent is now available for commands
+    A->>H: GET /api/v1/agent/ws<br/>Authorization: Bearer token<br/>Sec-WebSocket-Protocol: redoor.v2
+    alt wrong or missing token
+        H-->>A: 401 (no socket)
+    else protocol not offered
+        H-->>A: 426 + {server_protocol, server_version}
+        Note over H: attempt kept in the mismatch list
+    else accepted
+        H-->>A: 101, Sec-WebSocket-Protocol: redoor.v2
+        A->>S: hello {agent_id, agent_name, identity, capabilities}
+        Note over S: any other first frame closes the socket
+        S->>R: register (with socket id)
+        alt accepted
+            R->>A: welcome {connection_id}
+            R->>A: transfer_socket_open {token}
+            A->>R: GET /api/v1/agent-transfer/ws<br/>Authorization: Bearer transfer token
+            Note over A,R: the agent is now available for commands
+        else duplicate name or stopped managed agent
+            R->>A: rejected {reason, message}
+            Note over S: the session flushes the frame and closes
+        end
+    end
 ```
 
-- The agent token proves the agent was started with server credentials. Until registration
-  succeeds, the session drops every other frame. After that, it always uses its own
-  registered agent id and never the one written in a frame. This stops an unauthenticated
-  client from forging command results.
+- **Authentication and negotiation happen during the HTTP upgrade.** An unauthenticated or
+  incompatible client never gets a socket, so no session state exists for it. The agent
+  treats `401` (wrong token) and `426` (other protocol version) as fatal and exits with a
+  clear log line instead of reconnecting forever.
+- Agents that predate negotiation still connect to `/ws`. That path only answers `426` and
+  records the attempt, so outdated standalone agents show up in the Devices view instead of
+  only in their own logs. Managed local and SSH agents are always provisioned with the
+  server's own binary, so they never mismatch.
+- **Identity is the connection.** `hello` is the only frame that names the agent; every later
+  frame is attributed to the session that received it. A second `hello` closes the socket.
+- **Request ids are scoped to one connection.** The server allocates them, and the router
+  indexes flows by agent and request id, so a frame can only resolve work that was sent to
+  its own connection.
+- A reconnect of the same agent id replaces the old connection, which receives `evicted`
+  and exits. A *different* agent id that claims a live agent's name is `rejected` with
+  `duplicate_name`.
 - Every connection gets a **socket id**. The router only accepts frames and unregistrations
   from an agent's *current* session, so a slow-dying old connection cannot remove the agent
   that replaced it after a reconnect.
-- `stream_credit` is echoed only to agents that advertised `supports_stream_credit`. Both
-  sides then switch to credit together. Older agents, and the fake agents in the tests, keep
-  the uncredited behaviour.
+- **Credit is mandatory.** Every stream in both directions is credited; there is no
+  capability flag and no uncredited fallback.
 - On the agent side, each link has a **generation** number. Timers and tasks from a replaced
   connection carry the old generation and are ignored.
 
@@ -306,9 +338,9 @@ sequenceDiagram
     C->>H: GET /api/v1/... (e.g. metadata)
     H->>R: AgentCall::command() with deadline
     R->>R: add Command flow to flow table
-    R->>A: command {request_id, command} (command lane)
+    R->>A: command {id, command} (command lane)
     A->>A: policy() → admit, register cancel, spawn
-    A->>R: command_response {request_id, result}
+    A->>R: command_response {id, result}
     R->>H: result (flow removed)
     H->>H: AgentCall::extract() → typed output or ApiError
     H->>C: JSON response
@@ -319,7 +351,7 @@ sequenceDiagram
   become an `ApiError`, which maps to the HTTP status in one place.
 - When the caller gives up (the deadline passes or the HTTP client disconnects), the router
   drops the flow. If the command can be cancelled on the agent, the router also sends
-  `cancel_transfer` on the priority lane. A few commands, such as trash restore, are allowed
+  `cancel {id}` on the priority lane. A few commands, such as trash restore, are allowed
   to run to completion on purpose.
 
 ## Download, exec output and stream credit
@@ -341,7 +373,7 @@ sequenceDiagram
         A->>T: StreamChunk (transfer socket)
         T->>O: try_send into this stream's slot (never waits)
         O->>C: body bytes
-        O->>A: stream_credit {request_id, frames} (priority lane)
+        O->>A: credit {stream, frames} (priority lane)
     end
     A->>T: final StreamChunk (is_last, spends no credit)
     T->>R: terminal event only
@@ -378,10 +410,10 @@ sequenceDiagram
     loop request body
         R->>A: StreamChunk (transfer socket, spends credit)
         A->>A: write to staging
-        A->>R: stream_credit (control socket)
+        A->>R: credit {stream, frames} (control socket)
     end
-    A->>R: upload_publication_request
-    R->>A: upload_publication_decision {allowed}
+    A->>R: publish_request {id}
+    R->>A: publish_decision {id, allowed}
     A->>A: publish (atomic rename into place) or discard staging
     A->>R: command_response
     R->>C: result
@@ -413,8 +445,8 @@ sequenceDiagram
     loop frames
         S->>F: StreamChunk
         F->>D: StreamChunk
-        D-->>F: stream_credit (frame accepted)
-        F-->>S: stream_credit
+        D-->>F: credit (frame accepted)
+        F-->>S: credit
     end
     D->>R: command_response (published)
     opt move
@@ -474,5 +506,7 @@ sequenceDiagram
   - Each socket writer is the only place that serializes JSON for its socket.
 - **Stale events are ignored.** Socket ids on the server and generations on the agent mean a
   delayed event from a replaced connection can never affect its replacement.
-- **The wire format is stable.** Message tags and field names are shared with the UI and the
-  integration tests, which act as fake agents. New fields must be optional.
+- **The wire format is versioned.** Incompatible frame changes bump the `redoor.vN`
+  subprotocol instead of carrying compatibility fallbacks; mismatched builds fail the upgrade
+  with `426`. The integration tests speak the protocol through one shared fake agent
+  (`tests/fake-agent.ts`), so a protocol change is made in one place on the test side.

@@ -4,6 +4,9 @@
 //! an output stream (download or exec), an upload, or a copy (which may also delete its source
 //! when it is a move). One index from request id to flow replaces probing several registries in
 //! turn, and explicit phase enums replace combinations of booleans.
+//!
+//! Request ids are scoped to the agent connection that carries them, so the index is keyed by
+//! agent and request id: a frame can only ever resolve work that was sent to its own agent.
 
 use super::RouterError;
 use super::messages::{RouterReply, UploadStartOutcome};
@@ -21,6 +24,9 @@ use std::collections::HashMap;
 
 /// Identifies one flow; it is the first request id allocated for the flow.
 pub(crate) type FlowId = RequestId;
+
+/// One request as an agent sees it: the agent connection plus the id scoped to it.
+pub(crate) type AgentRequest = (AgentId, RequestId);
 
 /// One unit of in-flight work owned by the router.
 pub(crate) enum Flow {
@@ -209,17 +215,20 @@ impl CopyFlow {
 }
 
 impl Flow {
-    /// Request ids the agents use for this flow's current phase.
-    fn request_ids(&self) -> Vec<RequestId> {
+    /// Agent requests this flow's current phase answers to.
+    fn request_ids(&self) -> Vec<AgentRequest> {
         match self {
-            Self::Command(flow) => vec![flow.request_id],
-            Self::Output(flow) => vec![flow.request_id],
-            Self::Upload(flow) => vec![flow.request_id],
+            Self::Command(flow) => vec![(flow.agent_id.clone(), flow.request_id)],
+            Self::Output(flow) => vec![(flow.agent_id.clone(), flow.request_id)],
+            Self::Upload(flow) => vec![(flow.agent_id.clone(), flow.request_id)],
             Self::Copy(flow) => match &flow.phase {
                 CopyPhase::Local { request_id } | CopyPhase::DeletingSource { request_id } => {
-                    vec![*request_id]
+                    vec![(flow.source_agent_id.clone(), *request_id)]
                 }
-                CopyPhase::Remote(remote) => vec![remote.source_id(), remote.dest_id()],
+                CopyPhase::Remote(remote) => vec![
+                    (flow.source_agent_id.clone(), remote.source_id()),
+                    (flow.dest_agent_id.clone(), remote.dest_id()),
+                ],
             },
         }
     }
@@ -301,10 +310,10 @@ impl Flow {
     }
 }
 
-/// All in-flight flows plus the index from agent request ids to flows.
+/// All in-flight flows plus the index from agent requests to flows.
 #[derive(Default)]
 pub(crate) struct FlowTable {
-    by_request: HashMap<RequestId, FlowId>,
+    by_request: HashMap<AgentRequest, FlowId>,
     flows: HashMap<FlowId, Flow>,
 }
 
@@ -317,9 +326,11 @@ impl FlowTable {
         self.flows.insert(id, flow);
     }
 
-    /// Finds the flow an agent request belongs to.
-    pub(crate) fn id_for(&self, request_id: RequestId) -> Option<FlowId> {
-        self.by_request.get(&request_id).copied()
+    /// Finds the flow a request sent to `agent_id` belongs to.
+    pub(crate) fn id_for(&self, agent_id: &AgentId, request_id: RequestId) -> Option<FlowId> {
+        self.by_request
+            .get(&(agent_id.clone(), request_id))
+            .copied()
     }
 
     /// Borrows one flow.
@@ -340,7 +351,7 @@ impl FlowTable {
     }
 
     /// Re-indexes a flow whose phase changed the request ids it answers to.
-    pub(crate) fn reindex(&mut self, id: FlowId, previous: &[RequestId]) {
+    pub(crate) fn reindex(&mut self, id: FlowId, previous: &[AgentRequest]) {
         for request_id in previous {
             if self.by_request.get(request_id) == Some(&id) {
                 self.by_request.remove(request_id);
@@ -353,8 +364,8 @@ impl FlowTable {
         }
     }
 
-    /// Request ids of one flow's current phase, captured before a phase change.
-    pub(crate) fn request_ids(&self, id: FlowId) -> Vec<RequestId> {
+    /// Agent requests of one flow's current phase, captured before a phase change.
+    pub(crate) fn request_ids(&self, id: FlowId) -> Vec<AgentRequest> {
         self.flows
             .get(&id)
             .map(Flow::request_ids)
@@ -452,9 +463,35 @@ mod tests {
         let extracted = table.extract_if(|flow| flow.involves(&AgentId::from("lost")));
         // Only the lost agent's work is settled by its disconnect.
         assert_eq!(extracted.len(), 1);
-        assert_eq!(table.id_for(RequestId::new(1)), None);
+        assert_eq!(
+            table.id_for(&AgentId::from("lost"), RequestId::new(1)),
+            None
+        );
         // Unrelated flows and their routing survive.
-        assert_eq!(table.id_for(RequestId::new(2)), Some(RequestId::new(2)));
+        assert_eq!(
+            table.id_for(&AgentId::from("kept"), RequestId::new(2)),
+            Some(RequestId::new(2))
+        );
+    }
+
+    /// Request ids belong to one connection, so another agent naming them finds nothing.
+    #[test]
+    fn request_ids_resolve_only_for_their_own_agent() {
+        let mut table = FlowTable::default();
+        let (owned, _reply) = command(7, "owner");
+        table.insert(RequestId::new(7), owned);
+        // The owning agent's frames reach the flow.
+        assert!(
+            table
+                .id_for(&AgentId::from("owner"), RequestId::new(7))
+                .is_some()
+        );
+        // The same number from another connection must not resolve someone else's work.
+        assert!(
+            table
+                .id_for(&AgentId::from("other"), RequestId::new(7))
+                .is_none()
+        );
     }
 
     /// Builds a cross-agent move from `source` to `dest` in a stream-less phase.
@@ -510,6 +547,10 @@ mod tests {
         assert_eq!(pruned[0].request_id, RequestId::new(1));
         // A timed-out caller's reply port must not be retained until the agent answers.
         assert_eq!(table.len(), 1);
-        assert!(table.id_for(RequestId::new(2)).is_some());
+        assert!(
+            table
+                .id_for(&AgentId::from("agent"), RequestId::new(2))
+                .is_some()
+        );
     }
 }

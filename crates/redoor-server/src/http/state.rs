@@ -43,6 +43,8 @@ pub(crate) struct ServerState {
     pub(crate) one_time_token_registry: OneTimeTokenRegistry,
     /// Correlates client-owned upload requests while their destination workers are still active.
     pub(crate) upload_requests: super::upload_requests::UploadRequests,
+    /// Recent agents refused for speaking another protocol version, shown in the UI.
+    pub(crate) protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches,
     /// Validates opaque cookies against durable, server-side session files.
     pub(crate) auth: AuthState,
     /// Reads durable MCP grants on every request so CLI revocations take effect immediately.

@@ -28,29 +28,30 @@ pub(crate) struct FakeAgent {
 }
 
 impl FakeAgent {
-    /// Starts a router and registers one uncredited agent with control and transfer sockets.
+    /// Starts a router and registers one agent with control and transfer sockets.
     pub(crate) async fn connect() -> Self {
         let (router, _task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
         let agent_id = AgentId::from("fake-agent");
         let (lanes, receivers) = ControlLanes::bounded(16, 16);
         let (commands, mut priority) = (receivers.commands, receivers.priority);
         let (transfer_sender, transfer) = mpsc::channel(16);
-        let streams = ConnectionStreams::new(agent_id.clone(), false);
+        let streams = ConnectionStreams::new(agent_id.clone());
         let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
         let socket_id = registration.socket_id.clone();
         router
             .send_async(RouterMsg::RegisterAgent(registration))
             .await
             .unwrap();
-        let ServerToAgent::TransferSocketOpen { token, .. } = Self::next(&mut priority).await
-        else {
-            panic!("registration starts with the transfer bootstrap");
+        let ServerToAgent::Welcome { .. } = Self::next(&mut priority).await else {
+            panic!("registration starts with the welcome");
+        };
+        let ServerToAgent::TransferSocketOpen { token } = Self::next(&mut priority).await else {
+            panic!("the welcome is followed by the transfer bootstrap");
         };
         let (shutdown, transfer_shutdown) = watch::channel(false);
         router
             .request(|reply| {
                 RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                    agent_id: agent_id.clone(),
                     token,
                     socket_id: SocketId::new(),
                     outgoing_binary: transfer_sender,
@@ -81,11 +82,7 @@ impl FakeAgent {
     /// Reads the next command the server sent.
     pub(crate) async fn next_command(&mut self) -> (RequestId, Command) {
         match Self::next(&mut self.commands).await {
-            ServerToAgent::Command {
-                request_id,
-                command,
-                ..
-            } => (request_id, command),
+            ServerToAgent::Command { id, command } => (id, command),
             other => panic!("expected a command, got {other:?}"),
         }
     }
@@ -116,7 +113,7 @@ impl FakeAgent {
 
     /// Delivers one stream frame through the transfer reader's routing.
     pub(crate) async fn deliver(&self, chunk: StreamChunk) {
-        if let Some(end) = self.streams.deliver(chunk).await {
+        if let Some(end) = self.streams.deliver(chunk) {
             self.router
                 .send_async(RouterMsg::InboundStreamEnded(end))
                 .await

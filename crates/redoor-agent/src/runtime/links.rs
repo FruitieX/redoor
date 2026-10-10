@@ -16,10 +16,6 @@ pub(crate) struct ControlLink {
     shutdown: Option<watch::Sender<bool>>,
     /// Parent of every cancellation token handed out while this connection is current.
     scope: CancellationToken,
-    /// Whether the server confirmed per-stream credit for this connection.
-    ///
-    /// Negotiated per control session because a reconnect may reach a different server build.
-    stream_credit: bool,
 }
 
 impl ControlLink {
@@ -32,7 +28,6 @@ impl ControlLink {
             sender: None,
             shutdown: None,
             scope,
-            stream_credit: false,
         }
     }
 
@@ -42,18 +37,7 @@ impl ControlLink {
         self.sender = Some(sender);
         self.shutdown = Some(shutdown);
         self.scope = CancellationToken::new();
-        self.stream_credit = false;
         self.generation
-    }
-
-    /// Records the server's credit confirmation for the current connection.
-    pub(crate) fn confirm_stream_credit(&mut self, enabled: bool) {
-        self.stream_credit = enabled;
-    }
-
-    /// Whether streams of the current connection use per-stream credit.
-    pub(crate) fn stream_credit(&self) -> bool {
-        self.stream_credit
     }
 
     /// Stops the socket and cancels everything scoped to this connection.

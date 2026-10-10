@@ -5,6 +5,7 @@
 //! reverse-forward port. Managed agents re-prepare on every watchdog cycle so the UI
 //! always shows current sniff results; relays prepare once and relaunch many times.
 
+use redoor_protocol::wire::handshake::AGENT_WS_PATH;
 use std::path::Path;
 use std::time::Instant;
 
@@ -185,8 +186,8 @@ impl PreparedSshBackedAgent {
     /// agent always connects to the random port SSH actually requested.
     pub(super) fn launch_settings(&self, remote_port: u16) -> (Vec<String>, SshRunOptions) {
         let server_url = match &self.secure_server {
-            Some(server) => format!("wss://{}/ws", server.authority),
-            None => format!("ws://localhost:{remote_port}/ws"),
+            Some(server) => format!("wss://{}{AGENT_WS_PATH}", server.authority),
+            None => format!("ws://localhost:{remote_port}{AGENT_WS_PATH}"),
         };
         let mut remote_argv = vec![
             "--app-name".to_string(),
@@ -447,7 +448,10 @@ mod tests {
         let (argv, _options) = prepared.launch_settings(52123);
 
         // Plain routing must retain its existing URL and avoid hidden TLS routing flags.
-        assert!(argv.iter().any(|value| value == "ws://localhost:52123/ws"));
+        assert!(
+            argv.iter()
+                .any(|value| value == "ws://localhost:52123/api/v1/agent/ws")
+        );
         // SSH channel EOF must stop the remote process instead of leaving its PID lock held.
         assert!(argv.iter().any(|value| value == "--exit-on-stdin-eof"));
         assert!(!argv.iter().any(|value| value == "--connect-address"));
@@ -468,12 +472,12 @@ mod tests {
         assert!(
             first_argv
                 .iter()
-                .any(|value| value == "wss://redoor.example:443/ws")
+                .any(|value| value == "wss://redoor.example:443/api/v1/agent/ws")
         );
         assert!(
             second_argv
                 .iter()
-                .any(|value| value == "wss://redoor.example:443/ws")
+                .any(|value| value == "wss://redoor.example:443/api/v1/agent/ws")
         );
         // Each retry must direct TCP to the newly selected remote SSH listener.
         assert!(first_argv.iter().any(|value| value == "localhost:52123"));

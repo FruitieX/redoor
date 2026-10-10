@@ -466,8 +466,7 @@ mod tests {
         let frame = OutboundFrame {
             after_send: Some(PostSend::Reexec { path: None }),
             ..OutboundFrame::message(AgentToServer::CommandResponse {
-                agent_id: redoor_protocol::ids::AgentId::from("agent"),
-                request_id: redoor_protocol::ids::RequestId::new(1),
+                id: redoor_protocol::ids::RequestId::new(1),
                 result: CommandResult::Restart,
             })
         };

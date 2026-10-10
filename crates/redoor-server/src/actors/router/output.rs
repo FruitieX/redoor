@@ -37,7 +37,7 @@ impl AgentConnection {
         request_id: RequestId,
     ) -> Result<Option<tokio::task::JoinHandle<()>>, RouterError> {
         self.lanes
-            .queue_priority(ServerToAgent::CancelTransfer { request_id })
+            .queue_priority(ServerToAgent::Cancel { id: request_id })
             .map_err(|_| RouterError::ControlQueueFull {
                 agent_id: self.agent_id.to_string(),
             })
@@ -86,11 +86,7 @@ impl RouterState {
         }
         let lease = StreamLease::new(id, connection.link(), 0);
         let receiver = connection.streams.open_inbound(lease.clone());
-        if !connection.send_message(ServerToAgent::Command {
-            agent_id: agent_id.clone(),
-            request_id: id,
-            command,
-        }) {
+        if !connection.send_message(ServerToAgent::Command { id, command }) {
             connection.streams.close_inbound(id);
             let _ = reply.send(Err(RouterError::ControlQueueFull {
                 agent_id: agent_id.to_string(),
@@ -360,7 +356,7 @@ mod tests {
 
     impl Fixture {
         /// Single-slot control lanes make saturation deterministic without a network peer.
-        fn new(credit: bool) -> Self {
+        fn new() -> Self {
             let mut state = RouterState::new(
                 tokio::spawn(std::future::pending()),
                 TerminalRegistry::new(),
@@ -368,7 +364,7 @@ mod tests {
             );
             let agent = AgentId::from("output-test");
             let (lanes, receivers) = ControlLanes::bounded(1, 1);
-            let streams = ConnectionStreams::new(agent.clone(), credit);
+            let streams = ConnectionStreams::new(agent.clone());
             let mut connection = AgentConnection::from_register_request(
                 RegisterAgentRequest::for_test(&agent, lanes, streams.clone()),
             );
@@ -433,20 +429,17 @@ mod tests {
         }
 
         /// Delivers one agent frame through the transfer reader's routing.
-        async fn deliver(&mut self, id: RequestId, is_last: bool, data: Vec<u8>) {
-            let end = self
-                .streams
-                .deliver(StreamChunk {
-                    request_id: id,
-                    chunk_index: ChunkIndex::new(0),
-                    is_last,
-                    is_error: false,
-                    payload_kind: StreamPayloadKind::RawFile,
-                    data,
-                })
-                .await;
+        fn deliver(&mut self, id: RequestId, is_last: bool, data: Vec<u8>) {
+            let end = self.streams.deliver(StreamChunk {
+                request_id: id,
+                chunk_index: ChunkIndex::new(0),
+                is_last,
+                is_error: false,
+                payload_kind: StreamPayloadKind::RawFile,
+                data,
+            });
             if let Some(end) = end {
-                let flow_id = self.state.flows.id_for(id).unwrap();
+                let flow_id = self.state.flows.id_for(&self.agent, id).unwrap();
                 self.state.finish_output_stream(flow_id, end);
             }
         }
@@ -455,11 +448,11 @@ mod tests {
     /// Both full lanes must retain one cancellation intent, with no fabricated termination.
     #[tokio::test]
     async fn saturated_lanes_retain_cancel_without_acknowledging_termination() {
-        let mut fixture = Fixture::new(true);
+        let mut fixture = Fixture::new();
         let (mut output, terminal) = fixture.exec().await;
         let id = output.request_id();
         let connection = &fixture.state.agents.by_id[&fixture.agent];
-        let occupied = || ServerToAgent::Error {
+        let occupied = || ServerToAgent::Evicted {
             message: "occupied".to_string(),
         };
         assert!(connection.lanes.try_command(occupied()));
@@ -472,23 +465,21 @@ mod tests {
         fixture.priority.recv().await.unwrap();
         assert!(matches!(
             fixture.priority.recv().await,
-            Some(ServerToAgent::CancelTransfer { request_id }) if request_id == id
+            Some(ServerToAgent::Cancel { id: request_id }) if request_id == id
         ));
         assert!(fixture.priority.try_recv().is_err());
         // The stopped stream ends for the consumer without waiting for more output.
         assert!(output.recv().await.is_none());
         // The agent's terminal frame confirms cleanup before ownership is released.
-        fixture
-            .deliver(id, true, serde_json::to_vec(&ExecEvent::Canceled).unwrap())
-            .await;
+        fixture.deliver(id, true, serde_json::to_vec(&ExecEvent::Canceled).unwrap());
         assert!(matches!(&*terminal.borrow(), Some(ExecEvent::Canceled)));
-        assert!(fixture.state.flows.id_for(id).is_none());
+        assert!(fixture.state.flows.id_for(&fixture.agent, id).is_none());
     }
 
     /// Failed admission must leave the stream untouched so a caller can retry.
     #[tokio::test]
     async fn closed_priority_lane_rejects_without_losing_retry() {
-        let mut fixture = Fixture::new(true);
+        let mut fixture = Fixture::new();
         let (_output, terminal) = fixture.exec().await;
         let id = _output.request_id();
         fixture.priority.close();
@@ -514,17 +505,17 @@ mod tests {
         assert_eq!(fixture.cancel(id), Ok(true));
         assert!(matches!(
             receivers.priority.recv().await,
-            Some(ServerToAgent::CancelTransfer { request_id }) if request_id == id
+            Some(ServerToAgent::Cancel { id: request_id }) if request_id == id
         ));
     }
 
     /// Output queued before a cancel is still drained, then the consumer sees the end.
     #[tokio::test]
     async fn cancel_keeps_queued_output_and_releases_consumer() {
-        let mut fixture = Fixture::new(false);
+        let mut fixture = Fixture::new();
         let (mut output, _terminal) = fixture.exec().await;
         let id = output.request_id();
-        fixture.deliver(id, false, b"queued".to_vec()).await;
+        fixture.deliver(id, false, b"queued".to_vec());
         assert_eq!(fixture.cancel(id), Ok(true));
         // Accepted output is not discarded by cancellation.
         assert_eq!(output.recv().await.unwrap().data, b"queued");
@@ -535,7 +526,7 @@ mod tests {
     /// Bad tracking metadata is rejected before remote work or file history is admitted.
     #[tokio::test]
     async fn command_tracking_mismatch_is_rejected_before_admission() {
-        let mut fixture = Fixture::new(true);
+        let mut fixture = Fixture::new();
         let result = fixture
             .start(
                 Command::Exec {
@@ -572,7 +563,7 @@ mod tests {
                 signal: None,
             },
         ] {
-            let mut fixture = Fixture::new(true);
+            let mut fixture = Fixture::new();
             let (_output, terminal) = fixture.exec().await;
             let id = _output.request_id();
             // Admission alone is deliberately not termination.
@@ -594,14 +585,14 @@ mod tests {
                 serde_json::to_value(terminal.borrow().clone()).unwrap(),
                 serde_json::to_value(Some(event)).unwrap()
             );
-            assert!(fixture.state.flows.id_for(id).is_none());
+            assert!(fixture.state.flows.id_for(&fixture.agent, id).is_none());
         }
     }
 
     /// An exit already acknowledged by the agent wins over a later cancel request.
     #[tokio::test]
     async fn terminal_after_cancel_retains_normal_exit() {
-        let mut fixture = Fixture::new(true);
+        let mut fixture = Fixture::new();
         let (_output, terminal) = fixture.exec().await;
         let id = _output.request_id();
         assert_eq!(fixture.cancel(id), Ok(true));
@@ -609,9 +600,7 @@ mod tests {
             code: Some(7),
             signal: None,
         };
-        fixture
-            .deliver(id, true, serde_json::to_vec(&exit).unwrap())
-            .await;
+        fixture.deliver(id, true, serde_json::to_vec(&exit).unwrap());
         // The real exit is published even though the stopped consumer never saw the frame.
         assert!(matches!(
             &*terminal.borrow(),
@@ -623,7 +612,7 @@ mod tests {
     /// is not reachable through the execution endpoint.
     #[tokio::test]
     async fn download_completion_counts_queued_bytes_and_is_not_an_execution() {
-        let mut fixture = Fixture::new(true);
+        let mut fixture = Fixture::new();
         let output = fixture
             .start(
                 Command::TarDownload {
@@ -642,8 +631,8 @@ mod tests {
         let id = output.request_id();
         // File history belongs to downloads only; DELETE /exec must not reach it.
         assert_eq!(fixture.cancel(id), Ok(false));
-        fixture.deliver(id, false, vec![1; 10]).await;
-        fixture.deliver(id, true, vec![1; 5]).await;
+        fixture.deliver(id, false, vec![1; 10]);
+        fixture.deliver(id, true, vec![1; 5]);
         let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
         // Unknown-size archives complete with every queued byte even before they are drained.
         assert!(matches!(entry.state, TransferProgressState::Completed));
@@ -653,7 +642,7 @@ mod tests {
     /// A credit violation fails only the violating stream and stops its agent worker.
     #[tokio::test]
     async fn credit_overflow_fails_stream_and_cancels_worker() {
-        let mut fixture = Fixture::new(true);
+        let mut fixture = Fixture::new();
         // Room for the cancel and the credit grants the drained frames return.
         let (lanes, receivers) = ControlLanes::bounded(1, 16);
         fixture
@@ -668,12 +657,12 @@ mod tests {
         let (mut output, terminal) = fixture.exec().await;
         let id = output.request_id();
         for _ in 0..=redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES + 1 {
-            fixture.deliver(id, false, b"x".to_vec()).await;
+            fixture.deliver(id, false, b"x".to_vec());
         }
         // The worker is told to stop because its frames are no longer routed.
         assert!(matches!(
             fixture.priority.try_recv(),
-            Ok(ServerToAgent::CancelTransfer { request_id }) if request_id == id
+            Ok(ServerToAgent::Cancel { id: request_id }) if request_id == id
         ));
         // The independent terminal lane reports the violation.
         assert!(matches!(&*terminal.borrow(), Some(ExecEvent::Error { .. })));

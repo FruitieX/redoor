@@ -102,29 +102,29 @@ mod tests {
     #[tokio::test]
     async fn queue_priority_retains_frames_on_a_full_lane() {
         let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
-        assert!(lanes.try_priority(ServerToAgent::Error {
+        assert!(lanes.try_priority(ServerToAgent::Evicted {
             message: "occupied".to_string()
         }));
         let retained = lanes
-            .queue_priority(ServerToAgent::CancelTransfer {
-                request_id: RequestId::new(3),
+            .queue_priority(ServerToAgent::Cancel {
+                id: RequestId::new(3),
             })
             .unwrap();
         // The frame waits in a task rather than being lost to momentary saturation.
         assert!(retained.is_some());
         assert!(matches!(
             receivers.priority.recv().await,
-            Some(ServerToAgent::Error { .. })
+            Some(ServerToAgent::Evicted { .. })
         ));
         // Draining one slot delivers the retained cancel, as a typed frame.
         assert!(matches!(
             receivers.priority.recv().await,
-            Some(ServerToAgent::CancelTransfer { request_id }) if request_id == RequestId::new(3)
+            Some(ServerToAgent::Cancel { id: request_id }) if request_id == RequestId::new(3)
         ));
         drop(receivers);
         // A closed lane is reported so callers can keep their state retryable.
         assert!(matches!(
-            lanes.queue_priority(ServerToAgent::Error {
+            lanes.queue_priority(ServerToAgent::Evicted {
                 message: "late".to_string()
             }),
             Err(LaneClosed)
@@ -136,21 +136,19 @@ mod tests {
     async fn priority_frames_fall_back_to_the_command_lane() {
         let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         for id in [1, 2] {
-            assert!(
-                lanes.try_priority_or_command(ServerToAgent::CancelTransfer {
-                    request_id: RequestId::new(id),
-                })
-            );
+            assert!(lanes.try_priority_or_command(ServerToAgent::Cancel {
+                id: RequestId::new(id),
+            }));
         }
         // The first cancel took the priority lane.
         assert!(matches!(
             receivers.priority.try_recv(),
-            Ok(ServerToAgent::CancelTransfer { request_id }) if request_id == RequestId::new(1)
+            Ok(ServerToAgent::Cancel { id: request_id }) if request_id == RequestId::new(1)
         ));
         // The second still reached the agent through the command lane.
         assert!(matches!(
             receivers.commands.try_recv(),
-            Ok(ServerToAgent::CancelTransfer { request_id }) if request_id == RequestId::new(2)
+            Ok(ServerToAgent::Cancel { id: request_id }) if request_id == RequestId::new(2)
         ));
     }
 }
