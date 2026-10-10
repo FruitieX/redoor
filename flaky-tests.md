@@ -11,6 +11,10 @@
 
 ## Failure history
 
+- 2026-10-10 `pn test` integration (wire protocol v2, phase 3): `mcp.test.ts` failed in `bounds retained output, cancels background execution, and keeps searches independent` because `waitForOperation` got `404 Operation not found` for the canceled background command at line 749. The agent acknowledged the cancel within 40 ms, so the record most likely passed its 2-second test retention before the first poll under full-suite load. The whole file passed on immediate isolated rerun (19 passed).
+
+- 2026-10-10 `pn test` Playwright (wire protocol v2, phase 3): `server-home.spec.ts` failed again in `shows a measuring badge until a directory archive total arrives`. The test mocks every transfer response, and it passed on immediate isolated rerun.
+
 - 2026-10-04 `pn test` integration (stateless MCP implementation): `real-ssh.test.ts` failed in `runs and controls multiple relays independently on one SSH host` because the shared SSH relay port was not ready after 50 retries. The exact test passed on immediate isolated rerun (1 passed, 4 skipped).
 
 - 2026-10-03 `pn test` Playwright (R9 memory-retention fix): `server-home.spec.ts` failed in `shows a measuring badge until a directory archive total arrives` while waiting for the measuring-badge tooltip at line 205. Rust and integration checks passed in that run. The browser case passed in subsequent isolated fix suites and the final combined `pn test` run; no UI implementation or test change was needed.
