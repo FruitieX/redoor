@@ -236,7 +236,7 @@ export class Agent {
         return sessionCookie ? { Cookie: sessionCookie } : {};
     }
 
-    /** Reads the threshold from the connected agent over its authoritative control socket. */
+    /** Reads the threshold from the connected agent over its connection. */
     async getLoggingLevel(): Promise<LoggingLevelResponse> {
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.id)}/logging-level`,
@@ -317,7 +317,7 @@ export class Agent {
         return this.info.connected_at;
     }
 
-    /** Identifies the current control socket so process restarts can await a replacement. */
+    /** Identifies the current agent connection so process restarts can await a replacement. */
     get connectionId(): string | null {
         return this.info.connection_id;
     }

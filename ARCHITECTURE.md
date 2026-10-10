@@ -32,11 +32,11 @@ flowchart BT
     bin --> server
     bin --> cli
     bin --> core
-    bin --> protocol
 ```
 
-Arrows point from a crate to what it depends on. Dependencies only go downwards, and the
-three role crates in the middle are siblings that cannot import each other.
+Arrows point from a crate to what it depends on (the binary uses `redoor-protocol` only in its
+tests). Dependencies only go downwards, and the three role crates in the middle are siblings
+that cannot import each other.
 
 ### `redoor-protocol`
 
@@ -61,7 +61,9 @@ The contract between all parties, with no runtime dependencies (no tokio).
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
   transfers, git, mcp, ...).
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
-  and the integration tests use. Wire and REST JSON is therefore checked from both sides.
+  and the integration tests use, so REST JSON (and the wire types the browser shares, such as
+  exec, log and terminal events) is checked from both sides. Agent-only wire types are
+  covered by round-trip tests in the protocol crate and by the TypeScript fake agent.
 
 ### `redoor-core`
 
@@ -91,14 +93,16 @@ The agent runtime and the implementation of every command.
     cancellation registration, spawning, logging and the response in one place.
   - `cancel`: a `CancellationToken` registry whose entries unregister themselves when dropped.
   - `responder`: typed outbound frames, including actions that must run after a frame was
-    written (for example, re-exec after a restart response).
+    written (for example, re-exec after a restart response), and the `ResultLedger` that
+    lets each request send exactly one result.
 - `commands/`: filesystem, git, file search, content grep, metadata and host commands.
 - `transfers/`: shared upload and download drivers.
   - `UploadSink` covers raw files, tar directories and file edits. `ByteSource` covers file
     ranges and tar archives.
   - Cancel and failure always run in the same order: stop, clean up, unregister, respond.
-  - `stream` is the per-request writer, and the only place payload frames leave the agent.
-    It waits for credit before each frame; every stream is credited.
+  - `stream` is the writer of every outgoing stream (request output, terminal and log
+    streams), and the only place payload frames leave the agent. It waits for credit before
+    each data frame; `FIN` spends none.
 - `trash/`: a `TrashProvider` with freedesktop (Linux and Android/Termux), macOS and
   unsupported implementations.
 - `platform/`: mounts, accounts and identity, which keeps OS-specific code out of the
@@ -119,10 +123,12 @@ The agent runtime and the implementation of every command.
     for `GET /api/v1/protocol-mismatches`.
   - `session`: one actor per agent connection. It requires `hello` as the first frame,
     asks the router to accept it and bridges the socket to the router through bounded lanes.
-  - `lanes`: the typed outbound lanes to one agent: a command lane and a priority lane.
+  - `lanes`: the typed outbound lanes to one agent (priority, command, interactive and bulk)
+    and the write tickets that let a cancel withdraw a command that is still queued.
   - `router/`: the single owner of agent registrations and in-flight work.
     - `flows`: one table where every request belongs to exactly one flow (command, output
-      stream, upload or copy), each with an explicit phase enum.
+      stream, upload or copy). Every flow except a one-shot command has an explicit phase
+      enum.
     - `streams`: the data path. Payload frames go from the connection reader to consumers
       (HTTP bodies, copy forwarders, terminal and log bridges) without passing through the
       router.
@@ -252,8 +258,8 @@ Each agent keeps exactly one websocket to the server, at `/api/v1/agent/ws`. It 
   `FIN`, which marks a successful end; failures are reported by the result) and up to 64 KiB
   of payload. Unknown flags are rejected.
 
-Every stream has a per-connection `u64` id allocated by the server, from the same id space
-as request ids:
+Every stream has a `u64` id allocated by the server from the same router-wide counter as
+request ids, and each id is interpreted per connection:
 
 | Stream | Opened by | Data direction |
 |---|---|---|
@@ -283,13 +289,16 @@ never overfill it; an overflow fails only that stream.
 
 | Stream | Window | Per connection |
 |---|---|---|
-| Request streams | 4 frames | at most 32 concurrent ordinary commands on the agent, plus uploads admitted by the server |
+| Output streams (downloads, exec) | 4 frames | at most 32 concurrent ordinary commands, enforced by the agent |
+| Upload streams (uploads, edits, copy destinations) | 4 frames | at most 32, enforced by the server's router |
 | Terminals | 16 frames each way | at most 8 |
 | Log streams | 4 frames | at most 8 |
 
 So the worst case per connection is roughly (streams × (window + 1) × 64 KiB), for example
 8 terminals × 2 directions × 17 frames × 64 KiB ≈ 17 MiB for a terminal-heavy agent, and
-33 × 5 × 64 KiB ≈ 10 MiB for transfers.
+64 × 5 × 64 KiB ≈ 20 MiB for transfers. On top of that the server reads one websocket
+message at a time, capped at 32 MiB (a control result such as a git diff batch can be a few
+MiB; data frames are at most 64 KiB).
 
 ## Connection setup
 
@@ -304,19 +313,24 @@ sequenceDiagram
     alt wrong or missing token
         H-->>A: 401 (no socket)
     else protocol not offered
-        H-->>A: 426 + {server_protocol, server_version}
+        H-->>A: 426 + {server_protocol, server_version, message}
         Note over H: attempt kept in the mismatch list
     else accepted
         H-->>A: 101, Sec-WebSocket-Protocol: redoor.v2
         A->>S: hello {agent_id, agent_name, identity, capabilities}
         Note over S: any other first frame closes the socket
-        S->>R: register (with socket id)
-        alt accepted
-            R->>A: welcome {connection_id}
-            Note over A,R: the agent is connected and available for commands
-        else duplicate name or stopped managed agent
-            R->>A: rejected {reason, message}
+        alt managed agent the server has stopped
+            S->>A: rejected {stopped, message}
             Note over S: the session flushes the frame and closes
+        else
+            S->>R: register (with socket id)
+            alt accepted
+                R->>A: welcome {connection_id}
+                Note over A,R: the agent is connected and available for commands
+            else duplicate name
+                R->>A: rejected {duplicate_name, message}
+                Note over S: the session flushes the frame and closes
+            end
         end
     end
 ```
@@ -331,9 +345,9 @@ sequenceDiagram
   server's own binary, so they never mismatch.
 - **Identity is the connection.** `hello` is the only frame that names the agent; every later
   frame is attributed to the session that received it. A second `hello` closes the socket.
-- **Request ids are scoped to one connection.** The server allocates them, and the router
-  indexes flows by agent and request id, so a frame can only resolve work that was sent to
-  its own connection.
+- **Request ids are interpreted per connection.** The server allocates them from one
+  router-wide counter, and the router indexes flows by agent and request id, so a frame can
+  only resolve work that was sent to its own connection.
 - A reconnect of the same agent id replaces the old connection, which receives `evicted`
   and exits. A *different* agent id that claims a live agent's name is `rejected` with
   `duplicate_name`.
@@ -371,9 +385,9 @@ flowchart LR
   reaches the agent, otherwise the cancel is sent after it. So a `cancel` can never overtake
   its command, and the agent needs no memory of early cancels.
 - The **priority lane** is drained first. Cancels, credit grants and publication decisions
-  never wait behind a backlog of commands or data. A cancel that finds the lane momentarily
-  full waits for capacity in a small task instead of being dropped, and publication
-  decisions fall back to the command lane.
+  never wait behind a backlog of commands or data. A cancel or publication decision that
+  finds the lane momentarily full waits for capacity in a small task instead of being
+  dropped.
 - The router never awaits. `RouterHandle::send` reports `Full` and `Stopped` separately, and
   async callers use `send_async`, so router messages are never silently dropped.
 
@@ -393,13 +407,14 @@ sequenceDiagram
     A->>A: policy() → admit, register cancel, spawn
     A->>R: result {id, ok | error}
     R->>H: outcome (flow removed)
-    H->>H: Request::decode() → its typed response or ApiError
+    H->>H: AgentRequest::decode() → its typed response or ApiError
     H->>C: JSON response
 ```
 
 - `AgentClient::call` is the only way handlers talk to agents. The request type decides
-  the response type: the agent encodes its answer with `Reply::of::<R>`, and the server
-  decodes it with `R::decode`, so there are no "unexpected result type" branches. An agent
+  the response type: the agent encodes its answer with `Reply::of::<R>` (or
+  `Reply::stream::<R>` for streaming commands), and the server decodes it with
+  `R::decode`, so there are no "unexpected result type" branches. An agent
   error becomes an `ApiError` with the status of its `CommandErrorKind`; a payload that is
   not the request's response type is a protocol fault (500).
 - When the caller gives up (the deadline passes or the HTTP client disconnects), the router
@@ -417,14 +432,20 @@ agent:  binary frames of stream id ... binary frame with FIN     (streaming comm
 agent:  result {id, ok: <response>} or result {id, error: {kind, message}}   (exactly one, last)
 ```
 
-- **Exactly one result per request, always after its data.** A streaming command's result is
-  queued on the same agent lane as its data, behind `FIN`, so when the server sees the result
-  the consumer already has every byte. Flows therefore settle on the result alone; there is
+- **Exactly one result per request, always after its data.** An output stream's result
+  (download, exec) is queued on the same agent lane as its data, behind `FIN`, so when the
+  server sees the result the consumer already has every byte. An upload answers after its
+  publication step, on the control lane. Flows therefore settle on the result alone; there is
   no separate "stream ended" event to reconcile with it. The agent's `ResultLedger` enforces
   the single result (a second one is a bug: a debug assertion, and dropped in release).
-- **`FIN` means success.** A stream that fails or is cancelled ends without `FIN`, and its
-  error result carries the reason. The server then fails the consumer after the frames it
-  already queued, so an HTTP body aborts visibly instead of looking like a short file.
+- **`FIN` means the data is complete.** A download or upload that fails or is cancelled ends
+  without `FIN`, and its error result carries the reason. The server then fails the consumer
+  after the frames it already queued, so an HTTP body aborts visibly instead of looking like a
+  short file. Exec output always ends with `FIN`, because the output of a stopped process is
+  still all the output there is; its result says how the process ended. Terminals and log
+  streams have no result, so `FIN` is how they end: a terminal always sends it (after its
+  exit or error event), and a log stream sends it unless the server canceled it, because
+  then nobody listens any more.
 - **Initial credit is in the command.** Output streams (downloads, exec) get their first
   window (`credit: 4`) in the command frame, so output starts without a round trip. Uploads
   start with `credit: 0`; the agent grants the first window when its worker is ready, and

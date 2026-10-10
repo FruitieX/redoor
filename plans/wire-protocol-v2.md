@@ -1,5 +1,7 @@
 # Agent wire protocol v2
 
+Status: implemented on branch `wire-protocol-v2` (all five phases).
+
 Redesign the server <-> agent websocket protocol now that there are no backwards
 compatibility requirements. The current protocol (described in `ARCHITECTURE.md`) was kept
 byte-compatible during the workspace rewrite, which left redundant fields, a fallback code

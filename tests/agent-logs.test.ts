@@ -522,7 +522,7 @@ log_format = "line"
         const closed = waitForClose(opened.socket);
         processManager.kill(agentPid);
         await closed;
-        // Dedicated socket closure proves control disconnect canceled active agent stream work.
+        // Browser socket closure proves losing the agent connection ended its log stream.
         expect(opened.socket.readyState).toBe(WebSocket.CLOSED);
 
         const disconnected = await waitForValue({

@@ -212,7 +212,7 @@ redoor agent launchd status
 redoor agent logs --follow
 ```
 
-A successful log contains `Connected to ...` and `Transfer socket connected`.
+A successful log contains `Connected to ...` and `Server accepted the agent`.
 
 The repair supplies a fresh ad-hoc identity only. It does not establish publisher trust, and installing another Redoor release replaces the signature. Run the command again if the launchd-only failure returns after an update.
 
