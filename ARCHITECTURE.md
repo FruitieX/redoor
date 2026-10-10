@@ -410,6 +410,50 @@ sequenceDiagram
 - On the agent side, each link has a **generation** number. Timers and tasks from a replaced
   connection carry the old generation and are ignored.
 
+## Managed agent lifecycle
+
+Managed agents are the `[[agents]]` entries in the server config: local child processes and
+SSH-backed agents. The server's watchdog runs them. Standalone agents manage themselves.
+
+- **States** are `AgentConnectionStatus`. A managed agent moves between `Stopped`, `Starting`
+  and `Connected`. `Disconnected` is only used for standalone agents. A managed agent whose
+  socket drops goes back to `Starting`, because the watchdog is already bringing it back.
+- **Dormant until started.** At startup every managed agent gets a supervisor in `Stopped`,
+  and nothing is spawned until the user starts it. So a server restart never launches local
+  or remote processes on its own.
+- **Actions**:
+
+  | Action | Endpoint | Effect |
+  |---|---|---|
+  | Start | `POST /api/v1/agents/{agent}/start` | Marks the agent desired-running; the supervisor spawns it |
+  | Disconnect | `POST /api/v1/agents/{agent}/shutdown` | Cancels provisioning or backoff, kills and reaps the child, evicts its socket |
+  | Retry start | `POST /api/v1/agents/{agent}/retry-start` | Abandons the current attempt and starts a fresh one with the backoff reset |
+  | Restart | `POST /api/v1/agents/{agent}/restart` | Not a watchdog action: the agent re-executes itself, so it works for any connected agent |
+
+- **Supervision.** While an agent is desired-running, the watchdog restarts it when spawning or
+  provisioning fails, when the child exits and when its heartbeat goes stale. The backoff
+  starts at 1 s and doubles up to 30 s, and resets after 30 s of stable connection. The
+  watchdog never gives up. The latest error is shown as the agent's `connection_issue` while
+  it stays `Starting`.
+- **SSH provisioning runs on every attempt**, so the UI always shows current results. It
+  probes the OS and architecture and reuses the remote binary if its version matches.
+  Otherwise it uploads the matching release from the local cache. Each step is published as
+  `provisioning_status`, which the UI lists while the agent starts. The ssh child holds the
+  remote agent's stdin, so killing ssh makes the remote agent exit (`--exit-on-stdin-eof`).
+- **A stop wins every race.** Every start, shutdown and retry bumps an attempt generation, and
+  the router commits a registration only if its generation is still current. An agent that
+  connects while its entry is not desired-running gets `rejected` with `stopped` and exits.
+  Without this, a `hello` that was already in flight, or a remote process that outlived its
+  ssh client, would reconnect and silently undo the user's stop. Socket ids likewise filter
+  out late disconnect and stale events from replaced sockets.
+- **Config edits apply at runtime.** Adding an agent creates a new dormant supervisor.
+  Editing or deleting one stops the agent, rewrites the config file (preserving its
+  formatting) and replaces the supervisor, so an edited agent comes back as `Stopped`. Changes
+  made to `config.toml` by hand take effect on the next server restart.
+- **Server restart** (`POST /api/v1/server/restart`) validates the config first. It then
+  stops every managed child before re-executing, because `exec` would otherwise leave them
+  orphaned. Standalone agents simply reconnect.
+
 ## Server-side lanes to an agent
 
 ```mermaid
@@ -441,6 +485,53 @@ flowchart LR
   dropped.
 - The router never awaits. `RouterHandle::send` reports `Full` and `Stopped` separately, and
   async callers use `send_async`, so router messages are never silently dropped.
+
+## Flows
+
+The router tracks all in-flight agent work as **flows**. Every request the router sends to an
+agent belongs to exactly one flow, and all flows live in one `FlowTable`.
+
+| Flow | What it is | Phases |
+|---|---|---|
+| `Command` | A one-shot request whose caller waits for the result | none |
+| `Output` | A download or exec output streaming to a consumer | `Streaming`, `Canceling` |
+| `Upload` | An upload, archive upload or file edit into one agent | `AwaitingReady`, `Streaming`, `Committing` (edits only), `Publishing`, `Canceling` |
+| `Copy` | A copy or move, on one agent or across two | `Verifying`, `SettlingPartial`, `Local`, `Remote`, `DeletingSource` |
+
+- **Why one table.** A frame's request id resolves through a single index instead of probing
+  several registries. Explicit phase enums replace combinations of booleans, so impossible
+  states such as "canceling and publishing" cannot be represented. Phases also decide what
+  can still be canceled. An upload in `Committing` or `Publishing` and a move in
+  `DeletingSource` have passed the point of no return.
+- **Keys.** Flows are indexed by agent and request id, so a frame can only resolve work that
+  was sent to its own agent. One flow can answer several request ids at once (a cross-agent
+  copy has one per agent), and it gets fresh ids when it changes phase.
+- Terminals and log streams are not flows. They are per-connection streams with no result.
+- **A flow settles exactly once**, and it is removed from the table when it does. A flow
+  settles when:
+  - the agent's result arrives. This is the normal case, and the result always comes after
+    the stream data.
+  - the caller gives up. A dropped `AgentClient` call or HTTP body tells the router, which
+    removes a command flow at once. Stream flows move to `Canceling` until the agent
+    acknowledges the cancel.
+  - the user cancels or pauses it by transfer id.
+  - the agent's connection is lost. `fail_agent_flows` takes out every flow that depends on
+    that agent and fails each one. Which agents a copy depends on changes with its phase.
+    Once the source has sent everything, losing it no longer fails the copy. Once a move is
+    deleting its source, losing the destination no longer matters.
+  - its stream violates credit.
+- Callers learn the outcome through oneshot channels (command results, upload readiness and
+  completion, pause confirmation) or a watch channel (exec exit status).
+- **Leases.** A streaming flow holds a `StreamLease`: a cancellation token, byte counters and
+  a fault slot, shared with the data path. This is what lets payload bypass the router. The
+  router cancels or fails a stream through its lease and reads progress from its counters,
+  and no frame passes through its mailbox.
+- **Progress rows are separate from flows.** Downloads, uploads and copies also get a row in
+  the transfer progress store, keyed by a public `TransferId`. Rows outlive their flows as
+  history (see browser live updates below).
+- **Admission.** The router allows at most 32 uploads per connection, counting copies into
+  that agent. It refuses a second copy to a destination path that already has one running,
+  and it rejects new work when the command lane is full.
 
 ## One-shot command
 
@@ -626,14 +717,74 @@ sequenceDiagram
   accepted the frame. A slow destination therefore slows down only this copy, never either
   agent's other streams.
 - The forwarder only relays data and `FIN`. A source that fails sends no `FIN`, and its
-  error result makes the router fail the copy and cancel the destination worker, which
-  discards its staging, so a partial copy is never published.
+  error result makes the router fail the copy and cancel the destination worker. A partial
+  copy is never published. The destination either discards its staging, or, for a
+  resumable file copy, keeps it as a partial (see the next section).
 - A **move** is a copy followed by deleting the source (`CopyFlow` then
   `CopyPhase::DeletingSource`). The source is deleted only if its identity still matches what
   was copied. Once the source is being deleted, a destination disconnect no longer affects
   the result.
 - A copy or move on a single agent runs entirely on that agent as a local worker. The server
   only follows its progress and can cancel it.
+
+## Resuming copies and moves
+
+An interrupted file copy or move keeps what it has already written, so the next attempt
+continues from there instead of from byte zero. This covers regular files: copies and moves
+between agents, copies on one agent, and the copy-and-delete fallback of a move on one agent.
+Directory archives start over.
+
+- **The partial is the only resume state.** The destination writes into a hidden partial file
+  next to the destination path (`.<name>.redoor-partial-<hash>`). It keeps a manifest for that
+  file under `partials/` in the agent's data dir. Both are made durable before any payload
+  arrives. The server keeps no transfer database, so resuming works across server, agent and
+  machine restarts, including a crash of the destination agent.
+- **The server signs the manifest.** The manifest records:
+  - the source agent, path and file identity
+  - the destination
+  - the operation and the conflict policy
+
+  The server signs these fields with a BLAKE3 keyed hash, using a key only it holds
+  (`partials-signing-key` in the server data dir). The agent stores the signature but can
+  neither check nor produce one. Without the signature, a compromised destination agent could
+  write a manifest naming any file on any other agent. A single Resume click would then copy
+  that file to the attacker, or, for a move, delete it. The server also checks that the
+  manifest names the agent that returned it as its destination. The shared agent token is not
+  used as the key, because every agent knows it.
+- **Only a verified prefix is reused.** The server rounds the partial's length down to whole
+  64 MiB segments.
+  - **Across agents**, the router has both agents hash each segment (`HashSegments`) and
+    compares the digests itself. Copying resumes after the last matching segment, and
+    everything after a mismatch is sent again. The hashing rounds are ordinary commands owned
+    by the copy's flow (`CopyPhase::Verifying`), so cancel, pause and agent loss behave as in
+    any other phase.
+  - **On one agent**, the copy runs the same check inside its own command.
+- **A changed source starts over.** The manifest and each resumed download carry the source's
+  identity (device, inode, size and mtime). If the live source no longer matches, the partial
+  is discarded.
+- **Why the copy stopped decides what happens to the partial.** Cancels carry a reason:
+
+  | Stop | Partial |
+  |---|---|
+  | User cancel | Discarded |
+  | Pause | Flushed and kept. The pause request returns only once the partial is durable, and the transfer's progress row is then dropped |
+  | Connection lost, agent crash, read or write error | Kept. The transfer ends as errored with "partial kept" |
+
+  An agent that loses its connection fires its cancel tokens with the default reason,
+  `Disconnected`. So it keeps its partials without needing to hear from the server.
+- **Resuming is explicit.** Nothing resumes by itself when an agent reconnects.
+  - `GET /api/v1/partials` lists the verified partials on connected agents.
+  - `POST /api/v1/partials/resume` starts a new transfer from one of them. It re-reads the
+    manifest from the agent instead of trusting the client.
+  - Starting the same copy again also resumes, because the default is `resume: "auto"`.
+    `"restart"` starts from scratch.
+  - `POST /api/v1/copy/preflight` lets the UI offer "Resume" or "Start over" before a copy
+    starts.
+- **The agent owns cleanup.** It sweeps its partials at startup and once a day. The sweep
+  removes partials older than `partial_max_age_days` (7 days by default), and manifests whose
+  file is gone. Partials are also removed when they are published, canceled or discarded.
+- `tests/resumable-transfers.test.ts` covers these cases, including tampered manifests and
+  manifests moved to another agent.
 
 ## Terminals and live logs
 
@@ -670,6 +821,81 @@ sequenceDiagram
   reassembles each line (bounded by the largest valid event) and validates it before
   relaying it to the browser.
 - Each connection allows at most 8 terminals and 8 log streams, enforced on both sides.
+
+## Browser live updates and transfer progress
+
+`/api/v1/ui/ws` carries only invalidation hints. The data itself is always fetched over REST.
+
+- `UiEvent` has three variants with no payload: `agents_changed`, `routes_changed` and
+  `transfers_changed`. The UI's `RefreshListener` turns them into TanStack Query
+  invalidations (agents, transfers, partials) and router loader invalidations. REST stays the
+  single source of truth, so there are no deltas to keep consistent, and a missed event only
+  means a view refreshes later.
+- Agent events go out immediately on connect, disconnect and lifecycle changes. Transfer
+  events are throttled to one every 5 s while progress is ticking. They go out immediately
+  when a transfer starts, starts canceling or ends.
+- **Transfer progress** lives in the router's `TransferProgressStore`. There is one row per
+  download, upload and copy, keyed by its public `TransferId`.
+  - Payload bypasses the router, so a 250 ms tick (and every progress listing) copies byte
+    counts from the flows' leases into the active rows.
+  - Copies on one agent run on that agent and report progress frames instead.
+  - The UI estimates speed and ETA between refreshes.
+- Rows end as `Completed`, `Errored` or `Canceled` and stay as history (at most 1000 rows, for
+  an hour). A paused copy's row is dropped, because its partial is now its record. The store
+  lives in memory only.
+- Things that produce no event are polled: protocol mismatches every 10 s and partials every
+  5 s.
+- `DELETE /api/v1/transfers/{id}` cancels and `POST /api/v1/transfers/{id}/pause` pauses.
+  - Cancel is idempotent and returns at once. The row becomes `Canceled` when the agent
+    acknowledges.
+  - Pause returns only after the destination has made the partial durable.
+
+## Authentication and trust
+
+Redoor has a single user account. Each kind of client has its own credential, and each
+credential only works on its own endpoints:
+
+| Client | Credential | Grants |
+|---|---|---|
+| Browser UI | `redoor_session` cookie from `POST /api/v1/login` | REST API and browser websockets, full access |
+| `redoor remote` CLI | The same kind of session, saved by `redoor remote login` | Same as the browser |
+| MCP clients | `redoor_mcp_...` bearer token | `/mcp` only, limited by scopes and a device allow-list |
+| Agents | The shared `agent_token` bearer | `/api/v1/agent/ws` only |
+| Plain download links | One-time token | One file on one agent, once |
+
+- **Login** checks the configured username and password (hashed in memory). If none is
+  configured, it checks the password of the server process's OS user through PAM. Logins are
+  rate limited.
+  - Sessions are files in the server data dir and expire after 7 days.
+  - Changing the configured password invalidates existing sessions.
+- **MCP tokens** are created in the UI or with `redoor server mcp-token`, and only a hash of
+  each is stored. Scopes (`files:read`, `files:write`, `commands:execute`, ...) and an
+  explicit device list limit what a token can do. An MCP client is usually an AI assistant
+  acting for the user, so it should get no more access than its task needs.
+- **The agent token** is one secret shared by all agents and checked during the websocket
+  upgrade. It proves "this is an agent of this server", not which agent: the agent id in
+  `hello` is self-reported. Agents are therefore only partly trusted.
+- **What agents are trusted with.** An agent acts as its own OS user. A local managed agent
+  runs as the server's user, an SSH agent as the SSH login, and a standalone agent as
+  whoever started it. The server trusts the content an agent returns (listings, file data,
+  exec output). It does not trust an agent with anything that could reach the server or
+  another agent:
+  - Frames are attributed to the connection they arrived on, not to ids they carry. Request
+    ids resolve only for the agent they were sent to, and only the current session's frames
+    count.
+  - Credit grants are clamped, and messages are capped at 32 MiB, so a peer cannot force
+    unbounded buffering.
+  - An agent cannot take over the name of a live agent.
+  - The server signs resume manifests and checks them against the agent that returned them,
+    and it compares both agents' hashes itself before reusing a prefix.
+  - The partial signing key, the sessions and the MCP token hashes exist only on the server.
+- **Browser protections.**
+  - The cookie is `HttpOnly` and `SameSite=Lax`.
+  - JSON endpoints require `Content-Type: application/json`.
+  - The terminal and log websockets check `Origin` against `Host`, which stops cross-site
+    websocket hijacking.
+  - MCP token changes reject cross-site requests.
+  - `/mcp` accepts only the origins listed in `mcp_allowed_origins`.
 
 ## Design rules
 
