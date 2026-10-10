@@ -11,6 +11,8 @@
 
 ## Failure history
 
+- 2026-10-10 `pn test` integration (wire protocol v2, phase 5 review fixes): `create-ssh-agent.test.ts` failed 8 of 9 tests with `ECONNREFUSED` right after the first test's `restartServer()` succeeded, so the restarted server was briefly unreachable under full-suite load. The file passed four immediate isolated reruns (9 passed each).
+
 - 2026-10-10 `pn test` integration (wire protocol v2, phase 3): `mcp.test.ts` failed in `bounds retained output, cancels background execution, and keeps searches independent` because `waitForOperation` got `404 Operation not found` for the canceled background command at line 749. The agent acknowledged the cancel within 40 ms, so the record most likely passed its 2-second test retention before the first poll under full-suite load. The whole file passed on immediate isolated rerun (19 passed).
 
 - 2026-10-10 `pn test` Playwright (wire protocol v2, phase 3): `server-home.spec.ts` failed again in `shows a measuring badge until a directory archive total arrives`. The test mocks every transfer response, and it passed on immediate isolated rerun.
