@@ -33,13 +33,6 @@ pub(crate) async fn content_grep_handler(
             "Content grep context must be between 0 and {MAX_GREP_CONTEXT_LINES} lines per direction"
         )));
     }
-    let context_requested = search.before_context > 0 || search.after_context > 0;
     let call = content_grep(absolute_path_from_url(path.unwrap_or_default()), search);
-    let result = state.agents.call(&AgentId::from(agent), call).await?;
-    if context_requested && !result.context_supported {
-        return Err(ApiError::conflict(
-            "The connected agent does not support content grep context; upgrade the agent",
-        ));
-    }
-    Ok(Json(result))
+    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
 }

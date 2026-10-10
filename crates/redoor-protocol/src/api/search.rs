@@ -21,13 +21,13 @@ pub enum CaseSensitivity {
     Insensitive,
 }
 
-/// Preserves the public REST default when a newer agent receives a command from an older server.
-pub(crate) fn default_file_search_timeout_seconds() -> u64 {
+/// Search deadline REST callers get when they do not choose one.
+fn default_file_search_timeout_seconds() -> u64 {
     5
 }
 
-/// Preserves default-enabled command options when older senders omit them.
-pub(crate) fn default_true() -> bool {
+/// Default for REST search options that are on unless a caller turns them off.
+fn default_true() -> bool {
     true
 }
 
@@ -86,11 +86,7 @@ pub struct ContentGrepMatch {
     pub line_number: u64,
     pub line: String,
     pub line_truncated: bool,
-    // Defaults preserve ordinary grep responses from agents predating context support.
-    #[serde(default)]
     pub before_context: Vec<ContentGrepContextLine>,
-    // Defaults preserve ordinary grep responses from agents predating context support.
-    #[serde(default)]
     pub after_context: Vec<ContentGrepContextLine>,
 }
 
@@ -123,9 +119,6 @@ pub struct GrepRequest {
 #[ts(export)]
 pub struct ContentGrepResponse {
     pub results: Vec<ContentGrepMatch>,
-    // Distinguishes an old agent's absent context from a genuinely empty context window.
-    #[serde(default)]
-    pub context_supported: bool,
     pub timed_out: bool,
     pub cancelled: bool,
     pub truncated: bool,

@@ -292,7 +292,7 @@ export class Agent {
         return this.info.supports_move_to_trash || this.info.supports_trash;
     }
 
-    /** Effective UID from registration; null until first connect or for older agents. */
+    /** Effective UID from registration; null until first connect. */
     get uid(): number | null {
         return this.info.uid;
     }
@@ -342,10 +342,6 @@ export class Agent {
         return this.info.binary;
     }
 
-    /** Reports whether this session can complete the safe in-place upgrade protocol. */
-    get supportsSelfExec(): boolean {
-        return this.info.supports_self_exec;
-    }
 
     /** Reports whether this session can launch paths in its graphical desktop. */
     get supportsNativeOpen(): boolean {

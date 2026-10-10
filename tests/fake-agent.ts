@@ -61,8 +61,6 @@ const rejectedSchema = z.object({
 /** Upgrade request settings; every field defaults to what a correct agent sends. */
 export type UpgradeOptions = {
     serverPort: number;
-    /** Endpoint path; the agent endpoint unless a test probes another one. */
-    path?: string;
     /** Bearer token; `null` sends no `Authorization` header at all. */
     token?: string | null;
     /** Offered subprotocols; an empty list sends no `Sec-WebSocket-Protocol` header. */
@@ -85,7 +83,7 @@ export type UpgradeOutcome =
 export async function upgradeAgentSocket(
     options: UpgradeOptions,
 ): Promise<UpgradeOutcome> {
-    const url = `ws://127.0.0.1:${options.serverPort}${options.path ?? AGENT_WS_PATH}`;
+    const url = `ws://127.0.0.1:${options.serverPort}${AGENT_WS_PATH}`;
     const token = options.token === undefined ? TEST_AGENT_TOKEN : options.token;
 
     const versionHeader = {
@@ -130,9 +128,9 @@ export type HelloOptions = {
     username?: string;
     cwd?: string;
     binary?: Partial<BinaryIdentity>;
-    supportsSelfExec?: boolean;
     supportsNativeOpen?: boolean;
     supportsTrash?: boolean;
+    supportsMoveToTrash?: boolean;
 };
 
 /** The flat `hello` frame a real agent sends first on every connection. */
@@ -146,9 +144,11 @@ export type HelloFrame = {
     username: string;
     cwd: string;
     binary: BinaryIdentity;
-    supports_self_exec: boolean;
+    uid: number;
+    is_root: boolean;
     supports_native_open: boolean;
     supports_trash: boolean;
+    supports_move_to_trash: boolean;
 };
 
 /** Builds the `hello` frame for one fake agent identity. */
@@ -171,9 +171,11 @@ export function helloFrame(options: HelloOptions): HelloFrame {
             build_date: "unknown",
             ...options.binary,
         } satisfies BinaryIdentity,
-        supports_self_exec: options.supportsSelfExec ?? false,
+        uid: 1000,
+        is_root: false,
         supports_native_open: options.supportsNativeOpen ?? false,
         supports_trash: options.supportsTrash ?? false,
+        supports_move_to_trash: options.supportsMoveToTrash ?? false,
     };
 }
 

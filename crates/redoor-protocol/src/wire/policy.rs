@@ -153,7 +153,6 @@ impl Command {
             | Self::DeleteMoveSource { .. }
             | Self::OpenPath { .. }
             | Self::Echo { .. }
-            | Self::AgentInfo(_)
             | Self::GetAgentDetails(_)
             | Self::GetLoggingLevel(_)
             | Self::SetLoggingLevel { .. }
@@ -211,17 +210,16 @@ mod tests {
             Command::DeleteMoveSource(request::DeleteMoveSource { .. }) => 28,
             Command::OpenPath(request::OpenPath { .. }) => 29,
             Command::Echo(request::Echo { .. }) => 30,
-            Command::AgentInfo(request::AgentInfo {}) => 31,
-            Command::GetAgentDetails(request::GetAgentDetails {}) => 32,
-            Command::GetLoggingLevel(request::GetLoggingLevel {}) => 33,
-            Command::SetLoggingLevel(request::SetLoggingLevel { .. }) => 34,
-            Command::Restart(request::Restart {}) => 35,
-            Command::SelfExec(request::SelfExec { .. }) => 36,
+            Command::GetAgentDetails(request::GetAgentDetails {}) => 31,
+            Command::GetLoggingLevel(request::GetLoggingLevel {}) => 32,
+            Command::SetLoggingLevel(request::SetLoggingLevel { .. }) => 33,
+            Command::Restart(request::Restart {}) => 34,
+            Command::SelfExec(request::SelfExec { .. }) => 35,
         }
     }
 
     /// Number of variants covered by `variant_index`.
-    const VARIANT_COUNT: usize = 37;
+    const VARIANT_COUNT: usize = 36;
 
     /// Builds one instance of every command variant for table-wide policy checks.
     fn every_command() -> Vec<Command> {
@@ -350,7 +348,6 @@ mod tests {
                     random_sleep: false,
                 },
             }),
-            Command::AgentInfo(request::AgentInfo {}),
             Command::GetAgentDetails(request::GetAgentDetails {}),
             Command::GetLoggingLevel(request::GetLoggingLevel {}),
             Command::SetLoggingLevel(request::SetLoggingLevel { level: Level::Info }),

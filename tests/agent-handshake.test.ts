@@ -122,18 +122,6 @@ describe("agent websocket handshake", () => {
         ).toBe(true);
     });
 
-    it("answers the pre-negotiation endpoint with 426", async () => {
-        const outcome = await upgradeAgentSocket({
-            serverPort,
-            path: "/ws",
-            token: null,
-            protocols: [],
-        });
-
-        // Agents of the previous protocol connect here; they must learn to upgrade.
-        expect(outcome).toMatchObject({ kind: "refused", status: 426 });
-    });
-
     it("rejects a hello whose name belongs to another live agent", async () => {
         let error: unknown;
 

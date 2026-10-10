@@ -722,15 +722,13 @@ impl AgentRuntime {
                 default_directory: self.profile.default_directory.clone(),
                 // Lets the server compare agent builds against itself without a round-trip command.
                 binary: redoor_core::identity::current_binary_identity(),
-                uid: Some(host.uid),
+                uid: host.uid,
                 is_root: host.is_root,
             }),
             capabilities: AgentCapabilities {
-                // Upgrade safety depends on the server knowing this command is implemented.
-                supports_self_exec: true,
                 // Reuse startup GUI detection so headless agents never advertise the action.
                 supports_native_open: self.notification.desktop_environment.is_some(),
-                // Prevents newer servers from dispatching unknown commands to unsupported agents.
+                // Only platforms with a Redoor trash inventory implement listing and restore.
                 supports_trash: trash.supports_inventory,
                 // macOS supports the native move without Redoor inventory or restore support.
                 supports_move_to_trash: trash.supports_move,

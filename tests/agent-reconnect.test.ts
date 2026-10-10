@@ -99,7 +99,7 @@ describe("Agent connection recovery", () => {
         const agentName = "blackhole-reconnect-agent";
 
         const agentPid = processManager.spawnAgent({
-            wsAddress: `ws://127.0.0.1:${proxy.port}/ws`,
+            wsAddress: `ws://127.0.0.1:${proxy.port}`,
             name: agentName,
             cwd: process.cwd(),
             home: process.cwd(),

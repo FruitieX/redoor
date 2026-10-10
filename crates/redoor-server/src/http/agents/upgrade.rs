@@ -170,17 +170,6 @@ pub(crate) async fn upgrade_agent_handler(
         )
             .into_response();
     }
-    if !snapshot.supports_self_exec {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!(
-                    "Agent does not support safe self-exec upgrades: {agent}. Install a current Redoor agent manually, reconnect it, and retry the upgrade."
-                ),
-            }),
-        )
-            .into_response();
-    }
     let details = match state.agents.agent_details(&agent_id).await {
         Ok(details) => details,
         Err(error) => return error.into_response(),

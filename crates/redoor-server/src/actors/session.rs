@@ -233,7 +233,7 @@ impl SessionRuntime {
                     socket_id,
                     lanes,
                     identity: hello.identity,
-                    capabilities: hello.capabilities.normalized(),
+                    capabilities: hello.capabilities,
                     watchdog,
                     watchdog_attempt_generation,
                     streams: registered_streams,
@@ -808,7 +808,7 @@ mod tests {
     async fn second_hello_closes_the_socket() {
         let (mut runtime, mut receiver) = capture_session(Some(AgentId::from("own")));
         let hello: AgentToServer = serde_json::from_str(
-            r#"{"type":"hello","agent_id":"other","agent_name":"other","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"}}"#,
+            r#"{"type":"hello","agent_id":"other","agent_name":"other","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"},"uid":1000,"is_root":false,"supports_native_open":false,"supports_trash":false,"supports_move_to_trash":false}"#,
         )
         .unwrap();
         let step = runtime

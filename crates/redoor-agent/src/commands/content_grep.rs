@@ -165,7 +165,6 @@ pub(crate) async fn execute(
 
     Ok(ContentGrepResponse {
         results: output.results,
-        context_supported: true,
         timed_out,
         cancelled,
         truncated: output.truncated,

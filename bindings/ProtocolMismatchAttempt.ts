@@ -21,6 +21,6 @@ remote_address: string,
  */
 agent_version: string | null, 
 /**
- * Subprotocols the agent offered; empty for agents that predate negotiation.
+ * Subprotocols the agent offered; empty when it offered none.
  */
 offered_protocols: Array<string>, };

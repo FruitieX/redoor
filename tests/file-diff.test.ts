@@ -89,7 +89,7 @@ describe("File Diff API", () => {
         );
 
         const secondAgentPid = processManager.spawnAgent({
-            wsAddress: `ws://127.0.0.1:${serverPort}/ws`,
+            wsAddress: `ws://127.0.0.1:${serverPort}`,
             name: secondAgentName,
             cwd: tempFiles.tempDirectory({ suffix: "-second-agent-cwd" }),
         });

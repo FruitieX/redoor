@@ -112,7 +112,7 @@ describe("Raw Copy API", () => {
         const sourceContent = "cross-agent-copy".repeat(4096);
         const sourcePath = tempFiles.create(sourceContent, { suffix: ".txt" });
         const destPath = tempFiles.tempFile({ suffix: ".txt" });
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const secondAgentName = "raw-copy-target-agent";
 
         const serverProcess = processManager.getProcess(serverPid);
@@ -293,7 +293,7 @@ describe("Raw Copy API", () => {
     it("should copy a directory across agents", async () => {
         const sourceRoot = tempFiles.tempFile({ suffix: "-cross-source-dir" });
         const destRoot = tempFiles.tempFile({ suffix: "-cross-dest-dir" });
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const secondAgentName = "raw-copy-target-agent-dir";
 
         await fs.mkdir(path.join(sourceRoot, "nested"), { recursive: true });
@@ -530,7 +530,7 @@ describe("Raw Copy API", () => {
             );
 
             secondAgentPid = processManager.spawnAgent({
-                wsAddress: `ws://127.0.0.1:${serverPort}/ws`,
+                wsAddress: `ws://127.0.0.1:${serverPort}`,
                 name: secondAgentName,
                 cwd: tempFiles.tempDirectory({
                     suffix: "-on-existing-target-agent-cwd",

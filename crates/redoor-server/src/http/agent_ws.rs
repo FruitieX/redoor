@@ -142,22 +142,6 @@ pub(crate) async fn agent_websocket_handler(
         .into_response()
 }
 
-/// Route: `GET /ws`, the endpoint of agents that predate protocol negotiation.
-///
-/// Such agents authenticate inside the socket, which this server no longer supports, so every
-/// attempt is refused with `426` and listed as a mismatch; otherwise outdated agents would
-/// only appear as an endless stream of failed requests in their own logs. Because they send
-/// no token at upgrade, these entries are unauthenticated: anyone reaching the server can add
-/// one, but the list is bounded and keeps one entry per host and version, so this can only
-/// add noise to the warning, never grow memory.
-pub(crate) async fn legacy_agent_websocket_handler(
-    ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    AxumState(state): AxumState<ServerState>,
-) -> Response {
-    protocol_mismatch(&state, remote, &headers)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

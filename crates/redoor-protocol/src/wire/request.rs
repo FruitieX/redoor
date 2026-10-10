@@ -14,14 +14,11 @@ use crate::api::files::{
     MetadataResponse,
 };
 use crate::api::git::{GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse};
-use crate::api::search::{
-    CaseSensitivity, ContentGrepResponse, FileSearchResponse, default_file_search_timeout_seconds,
-    default_true,
-};
+use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchResponse};
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
 use crate::wire::command::{
-    AgentInfoResult, Command, CommandErrorKind, EchoResult, LsDirectoryResult, LsFileResult,
+    Command, CommandErrorKind, EchoResult, LsDirectoryResult, LsFileResult,
     MoveMetadataResult, MoveSourceIdentity,
 };
 use crate::wire::exec::{ExecEvent, ExecRequest};
@@ -181,16 +178,12 @@ pub struct FileSearch {
     pub path: String,
     pub query: String,
     /// Keeps the deadline agent-local so traversal stops even if the REST caller disconnects.
-    #[serde(default = "default_file_search_timeout_seconds")]
     pub timeout_seconds: u64,
     /// Hidden directories are opt-in because they often contain large caches and metadata trees.
-    #[serde(default)]
     pub include_hidden: bool,
-    /// Git ignore rules are enabled by default so searches match repository expectations.
-    #[serde(default = "default_true")]
+    /// Git ignore rules are usually on so searches match repository expectations.
     pub respect_gitignore: bool,
     /// Smart case keeps lowercase searches forgiving while uppercase remains intentional.
-    #[serde(default)]
     pub case_sensitivity: CaseSensitivity,
 }
 
@@ -200,25 +193,18 @@ pub struct ContentGrep {
     pub path: String,
     pub query: String,
     /// Keeps the whole operation, including exclusive-slot waiting, agent-local and bounded.
-    #[serde(default = "default_file_search_timeout_seconds")]
     pub timeout_seconds: u64,
     /// Hidden directories are opt-in to avoid unexpectedly scanning cache trees.
-    #[serde(default)]
     pub include_hidden: bool,
-    /// Repository ignore rules are enabled by default to match recursive filename search.
-    #[serde(default = "default_true")]
+    /// Repository ignore rules are usually on to match recursive filename search.
     pub respect_gitignore: bool,
     /// Literal matching is opt-in so existing callers keep regex semantics.
-    #[serde(default)]
     pub fixed_string: bool,
     /// Smart case keeps lowercase searches forgiving while uppercase remains intentional.
-    #[serde(default)]
     pub case_sensitivity: CaseSensitivity,
     /// Preceding physical lines are opt-in and bounded to keep each match response small.
-    #[serde(default)]
     pub before_context: u64,
     /// Following physical lines are opt-in and bounded to keep each match response small.
-    #[serde(default)]
     pub after_context: u64,
 }
 
@@ -235,7 +221,6 @@ pub struct RawDownload {
 pub struct TarDownload {
     pub path: String,
     /// Includes the source directory itself for archives intended for user extraction.
-    #[serde(default)]
     pub include_root: bool,
 }
 
@@ -244,11 +229,8 @@ pub struct TarDownload {
 pub struct RawUpload {
     pub path: String,
     /// Controls replacement when the destination already exists.
-    /// Defaults to override so direct HTTP raw uploads keep replacing files.
-    #[serde(default = "CopyExistingMode::override_mode")]
     pub on_existing: CopyExistingMode,
     /// Applies only to the uploaded destination entry, not its parent directories.
-    #[serde(default)]
     pub ownership: CreationOwnershipOptions,
 }
 
@@ -263,8 +245,6 @@ pub struct EditFile {
 pub struct TarUpload {
     pub path: String,
     /// Controls replacement when the destination already exists.
-    /// Defaults to error so directory placement stays non-destructive unless copy asks otherwise.
-    #[serde(default)]
     pub on_existing: CopyExistingMode,
 }
 
@@ -274,7 +254,6 @@ pub struct LocalCopyFile {
     pub source_path: String,
     pub dest_path: String,
     /// Controls replacement when the destination already exists.
-    #[serde(default)]
     pub on_existing: CopyExistingMode,
 }
 
@@ -284,7 +263,6 @@ pub struct LocalCopyDirectory {
     pub source_path: String,
     pub dest_path: String,
     /// Controls replacement when the destination already exists.
-    #[serde(default)]
     pub on_existing: CopyExistingMode,
 }
 
@@ -297,7 +275,6 @@ pub struct LocalMove {
     /// Prevents either rename or fallback cleanup from acting on a replacement source.
     pub expected_identity: MoveSourceIdentity,
     /// Controls replacement when the destination path already exists.
-    #[serde(default)]
     pub on_existing: CopyExistingMode,
 }
 
@@ -334,7 +311,6 @@ pub struct RestoreTrash {
 pub struct CreateDirectory {
     pub path: String,
     /// Applies only to the requested directory after recursive parent creation.
-    #[serde(default)]
     pub ownership: CreationOwnershipOptions,
 }
 
@@ -423,10 +399,6 @@ pub struct Echo {
     pub request: EchoRequest,
 }
 
-/// Reads a lightweight process and load snapshot.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentInfo {}
-
 /// Reads the agent's runtime details.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GetAgentDetails {}
@@ -501,7 +473,6 @@ agent_requests! {
     DeleteMoveSource => (),
     OpenPath => (),
     Echo => EchoResult,
-    AgentInfo => AgentInfoResult,
     GetAgentDetails => AgentDetailsResponse,
     GetLoggingLevel => Level,
     SetLoggingLevel => Level,
@@ -554,7 +525,7 @@ mod tests {
         assert_round_trip::<Exec>(json!({"type": "exit", "code": 0, "signal": null}));
         assert_round_trip::<FileSearch>(json!({"results": [], "timed_out": false,
             "duration_ms": 4}));
-        assert_round_trip::<ContentGrep>(json!({"results": [], "context_supported": true,
+        assert_round_trip::<ContentGrep>(json!({"results": [],
             "timed_out": false, "cancelled": false, "truncated": false,
             "omitted_long_lines": 0, "duration_ms": 4}));
         for unit in [
@@ -600,8 +571,6 @@ mod tests {
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));
         assert_round_trip::<Echo>(json!({"message": "hello"}));
-        assert_round_trip::<AgentInfo>(json!({"pid": 1, "cwd": "/", "load_average": [0.5, 0.25,
-            0.125], "system_uptime": 9}));
         assert_round_trip::<GetAgentDetails>(json!({"id": "agent", "name": "agent", "pid": 1,
             "cwd": "/", "config_path": "", "exe_path": "/bin/redoor", "load_average_one": 0.5,
             "load_average_five": 0.25, "load_average_fifteen": 0.125, "system_uptime": 9,

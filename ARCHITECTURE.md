@@ -339,10 +339,11 @@ sequenceDiagram
   incompatible client never gets a socket, so no session state exists for it. The agent
   treats `401` (wrong token) and `426` (other protocol version) as fatal and exits with a
   clear log line instead of reconnecting forever.
-- Agents that predate negotiation still connect to `/ws`. That path only answers `426` and
-  records the attempt, so outdated standalone agents show up in the Devices view instead of
-  only in their own logs. Managed local and SSH agents are always provisioned with the
-  server's own binary, so they never mismatch.
+- A refused protocol mismatch is remembered, so a standalone agent of another release shows
+  up in the Devices view instead of only in its own logs. Managed local and SSH agents are
+  always provisioned with the server's own binary, so they never mismatch. There is no
+  compatibility with earlier protocols: an agent and a server must speak the same
+  `redoor.vN`.
 - **Identity is the connection.** `hello` is the only frame that names the agent; every later
   frame is attributed to the session that received it. A second `hello` closes the socket.
 - **Request ids are interpreted per connection.** The server allocates them from one

@@ -34,7 +34,7 @@ pub struct AgentConnection {
     pub connected_at: UnixTimestampSeconds,
     /// Platform, account, start directory and binary announced by this session.
     pub identity: AgentIdentity,
-    /// Optional protocol features announced by this session.
+    /// Platform-dependent features announced by this session.
     pub capabilities: AgentCapabilities,
     /// Payload stream routing shared with the connection's session.
     pub streams: ConnectionStreams,

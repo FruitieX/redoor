@@ -352,7 +352,8 @@ async fn verify_move_source_identity(
     Ok(())
 }
 
-/// Accepts legacy target identity for symlink moves while trash restore tracks the link itself.
+/// Matches the identity captured before copying. Move metadata follows symlinks, so a symlink
+/// source also matches through its target; trash restore tracks the link itself.
 async fn move_source_matches_identity(
     source: &Path,
     entry_metadata: &std::fs::Metadata,

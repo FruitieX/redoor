@@ -52,7 +52,7 @@ pub struct RegisterAgentRequest {
     pub lanes: ControlLanes,
     /// Platform, account, start directory and binary announced at registration.
     pub identity: AgentIdentity,
-    /// Optional protocol features announced at registration.
+    /// Platform-dependent features announced at registration.
     pub capabilities: AgentCapabilities,
     /// Lets the router reject a managed registration whose shutdown won after socket parsing.
     pub watchdog: Option<crate::watchdog::WatchdogHandle>,
@@ -118,9 +118,7 @@ impl AgentListEntry {
         details.hostname = identity.hostname.clone();
         details.username = identity.username.clone();
         details.binary = identity.binary.clone();
-        if let Some(uid) = identity.uid {
-            details.uid = uid;
-        }
+        details.uid = identity.uid;
         details.is_root = identity.is_root;
     }
 }
@@ -142,10 +140,9 @@ impl From<AgentListEntry> for AgentInfoResponse {
             last_seen_at: agent.last_seen_at,
             connection_issue: agent.connection_issue,
             provisioning_status: agent.provisioning_status,
-            uid: identity.as_ref().and_then(|identity| identity.uid),
+            uid: identity.as_ref().map(|identity| identity.uid),
             is_root: identity.as_ref().is_some_and(|identity| identity.is_root),
             binary: identity.map(|identity| identity.binary),
-            supports_self_exec: agent.capabilities.supports_self_exec,
             supports_native_open: agent.capabilities.supports_native_open,
             supports_move_to_trash: agent.capabilities.supports_move_to_trash,
             supports_trash: agent.capabilities.supports_trash,
@@ -500,11 +497,10 @@ impl RegisterAgentRequest {
                 username: "user".to_string(),
                 default_directory: "/tmp".to_string(),
                 binary: redoor_core::identity::current_binary_identity(),
-                uid: Some(1000),
+                uid: 1000,
                 is_root: false,
             },
             capabilities: AgentCapabilities {
-                supports_self_exec: true,
                 supports_native_open: true,
                 supports_trash: true,
                 supports_move_to_trash: true,
@@ -556,7 +552,7 @@ mod tests {
         assert!(!info.is_root);
         assert!(info.binary.is_some());
         // Capability gates the UI uses survive the projection.
-        assert!(info.supports_trash && info.supports_move_to_trash && info.supports_self_exec);
+        assert!(info.supports_trash && info.supports_move_to_trash);
         // The JSON keeps the established flat field names, with no nested objects.
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["supports_native_open"], true);

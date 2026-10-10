@@ -82,7 +82,6 @@ export async function createToxiproxyAgent(options: {
             connection_issue: options.agent.connectionIssue,
             provisioning_status: options.agent.provisioningStatus,
             binary: options.agent.binary,
-            supports_self_exec: options.agent.supportsSelfExec,
             supports_native_open: options.agent.supportsNativeOpen,
             supports_move_to_trash: options.agent.supportsMoveToTrash,
             supports_trash: options.agent.supportsTrash,

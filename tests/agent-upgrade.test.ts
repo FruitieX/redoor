@@ -186,61 +186,6 @@ describe("connected external agent upgrade", () => {
         expect(details.pid).toBe(agentPid);
     }, 60000);
 
-    it("rejects an older agent before sending an upload command", async () => {
-        const oldAgentName = "upgrade-unsupported-agent";
-
-        const oldAgent = await FakeAgent.connect({
-            serverPort,
-            agentId: oldAgentName,
-            hostname: "old-host",
-            username: "old-user",
-            binary: {
-                version: "0.0.3",
-                git_rev: "old",
-                build_mode: "release",
-            },
-            // Deliberately omit self-exec support to model an agent without upgrade support.
-            supportsSelfExec: false,
-        });
-
-        onTestFinished(() => oldAgent.close());
-
-        const listed = await waitForValue({
-            description: "unsupported fixture transfer registration",
-            predicate: async () => {
-                const candidate = (await api.listAgents()).find(
-                    (entry) => entry.name === oldAgentName,
-                );
-
-                return candidate?.status === "connected"
-                    ? candidate
-                    : undefined;
-            },
-        });
-
-        // An omitted capability must remain visible as unsupported metadata.
-        expect(listed.supportsSelfExec).toBe(false);
-
-        let error: unknown;
-
-        try {
-            await listed.upgrade(targetVersion);
-        } catch (caught) {
-            error = caught;
-        }
-
-        // Conflict plus remediation tells operators how to make the upgrade safe.
-        expect(error).toBeInstanceOf(ApiError);
-        expect(error).toMatchObject({
-            status: 409,
-            message: expect.stringContaining(
-                "Install a current Redoor agent manually",
-            ),
-        });
-        // No command at all proves rejection happened before any remote mutation began.
-        expect(oldAgent.commands).toEqual([]);
-    });
-
     it("refuses to self-exec when the upgrade upload completes before any byte", async () => {
         const earlyAgentName = "upgrade-early-completion-agent";
         const serverInfo = await api.getServerInfo();
@@ -262,7 +207,6 @@ describe("connected external agent upgrade", () => {
             hostname: "early-host",
             username: "early-user",
             binary,
-            supportsSelfExec: true,
         });
 
         onTestFinished(() => earlyAgent.close());

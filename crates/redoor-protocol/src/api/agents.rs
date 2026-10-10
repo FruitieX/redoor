@@ -216,20 +216,17 @@ pub struct AgentInfoResponse {
     pub provisioning_status: Vec<ProvisioningStatusMessage>,
     /// Binary identity from the latest registration; absent until first connect.
     pub binary: Option<BinaryIdentity>,
-    /// Whether the latest agent session can safely complete an in-place upgrade.
-    pub supports_self_exec: bool,
     /// Whether the latest agent session can launch paths in a graphical desktop.
     pub supports_native_open: bool,
     /// Whether the latest agent session can move entries to its platform trash.
     pub supports_move_to_trash: bool,
     /// Whether the latest agent session can also list and restore trash entries.
     pub supports_trash: bool,
-    /// Effective UID from the latest registration so chmod gating does not need a details round-trip.
-    #[serde(default)]
+    /// Effective UID from the latest registration so chmod gating does not need a details
+    /// round-trip; absent until first connect.
     #[ts(type = "number | null")]
     pub uid: Option<u32>,
-    /// Whether the latest session's effective UID is root. False until first connect or for older agents.
-    #[serde(default)]
+    /// Whether the latest session's effective UID is root; false until first connect.
     pub is_root: bool,
 }
 
@@ -296,14 +293,11 @@ pub struct AgentDetailsResponse {
     pub connected_at: UnixTimestampSeconds,
     /// Compile-time identity of the agent binary currently serving this connection.
     pub binary: BinaryIdentity,
-    /// Current filesystems are optional on the wire so newer servers can still inspect older agents.
-    #[serde(default)]
+    /// Mounted filesystems, for capacity checks and direct navigation.
     pub mount_points: Vec<MountPoint>,
-    /// Effective UID of the connected agent process; defaults for older agents that omit it.
-    #[serde(default)]
+    /// Effective UID of the connected agent process.
     pub uid: u32,
-    /// Whether the connected agent process is running as root; defaults false for older agents.
-    #[serde(default)]
+    /// Whether the connected agent process is running as root.
     pub is_root: bool,
 }
 

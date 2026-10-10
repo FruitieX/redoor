@@ -102,7 +102,7 @@ describe("Raw Download API", () => {
         );
 
         const proxiedAgentPid = processManager.spawnAgent({
-            wsAddress: `ws://${proxy.listen}/ws`,
+            wsAddress: `ws://${proxy.listen}`,
             name: proxiedAgentName,
             cwd: tempFiles.tempDirectory({
                 suffix: "-explicit-cancel-agent-cwd",
@@ -400,7 +400,6 @@ describe("Raw Download API", () => {
                 connection_issue: null,
                 provisioning_status: [],
                 binary: null,
-                supports_self_exec: false,
                 supports_native_open: false,
                 supports_move_to_trash: false,
                 supports_trash: false,
@@ -429,7 +428,7 @@ describe("Raw Download API", () => {
 
         const fileSize = Buffer.byteLength(largeContent);
 
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const ephemeralAgentName = "ephemeral-raw-agent";
 
         // Spawn a second agent that we can kill mid-transfer
@@ -607,7 +606,7 @@ describe("Raw Download API", () => {
         );
 
         const proxiedAgentPid = processManager.spawnAgent({
-            wsAddress: `ws://${proxy.listen}/ws`,
+            wsAddress: `ws://${proxy.listen}`,
             name: proxiedAgentName,
             cwd: tempFiles.tempDirectory({
                 suffix: "-proxied-download-agent-cwd",
@@ -738,7 +737,7 @@ describe("Raw Download API", () => {
         );
 
         const proxiedAgentPid = processManager.spawnAgent({
-            wsAddress: `ws://${proxy.listen}/ws`,
+            wsAddress: `ws://${proxy.listen}`,
             name: proxiedAgentName,
             cwd: tempFiles.tempDirectory({
                 suffix: "-proxied-cancel-agent-cwd",

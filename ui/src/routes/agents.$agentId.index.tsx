@@ -296,7 +296,6 @@ function AgentUpgradeControls(props: {
                 agentOs={props.details.os}
                 agentArch={props.details.arch}
                 agentExePath={props.details.exe_path}
-                supportsSelfExec={props.agent.supportsSelfExec}
                 serverInfo={serverInfo}
                 upgrade={(targetVersion) => props.agent.upgrade(targetVersion)}
                 forceInstallRunningBinary={() =>

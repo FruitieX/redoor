@@ -8,7 +8,7 @@ use redoor_protocol::{
     api::agents::{AgentAccountsResponse, AgentDetailsResponse, EchoRequest},
     ids::{AgentId, UnixTimestampSeconds},
     wire::{
-        command::{AgentInfoResult, CommandErrorKind, EchoResult},
+        command::{CommandErrorKind, EchoResult},
         log::Level,
     },
 };
@@ -21,30 +21,6 @@ pub(super) async fn echo(request: EchoRequest) -> Result<EchoResult, CommandErro
     }
     Ok(EchoResult {
         message: request.message,
-    })
-}
-
-/// Reports lightweight process and host load information to legacy callers.
-pub(super) async fn agent_info() -> Result<AgentInfoResult, CommandError> {
-    use std::env;
-    use sysinfo::System;
-
-    let pid = std::process::id();
-    let cwd = env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    // Load and uptime are cheap OS reads; a full `System` refresh would scan every process
-    // on an async worker for nothing.
-    let load_avg = System::load_average();
-    let load_average = (load_avg.one, load_avg.five, load_avg.fifteen);
-    let system_uptime = System::uptime();
-
-    Ok(AgentInfoResult {
-        pid,
-        cwd,
-        load_average,
-        system_uptime,
     })
 }
 

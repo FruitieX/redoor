@@ -90,9 +90,9 @@ pub enum ServerToAgent {
 impl ServerToAgent {
     /// Recovers the request id of a `command` frame whose body did not parse.
     ///
-    /// A newer server may send a command variant this agent does not know; answering with a
-    /// typed error lets the waiting REST caller fail immediately instead of timing out. Other
-    /// frame types are not answered because they have no command response to correlate.
+    /// Both sides speak the same protocol version, so this only happens through a bug; answering
+    /// with a typed error lets the waiting REST caller fail immediately instead of timing out.
+    /// Other frame types are not answered because they have no result to correlate.
     pub fn unparsed_command_request_id(text: &str) -> Option<RequestId> {
         probe_request_id(text, "command")
     }
@@ -300,7 +300,7 @@ mod tests {
     /// Verifies flattening keeps the flat hello JSON that agents and fixtures send.
     #[test]
     fn hello_round_trips_its_flat_json() {
-        let json = r#"{"type":"hello","agent_id":"a","agent_name":"n","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/home/u","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"},"uid":1000,"is_root":false,"supports_self_exec":true,"supports_native_open":false,"supports_trash":true,"supports_move_to_trash":false}"#;
+        let json = r#"{"type":"hello","agent_id":"a","agent_name":"n","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/home/u","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"},"uid":1000,"is_root":false,"supports_native_open":false,"supports_trash":true,"supports_move_to_trash":false}"#;
         let hello: AgentToServer = serde_json::from_str(json).unwrap();
         let AgentToServer::Hello {
             identity,
@@ -312,15 +312,13 @@ mod tests {
         };
         // Flat wire fields land in the nested values, including the renamed directory.
         assert_eq!(identity.default_directory, "/home/u");
-        assert_eq!(identity.uid, Some(1000));
+        assert_eq!(identity.uid, 1000);
         assert!(capabilities.supports_trash);
         // Serializing yields the same flat object the fake agents build by hand.
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
             serde_json::from_str::<serde_json::Value>(json).unwrap()
         );
-        // Agents with trash inventory support can always move entries to trash.
-        assert!(capabilities.normalized().supports_move_to_trash);
     }
 
     /// Verifies unknown command variants still expose their request id.

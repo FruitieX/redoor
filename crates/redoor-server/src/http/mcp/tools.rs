@@ -348,7 +348,7 @@ async fn get_device(
 }
 /// Reduces the REST inventory model to the safe MCP device contract.
 fn device_json(agent: redoor_protocol::api::agents::AgentInfoResponse) -> Value {
-    json!({"device_id":agent.id,"display_name":agent.name,"status":agent.status,"managed":agent.managed,"default_working_directory":agent.cwd,"supported_features":{"trash":agent.supports_move_to_trash,"trash_restore":agent.supports_trash,"self_exec":agent.supports_self_exec}})
+    json!({"device_id":agent.id,"display_name":agent.name,"status":agent.status,"managed":agent.managed,"default_working_directory":agent.cwd,"supported_features":{"trash":agent.supports_move_to_trash,"trash_restore":agent.supports_trash}})
 }
 
 /// Admits foreground or independently owned background non-PTY execution.

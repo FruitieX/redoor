@@ -44,7 +44,7 @@ pub struct ProtocolMismatchAttempt {
     pub remote_address: String,
     /// Agent binary version from the upgrade header, when the agent sent one.
     pub agent_version: Option<String>,
-    /// Subprotocols the agent offered; empty for agents that predate negotiation.
+    /// Subprotocols the agent offered; empty when it offered none.
     pub offered_protocols: Vec<String>,
 }
 

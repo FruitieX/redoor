@@ -46,7 +46,7 @@ describe("Smart Move API", () => {
         );
 
         processManager.spawnAgent({
-            wsAddress: `ws://127.0.0.1:${setup.serverPort}/ws`,
+            wsAddress: `ws://127.0.0.1:${setup.serverPort}`,
             name: destinationName,
             cwd: tempFiles.tempDirectory({ suffix: "-move-destination-cwd" }),
         });

@@ -2,7 +2,7 @@
 //!
 //! Operators may pass `http(s)://` or `ws(s)://` URLs. HTTP schemes are
 //! normalized to WebSocket schemes, and the WebSocket path is always the agent endpoint
-//! (`/api/v1/agent/ws`); the legacy `/ws` path is accepted so existing configs keep working.
+//! (`/api/v1/agent/ws`).
 
 use redoor_protocol::wire::handshake::AGENT_WS_PATH;
 use std::fmt;
@@ -143,7 +143,7 @@ fn parse_server_address(value: &str) -> Result<(ServerAddress, Option<String>), 
 
     let path = url.path();
     let warning = match path {
-        "" | "/" | "/ws" => None,
+        "" | "/" => None,
         known if known == AGENT_WS_PATH => None,
         other => Some(format!(
             "server path '{other}' is ignored; WebSocket path is always {AGENT_WS_PATH}"
@@ -244,21 +244,18 @@ mod tests {
         assert!(warning.contains("/api/v1/agent/ws"));
     }
 
-    /// Keeps configs written for the old endpoint and URLs naming the new one warning-free.
+    /// A URL that already names the agent endpoint is used as is, without a warning.
     #[test]
-    fn accepts_legacy_and_current_agent_paths_silently() {
-        for input in [
-            "wss://redoor.example.com/ws",
-            "wss://redoor.example.com/api/v1/agent/ws",
-        ] {
-            let (address, warning) = super::parse_server_address(input).expect("known path");
-            // Both spellings name the agent endpoint, so nothing was rewritten unexpectedly.
-            assert_eq!(warning, None);
-            assert_eq!(
-                address.websocket_url(),
-                "wss://redoor.example.com/api/v1/agent/ws"
-            );
-        }
+    fn accepts_the_agent_path_silently() {
+        let (address, warning) =
+            super::parse_server_address("wss://redoor.example.com/api/v1/agent/ws")
+                .expect("known path");
+        // The URL names the agent endpoint, so nothing was rewritten unexpectedly.
+        assert_eq!(warning, None);
+        assert_eq!(
+            address.websocket_url(),
+            "wss://redoor.example.com/api/v1/agent/ws"
+        );
     }
 
     /// Keeps IPv6 destinations unambiguous for both SSH forwards and WSS authorities.

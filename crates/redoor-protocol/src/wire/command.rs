@@ -41,7 +41,6 @@ pub enum Command {
     DeleteMoveSource(request::DeleteMoveSource),
     OpenPath(request::OpenPath),
     Echo(request::Echo),
-    AgentInfo(request::AgentInfo),
     GetAgentDetails(request::GetAgentDetails),
     GetLoggingLevel(request::GetLoggingLevel),
     SetLoggingLevel(request::SetLoggingLevel),
@@ -157,7 +156,6 @@ impl Command {
             Self::OpenPath(request) => format!("OpenPath path={}", request.path),
             // Echo bodies can be large or sensitive, so only the command name is logged.
             Self::Echo(_) => "Echo".to_string(),
-            Self::AgentInfo(_) => "AgentInfo".to_string(),
             Self::GetAgentDetails(_) => "GetAgentDetails".to_string(),
             Self::GetLoggingLevel(_) => "GetLoggingLevel".to_string(),
             Self::SetLoggingLevel(request) => format!("SetLoggingLevel level={}", request.level),
@@ -235,15 +233,6 @@ pub struct EchoResult {
     pub message: String,
 }
 
-/// Lightweight process and host load snapshot for agent status views.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentInfoResult {
-    pub pid: u32,
-    pub cwd: String,
-    pub load_average: (f64, f64, f64),
-    pub system_uptime: u64,
-}
-
 /// Classifies command failures so transports do not depend on OS-specific text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -275,39 +264,5 @@ impl CommandErrorKind {
             }
             _ => Self::Internal,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::search::ContentGrepResponse;
-
-    /// A missing `include_root` keeps the flat archive copies rely on.
-    #[test]
-    fn tar_download_defaults_to_excluding_root() {
-        let command: Command = serde_json::from_str(r#"{"type":"TarDownload","path":"test-dir"}"#)
-            .expect("tar download command should deserialize");
-
-        let Command::TarDownload(request) = command else {
-            panic!("Expected TarDownload");
-        };
-        // The default must match what a copy's source download expects.
-        assert!(!request.include_root);
-    }
-
-    /// Grep responses without context fields still decode, with empty context.
-    #[test]
-    fn content_grep_response_defaults_context_fields() {
-        let response: ContentGrepResponse = serde_json::from_str(
-            r#"{"results":[{"path":"/tmp/file","line_number":1,"line":"match","line_truncated":false}],"timed_out":false,"cancelled":false,"truncated":false,"omitted_long_lines":0,"duration_ms":1}"#,
-        )
-        .expect("grep response without context should deserialize");
-
-        // A missing capability means the agent did not collect context lines.
-        assert!(!response.context_supported);
-        // Defaulted arrays keep zero-context results usable.
-        assert!(response.results[0].before_context.is_empty());
-        assert!(response.results[0].after_context.is_empty());
     }
 }

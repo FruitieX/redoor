@@ -622,7 +622,7 @@ fn readable_and_json_agent_output() {
         "id": "agent-123", "name": "Host With Spaces", "cwd": null, "managed": false,
         "configuration_editable": false, "ssh_target": null, "status": "connected", "connected_at": null,
         "connection_id": null, "last_seen_at": null, "connection_issue": null, "provisioning_status": [],
-        "binary": null, "supports_self_exec": false, "supports_native_open": false,
+        "binary": null, "supports_native_open": false,
         "supports_move_to_trash": false, "supports_trash": false, "uid": null, "is_root": false
     }]});
     let agents: AgentListResponse = serde_json::from_value(payload.clone()).unwrap();

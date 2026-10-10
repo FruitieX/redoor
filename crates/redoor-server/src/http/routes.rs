@@ -13,7 +13,7 @@ use super::{
         get_ssh_agent_configuration_handler, update_local_agent_handler, update_ssh_agent_handler,
     },
     agent_logs::browser_agent_logs_websocket_handler,
-    agent_ws::{agent_websocket_handler, legacy_agent_websocket_handler},
+    agent_ws::agent_websocket_handler,
     agents::{
         accounts_handler, chmod_path_handler, chown_path_handler, content_grep_handler,
         directory_size_handler, echo_agent_handler, file_search_agent_handler,
@@ -55,7 +55,6 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
 
     let browser_router = Router::new()
         .route("/api/v1/agent/ws", get(agent_websocket_handler))
-        .route("/ws", get(legacy_agent_websocket_handler))
         .route(
             "/api/v1/protocol-mismatches",
             get(list_protocol_mismatches_handler),

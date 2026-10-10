@@ -242,7 +242,6 @@ impl RunCommand for Command {
             Command::Echo(request::Echo { request: echo }) => {
                 Reply::of::<request::Echo>(host::echo(echo).await)
             }
-            Command::AgentInfo(_) => Reply::of::<request::AgentInfo>(host::agent_info().await),
             Command::GetAgentDetails(_) => Reply::of::<request::GetAgentDetails>(
                 host::get_agent_details(&ctx.services.loaded_config_path).await,
             ),

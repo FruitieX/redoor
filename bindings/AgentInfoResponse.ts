@@ -31,10 +31,6 @@ provisioning_status: Array<ProvisioningStatusMessage>,
  */
 binary: BinaryIdentity | null, 
 /**
- * Whether the latest agent session can safely complete an in-place upgrade.
- */
-supports_self_exec: boolean, 
-/**
  * Whether the latest agent session can launch paths in a graphical desktop.
  */
 supports_native_open: boolean, 
@@ -47,10 +43,11 @@ supports_move_to_trash: boolean,
  */
 supports_trash: boolean, 
 /**
- * Effective UID from the latest registration so chmod gating does not need a details round-trip.
+ * Effective UID from the latest registration so chmod gating does not need a details
+ * round-trip; absent until first connect.
  */
 uid: number | null, 
 /**
- * Whether the latest session's effective UID is root. False until first connect or for older agents.
+ * Whether the latest session's effective UID is root; false until first connect.
  */
 is_root: boolean, };

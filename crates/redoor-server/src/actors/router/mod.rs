@@ -594,7 +594,6 @@ mod tests {
                 provisioning_status: Vec::new(),
                 identity: list_agents[0].identity.clone(),
                 capabilities: redoor_protocol::wire::registration::AgentCapabilities {
-                    supports_self_exec: true,
                     supports_native_open: true,
                     supports_trash: true,
                     supports_move_to_trash: true,

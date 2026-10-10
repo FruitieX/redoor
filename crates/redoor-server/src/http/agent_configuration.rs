@@ -565,7 +565,6 @@ fn stopped_agent_response(
         connection_issue: None,
         provisioning_status: Vec::new(),
         binary: None,
-        supports_self_exec: false,
         supports_native_open: false,
         supports_move_to_trash: false,
         supports_trash: false,

@@ -27,40 +27,19 @@ pub struct AgentIdentity {
     /// Compile-time identity of the agent binary.
     pub binary: BinaryIdentity,
     /// Effective UID captured at connect so chmod gating does not depend on `$USER`.
-    #[serde(default)]
-    pub uid: Option<u32>,
+    pub uid: u32,
     /// Derived from the effective UID, never from the username, so systemd `User=` is correct.
-    #[serde(default)]
     pub is_root: bool,
 }
 
-/// Which optional protocol features the agent implements.
-///
-/// Every flag defaults to `false` on the wire so older agents and test fixtures that omit a
-/// flag are never sent commands they do not understand.
+/// Which platform-dependent features the agent implements, so the server only offers what
+/// this agent can do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilities {
-    /// Understands the replacement-path self-exec command used by upgrades.
-    #[serde(default)]
-    pub supports_self_exec: bool,
     /// Can launch filesystem paths in a graphical desktop.
-    #[serde(default)]
     pub supports_native_open: bool,
     /// Implements the trash inventory and restore commands.
-    #[serde(default)]
     pub supports_trash: bool,
     /// Can move filesystem entries to its platform trash.
-    #[serde(default)]
     pub supports_move_to_trash: bool,
-}
-
-impl AgentCapabilities {
-    /// Applies implications older agents left implicit: an agent with full trash inventory
-    /// support predates the separate move flag but can always move entries to trash.
-    pub fn normalized(self) -> Self {
-        Self {
-            supports_move_to_trash: self.supports_move_to_trash || self.supports_trash,
-            ..self
-        }
-    }
 }

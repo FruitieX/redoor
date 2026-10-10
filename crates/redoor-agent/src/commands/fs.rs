@@ -907,9 +907,9 @@ mod tests {
             .expect("maximum-name quarantine cleanup should finish");
     }
 
-    /// Verifies conditional cleanup retains the RawDelete response consumed by the move router.
+    /// Verifies conditional cleanup of a matching source succeeds and removes it.
     #[tokio::test]
-    async fn move_source_deletion_returns_the_compatible_response() {
+    async fn move_source_deletion_removes_a_matching_source() {
         let temp = TempDir::create();
         let path = temp.path().join("completed-move-source");
         tokio::fs::write(&path, "published at destination")
@@ -925,10 +925,10 @@ mod tests {
         )
         .await;
 
-        // The router completes source-deletion state only for the established RawDelete result.
+        // The router completes the move only on a successful deletion result.
         assert!(
             matches!(result, Ok(())),
-            "move source deletion should preserve its wire response"
+            "move source deletion should succeed"
         );
         // A successful response must mean the identity-verified source pathname is gone.
         assert!(

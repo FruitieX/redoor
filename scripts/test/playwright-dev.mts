@@ -195,7 +195,7 @@ async function supervise(): Promise<void> {
             "agent1_src",
             [
                 "agent",
-                `ws://127.0.0.1:${port}/ws`,
+                `ws://127.0.0.1:${port}`,
                 "--name",
                 "agent1_src",
                 "--token",
@@ -211,7 +211,7 @@ async function supervise(): Promise<void> {
             "agent2_custom",
             [
                 "agent",
-                `ws://127.0.0.1:${port}/ws`,
+                `ws://127.0.0.1:${port}`,
                 "--name",
                 "agent2_custom",
                 "--token",

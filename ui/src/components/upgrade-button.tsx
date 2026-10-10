@@ -14,7 +14,6 @@ type UpgradeButtonProps = {
     agentOs: string;
     agentArch: string;
     agentExePath: string;
-    supportsSelfExec: boolean;
     serverInfo: ServerInfoResponse;
     upgrade: (targetVersion: string) => Promise<UpgradeAgentResponse>;
     forceInstallRunningBinary: () => Promise<UpgradeAgentResponse>;
@@ -31,13 +30,8 @@ function upgradeErrorMessage(cause: unknown): string {
 
 /** Explains a client-known condition that prevents the server from starting an upgrade. */
 function upgradeUnavailableReason(props: {
-    supportsSelfExec: boolean;
     exePath: string;
 }): string | null {
-    if (!props.supportsSelfExec) {
-        return "This agent does not support safe self-exec upgrades. Install a current Redoor agent manually, reconnect it, and try again.";
-    }
-
     if (props.exePath === "unknown" || !props.exePath.startsWith("/")) {
         return `The agent reported an unusable executable path (${props.exePath}), so Redoor cannot safely replace its binary.`;
     }
@@ -70,7 +64,6 @@ export function UpgradeButton(props: UpgradeButtonProps) {
     const disabledDescriptionId = `upgrade-disabled-${props.target.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
 
     const unavailableReason = upgradeUnavailableReason({
-        supportsSelfExec: props.supportsSelfExec,
         exePath: props.agentExePath,
     });
 

@@ -510,8 +510,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
 
 /// Allows only resources needed to establish a session before enforcing authentication globally.
 fn is_public_path(path: &str) -> bool {
-    path == "/ws"
-        || path == redoor_protocol::wire::handshake::AGENT_WS_PATH
+    path == redoor_protocol::wire::handshake::AGENT_WS_PATH
         || path == "/api/v1/login"
         || path == "/api/v1/logout"
         || !path.starts_with("/api/")
@@ -827,8 +826,6 @@ mod tests {
     fn only_the_agent_endpoints_are_public() {
         // The agent endpoint authenticates with the agent token during the upgrade instead.
         assert!(is_public_path("/api/v1/agent/ws"));
-        // The pre-negotiation endpoint only answers 426, so it needs no cookie either.
-        assert!(is_public_path("/ws"));
         // Neighboring agent paths must not inherit the exception.
         assert!(!is_public_path("/api/v1/agent/ws/extra"));
         // The removed dedicated sockets must not stay reachable without a session.

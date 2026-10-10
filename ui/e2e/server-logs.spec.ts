@@ -4,7 +4,7 @@ import {
     type WebSocket as PlaywrightWebSocket,
 } from "@playwright/test";
 
-import { WEB_BASE_URL } from "./helpers";
+import { WEB_BASE_URL, upgradeWithProtocol } from "./helpers";
 
 /** Identifies only the route-scoped socket so unrelated UI refresh traffic does not affect assertions. */
 function isServerLogSocket(socket: PlaywrightWebSocket): boolean {
@@ -192,27 +192,9 @@ test.describe.serial("Server logs", () => {
         expect(scrollTopBefore).toBeLessThanOrEqual(1);
 
         const marker = `playwright-live-log-${crypto.randomUUID()}`;
-        await page.evaluate(async (value) => {
-            const protocol =
-                window.location.protocol === "https:" ? "wss:" : "ws:";
 
-            // The pre-negotiation agent endpoint refuses every client and logs what it offered.
-            const socket = new WebSocket(
-                `${protocol}//${window.location.host}/ws`,
-                [value],
-            );
-
-            await new Promise<void>((resolve, reject) => {
-                socket.addEventListener(
-                    "open",
-                    () => reject(new Error("mismatched agent socket opened")),
-                    { once: true },
-                );
-                socket.addEventListener("close", () => resolve(), {
-                    once: true,
-                });
-            });
-        }, marker);
+        // An agent offering an unknown protocol is refused and its offer is logged as an error.
+        expect(await upgradeWithProtocol(marker, "0.0.0-live-log")).toBe(426);
 
         // The unique refused protocol must reach the page through the logger broadcast path.
         await expect(logRegion).toContainText(marker);
