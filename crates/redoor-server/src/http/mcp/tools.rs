@@ -281,6 +281,12 @@ fn input_properties(name: &str) -> Value {
             },
         );
     }
+    if matches!(name, "copy_path" | "move_path") {
+        result.insert(
+            "resume".into(),
+            json!({"type":"string", "enum":["auto", "restart"], "default":"auto"}),
+        );
+    }
     Value::Object(result)
 }
 /// Wraps structured tool output with a concise human-readable MCP summary.
@@ -774,6 +780,7 @@ async fn read_file(
         &state.router_ref,
         AgentId::from(device),
         Command::RawDownload(request::RawDownload {
+            expected_identity: None,
             path: path.to_string(),
             range_start: Some(offset),
             // One byte past the page tells whether more content follows.
@@ -834,6 +841,7 @@ async fn write_file(
         ));
     }
     let command = Command::RawUpload(request::RawUpload {
+        partial: None,
         path: path.to_string(),
         on_existing: conflict_mode(string(args, "on_existing", id)?, id)?,
         ownership: CreationOwnershipOptions::default(),
@@ -978,6 +986,16 @@ async fn transfer(
             path: destination_path.to_string(),
         },
         on_existing: mode,
+        resume: match args.get("resume") {
+            None => redoor_protocol::api::transfers::ResumeMode::Auto,
+            Some(Value::String(mode)) if mode == "auto" => {
+                redoor_protocol::api::transfers::ResumeMode::Auto
+            }
+            Some(Value::String(mode)) if mode == "restart" => {
+                redoor_protocol::api::transfers::ResumeMode::Restart
+            }
+            _ => return Err(invalid("resume must be auto or restart", id)),
+        },
         observe_terminal: true,
     };
     let (remote_id, terminal) = match state.transfers.start_copy(spec).await {

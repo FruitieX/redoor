@@ -317,6 +317,7 @@ mod tests {
             &agent.router,
             agent.agent_id.clone(),
             Command::RawDownload(request::RawDownload {
+                expected_identity: None,
                 path: "/tmp/file".to_string(),
                 range_start: None,
                 range_end: None,
@@ -355,7 +356,7 @@ mod tests {
         // A consumer that vanished must not leave the agent streaming into nothing.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::Cancel { id: request_id } if request_id == id
+            ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled } if request_id == id
         ));
 
         let mut stream = download(&mut agent).await;
@@ -444,7 +445,7 @@ mod tests {
         // Stopping early cancels the agent, which may still be producing.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::Cancel { id: request_id } if request_id == id
+            ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled } if request_id == id
         ));
     }
 }

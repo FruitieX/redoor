@@ -433,8 +433,8 @@ impl AgentRuntime {
                 .services()
                 .upload_routes
                 .resolve_publication(id, allowed),
-            ServerToAgent::Cancel { id } => {
-                self.sessions.cancel_request(id);
+            ServerToAgent::Cancel { id, reason } => {
+                self.sessions.cancel_request_with_reason(id, reason);
             }
             ServerToAgent::TerminalOpen { stream, size, cwd } => {
                 self.start_terminal(stream, size, cwd)
@@ -768,7 +768,12 @@ mod tests {
                 ws_timeouts: redoor_core::websocket::WebSocketTimeouts::production(),
             },
             AgentConnection::new("ws://localhost".to_string(), None, false).unwrap(),
-            AgentServices::new(Trash::unsupported(), None),
+            AgentServices::new(
+                Trash::unsupported(),
+                // Never created: these tests do not write partials.
+                redoor_core::partials::PartialStore::new("/nonexistent/redoor-agent".into()),
+                None,
+            ),
             None,
         )
     }
@@ -957,6 +962,7 @@ mod tests {
                     credit: 4,
                     command: redoor_protocol::wire::command::Command::RawDownload(
                         request::RawDownload {
+                            expected_identity: None,
                             path: "/dev/zero".to_string(),
                             range_start: None,
                             range_end: None,

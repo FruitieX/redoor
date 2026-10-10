@@ -214,6 +214,9 @@ pub struct RawDownload {
     pub path: String,
     pub range_start: Option<u64>,
     pub range_end: Option<u64>,
+    /// Ranged resume must read the same source admitted by the server.
+    #[serde(default)]
+    pub expected_identity: Option<MoveSourceIdentity>,
 }
 
 /// Streams a directory as a tar archive.
@@ -232,6 +235,9 @@ pub struct RawUpload {
     pub on_existing: CopyExistingMode,
     /// Applies only to the uploaded destination entry, not its parent directories.
     pub ownership: CreationOwnershipOptions,
+    /// Present only for agent-to-agent file copies, which stage into a resumable partial.
+    #[serde(default)]
+    pub partial: Option<Box<crate::wire::partials::PartialTransfer>>,
 }
 
 /// Rewrites one existing regular-file inode after staging the complete body.
@@ -255,6 +261,9 @@ pub struct LocalCopyFile {
     pub dest_path: String,
     /// Controls replacement when the destination already exists.
     pub on_existing: CopyExistingMode,
+    /// Present for file copies, which stage into a resumable partial.
+    #[serde(default)]
+    pub partial: Option<Box<crate::wire::partials::PartialTransfer>>,
 }
 
 /// Copies one directory tree within the agent.
@@ -276,6 +285,9 @@ pub struct LocalMove {
     pub expected_identity: MoveSourceIdentity,
     /// Controls replacement when the destination path already exists.
     pub on_existing: CopyExistingMode,
+    /// Present for file copies, which stage into a resumable partial.
+    #[serde(default)]
+    pub partial: Option<Box<crate::wire::partials::PartialTransfer>>,
 }
 
 /// Deletes a path permanently, recursively for directories.
@@ -423,6 +435,50 @@ pub struct SelfExec {
     pub path: String,
 }
 
+/// Lists inactive durable outputs without scanning destination trees.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListPartials {}
+
+/// Inspects one destination before offering resume to the user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbePartial {
+    pub dest_path: String,
+}
+
+/// Reads the manifest again so resume never trusts client-provided endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadPartial {
+    pub key: String,
+}
+
+/// Removes a still-owned partial by opaque key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletePartial {
+    pub key: String,
+}
+
+/// Pause during verification still needs an explicit durable destination acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistPartial {
+    pub key: String,
+    /// Verification precedes upload preparation, so pause must save the current operation policy.
+    #[serde(default)]
+    pub signed: Option<Box<crate::wire::partials::SignedPartial>>,
+}
+
+/// One bounded segment per reply allows comparison to stop at the first mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HashSegments {
+    /// File to hash when `partial_key` is absent.
+    pub path: String,
+    pub start: u64,
+    pub end: u64,
+    /// Hashes the destination partial of this manifest instead of `path`.
+    pub partial_key: Option<String>,
+    /// Fails with `SourceChanged` when the opened source is no longer the admitted one.
+    pub expected_identity: Option<MoveSourceIdentity>,
+}
+
 /// Ties each request struct to its [`Command`] variant and its response type.
 macro_rules! agent_requests {
     ($($request:ident => $response:ty),* $(,)?) => {
@@ -442,6 +498,12 @@ macro_rules! agent_requests {
 }
 
 agent_requests! {
+    ListPartials => Vec<crate::wire::partials::PartialRecord>,
+    ProbePartial => Option<crate::wire::partials::PartialRecord>,
+    ReadPartial => Option<crate::wire::partials::PartialRecord>,
+    DeletePartial => (),
+    PersistPartial => (),
+    HashSegments => String,
     Exec => ExecEvent,
     Ls => LsResponse,
     FileSearch => FileSearchResponse,

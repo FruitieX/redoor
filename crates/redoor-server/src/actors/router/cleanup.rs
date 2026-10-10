@@ -56,8 +56,8 @@ impl RouterState {
                 self.mark_transfer_canceling(transfer_id);
             }
             Some((flow_id, Flow::Copy(_))) => {
-                self.cancel_copy(flow_id)?;
                 self.mark_transfer_canceling(transfer_id);
+                self.cancel_copy(flow_id)?;
             }
             Some((flow_id, Flow::Upload(_))) => {
                 self.mark_transfer_canceling(transfer_id);
@@ -101,7 +101,11 @@ impl RouterState {
             request_id
         );
         // A closed lane means the connection is gone, and its teardown settles the upload.
-        let _ = self.cancel_on_agent(&agent_id, request_id);
+        let _ = self.cancel_on_agent(
+            &agent_id,
+            request_id,
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
     }
 
     /// Stops request `request_id` on `agent_id`.
@@ -115,6 +119,7 @@ impl RouterState {
         &mut self,
         agent_id: &AgentId,
         request_id: RequestId,
+        reason: redoor_protocol::wire::partials::CancelReason,
     ) -> Result<Option<tokio::task::JoinHandle<()>>, RouterError> {
         let connection =
             self.agents
@@ -123,7 +128,7 @@ impl RouterState {
                 .ok_or_else(|| RouterError::AgentNotFound {
                     agent_id: agent_id.to_string(),
                 })?;
-        match connection.cancel_request(request_id)? {
+        match connection.cancel_request(request_id, reason)? {
             CancelDelivery::Sent(retained) => Ok(retained),
             CancelDelivery::Withdrawn => {
                 self.local_results.push(RouteResponse {
@@ -320,9 +325,20 @@ impl RouterState {
                     let _ = sender.send(Err(error));
                 }
             }
-            Flow::Copy(copy) => {
+            Flow::Copy(mut copy) => {
                 self.release_copy(&copy, CopyRelease::Fail);
-                self.settle_lost_transfer(copy.progress_id, reason);
+                let message = if copy.keeps_partial() {
+                    format!("{reason}; partial kept")
+                } else {
+                    reason.to_string()
+                };
+                if let Some(reply) = copy.pause.take() {
+                    // Connection loss cannot acknowledge that the paused bytes are durable.
+                    let _ = reply.send(Err(message.clone()));
+                    self.mark_transfer_errored(copy.progress_id, message);
+                } else {
+                    self.settle_lost_transfer(copy.progress_id, &message);
+                }
             }
         }
     }

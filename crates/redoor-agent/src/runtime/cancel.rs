@@ -3,8 +3,10 @@
 //! Replaces several hand-rolled `Arc<Mutex<HashMap<_, watch::Sender<bool>>>>` maps whose
 //! insert/remove/clear bookkeeping was repeated per feature and easy to leak on early returns.
 
+use redoor_protocol::wire::partials::CancelReason;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio_util::sync::CancellationToken;
 
@@ -40,8 +42,49 @@ struct RegistryState<K> {
     next_serial: u64,
 }
 
+/// Why a registered worker was canceled, readable after its token fired.
+///
+/// Shared by the registry entry, the registration and sinks that outlive their command
+/// context. Until a cancel frame stores a reason it reads as `Disconnected`, because the only
+/// other way a token fires is the connection generation ending.
+#[derive(Clone)]
+pub(crate) struct CancelReasonCell(Arc<AtomicU8>);
+
+impl CancelReasonCell {
+    /// Starts as a connection loss, which keeps resumable partials.
+    fn new() -> Self {
+        Self(Arc::new(AtomicU8::new(Self::encode(
+            CancelReason::Disconnected,
+        ))))
+    }
+
+    /// Fixed encoding so the reason fits in one atomic.
+    fn encode(reason: CancelReason) -> u8 {
+        match reason {
+            CancelReason::Canceled => 0,
+            CancelReason::Paused => 1,
+            CancelReason::Disconnected => 2,
+        }
+    }
+
+    /// Records the reason; stored before the token fires so a woken worker sees it.
+    fn store(&self, reason: CancelReason) {
+        self.0.store(Self::encode(reason), Ordering::SeqCst);
+    }
+
+    /// Reads the most recently stored reason.
+    pub(crate) fn load(&self) -> CancelReason {
+        match self.0.load(Ordering::SeqCst) {
+            0 => CancelReason::Canceled,
+            1 => CancelReason::Paused,
+            _ => CancelReason::Disconnected,
+        }
+    }
+}
+
 /// One registered worker's cancellation handle.
 struct RegistryEntry {
+    reason: CancelReasonCell,
     serial: u64,
     token: CancellationToken,
 }
@@ -92,25 +135,30 @@ impl<K: Eq + Hash + Clone> CancelRegistry<K> {
         state.next_serial = state.next_serial.wrapping_add(1);
         let serial = state.next_serial;
         let token = state.generation.child_token();
+        let reason = CancelReasonCell::new();
         state.entries.insert(
             key.clone(),
             RegistryEntry {
                 serial,
+                reason: reason.clone(),
                 token: token.clone(),
             },
         );
         Ok(Registration {
             key,
+            reason,
             serial,
             token,
             registry: Arc::downgrade(&self.shared),
         })
     }
 
-    /// Cancels one live worker; returns `false` when no worker owns `key`.
-    pub(crate) fn cancel(&self, key: &K) -> bool {
+    /// Cancels one live worker, storing why before waking it so a pause is never mistaken for
+    /// a cancel; returns `false` when no worker owns `key`.
+    pub(crate) fn cancel_with_reason(&self, key: &K, reason: CancelReason) -> bool {
         match self.state().entries.get(key) {
             Some(entry) => {
+                entry.reason.store(reason);
                 entry.token.cancel();
                 true
             }
@@ -167,6 +215,8 @@ impl<K: Eq + Hash + Clone> CancelRegistry<K> {
 
 /// Ownership of one registered key; dropping it unregisters the key.
 pub(crate) struct Registration<K: Eq + Hash> {
+    /// Why the token fired, for workers that keep or discard output accordingly.
+    reason: CancelReasonCell,
     key: K,
     serial: u64,
     /// Cancelled by an explicit cancel, a revocation or connection loss.
@@ -181,9 +231,20 @@ impl<K: Eq + Hash> Registration<K> {
         &self.token
     }
 
+    /// Sinks retain the reason after the upload driver took ownership of the registration.
+    pub(crate) fn reason_cell(&self) -> CancelReasonCell {
+        self.reason.clone()
+    }
+
+    /// Shared disposition survives registry revocation during connection teardown.
+    pub(crate) fn reason(&self) -> CancelReason {
+        self.reason.load()
+    }
+
     /// Cancels this registration directly, for tests that model a cancel arriving.
     #[cfg(test)]
     pub(crate) fn cancel(&self) {
+        self.reason.store(CancelReason::Canceled);
         self.token.cancel();
     }
 
@@ -228,7 +289,10 @@ mod tests {
         // Early returns and panics release the key without explicit bookkeeping.
         assert!(!registry.contains(&1));
         // A later cancel for the finished request finds nothing to signal.
-        assert!(!registry.cancel(&1));
+        assert!(
+            !registry
+                .cancel_with_reason(&1, redoor_protocol::wire::partials::CancelReason::Canceled)
+        );
     }
 
     /// Verifies explicit cancellation is request-scoped rather than generation-wide.
@@ -239,7 +303,10 @@ mod tests {
         let second = registry.register(2).unwrap();
 
         // A known key accepts cancellation synchronously.
-        assert!(registry.cancel(&1));
+        assert!(
+            registry
+                .cancel_with_reason(&1, redoor_protocol::wire::partials::CancelReason::Canceled)
+        );
         // The selected worker observes its own cancellation.
         assert!(first.token().is_cancelled());
         // Unrelated workers keep running.

@@ -1,3 +1,11 @@
+import type { ResumeMode } from "#bindings/ResumeMode";
+import type { CopyPreflightRequest } from "#bindings/CopyPreflightRequest";
+import type { CopyPreflightResponse } from "#bindings/CopyPreflightResponse";
+import type { PartialsResponse } from "#bindings/PartialsResponse";
+import type { PartialActionRequest } from "#bindings/PartialActionRequest";
+import type { ResumePartialResponse } from "#bindings/ResumePartialResponse";
+import type { DiscardPartialResponse } from "#bindings/DiscardPartialResponse";
+import type { PauseTransferResponse } from "#bindings/PauseTransferResponse";
 import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
 import type { ProtocolMismatchListResponse } from "#bindings/ProtocolMismatchListResponse";
 import type { LsFileResponse } from "#bindings/LsFileResponse";
@@ -813,6 +821,7 @@ export class Agent {
         sourcePath: string,
         options?: {
             on_existing?: CopyExistingMode;
+            resume?: ResumeMode;
         },
     ): Promise<CopyFileResponse> {
         encodeFilesystemPath(sourcePath);
@@ -825,6 +834,7 @@ export class Agent {
             },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
+            resume: options?.resume ?? "auto",
         };
 
         return apiRequest<CopyFileResponse>(
@@ -844,7 +854,7 @@ export class Agent {
     async moveTo(
         destination: CopyEndpoint,
         sourcePath: string,
-        options?: { on_existing?: CopyExistingMode },
+        options?: { on_existing?: CopyExistingMode; resume?: ResumeMode },
     ): Promise<MoveFileResponse> {
         encodeFilesystemPath(sourcePath);
         encodeFilesystemPath(destination.path);
@@ -853,6 +863,7 @@ export class Agent {
             source: { agent: this.info.id, path: sourcePath },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
+            resume: options?.resume ?? "auto",
         };
 
         return apiRequest<MoveFileResponse>(
@@ -1138,6 +1149,69 @@ export class ApiClient {
         return apiRequest<TransferProgressListResponse>(
             `${this.baseUrl}/api/v1/transfers/progress`,
             undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Discovers durable partials from the currently connected destination agents. */
+    async listPartials(): Promise<PartialsResponse> {
+        return apiRequest<PartialsResponse>(
+            `${this.baseUrl}/api/v1/partials`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Checks metadata without making the dialog wait for prefix hashing. */
+    async copyPreflight(
+        request: CopyPreflightRequest,
+    ): Promise<CopyPreflightResponse> {
+        return apiRequest<CopyPreflightResponse>(
+            `${this.baseUrl}/api/v1/copy/preflight`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Waits until the destination confirms the partial is durable. */
+    async pauseTransfer(transferId: number): Promise<PauseTransferResponse> {
+        return apiRequest<PauseTransferResponse>(
+            `${this.baseUrl}/api/v1/transfers/${transferId}/pause`,
+            { method: "POST" },
+            this.requestContext(),
+        );
+    }
+
+    /** An opaque manifest key creates a fresh transfer using signed endpoints. */
+    async resumePartial(
+        request: PartialActionRequest,
+    ): Promise<ResumePartialResponse> {
+        return apiRequest<ResumePartialResponse>(
+            `${this.baseUrl}/api/v1/partials/resume`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Deletes agent-owned output after the user chooses to abandon it. */
+    async discardPartial(
+        request: PartialActionRequest,
+    ): Promise<DiscardPartialResponse> {
+        return apiRequest<DiscardPartialResponse>(
+            `${this.baseUrl}/api/v1/partials/discard`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
             this.requestContext(),
         );
     }

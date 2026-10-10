@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
+    ListPartials(request::ListPartials),
+    ProbePartial(request::ProbePartial),
+    ReadPartial(request::ReadPartial),
+    DeletePartial(request::DeletePartial),
+    PersistPartial(request::PersistPartial),
+    HashSegments(request::HashSegments),
     Exec(request::Exec),
     Ls(request::Ls),
     FileSearch(request::FileSearch),
@@ -52,6 +58,12 @@ impl Command {
     /// Short operator-facing label without large or sensitive payloads.
     pub fn summary(&self) -> String {
         match self {
+            Self::ListPartials(_) => "ListPartials".into(),
+            Self::ProbePartial(_) => "ProbePartial".into(),
+            Self::ReadPartial(_) => "ReadPartial".into(),
+            Self::DeletePartial(_) => "DeletePartial".into(),
+            Self::PersistPartial(_) => "PersistPartial".into(),
+            Self::HashSegments(_) => "HashSegments".into(),
             Self::Ls(request) => match &request.path {
                 Some(path) => format!("Ls path={path}"),
                 None => "Ls path=.".to_string(),
@@ -247,6 +259,10 @@ pub enum CommandErrorKind {
     ServiceUnavailable,
     /// The server canceled the request before it finished.
     Canceled,
+    /// Durable destination persistence is the explicit acknowledgement of pause.
+    Paused,
+    /// Resume authorization no longer identifies the opened source file.
+    SourceChanged,
     Internal,
 }
 

@@ -199,6 +199,7 @@ pub(crate) async fn download_file(
     path: String,
     range_start: Option<u64>,
     range_end: Option<u64>,
+    expected_identity: Option<redoor_protocol::wire::command::MoveSourceIdentity>,
     ctx: CommandCtx,
 ) -> Reply {
     let request_id = ctx.responder.request_id();
@@ -215,6 +216,25 @@ pub(crate) async fn download_file(
         Err(error) => return Reply::failure(error),
     };
     let opened = FileRangeSource::open(&path, range_start, range_end).await;
+    if let Ok(source) = &opened
+        && let Some(identity) = expected_identity
+    {
+        match source.file.metadata().await {
+            Ok(metadata)
+                if redoor_protocol::wire::command::MoveSourceIdentity::from_metadata(&metadata)
+                    == identity => {}
+            _ => {
+                drop(output.registration);
+                return Reply::stream::<request::RawDownload>(
+                    output.stream,
+                    Err(CommandError::new(
+                        CommandErrorKind::SourceChanged,
+                        "Source changed before resumed read",
+                    )),
+                );
+            }
+        }
+    }
     let outcome = DownloadDriver::new("Raw download", path, output.stream, output.registration)
         .run(opened)
         .await;

@@ -134,7 +134,13 @@ impl Command {
             }
             // Restore is a move that reports progress and owns staging, so it stays cancelable.
             Self::RestoreTrash { .. } => CommandPolicy::trash_mutation(CancelScope::Request),
-            Self::Ls { .. }
+            Self::HashSegments(_) => CommandPolicy::LOCAL_TRANSFER,
+            Self::ListPartials(_)
+            | Self::ProbePartial(_)
+            | Self::ReadPartial(_)
+            | Self::DeletePartial(_)
+            | Self::PersistPartial(_)
+            | Self::Ls { .. }
             | Self::FileSearch { .. }
             | Self::ContentGrep { .. }
             | Self::RawDelete { .. }
@@ -185,6 +191,12 @@ mod tests {
             Command::ContentGrep(request::ContentGrep { .. }) => 3,
             Command::RawDownload(request::RawDownload { .. }) => 4,
             Command::TarDownload(request::TarDownload { .. }) => 5,
+            Command::ListPartials(_) => 36,
+            Command::ProbePartial(_) => 37,
+            Command::ReadPartial(_) => 38,
+            Command::DeletePartial(_) => 39,
+            Command::HashSegments(_) => 40,
+            Command::PersistPartial(_) => 41,
             Command::RawUpload(request::RawUpload { .. }) => 6,
             Command::EditFile(request::EditFile { .. }) => 7,
             Command::TarUpload(request::TarUpload { .. }) => 8,
@@ -219,7 +231,7 @@ mod tests {
     }
 
     /// Number of variants covered by `variant_index`.
-    const VARIANT_COUNT: usize = 36;
+    const VARIANT_COUNT: usize = 42;
 
     /// Builds one instance of every command variant for table-wide policy checks.
     fn every_command() -> Vec<Command> {
@@ -233,6 +245,25 @@ mod tests {
             is_directory: false,
         };
         vec![
+            Command::ListPartials(request::ListPartials {}),
+            Command::ProbePartial(request::ProbePartial { dest_path: path() }),
+            Command::ReadPartial(request::ReadPartial {
+                key: "0".repeat(64),
+            }),
+            Command::DeletePartial(request::DeletePartial {
+                key: "0".repeat(64),
+            }),
+            Command::PersistPartial(request::PersistPartial {
+                key: "0".repeat(64),
+                signed: None,
+            }),
+            Command::HashSegments(request::HashSegments {
+                path: path(),
+                start: 0,
+                end: 1,
+                partial_key: None,
+                expected_identity: None,
+            }),
             Command::Exec(request::Exec {
                 request: ExecRequest {
                     argv: vec!["true".to_string()],
@@ -262,6 +293,7 @@ mod tests {
                 after_context: 0,
             }),
             Command::RawDownload(request::RawDownload {
+                expected_identity: None,
                 path: path(),
                 range_start: None,
                 range_end: None,
@@ -271,6 +303,7 @@ mod tests {
                 include_root: false,
             }),
             Command::RawUpload(request::RawUpload {
+                partial: None,
                 path: path(),
                 on_existing: CopyExistingMode::Override,
                 ownership: CreationOwnershipOptions::default(),
@@ -281,6 +314,7 @@ mod tests {
                 on_existing: CopyExistingMode::Error,
             }),
             Command::LocalCopyFile(request::LocalCopyFile {
+                partial: None,
                 source_path: path(),
                 dest_path: path(),
                 on_existing: CopyExistingMode::Error,
@@ -291,6 +325,7 @@ mod tests {
                 on_existing: CopyExistingMode::Error,
             }),
             Command::LocalMove(request::LocalMove {
+                partial: None,
                 source_path: path(),
                 dest_path: path(),
                 source_is_directory: false,

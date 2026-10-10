@@ -289,7 +289,12 @@ mod tests {
         /// Builds a dispatcher bound to a live scope plus the receiver of its bulk lane.
         async fn new() -> (Self, mpsc::Receiver<OutboundFrame>) {
             let routes = UploadRoutes::default();
-            let services = AgentServices::new(Trash::unsupported(), None);
+            // Never created: these tests do not write partials.
+            let services = AgentServices::new(
+                Trash::unsupported(),
+                redoor_core::partials::PartialStore::new("/nonexistent/redoor-agent".into()),
+                None,
+            );
             let (control, frames) = mpsc::channel(8);
             let (bulk, payload) = mpsc::channel(8);
             let scope = CancellationToken::new();
@@ -340,6 +345,7 @@ mod tests {
     /// A download that cannot finish until cancelled, used to occupy a request id.
     fn blocking_download() -> Command {
         Command::RawDownload(request::RawDownload {
+            expected_identity: None,
             path: "/dev/zero".to_string(),
             range_start: None,
             range_end: None,
@@ -399,13 +405,17 @@ mod tests {
             .dispatch(
                 4,
                 Command::RawDownload(request::RawDownload {
+                    expected_identity: None,
                     path: path.to_string_lossy().to_string(),
                     range_start: None,
                     range_end: None,
                 }),
             )
             .await;
-        fixture.sessions.cancel_request(RequestId::new(4));
+        fixture.sessions.cancel_request_with_reason(
+            RequestId::new(4),
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
         fixture.scope.cancel();
         fixture.dispatcher.stop().await;
 
@@ -450,6 +460,7 @@ mod tests {
             .dispatch(
                 5,
                 Command::LocalCopyFile(request::LocalCopyFile {
+                    partial: None,
                     source_path: "/nonexistent".to_string(),
                     dest_path: "/nonexistent-copy".to_string(),
                     on_existing: CopyExistingMode::Error,

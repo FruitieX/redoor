@@ -98,6 +98,7 @@ async fn upload_upgrade_binary(
         total_bytes
     );
     let command = Command::RawUpload(request::RawUpload {
+        partial: None,
         path: destination_path.to_string(),
         on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
         ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),

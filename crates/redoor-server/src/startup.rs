@@ -296,13 +296,17 @@ impl ServerRuntime {
         // Oneshot so restart can drop the axum listener before self-exec; keeping
         // the listen FD open would race the restarted process on the same port.
         let (shutdown_tx, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let transfer_service = crate::http::services::transfer::TransferService::new(
+            router.clone(),
+            runtime.paths.data_dir()?,
+        );
         let app = build_app(ServerState {
             runtime,
             binaries,
             launcher: launcher.clone(),
             router_ref: router.clone(),
             agents: crate::http::agent_client::AgentClient::new(router.clone()),
-            transfers: crate::http::services::transfer::TransferService::new(router.clone()),
+            transfers: transfer_service,
             watchdog_registry: watchdogs.clone(),
             one_time_token_registry: OneTimeTokenRegistry::new(),
             upload_requests: crate::http::upload_requests::UploadRequests::default(),

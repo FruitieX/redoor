@@ -336,6 +336,21 @@ impl SessionRuntime {
                     streams.deliver_terminal_event(stream, event);
                 }
             }
+            AgentToServer::TransferVerification {
+                id,
+                bytes,
+                verifying,
+            } => {
+                self.router_ref
+                    .send_async(RouterMsg::LocalVerification {
+                        agent_id,
+                        request_id: id,
+                        bytes,
+                        verifying,
+                    })
+                    .await
+                    .ok();
+            }
             AgentToServer::TransferProgress {
                 id,
                 transferred_bytes,
@@ -698,6 +713,7 @@ mod tests {
     fn writer_encodes_typed_frames_as_protocol_json() {
         let frame = ServerToAgent::Cancel {
             id: RequestId::new(5),
+            reason: redoor_protocol::wire::partials::CancelReason::Canceled,
         };
         let Some(WsMessage::Text(text)) = encode_frame(&frame) else {
             panic!("control frames are text messages");

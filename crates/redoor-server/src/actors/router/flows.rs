@@ -127,6 +127,10 @@ pub(crate) enum UploadPhase {
 
 /// A logical copy or move between two paths, on one agent or across two.
 pub(crate) struct CopyFlow {
+    /// A pause's reply remains owned until destination persistence is acknowledged.
+    pub(crate) pause: Option<super::messages::RouterReply<Result<(), String>>>,
+    /// Whether the destination stages into a durable partial that survives failures.
+    pub(crate) resumable: bool,
     /// Public transfer id shown in progress listings and used for cancellation.
     pub(crate) progress_id: TransferId,
     pub(crate) source_agent_id: AgentId,
@@ -146,6 +150,16 @@ pub(crate) struct DeleteSource {
 
 /// Lifecycle of a copy.
 pub(crate) enum CopyPhase {
+    /// Both agents hash one prefix segment at a time before a remote resume appends.
+    /// Hashing owns no byte streams and can be stopped without touching durable output.
+    Verifying(Box<PrefixVerification>),
+    /// The destination persists (pause) or deletes (cancel, changed source) the partial whose
+    /// verification was interrupted, before the transfer settles.
+    SettlingPartial {
+        request_id: RequestId,
+        /// Why verification failed; `None` when the user paused or canceled.
+        failure: Option<String>,
+    },
     /// One agent copies or moves locally and reports its own progress.
     Local { request_id: RequestId },
     /// Bytes stream from the source agent through the server to the destination agent.
@@ -153,6 +167,30 @@ pub(crate) enum CopyPhase {
     Remote(Box<RemoteCopy>),
     /// A remote move published its destination and is deleting the source.
     DeletingSource { request_id: RequestId },
+}
+
+/// Segment-by-segment comparison of a destination partial with its source.
+///
+/// One segment per command keeps both disks reading sequentially and lets comparison stop at
+/// the first mismatch, which bounds how much a slow disk reads when the tail is torn.
+pub(crate) struct PrefixVerification {
+    /// Started with the verified offset once comparison ends.
+    pub(crate) target: super::messages::CopyTarget,
+    /// Agent-local manifest key of the destination partial.
+    pub(crate) key: String,
+    /// Whole-segment prefix length to compare.
+    pub(crate) end: u64,
+    /// Bytes verified so far; always a segment boundary.
+    pub(crate) offset: u64,
+    pub(crate) source: SegmentDigest,
+    pub(crate) dest: SegmentDigest,
+}
+
+/// One agent's hash of the segment being compared.
+pub(crate) struct SegmentDigest {
+    pub(crate) request_id: RequestId,
+    /// Arrives independently from each agent; comparison waits for both.
+    pub(crate) digest: Option<String>,
 }
 
 /// The two streams of a cross-agent copy and how far it got.
@@ -198,6 +236,24 @@ impl CopyFlow {
         self.then.is_some()
     }
 
+    /// Whether a failure now leaves a resumable partial on the destination.
+    ///
+    /// A remote destination creates its partial before granting credit, so a failure while
+    /// still awaiting it may have happened before any partial existed. A published move has
+    /// consumed its partial.
+    pub(crate) fn keeps_partial(&self) -> bool {
+        self.resumable
+            && match &self.phase {
+                CopyPhase::Verifying(_)
+                | CopyPhase::SettlingPartial { .. }
+                | CopyPhase::Local { .. } => true,
+                CopyPhase::Remote(remote) => {
+                    !matches!(remote.stage, RemoteStage::AwaitingDestination { .. })
+                }
+                CopyPhase::DeletingSource { .. } => false,
+            }
+    }
+
     /// Whether the copy's current phase still depends on `agent_id`.
     ///
     /// Only a remote stream needs both agents, and only until the source has answered: after
@@ -207,6 +263,10 @@ impl CopyFlow {
     /// destination agent then must not mark a successful move as errored.
     fn involves(&self, agent_id: &AgentId) -> bool {
         match &self.phase {
+            CopyPhase::Verifying(_) => {
+                &self.source_agent_id == agent_id || &self.dest_agent_id == agent_id
+            }
+            CopyPhase::SettlingPartial { .. } => &self.dest_agent_id == agent_id,
             CopyPhase::Remote(remote) => {
                 (&self.source_agent_id == agent_id && !remote.source_finished)
                     || &self.dest_agent_id == agent_id
@@ -226,6 +286,13 @@ impl Flow {
             Self::Output(flow) => vec![(flow.agent_id.clone(), flow.request_id)],
             Self::Upload(flow) => vec![(flow.agent_id.clone(), flow.request_id)],
             Self::Copy(flow) => match &flow.phase {
+                CopyPhase::Verifying(verification) => vec![
+                    (flow.source_agent_id.clone(), verification.source.request_id),
+                    (flow.dest_agent_id.clone(), verification.dest.request_id),
+                ],
+                CopyPhase::SettlingPartial { request_id, .. } => {
+                    vec![(flow.dest_agent_id.clone(), *request_id)]
+                }
                 CopyPhase::Local { request_id } | CopyPhase::DeletingSource { request_id } => {
                     vec![(flow.source_agent_id.clone(), *request_id)]
                 }
@@ -504,6 +571,8 @@ mod tests {
     /// Builds a cross-agent move from `source` to `dest` in a stream-less phase.
     fn move_flow(phase: CopyPhase) -> Flow {
         Flow::Copy(Box::new(CopyFlow {
+            pause: None,
+            resumable: false,
             progress_id: TransferId::new(1),
             source_agent_id: AgentId::from("source"),
             dest_agent_id: AgentId::from("dest"),

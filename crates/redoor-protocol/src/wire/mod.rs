@@ -8,6 +8,7 @@ pub mod command;
 pub mod exec;
 pub mod handshake;
 pub mod log;
+pub mod partials;
 pub mod policy;
 pub mod registration;
 pub mod request;
@@ -68,7 +69,11 @@ pub enum ServerToAgent {
     ///
     /// Only sent for a command whose frame was already written, so the agent always knows the
     /// id; a cancel for an id the agent has already answered is ignored.
-    Cancel { id: RequestId },
+    Cancel {
+        id: RequestId,
+        #[serde(default, skip_serializing_if = "partials::CancelReason::is_canceled")]
+        reason: partials::CancelReason,
+    },
 
     /// Starts a PTY whose output and input travel on stream `stream` of this connection.
     TerminalOpen {
@@ -144,6 +149,15 @@ pub enum AgentToServer {
         outcome: CommandOutcome,
     },
 
+    /// Prefix verification of a resumable same-agent copy, kept apart from copied bytes so
+    /// hashing never counts towards transfer speed.
+    TransferVerification {
+        id: RequestId,
+        /// Verified prefix length, or the resume offset once `verifying` is false.
+        bytes: u64,
+        verifying: bool,
+    },
+
     /// Copy byte progress or a later-discovered directory-download tar total.
     ///
     /// Direct uploads and file downloads derive transferred counts from streamed frames.
@@ -187,6 +201,7 @@ impl AgentToServer {
         match self {
             Self::Hello { .. } => "hello",
             Self::Result { .. } => "result",
+            Self::TransferVerification { .. } => "transfer_verification",
             Self::TransferProgress { .. } => "transfer_progress",
             Self::PublishRequest { .. } => "publish_request",
             Self::Credit { .. } => "credit",
@@ -241,6 +256,7 @@ mod tests {
             (
                 ServerToAgent::Cancel {
                     id: RequestId::new(3),
+                    reason: crate::wire::partials::CancelReason::Canceled,
                 },
                 r#"{"type":"cancel","id":3}"#,
             ),

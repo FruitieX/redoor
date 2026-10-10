@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { Route as RootRoute } from "./__root";
 import { TransferList } from "#ui/components/transfer-list";
+import { ResumableTransfers } from "#ui/components/resumable-transfers";
 import { transfersQueryOptions } from "#ui/queries";
 
 export const Route = createFileRoute("/transfers/")({
@@ -30,6 +31,7 @@ function TransfersPage() {
                         Transfer history
                     </h1>
                 </div>
+                <ResumableTransfers api={api} />
                 <div className="overflow-hidden rounded-lg border border-slate-800">
                     <TransferList
                         api={api}

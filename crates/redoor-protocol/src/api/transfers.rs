@@ -43,6 +43,9 @@ pub struct CopyFileRequest {
     /// What to do when `dest.path` already exists. Omitted requests keep the historical error behavior.
     #[serde(default)]
     pub on_existing: CopyExistingMode,
+    /// Auto reuses verified partials; restart deliberately begins from zero.
+    #[serde(default)]
+    pub resume: ResumeMode,
 }
 
 /// Returns the public id used to follow asynchronous copy progress.
@@ -79,6 +82,9 @@ pub struct MoveFileRequest {
     /// What to do when `dest.path` already exists.
     #[serde(default)]
     pub on_existing: CopyExistingMode,
+    /// Auto reuses verified partials; restart deliberately begins from zero.
+    #[serde(default)]
+    pub resume: ResumeMode,
 }
 
 /// Returns the public id used to follow asynchronous move progress.
@@ -130,6 +136,16 @@ pub struct TransferProgressEntry {
     pub error: Option<String>,
     /// Stamped only after a same-agent filesystem rename so the UI can skip copy speeds.
     pub atomic: bool,
+    /// Only signed regular-file staging supports pause.
+    #[serde(default)]
+    pub pausable: bool,
+    /// Prefix hashing remains an active transfer with a distinct visible phase.
+    #[serde(default)]
+    pub verifying: bool,
+    /// Speeds count only bytes transferred in this attempt.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub resumed_bytes: u64,
 }
 
 /// Kind of transfer, so clients can label entries and pick the right progress semantics.
@@ -176,4 +192,95 @@ pub enum CancelTransferStatus {
 pub struct CancelTransferResponse {
     pub transfer_id: TransferId,
     pub status: CancelTransferStatus,
+}
+
+/// Explicit restart preserves the user's ability to reject an existing partial.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ResumeMode {
+    #[default]
+    Auto,
+    Restart,
+}
+
+/// Preflight inspects candidates without reading the potentially large prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CopyPreflightRequest {
+    pub source: CopyEndpoint,
+    pub dest: CopyEndpoint,
+}
+
+/// Cheap candidate information shown before the user starts expensive verification.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResumeCandidate {
+    #[ts(type = "number")]
+    pub partial_bytes: u64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub updated_at: u64,
+}
+
+/// A null candidate also covers stale and unverifiable manifests.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CopyPreflightResponse {
+    pub resume_candidate: Option<ResumeCandidate>,
+}
+
+/// The client selects only an opaque agent-local key, never trusted source endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PartialActionRequest {
+    pub dest_agent_id: AgentId,
+    pub key: String,
+}
+
+/// Public inventory omits signatures and private filesystem identities.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResumableTransfer {
+    pub dest_agent_id: AgentId,
+    pub key: String,
+    pub source: CopyEndpoint,
+    pub dest: CopyEndpoint,
+    pub operation: TransferDirection,
+    #[ts(type = "number")]
+    pub partial_bytes: u64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub updated_at: u64,
+}
+
+/// Inventory is rebuilt from connected agents after every restart.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PartialsResponse {
+    pub partials: Vec<ResumableTransfer>,
+}
+
+/// Resume always creates a new public transfer id.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResumePartialResponse {
+    pub transfer_id: TransferId,
+}
+
+/// Discard confirms agent-side cleanup completed.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscardPartialResponse {
+    pub discarded: bool,
+}
+
+/// Pause is acknowledged only after durable destination storage.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PauseTransferResponse {
+    pub transfer_id: TransferId,
 }

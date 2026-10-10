@@ -10,3 +10,5 @@ pub(crate) mod raw_upload;
 pub(crate) mod stream;
 pub(crate) mod tar_upload;
 pub(crate) mod upload;
+
+pub(crate) mod partials;

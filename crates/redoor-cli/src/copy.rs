@@ -409,6 +409,7 @@ impl Transfer {
         on_existing: CopyExistingMode,
     ) -> Result<()> {
         let payload = CopyFileRequest {
+            resume: Default::default(),
             source: source.clone(),
             dest: dest.clone(),
             on_existing,

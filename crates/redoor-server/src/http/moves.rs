@@ -22,6 +22,7 @@ pub(crate) async fn move_file_handler(
             source: payload.source,
             dest: payload.dest,
             on_existing: payload.on_existing,
+            resume: payload.resume,
             observe_terminal: false,
         })
         .await?;

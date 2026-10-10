@@ -7,17 +7,22 @@
 
 use super::super::RouterError;
 use super::super::flows::{
-    CopyFlow, CopyPhase, DeleteSource, Flow, FlowId, RemoteCopy, RemoteStage,
+    CopyFlow, CopyPhase, DeleteSource, Flow, FlowId, PrefixVerification, RemoteCopy, RemoteStage,
+    SegmentDigest,
 };
 use super::super::messages::{
-    CancelPublicTransferError, RouteResponse, StartCopyRequest, TransferProgressUpdateRequest,
+    CancelPublicTransferError, CopyTarget, ResumeVerification, RouteResponse, RouterReply,
+    StartCopyRequest, TransferProgressUpdateRequest,
 };
 use super::super::progress::CopyStartContext;
 use super::super::state::{CopyContentKind, CopyOperation, RouterState};
 use super::super::streams::{OutboundStart, OutboundStream, OutputReceiver, StreamLease};
 use redoor_core::log;
-use redoor_protocol::ids::{AgentId, RequestId};
+use redoor_core::partials::SEGMENT_SIZE;
+use redoor_protocol::ids::{AgentId, RequestId, TransferId};
+use redoor_protocol::wire::command::CommandErrorKind;
 use redoor_protocol::wire::log::Level;
+use redoor_protocol::wire::partials::CancelReason;
 use redoor_protocol::wire::request::{
     self, AgentRequest, CommandError, CommandOutcome, DecodeError,
 };
@@ -34,6 +39,8 @@ pub(crate) enum CopyRelease {
     /// Failed: cancel the destination worker so it discards its staging, and an unfinished
     /// source so it stops producing.
     Fail,
+    /// Identity changes invalidate the prefix rather than preserving it for another source.
+    SourceChanged,
 }
 
 /// Moves one remote copy's frames from the source stream to the destination stream.
@@ -73,31 +80,52 @@ impl CopyForwarder {
 impl RouterState {
     /// Starts a local copy or move, or a remote streamed one, and replies with its public id.
     pub(crate) fn start_copy(&mut self, request: StartCopyRequest) {
+        let StartCopyRequest {
+            target,
+            resume_verification,
+            terminal,
+            reply,
+        } = request;
         let (Some(_), Some(_)) = (
-            self.agents.by_id.get(&request.source_agent_id),
-            self.agents.by_id.get(&request.dest_agent_id),
+            self.agents.by_id.get(&target.source_agent_id),
+            self.agents.by_id.get(&target.dest_agent_id),
         ) else {
-            let missing = if self.agents.by_id.contains_key(&request.source_agent_id) {
-                &request.dest_agent_id
+            let missing = if self.agents.by_id.contains_key(&target.source_agent_id) {
+                &target.dest_agent_id
             } else {
-                &request.source_agent_id
+                &target.source_agent_id
             };
-            let _ = request.reply.send(Err(RouterError::AgentNotFound {
+            let _ = reply.send(Err(RouterError::AgentNotFound {
                 agent_id: missing.to_string(),
             }));
             return;
         };
-        let remote = request.source_agent_id != request.dest_agent_id;
-        let then = match (request.operation, request.source_identity.clone()) {
+        // Two writers would share one deterministic partial, and even without partials the
+        // later publication would silently replace the earlier one.
+        if self.progress.entries.values().any(|entry| {
+            matches!(
+                entry.state,
+                TransferProgressState::Active | TransferProgressState::Canceling
+            ) && entry.dest.as_ref().is_some_and(|dest| {
+                dest.agent == target.dest_agent_id && dest.path == target.dest_path
+            })
+        }) {
+            let _ = reply.send(Err(RouterError::DestinationBusy {
+                path: target.dest_path,
+            }));
+            return;
+        }
+        let remote = target.source_agent_id != target.dest_agent_id;
+        let then = match (target.operation, target.source_identity.clone()) {
             (CopyOperation::Copy, _) => None,
             (CopyOperation::Move, Some(identity)) => Some(DeleteSource {
-                path: request.source_path.clone(),
+                path: target.source_path.clone(),
                 identity,
             }),
             (CopyOperation::Move, None) => {
                 // Deleting a source whose identity was never captured could remove a
                 // replacement created while copying.
-                let _ = request.reply.send(Err(RouterError::UnexpectedResponseType {
+                let _ = reply.send(Err(RouterError::UnexpectedResponseType {
                     operation: "starting a move without its source identity",
                 }));
                 return;
@@ -105,12 +133,12 @@ impl RouterState {
         };
 
         if remote
-            && self.flows.uploads_into(&request.dest_agent_id)
+            && self.flows.uploads_into(&target.dest_agent_id)
                 >= super::upload::MAX_UPLOADS_PER_CONNECTION
         {
             // The destination side is an upload and counts against the same cap.
-            let _ = request.reply.send(Err(RouterError::StreamLimitReached {
-                agent_id: request.dest_agent_id.to_string(),
+            let _ = reply.send(Err(RouterError::StreamLimitReached {
+                agent_id: target.dest_agent_id.to_string(),
                 kind: "uploads",
             }));
             return;
@@ -119,17 +147,17 @@ impl RouterState {
         let progress_id = flow_id.as_transfer_id();
         self.record_copy_start(CopyStartContext {
             request_id: progress_id,
-            source_agent_id: request.source_agent_id.clone(),
-            source_path: request.source_path.clone(),
-            dest_agent_id: request.dest_agent_id.clone(),
-            dest_path: request.dest_path.clone(),
-            total_bytes: request.total_bytes,
-            direction: match request.operation {
+            source_agent_id: target.source_agent_id.clone(),
+            source_path: target.source_path.clone(),
+            dest_agent_id: target.dest_agent_id.clone(),
+            dest_path: target.dest_path.clone(),
+            total_bytes: target.total_bytes,
+            direction: match target.operation {
                 CopyOperation::Copy => TransferDirection::Copy,
                 CopyOperation::Move => TransferDirection::Move,
             },
         });
-        if let Some(terminal) = request.terminal.clone() {
+        if let Some(terminal) = terminal {
             self.progress
                 .terminal_observers
                 .insert(progress_id, terminal);
@@ -139,33 +167,338 @@ impl RouterState {
                 Level::Debug,
                 "Smart move routing started: public_request_id={}, source_agent_id={}, dest_agent_id={}, source_path={}, dest_path={}, local={}, content_kind={:?}, on_existing={:?}, source_identity={:?}",
                 progress_id,
-                request.source_agent_id,
-                request.dest_agent_id,
-                request.source_path,
-                request.dest_path,
+                target.source_agent_id,
+                target.dest_agent_id,
+                target.source_path,
+                target.dest_path,
                 !remote,
-                request.content_kind,
-                request.on_existing,
-                request.source_identity
+                target.content_kind,
+                target.on_existing,
+                target.source_identity
             );
         }
 
-        let (queued_agent, queued) = if remote {
-            self.start_remote_copy(flow_id, &request, then)
-        } else {
-            self.start_local_copy(flow_id, &request, then)
+        if let Some(entry) = self.progress.entries.get_mut(&progress_id) {
+            // Local moves may publish by rename; the worker announces resumable staging.
+            entry.pausable = target.partial.is_some() && remote;
+        }
+        let (queued_agent, queued) = match resume_verification {
+            Some(verification) if remote && target.partial.is_some() && verification.end > 0 => {
+                self.start_prefix_verification(flow_id, target, then, verification)
+            }
+            _ if remote => self.start_remote_copy(flow_id, &target, then),
+            _ => self.start_local_copy(flow_id, &target, then),
         };
         if !queued {
             if let Some(Flow::Copy(flow)) = self.flows.remove(flow_id) {
                 self.release_copy(&flow, CopyRelease::Quiet);
             }
             self.mark_transfer_errored(progress_id, "Agent control queue is full".to_string());
-            let _ = request.reply.send(Err(RouterError::ControlQueueFull {
+            let _ = reply.send(Err(RouterError::ControlQueueFull {
                 agent_id: queued_agent.to_string(),
             }));
             return;
         }
-        let _ = request.reply.send(Ok(progress_id));
+        let _ = reply.send(Ok(progress_id));
+    }
+
+    /// Starts comparing the destination partial with its source before any byte is appended;
+    /// returns the agent and whether both first segment hashes were queued.
+    fn start_prefix_verification(
+        &mut self,
+        flow_id: FlowId,
+        target: CopyTarget,
+        then: Option<DeleteSource>,
+        verification: ResumeVerification,
+    ) -> (AgentId, bool) {
+        if let Some(entry) = self.progress.entries.get_mut(&flow_id.as_transfer_id()) {
+            entry.verifying = true;
+        }
+        let dest_agent_id = target.dest_agent_id.clone();
+        let source = SegmentDigest {
+            request_id: self.next_id(),
+            digest: None,
+        };
+        let dest = SegmentDigest {
+            request_id: self.next_id(),
+            digest: None,
+        };
+        self.flows.insert(
+            flow_id,
+            Flow::Copy(Box::new(CopyFlow {
+                pause: None,
+                resumable: true,
+                progress_id: flow_id.as_transfer_id(),
+                source_agent_id: target.source_agent_id.clone(),
+                dest_agent_id: target.dest_agent_id.clone(),
+                content_kind: target.content_kind,
+                then,
+                phase: CopyPhase::Verifying(Box::new(PrefixVerification {
+                    target,
+                    key: verification.key,
+                    end: verification.end,
+                    offset: 0,
+                    source,
+                    dest,
+                })),
+            })),
+        );
+        match self.send_segment_hashes(flow_id) {
+            Ok(()) => (dest_agent_id, true),
+            Err(agent_id) => (agent_id, false),
+        }
+    }
+
+    /// Asks both agents for the hash of the segment at the current verification offset;
+    /// returns the agent whose control queue refused its command.
+    fn send_segment_hashes(&mut self, flow_id: FlowId) -> Result<(), AgentId> {
+        let Some(Flow::Copy(flow)) = self.flows.get(flow_id) else {
+            return Ok(());
+        };
+        let CopyPhase::Verifying(verification) = &flow.phase else {
+            return Ok(());
+        };
+        let start = verification.offset;
+        let end = start + SEGMENT_SIZE;
+        let commands = [
+            (
+                flow.source_agent_id.clone(),
+                verification.source.request_id,
+                request::HashSegments {
+                    path: verification.target.source_path.clone(),
+                    start,
+                    end,
+                    partial_key: None,
+                    // A source replaced during verification must not vouch for the prefix.
+                    expected_identity: verification.target.source_identity.clone(),
+                },
+            ),
+            (
+                flow.dest_agent_id.clone(),
+                verification.dest.request_id,
+                request::HashSegments {
+                    path: verification.target.dest_path.clone(),
+                    start,
+                    end,
+                    partial_key: Some(verification.key.clone()),
+                    expected_identity: None,
+                },
+            ),
+        ];
+        for (agent_id, request_id, command) in commands {
+            let queued = self.agents.by_id.get_mut(&agent_id).is_some_and(|agent| {
+                agent.send_command(request_id, Command::HashSegments(command))
+            });
+            if !queued {
+                return Err(agent_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Records one agent's segment hash and, once both arrived, advances to the next segment
+    /// or starts streaming from the verified offset.
+    fn finish_segment_hash(&mut self, flow_id: FlowId, from_source: bool, result: CommandOutcome) {
+        let digest = match request::HashSegments::decode(result) {
+            Ok(digest) => digest,
+            Err(DecodeError::Failed(error)) if error.kind == CommandErrorKind::SourceChanged => {
+                // The prefix may belong to the previous source, so it must not be resumed.
+                self.settle_verifying_partial(flow_id, Some(error.message));
+                return;
+            }
+            Err(DecodeError::Failed(error)) => {
+                self.end_copy(flow_id, Some(error.message));
+                return;
+            }
+            Err(DecodeError::Malformed(error)) => {
+                self.end_copy(
+                    flow_id,
+                    Some(format!("Unexpected verification response: {error}")),
+                );
+                return;
+            }
+        };
+        let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
+            return;
+        };
+        let CopyPhase::Verifying(verification) = &mut flow.phase else {
+            return;
+        };
+        let side = if from_source {
+            &mut verification.source
+        } else {
+            &mut verification.dest
+        };
+        side.digest = Some(digest);
+        let (Some(source), Some(dest)) = (&verification.source.digest, &verification.dest.digest)
+        else {
+            return;
+        };
+        let matched = source == dest;
+        if matched {
+            verification.offset += SEGMENT_SIZE;
+        }
+        let offset = verification.offset;
+        let done = !matched || offset >= verification.end;
+        let progress_id = flow.progress_id;
+        if let Some(entry) = self.progress.entries.get_mut(&progress_id) {
+            // Hashed bytes are the only visible progress on slow disks.
+            entry.transferred_bytes = offset;
+        }
+        self.notify_transfer_refresh();
+        if done {
+            self.finish_prefix_verification(flow_id);
+        } else {
+            self.next_segment_hashes(flow_id);
+        }
+    }
+
+    /// Re-indexes the flow under fresh request ids and requests the next pair of hashes.
+    fn next_segment_hashes(&mut self, flow_id: FlowId) {
+        let previous = self.flows.request_ids(flow_id);
+        let source_id = self.next_id();
+        let dest_id = self.next_id();
+        let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
+            return;
+        };
+        let CopyPhase::Verifying(verification) = &mut flow.phase else {
+            return;
+        };
+        verification.source = SegmentDigest {
+            request_id: source_id,
+            digest: None,
+        };
+        verification.dest = SegmentDigest {
+            request_id: dest_id,
+            digest: None,
+        };
+        self.flows.reindex(flow_id, &previous);
+        if let Err(agent_id) = self.send_segment_hashes(flow_id) {
+            self.end_copy(
+                flow_id,
+                Some(format!("Agent control queue is unavailable: {agent_id}")),
+            );
+        }
+    }
+
+    /// Starts the streamed copy from the verified offset under the same flow and public id.
+    fn finish_prefix_verification(&mut self, flow_id: FlowId) {
+        let Some(Flow::Copy(flow)) = self.flows.remove(flow_id) else {
+            return;
+        };
+        let CopyFlow {
+            progress_id,
+            then,
+            phase: CopyPhase::Verifying(verification),
+            ..
+        } = *flow
+        else {
+            return;
+        };
+        let PrefixVerification {
+            mut target, offset, ..
+        } = *verification;
+        if let Some(partial) = &mut target.partial {
+            partial.offset = offset;
+        }
+        if let Some(entry) = self.progress.entries.get_mut(&progress_id) {
+            entry.verifying = false;
+            entry.resumed_bytes = offset;
+            entry.transferred_bytes = offset;
+        }
+        let (agent_id, queued) = self.start_remote_copy(flow_id, &target, then);
+        if !queued {
+            self.end_copy(
+                flow_id,
+                Some(format!("Agent control queue is unavailable: {agent_id}")),
+            );
+        }
+    }
+
+    /// Stops in-flight hashing and asks the destination to persist the partial for a pause or
+    /// delete it for a cancel or a changed source; the transfer settles on its answer.
+    fn settle_verifying_partial(&mut self, flow_id: FlowId, failure: Option<String>) {
+        let previous = self.flows.request_ids(flow_id);
+        let request_id = self.next_id();
+        let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
+            return;
+        };
+        let CopyPhase::Verifying(verification) = &flow.phase else {
+            return;
+        };
+        let command = if flow.pause.is_some() {
+            Command::PersistPartial(request::PersistPartial {
+                key: verification.key.clone(),
+                // The paused attempt's operation and conflict policy replace the saved ones.
+                signed: verification
+                    .target
+                    .partial
+                    .as_ref()
+                    .map(|partial| Box::new(partial.signed.clone())),
+            })
+        } else {
+            Command::DeletePartial(request::DeletePartial {
+                key: verification.key.clone(),
+            })
+        };
+        let pending = pending_segment_hashes(flow, verification);
+        flow.phase = CopyPhase::SettlingPartial {
+            request_id,
+            failure,
+        };
+        let dest_agent_id = flow.dest_agent_id.clone();
+        self.flows.reindex(flow_id, &previous);
+        for (agent_id, hash_id) in pending {
+            let _ = self.cancel_on_agent(&agent_id, hash_id, CancelReason::Canceled);
+        }
+        let queued = self
+            .agents
+            .by_id
+            .get_mut(&dest_agent_id)
+            .is_some_and(|agent| agent.send_command(request_id, command));
+        if !queued {
+            self.finish_partial_settlement(
+                flow_id,
+                CommandOutcome::Error(CommandError::new(
+                    CommandErrorKind::ServiceUnavailable,
+                    format!("Agent control queue is unavailable: {dest_agent_id}"),
+                )),
+            );
+        }
+    }
+
+    /// Settles a transfer whose interrupted verification left the destination to persist or
+    /// delete its partial.
+    fn finish_partial_settlement(&mut self, flow_id: FlowId, result: CommandOutcome) {
+        let Some(Flow::Copy(mut flow)) = self.flows.remove(flow_id) else {
+            return;
+        };
+        let CopyPhase::SettlingPartial { failure, .. } = &mut flow.phase else {
+            return;
+        };
+        let progress_id = flow.progress_id;
+        let settled = result
+            .failure()
+            .map_or(Ok(()), |error| Err(error.message.clone()));
+        if let Some(reply) = flow.pause.take() {
+            match &settled {
+                Ok(()) => self.forget_paused_transfer(progress_id),
+                Err(message) => self.mark_transfer_errored(progress_id, message.clone()),
+            }
+            let _ = reply.send(settled);
+            return;
+        }
+        match (failure.take(), settled) {
+            (Some(message), Ok(())) => {
+                self.mark_transfer_errored(progress_id, format!("{message}; partial discarded"))
+            }
+            (Some(message), Err(cleanup)) => self.mark_transfer_errored(
+                progress_id,
+                format!("{message}; cannot discard partial: {cleanup}"),
+            ),
+            (None, Ok(())) => self.mark_transfer_canceled(progress_id),
+            (None, Err(message)) => self.mark_transfer_errored(progress_id, message),
+        }
     }
 
     /// Runs the whole copy or move as one agent-local command; returns the agent and whether
@@ -173,29 +506,31 @@ impl RouterState {
     fn start_local_copy(
         &mut self,
         flow_id: FlowId,
-        request: &StartCopyRequest,
+        target: &CopyTarget,
         then: Option<DeleteSource>,
     ) -> (AgentId, bool) {
         let request_id = self.next_id();
         let command = match &then {
             Some(delete) => Command::LocalMove(request::LocalMove {
-                source_path: request.source_path.clone(),
-                dest_path: request.dest_path.clone(),
-                source_is_directory: request.content_kind == CopyContentKind::TarDirectory,
+                partial: target.partial.clone(),
+                source_path: target.source_path.clone(),
+                dest_path: target.dest_path.clone(),
+                source_is_directory: target.content_kind == CopyContentKind::TarDirectory,
                 expected_identity: delete.identity.clone(),
-                on_existing: request.on_existing,
+                on_existing: target.on_existing,
             }),
-            None => match request.content_kind {
+            None => match target.content_kind {
                 CopyContentKind::RawFile => Command::LocalCopyFile(request::LocalCopyFile {
-                    source_path: request.source_path.clone(),
-                    dest_path: request.dest_path.clone(),
-                    on_existing: request.on_existing,
+                    partial: target.partial.clone(),
+                    source_path: target.source_path.clone(),
+                    dest_path: target.dest_path.clone(),
+                    on_existing: target.on_existing,
                 }),
                 CopyContentKind::TarDirectory => {
                     Command::LocalCopyDirectory(request::LocalCopyDirectory {
-                        source_path: request.source_path.clone(),
-                        dest_path: request.dest_path.clone(),
-                        on_existing: request.on_existing,
+                        source_path: target.source_path.clone(),
+                        dest_path: target.dest_path.clone(),
+                        on_existing: target.on_existing,
                     })
                 }
             },
@@ -203,10 +538,12 @@ impl RouterState {
         self.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
+                pause: None,
+                resumable: target.partial.is_some(),
                 progress_id: flow_id.as_transfer_id(),
-                source_agent_id: request.source_agent_id.clone(),
-                dest_agent_id: request.dest_agent_id.clone(),
-                content_kind: request.content_kind,
+                source_agent_id: target.source_agent_id.clone(),
+                dest_agent_id: target.dest_agent_id.clone(),
+                content_kind: target.content_kind,
                 then,
                 phase: CopyPhase::Local { request_id },
             })),
@@ -214,9 +551,9 @@ impl RouterState {
         let queued = self
             .agents
             .by_id
-            .get_mut(&request.source_agent_id)
+            .get_mut(&target.source_agent_id)
             .is_some_and(|agent| agent.send_command(request_id, command));
-        (request.source_agent_id.clone(), queued)
+        (target.source_agent_id.clone(), queued)
     }
 
     /// Opens both streams and the forwarder, then starts the destination upload; the source
@@ -224,24 +561,28 @@ impl RouterState {
     fn start_remote_copy(
         &mut self,
         flow_id: FlowId,
-        request: &StartCopyRequest,
+        target: &CopyTarget,
         then: Option<DeleteSource>,
     ) -> (AgentId, bool) {
         let dest_id = self.next_id();
         let source_id = self.next_id();
-        let Some(source_agent) = self.agents.by_id.get(&request.source_agent_id) else {
-            return (request.source_agent_id.clone(), false);
+        let Some(source_agent) = self.agents.by_id.get(&target.source_agent_id) else {
+            return (target.source_agent_id.clone(), false);
         };
         let source = StreamLease::new(source_id, source_agent.link(), 0);
         let source_receiver = source_agent
             .streams
             .open_inbound(source.clone(), STREAM_CREDIT_WINDOW_FRAMES);
-        let Some(dest_agent) = self.agents.by_id.get_mut(&request.dest_agent_id) else {
-            return (request.dest_agent_id.clone(), false);
+        let Some(dest_agent) = self.agents.by_id.get_mut(&target.dest_agent_id) else {
+            return (target.dest_agent_id.clone(), false);
         };
         // The destination's first credit grant tells the router its worker is ready.
         let dest = OutboundStream::new(
-            StreamLease::new(dest_id, dest_agent.link(), 0),
+            StreamLease::new(
+                dest_id,
+                dest_agent.link(),
+                target.partial.as_ref().map_or(0, |partial| partial.offset),
+            ),
             dest_agent.streams.open_outbound(
                 dest_id,
                 STREAM_CREDIT_WINDOW_FRAMES,
@@ -256,39 +597,66 @@ impl RouterState {
             }
             .run(),
         );
-        let queued = dest_agent.send_command(
-            dest_id,
-            request
-                .content_kind
-                .upload_command(request.dest_path.clone(), request.on_existing),
-        );
+        let mut upload = target
+            .content_kind
+            .upload_command(target.dest_path.clone(), target.on_existing);
+        if let Command::RawUpload(raw) = &mut upload {
+            raw.partial = target.partial.clone();
+        }
+        let queued = dest_agent.send_command(dest_id, upload);
         self.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
+                pause: None,
+                resumable: target.partial.is_some(),
                 progress_id: flow_id.as_transfer_id(),
-                source_agent_id: request.source_agent_id.clone(),
-                dest_agent_id: request.dest_agent_id.clone(),
-                content_kind: request.content_kind,
+                source_agent_id: target.source_agent_id.clone(),
+                dest_agent_id: target.dest_agent_id.clone(),
+                content_kind: target.content_kind,
                 then,
                 phase: CopyPhase::Remote(Box::new(RemoteCopy {
                     source,
                     dest,
                     stage: RemoteStage::AwaitingDestination {
-                        source_command: request
-                            .content_kind
-                            .download_command(request.source_path.clone()),
+                        source_command: {
+                            let mut command = target
+                                .content_kind
+                                .download_command(target.source_path.clone());
+                            if let Command::RawDownload(raw) = &mut command {
+                                raw.range_start =
+                                    target.partial.as_ref().map(|partial| partial.offset);
+                                raw.expected_identity = target.source_identity.clone();
+                            }
+                            command
+                        },
                     },
                     source_finished: false,
                 })),
             })),
         );
-        (request.dest_agent_id.clone(), queued)
+        (target.dest_agent_id.clone(), queued)
     }
 
     /// Stops a copy's data path and forgets its stream state on both agents.
     pub(crate) fn release_copy(&mut self, flow: &CopyFlow, release: CopyRelease) {
-        if let CopyPhase::Remote(remote) = &flow.phase {
-            self.release_remote_copy(&flow.source_agent_id, &flow.dest_agent_id, remote, release);
+        match &flow.phase {
+            CopyPhase::Remote(remote) => {
+                self.release_remote_copy(
+                    &flow.source_agent_id,
+                    &flow.dest_agent_id,
+                    remote,
+                    release,
+                );
+            }
+            // Hashing holds no staging, so stopping it never needs an acknowledgement.
+            CopyPhase::Verifying(verification) => {
+                for (agent_id, request_id) in pending_segment_hashes(flow, verification) {
+                    let _ = self.cancel_on_agent(&agent_id, request_id, CancelReason::Canceled);
+                }
+            }
+            CopyPhase::SettlingPartial { .. }
+            | CopyPhase::Local { .. }
+            | CopyPhase::DeletingSource { .. } => {}
         }
     }
 
@@ -306,11 +674,23 @@ impl RouterState {
     ) {
         remote.dest.lease().stop();
         remote.source.stop();
-        if let CopyRelease::Fail = release {
-            let _ = self.cancel_on_agent(dest_agent_id, remote.dest_id());
+        if matches!(release, CopyRelease::Fail | CopyRelease::SourceChanged) {
+            let _ = self.cancel_on_agent(
+                dest_agent_id,
+                remote.dest_id(),
+                if matches!(release, CopyRelease::SourceChanged) {
+                    CancelReason::Canceled
+                } else {
+                    CancelReason::Disconnected
+                },
+            );
             let source_started = !matches!(remote.stage, RemoteStage::AwaitingDestination { .. });
             if source_started && !remote.source_finished {
-                let _ = self.cancel_on_agent(source_agent_id, remote.source_id());
+                let _ = self.cancel_on_agent(
+                    source_agent_id,
+                    remote.source_id(),
+                    CancelReason::Canceled,
+                );
             }
         }
         if let Some(source) = self.agents.by_id.get(source_agent_id) {
@@ -329,6 +709,11 @@ impl RouterState {
         match failure {
             Some(message) => {
                 self.release_copy(&flow, CopyRelease::Fail);
+                let message = if flow.keeps_partial() {
+                    format!("{message}; partial kept")
+                } else {
+                    message
+                };
                 self.mark_transfer_errored(flow.progress_id, message);
             }
             None => self.release_copy(&flow, CopyRelease::Quiet),
@@ -397,8 +782,15 @@ impl RouterState {
             // A finished or failed source holds nothing to clean up, so its result is its
             // cancel acknowledgement.
             self.acknowledge_copy_cancel(flow_id, source_id);
-        } else if let CommandOutcome::Error(CommandError { message, .. }) = result {
-            self.end_copy(flow_id, Some(message));
+        } else if let CommandOutcome::Error(CommandError { kind, message }) = result {
+            if kind == CommandErrorKind::SourceChanged {
+                if let Some(Flow::Copy(flow)) = self.flows.remove(flow_id) {
+                    self.release_copy(&flow, CopyRelease::SourceChanged);
+                    self.mark_transfer_errored(flow.progress_id, message);
+                }
+            } else {
+                self.end_copy(flow_id, Some(message));
+            }
         }
     }
 
@@ -437,6 +829,24 @@ impl RouterState {
             {
                 self.finish_copy_source(flow_id, response.result)
             }
+            CopyPhase::Verifying(verification)
+                if verification.source.request_id == request_id
+                    && &flow.source_agent_id == agent_id =>
+            {
+                self.finish_segment_hash(flow_id, true, response.result)
+            }
+            CopyPhase::Verifying(verification)
+                if verification.dest.request_id == request_id
+                    && &flow.dest_agent_id == agent_id =>
+            {
+                self.finish_segment_hash(flow_id, false, response.result)
+            }
+            CopyPhase::SettlingPartial {
+                request_id: settling,
+                ..
+            } if *settling == request_id && &flow.dest_agent_id == agent_id => {
+                self.finish_partial_settlement(flow_id, response.result)
+            }
             CopyPhase::Local { request_id: local }
                 if *local == request_id && &flow.source_agent_id == agent_id =>
             {
@@ -469,6 +879,23 @@ impl RouterState {
         let progress_id = flow.progress_id;
         let is_move = flow.is_move();
         let content_kind = flow.content_kind;
+        if flow.pause.is_some()
+            && !result
+                .failure()
+                .is_some_and(|failure| failure.kind == CommandErrorKind::Paused)
+        {
+            let message = result.failure().map_or(
+                "Pause did not preserve the partial".to_string(),
+                |failure| failure.message.clone(),
+            );
+            if let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id)
+                && let Some(reply) = flow.pause.take()
+            {
+                let _ = reply.send(Err(message.clone()));
+            }
+            self.end_copy(flow_id, Some(message));
+            return;
+        }
         match result {
             CommandOutcome::Ok(_) if is_move && !canceling => self.begin_source_deletion(flow_id),
             CommandOutcome::Ok(_) if is_move => {
@@ -506,6 +933,23 @@ impl RouterState {
             return;
         };
         let progress_id = flow.progress_id;
+        if let Some(reply) = flow.pause {
+            if result
+                .failure()
+                .is_some_and(|failure| failure.kind == CommandErrorKind::Paused)
+            {
+                self.forget_paused_transfer(progress_id);
+                let _ = reply.send(Ok(()));
+            } else {
+                let message = result.failure().map_or(
+                    "Pause did not preserve the partial".to_string(),
+                    |failure| failure.message.clone(),
+                );
+                self.mark_transfer_errored(progress_id, message.clone());
+                let _ = reply.send(Err(message));
+            }
+            return;
+        }
         let canceling = matches!(
             self.progress
                 .entries
@@ -592,8 +1036,14 @@ impl RouterState {
         }
         if *source_acked && *dest_acked {
             let progress_id = flow.progress_id;
+            let pause = flow.pause.take();
             self.end_copy(flow_id, None);
-            self.mark_transfer_canceled(progress_id);
+            if let Some(reply) = pause {
+                self.forget_paused_transfer(progress_id);
+                let _ = reply.send(Ok(()));
+            } else {
+                self.mark_transfer_canceled(progress_id);
+            }
         }
     }
 
@@ -602,6 +1052,10 @@ impl RouterState {
         let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
             return Err(CancelPublicTransferError::NotFound);
         };
+        if matches!(flow.phase, CopyPhase::Verifying(_)) {
+            self.settle_verifying_partial(flow_id, None);
+            return Ok(());
+        }
         let targets = match &mut flow.phase {
             CopyPhase::Remote(remote) => {
                 let mut targets = vec![(flow.dest_agent_id.clone(), remote.dest_id())];
@@ -618,16 +1072,95 @@ impl RouterState {
                 };
                 targets
             }
+            // Pause and cancel are both already settling the partial.
+            CopyPhase::Verifying(_) | CopyPhase::SettlingPartial { .. } => return Ok(()),
             CopyPhase::Local { request_id } => vec![(flow.source_agent_id.clone(), *request_id)],
             CopyPhase::DeletingSource { .. } => {
                 return Err(CancelPublicTransferError::NotCancelable);
             }
         };
+        // Destination cancellation carries the disposition; source workers ignore it.
+        let reason = if flow.pause.is_some() {
+            CancelReason::Paused
+        } else {
+            CancelReason::Canceled
+        };
         for (agent_id, request_id) in targets {
             // A lost connection settles its side of the copy through agent-loss cleanup.
-            let _ = self.cancel_on_agent(&agent_id, request_id);
+            let _ = self.cancel_on_agent(&agent_id, request_id, reason);
         }
         Ok(())
+    }
+
+    /// Pause uses cancellation ownership but keeps its reply until durable destination cleanup.
+    pub(crate) fn pause_transfer(
+        &mut self,
+        transfer_id: TransferId,
+        reply: RouterReply<Result<(), String>>,
+    ) {
+        let eligible = self
+            .progress
+            .entries
+            .get(&transfer_id)
+            .is_some_and(|entry| {
+                entry.cancelable
+                    && entry.pausable
+                    && matches!(entry.state, TransferProgressState::Active)
+            });
+        let flow_id = self.flows.find_by_progress(transfer_id).filter(|flow_id| {
+            matches!(
+                self.flows.get(*flow_id),
+                Some(Flow::Copy(flow)) if flow.resumable && flow.pause.is_none()
+            )
+        });
+        let (true, Some(flow_id)) = (eligible, flow_id) else {
+            let _ = reply.send(Err("Transfer cannot be paused".into()));
+            return;
+        };
+        if let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) {
+            flow.pause = Some(reply);
+        }
+        self.mark_transfer_canceling(transfer_id);
+        let _ = self.cancel_copy(flow_id);
+    }
+
+    /// Removes a paused transfer entirely; the destination partial is now its only record.
+    fn forget_paused_transfer(&mut self, transfer_id: TransferId) {
+        self.progress.entries.remove(&transfer_id);
+        self.progress.terminal_observers.remove(&transfer_id);
+        self.notify_transfer_refresh_immediately();
+    }
+
+    /// Applies prefix verification progress of an agent-local resumable copy.
+    ///
+    /// The first report also marks the copy pausable: only the worker knows whether a local
+    /// move publishes by rename or stages through a partial.
+    pub(crate) fn update_local_verification(
+        &mut self,
+        agent_id: &AgentId,
+        request_id: RequestId,
+        bytes: u64,
+        verifying: bool,
+    ) {
+        let Some(flow_id) = self.flows.id_for(agent_id, request_id) else {
+            return;
+        };
+        let Some(Flow::Copy(flow)) = self.flows.get(flow_id) else {
+            return;
+        };
+        if !matches!(flow.phase, CopyPhase::Local { .. }) {
+            return;
+        }
+        let Some(entry) = self.progress.entries.get_mut(&flow.progress_id) else {
+            return;
+        };
+        entry.pausable = entry.cancelable && matches!(entry.state, TransferProgressState::Active);
+        entry.verifying = verifying;
+        entry.transferred_bytes = bytes;
+        if !verifying {
+            entry.resumed_bytes = bytes;
+        }
+        self.notify_transfer_refresh();
     }
 
     /// Applies agent-reported progress of an agent-local copy.
@@ -655,6 +1188,21 @@ impl RouterState {
         let progress_id = flow.progress_id;
         self.set_copy_progress(progress_id, request.transferred_bytes, request.total_bytes);
     }
+}
+
+/// Segment hashes of a verification that were requested but not answered yet.
+fn pending_segment_hashes(
+    flow: &CopyFlow,
+    verification: &PrefixVerification,
+) -> Vec<(AgentId, RequestId)> {
+    [
+        (&flow.source_agent_id, &verification.source),
+        (&flow.dest_agent_id, &verification.dest),
+    ]
+    .into_iter()
+    .filter(|(_, segment)| segment.digest.is_none())
+    .map(|(agent_id, segment)| (agent_id.clone(), segment.request_id))
+    .collect()
 }
 
 #[cfg(test)]
@@ -812,6 +1360,8 @@ mod tests {
         state.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
+                pause: None,
+                resumable: false,
                 progress_id: flow_id.as_transfer_id(),
                 source_agent_id: AgentId::from("source"),
                 dest_agent_id: AgentId::from("dest"),
@@ -895,6 +1445,8 @@ mod tests {
         state.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
+                pause: None,
+                resumable: false,
                 progress_id: flow_id.as_transfer_id(),
                 source_agent_id: AgentId::from("source"),
                 dest_agent_id: AgentId::from("dest"),
@@ -927,7 +1479,7 @@ mod tests {
         // The destination worker is told to stop; its staging must never be published.
         assert!(matches!(
             lanes[1].priority.try_recv(),
-            Ok(ServerToAgent::Cancel { id }) if id == dest_id
+            Ok(ServerToAgent::Cancel { id, reason: CancelReason::Disconnected }) if id == dest_id
         ));
         // The source already answered, so it is not canceled again.
         assert!(lanes[0].priority.try_recv().is_err());

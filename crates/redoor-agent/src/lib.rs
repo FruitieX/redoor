@@ -82,6 +82,14 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     );
 
     let (handle, receiver, lifecycle_receiver) = AgentHandle::channel(AGENT_MAILBOX_CAPACITY);
+    let services = AgentServices::new(
+        trash,
+        redoor_core::partials::PartialStore::new(runtime.paths.data_dir()?),
+        loaded_config_path.as_deref(),
+    );
+    services
+        .start_partial_cleanup(settings.partial_max_age_days.saturating_mul(24 * 60 * 60))
+        .await;
     let agent = AgentRuntime::new(
         AgentProfile {
             agent_id: AgentId::from(settings.name.clone()),
@@ -91,7 +99,7 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
             ws_timeouts: runtime.ws_timeouts,
         },
         connection,
-        AgentServices::new(trash, loaded_config_path.as_deref()),
+        services,
         settings
             .notification_delay_seconds
             .map(tokio::time::Duration::from_secs),
@@ -161,6 +169,8 @@ struct AgentSettings {
     log_format: redoor_core::logging::LogFormat,
     /// Non-negative delay selected on the command line, or `None` when explicitly disabled.
     notification_delay_seconds: Option<u64>,
+    /// Controls durable interrupted-output retention independently of transfer activity.
+    partial_max_age_days: u64,
 }
 
 impl AgentSettings {
@@ -226,6 +236,7 @@ impl AgentSettings {
             log_level,
             log_format,
             notification_delay_seconds,
+            partial_max_age_days: agent_section.partial_max_age_days.unwrap_or(7),
         })
     }
 

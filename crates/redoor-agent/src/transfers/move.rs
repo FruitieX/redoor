@@ -55,6 +55,25 @@ impl LocalMoveError {
 }
 
 impl CopyContext<'_> {
+    /// Removes the partial of an earlier copy-and-delete attempt once a rename published the
+    /// destination, since that partial can never be resumed into it again.
+    ///
+    /// The move already succeeded, so a failure is only logged; cleanup expires the partial.
+    async fn discard_leftover_partial(&self, dest: &Path) {
+        let Some(services) = self.services else {
+            return;
+        };
+        let key = redoor_core::partials::PartialStore::key(&dest.to_string_lossy());
+        if let Err(error) = services.partial_store.discard(&key).await {
+            log!(
+                Level::Warning,
+                "Cannot discard leftover partial after rename: dest={}, error={}",
+                dest.display(),
+                error
+            );
+        }
+    }
+
     /// Moves a same-agent path atomically when possible and otherwise copies before deleting.
     pub(crate) async fn move_command(
         &self,
@@ -211,6 +230,27 @@ impl CopyContext<'_> {
         }
 
         if atomic_rename {
+            // A resumable copy into the same destination would otherwise publish over, or
+            // append to the partial of, this rename.
+            let _guard = self
+                .services
+                .map(|services| services.destination_locks.acquire(&dest.to_string_lossy()))
+                .transpose()
+                .map_err(|error| LocalCopyError::WriteDestinationFile(error.to_string()))?;
+            // A resumable move is pausable until here, so the router must close that window
+            // before the rename publishes.
+            if let Some(services) = self.services
+                && self.partial.is_some()
+            {
+                let gate = crate::transfers::upload::PublicationGate::new(
+                    &services.upload_routes,
+                    self.responder,
+                    self.cancel,
+                );
+                if !gate.authorize().await {
+                    return Err(LocalCopyError::Canceled.into());
+                }
+            }
             log!(
                 Level::Debug,
                 "Smart move attempting atomic rename: source={}, dest={}, destination_exists={}, on_existing={:?}",
@@ -234,6 +274,7 @@ impl CopyContext<'_> {
                         source.display(),
                         dest.display()
                     );
+                    self.discard_leftover_partial(&dest).await;
                     return Ok(true);
                 }
                 Ok(SameFilesystemRenameResult::Exchanged) => {
@@ -243,6 +284,7 @@ impl CopyContext<'_> {
                         source.display(),
                         dest.display()
                     );
+                    self.discard_leftover_partial(&dest).await;
                     finish_atomic_override(source, dest).await?;
                     return Ok(true);
                 }

@@ -81,6 +81,10 @@ pub(crate) enum LocalCopyError {
     ProgressChannelClosed,
     #[error("Local copy canceled because its control connection ended")]
     Canceled,
+    #[error("Transfer paused; partial kept")]
+    Paused,
+    #[error("Source changed before resumed streaming")]
+    SourceChanged,
 }
 
 impl LocalCopyError {
@@ -119,8 +123,12 @@ impl LocalCopyError {
             | Self::ReadEntryMetadata(_)
             | Self::CreateDestinationDirectory(_)
             | Self::CreateDestinationSymlink(_)
-            | Self::ProgressChannelClosed
-            | Self::Canceled => redoor_protocol::wire::command::CommandErrorKind::Internal,
+            | Self::ProgressChannelClosed => {
+                redoor_protocol::wire::command::CommandErrorKind::Internal
+            }
+            Self::Paused => redoor_protocol::wire::command::CommandErrorKind::Paused,
+            Self::SourceChanged => redoor_protocol::wire::command::CommandErrorKind::SourceChanged,
+            Self::Canceled => redoor_protocol::wire::command::CommandErrorKind::Canceled,
         }
     }
 }
@@ -420,6 +428,10 @@ async fn copy_directory_streaming(
 
 /// Cancellation and progress plumbing shared by local copy, move and trash restore.
 pub(crate) struct CopyContext<'a> {
+    pub(crate) services: Option<&'a crate::commands::ctx::AgentServices>,
+    pub(crate) registration:
+        Option<&'a crate::runtime::cancel::Registration<redoor_protocol::ids::RequestId>>,
+    pub(crate) partial: Option<&'a redoor_protocol::wire::partials::PartialTransfer>,
     pub(crate) responder: &'a Responder,
     /// Stops staging-owning work when the request is canceled or its connection ends.
     pub(crate) cancel: &'a CancellationToken,
@@ -485,6 +497,11 @@ impl CopyContext<'_> {
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
     ) -> Result<(), LocalCopyError> {
+        if let Some(transfer) = self.partial {
+            return self
+                .copy_resumable(&source_path, &dest_path, on_existing, transfer.clone())
+                .await;
+        }
         let source_metadata = tokio::fs::metadata(&source_path)
             .await
             .map_err(LocalCopyError::AccessSourceFile)?;
@@ -530,6 +547,197 @@ impl CopyContext<'_> {
             Err(_) => staging.discard().await,
         }
         result
+    }
+
+    /// Verifies whole prefix segments before appending, keeping disk access sequential.
+    async fn copy_resumable(
+        &self,
+        source: &Path,
+        dest: &Path,
+        mode: CopyExistingMode,
+        mut transfer: redoor_protocol::wire::partials::PartialTransfer,
+    ) -> Result<(), LocalCopyError> {
+        use redoor_core::partials::{PartialStore, SEGMENT_SIZE, hash_segment};
+        use redoor_protocol::wire::partials::CancelReason;
+        use tokio::io::AsyncSeekExt;
+        let error = |error: std::io::Error| LocalCopyError::WriteDestinationFile(error.to_string());
+        let services = self.services.ok_or_else(|| {
+            LocalCopyError::WriteDestinationFile("Missing partial services".into())
+        })?;
+        let guard = services
+            .destination_locks
+            .acquire(&transfer.signed.authorization.dest_path)
+            .map_err(error)?;
+        validate_local_copy_destination(source, dest, false).await?;
+        check_existing_destination(dest, mode, false).await?;
+        let mut input = File::open(source)
+            .await
+            .map_err(LocalCopyError::AccessSourceFile)?;
+        if redoor_protocol::wire::command::MoveSourceIdentity::from_metadata(
+            &input
+                .metadata()
+                .await
+                .map_err(LocalCopyError::AccessSourceFile)?,
+        ) != transfer.signed.authorization.source_identity
+        {
+            services
+                .partial_store
+                .discard(&PartialStore::key(&transfer.signed.authorization.dest_path))
+                .await
+                .map_err(error)?;
+            return Err(LocalCopyError::SourceChanged);
+        }
+        // Local verification runs under the same destination lock as the subsequent writes.
+        let key = PartialStore::key(&transfer.signed.authorization.dest_path);
+        let candidate = services.partial_store.probe(&key).await.map_err(error)?;
+        transfer.offset = if transfer.resume == redoor_protocol::api::transfers::ResumeMode::Auto {
+            candidate
+                .as_ref()
+                .filter(|record| {
+                    record.manifest.signed.authorization.source_identity
+                        == transfer.signed.authorization.source_identity
+                        && record.manifest.signed.authorization.source_path
+                            == transfer.signed.authorization.source_path
+                        && record.manifest.signed.authorization.source_agent_id
+                            == transfer.signed.authorization.source_agent_id
+                })
+                .map_or(0, |record| {
+                    record
+                        .partial_bytes
+                        .min(transfer.signed.authorization.source_identity.size)
+                        / SEGMENT_SIZE
+                        * SEGMENT_SIZE
+                })
+        } else {
+            0
+        };
+        transfer.expected_partial =
+            candidate
+                .as_ref()
+                .map(|record| redoor_protocol::wire::partials::PartialIdentity {
+                    device: record.manifest.partial_device,
+                    inode: record.manifest.partial_inode,
+                });
+        let mut output = crate::transfers::partials::PartialOutput::prepare(
+            services.partial_store.clone(),
+            guard,
+            transfer.clone(),
+        )
+        .await
+        .map_err(error)?;
+        let mut reporter = self.reporter(transfer.signed.authorization.source_identity.size);
+        let result = async {
+            let mut offset = 0;
+            self.responder
+                .verification(0, transfer.offset > 0)
+                .await
+                .map_err(|_| LocalCopyError::ProgressChannelClosed)?;
+            while offset < transfer.offset {
+                let source_hash = hash_segment(&mut input, offset, SEGMENT_SIZE, self.cancel)
+                    .await
+                    .map_err(|failure| {
+                        if failure.kind() == std::io::ErrorKind::UnexpectedEof {
+                            LocalCopyError::SourceChanged
+                        } else {
+                            LocalCopyError::ReadSourceFile(failure.to_string())
+                        }
+                    })?;
+                let partial_hash =
+                    hash_segment(&mut output.file, offset, SEGMENT_SIZE, self.cancel)
+                        .await
+                        .map_err(error)?;
+                if source_hash != partial_hash {
+                    break;
+                }
+                offset += SEGMENT_SIZE;
+                self.responder
+                    .verification(offset, true)
+                    .await
+                    .map_err(|_| LocalCopyError::ProgressChannelClosed)?;
+            }
+            self.responder
+                .verification(offset, false)
+                .await
+                .map_err(|_| LocalCopyError::ProgressChannelClosed)?;
+            // Prefix verification may take minutes; recheck before combining it with the tail.
+            if redoor_protocol::wire::command::MoveSourceIdentity::from_metadata(
+                &input
+                    .metadata()
+                    .await
+                    .map_err(LocalCopyError::AccessSourceFile)?,
+            ) != transfer.signed.authorization.source_identity
+            {
+                return Err(LocalCopyError::SourceChanged);
+            }
+            output.file.set_len(offset).await.map_err(error)?;
+            output
+                .file
+                .seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(error)?;
+            input
+                .seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(error)?;
+            reporter.transferred_bytes = offset;
+            let mut buffer = vec![0; 1024 * 1024];
+            loop {
+                ensure_active(self.cancel)?;
+                let count = input
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| LocalCopyError::ReadSourceFile(error.to_string()))?;
+                if count == 0 {
+                    break;
+                }
+                output
+                    .file
+                    .write_all(&buffer[..count])
+                    .await
+                    .map_err(error)?;
+                reporter.advance(count as u64).await?;
+            }
+            output.file.sync_all().await.map_err(error)?;
+            reporter.finish().await?;
+            let gate = crate::transfers::upload::PublicationGate::new(
+                &services.upload_routes,
+                self.responder,
+                self.cancel,
+            );
+            if !gate.authorize().await {
+                return Err(LocalCopyError::Canceled);
+            }
+            place_temp_at_destination(Path::new(&output.manifest.partial_path), dest, mode, false)
+                .await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                output.published().await;
+                Ok(())
+            }
+            Err(failure) => {
+                let reason = if matches!(failure, LocalCopyError::SourceChanged) {
+                    CancelReason::Canceled
+                } else if self.cancel.is_cancelled() {
+                    self.registration
+                        .map_or(CancelReason::Canceled, |registration| registration.reason())
+                } else {
+                    CancelReason::Disconnected
+                };
+                output.stop(reason).await.map_err(error)?;
+                if reason == CancelReason::Paused {
+                    Err(LocalCopyError::Paused)
+                } else if reason == CancelReason::Canceled {
+                    Err(failure)
+                } else {
+                    Err(LocalCopyError::WriteDestinationFile(format!(
+                        "{failure}; partial kept"
+                    )))
+                }
+            }
+        }
     }
 
     /// Copies a symbolic link itself through a hidden name instead of dereferencing its target.
@@ -661,6 +869,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = CopyContext {
+            services: None,
+            registration: None,
+            partial: None,
             responder: &responder,
             cancel: &cancel,
         }
@@ -746,6 +957,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         CopyContext {
+            services: None,
+            registration: None,
+            partial: None,
             responder: &responder,
             cancel: &cancel,
         }
@@ -777,6 +991,9 @@ mod tests {
         let (responder, _frames) = Responder::recording(RequestId::new(43), 1);
         let cancel = CancellationToken::new();
         let context = CopyContext {
+            services: None,
+            registration: None,
+            partial: None,
             responder: &responder,
             cancel: &cancel,
         };

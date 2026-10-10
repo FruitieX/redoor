@@ -58,6 +58,17 @@ pub(crate) trait UploadSink: Send + Sized {
         gate: PublicationGate<'_>,
     ) -> impl Future<Output = Result<(), AgentCommandError>> + Send;
 
+    /// Resumable sinks persist on pause or interruption; ordinary sinks retain cleanup behavior.
+    fn stop(
+        self,
+        _reason: redoor_protocol::wire::partials::CancelReason,
+    ) -> impl Future<Output = Result<(), AgentCommandError>> + Send {
+        async move {
+            self.abort().await;
+            Ok(())
+        }
+    }
+
     /// Discards staged output after cancellation or failure.
     fn abort(self) -> impl Future<Output = ()> + Send;
 }
@@ -243,7 +254,7 @@ impl UploadDriver {
             }
         };
 
-        let result = match stop {
+        let result = match &stop {
             UploadStop::Canceled => {
                 log!(
                     Level::Info,
@@ -257,16 +268,33 @@ impl UploadDriver {
                     format!("{} canceled by server", self.subject()),
                 ))
             }
-            UploadStop::Failed(error) => Err(error.into()),
+            UploadStop::Failed(error) => Err(CommandError::new(error.kind(), error.to_string())),
         };
         // Unroute before the possibly slow abort so the reader drops late frames instead of
         // queueing them for a worker that stopped reading. Late frames for an unrouted request
         // are dropped.
         drop(route);
         drop(chunks);
-        sink.abort().await;
+        let reason = if matches!(stop, UploadStop::Canceled) {
+            self.ctx.registration.as_ref().map_or(
+                redoor_protocol::wire::partials::CancelReason::Canceled,
+                |registration| registration.reason(),
+            )
+        } else {
+            redoor_protocol::wire::partials::CancelReason::Disconnected
+        };
+        if let Err(error) = sink.stop(reason).await {
+            return Err(error.into());
+        }
         drop(self.ctx);
-        result
+        if reason == redoor_protocol::wire::partials::CancelReason::Paused {
+            Err(CommandError::new(
+                CommandErrorKind::Paused,
+                "Transfer paused; partial kept",
+            ))
+        } else {
+            result
+        }
     }
 
     /// Waits for the next chunk or cancellation, preferring an already queued terminal frame
@@ -583,7 +611,10 @@ mod tests {
             Some(redoor_protocol::wire::AgentToServer::Credit { .. })
         ));
 
-        harness.registry.cancel(&RequestId::new(5));
+        harness.registry.cancel_with_reason(
+            &RequestId::new(5),
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
         let result = harness.task.await.unwrap();
 
         // Staging is discarded after unrouting but while the request is still cancelable.
@@ -609,7 +640,10 @@ mod tests {
         let (release, abort_release) = oneshot::channel();
         let mut harness = start_with(Some((started, abort_release)));
         harness.frames.recv().await.unwrap();
-        harness.registry.cancel(&RequestId::new(5));
+        harness.registry.cancel_with_reason(
+            &RequestId::new(5),
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
         abort_started.await.unwrap();
         let (control, mut control_frames) = mpsc::channel(4);
         // More frames than the queue holds: with the route still registered the reader would

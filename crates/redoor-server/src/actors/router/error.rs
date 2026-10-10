@@ -7,6 +7,9 @@ use thiserror::Error;
 /// HTTP layer chooses the final status code and response message.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RouterError {
+    /// Verification and streaming must not admit competing writers to one destination.
+    #[error("destination has an active transfer: {path}")]
+    DestinationBusy { path: String },
     /// The requested agent or transfer target no longer exists in router state.
     #[error("Agent not found: {agent_id}")]
     AgentNotFound { agent_id: String },
@@ -57,6 +60,7 @@ impl RouterError {
             Self::StreamLimitReached { .. } | Self::ControlQueueFull { .. } => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            Self::DestinationBusy { .. } => StatusCode::CONFLICT,
             Self::ClientCanceledUpload => StatusCode::BAD_REQUEST,
             Self::UploadForwardFailed { .. }
             | Self::RouterStopped { .. }

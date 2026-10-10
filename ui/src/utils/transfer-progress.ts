@@ -12,6 +12,8 @@ export function getTransferSpeedBytesPerSecond(
     transfer: TransferProgressEntry,
     measuredAtMilliseconds: number = Date.now(),
 ): number | null {
+    if (transfer.verifying) return null;
+
     const endTime =
         transfer.ended_at === null || transfer.ended_at === undefined
             ? measuredAtMilliseconds / 1000
@@ -30,7 +32,12 @@ export function getTransferSpeedBytesPerSecond(
         return null;
     }
 
-    return transfer.transferred_bytes / elapsedSeconds;
+    return (
+        Math.max(
+            0,
+            transfer.transferred_bytes - (transfer.resumed_bytes ?? 0),
+        ) / elapsedSeconds
+    );
 }
 
 /** Projects progress from one API snapshot while reserving 100% for API-confirmed completion. */

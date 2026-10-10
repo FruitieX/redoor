@@ -25,6 +25,7 @@ mod mcp_tokens;
 mod moves;
 #[cfg(target_os = "linux")]
 mod pam;
+mod partials;
 mod protocol_mismatches;
 mod raw;
 mod restart;
@@ -35,6 +36,7 @@ pub(crate) mod services;
 pub mod state;
 mod terminals;
 mod transfer_cancellation;
+mod transfer_pause;
 mod transfer_progress;
 mod trash;
 mod ui;

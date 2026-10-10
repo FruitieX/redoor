@@ -256,6 +256,22 @@ impl Responder {
         .map_err(|_| ControlClosed)
     }
 
+    /// Verification progress must not be mistaken for network throughput.
+    pub(crate) async fn verification(
+        &self,
+        bytes: u64,
+        verifying: bool,
+    ) -> Result<(), ControlClosed> {
+        self.send(OutboundFrame::message(
+            AgentToServer::TransferVerification {
+                id: self.request_id,
+                bytes,
+                verifying,
+            },
+        ))
+        .await
+    }
+
     /// Reports byte progress (or a late-discovered total) for router-managed transfers.
     pub(crate) async fn progress(
         &self,

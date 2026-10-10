@@ -200,6 +200,7 @@ mod tests {
         let retained = lanes
             .queue_priority(ServerToAgent::Cancel {
                 id: RequestId::new(3),
+                reason: redoor_protocol::wire::partials::CancelReason::Canceled,
             })
             .unwrap();
         // The frame waits in a task rather than being lost to momentary saturation.
@@ -211,7 +212,7 @@ mod tests {
         // Draining one slot delivers the retained cancel, as a typed frame.
         assert!(matches!(
             receivers.priority.recv().await,
-            Some(ServerToAgent::Cancel { id: request_id }) if request_id == RequestId::new(3)
+            Some(ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled }) if request_id == RequestId::new(3)
         ));
         drop(receivers);
         // A closed lane is reported so callers can keep their state retryable.
@@ -230,17 +231,18 @@ mod tests {
         for id in [1, 2] {
             assert!(lanes.try_priority_or_command(ServerToAgent::Cancel {
                 id: RequestId::new(id),
+                reason: redoor_protocol::wire::partials::CancelReason::Canceled
             }));
         }
         // The first cancel took the priority lane.
         assert!(matches!(
             receivers.priority.try_recv(),
-            Ok(ServerToAgent::Cancel { id: request_id }) if request_id == RequestId::new(1)
+            Ok(ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled }) if request_id == RequestId::new(1)
         ));
         // The second still reached the agent through the command lane.
         assert!(matches!(
             receivers.commands.try_recv(),
-            Ok(QueuedCommand { frame: ServerToAgent::Cancel { id: request_id }, .. })
+            Ok(QueuedCommand { frame: ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled }, .. })
                 if request_id == RequestId::new(2)
         ));
     }
@@ -252,11 +254,13 @@ mod tests {
         let withdrawn = lanes
             .try_tracked_command(ServerToAgent::Cancel {
                 id: RequestId::new(1),
+                reason: redoor_protocol::wire::partials::CancelReason::Canceled,
             })
             .unwrap();
         let written = lanes
             .try_tracked_command(ServerToAgent::Cancel {
                 id: RequestId::new(2),
+                reason: redoor_protocol::wire::partials::CancelReason::Canceled,
             })
             .unwrap();
         // A cancel before the writer took the command removes it without wire traffic.

@@ -8,6 +8,7 @@ import {
     MoveRight,
     CircleX,
     FilePenLine,
+    Pause,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ApiClient, type TransferProgressEntry } from "#ui/api-client";
@@ -246,7 +247,9 @@ function TransferStatusCell(props: { transfer: TransferProgressEntry }) {
                               : "text-slate-100"
                     }`}
                 >
-                    {props.transfer.state}
+                    {props.transfer.verifying
+                        ? "verifying"
+                        : props.transfer.state}
                 </span>
                 {props.transfer.error ? (
                     <span className="inline-flex max-w-xs items-start gap-1 text-xs text-red-400">
@@ -266,9 +269,20 @@ function TransferActionsCell(props: {
     transfer: TransferProgressEntry;
     disabled: boolean;
     onCancel: () => void;
+    onPause: () => void;
 }) {
     return (
         <td className="p-3 text-right">
+            {props.transfer.pausable && props.transfer.state === "active" ? (
+                <IconButton
+                    type="button"
+                    label="Pause transfer"
+                    disabled={props.disabled}
+                    onClick={props.onPause}
+                >
+                    <Pause className="h-4 w-4" />
+                </IconButton>
+            ) : null}
             {props.transfer.cancelable && props.transfer.state === "active" ? (
                 <IconButton
                     type="button"
@@ -376,6 +390,26 @@ function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
     );
 }
 
+/** Pause refreshes both live history and durable discovery after acknowledgement. */
+function usePauseTransfer(props: { api: ApiClient; onPaused: () => void }) {
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationFn: (transferId: number) => props.api.pauseTransfer(transferId),
+        onSuccess: async () => {
+            await Promise.all([
+                queryClient.invalidateQueries({
+                    queryKey: queryKeys.transfers(),
+                }),
+                queryClient.invalidateQueries({
+                    queryKey: queryKeys.partials(),
+                }),
+            ]);
+            props.onPaused();
+        },
+    });
+}
+
 export function TransferList(props: {
     api: ApiClient;
     agents: Awaited<ReturnType<ApiClient["listAgents"]>>;
@@ -398,6 +432,11 @@ export function TransferList(props: {
             setSelectedTransfer(null);
             setToastMessage("Transfer cancellation requested");
         },
+    });
+
+    const pauseMutation = usePauseTransfer({
+        api: props.api,
+        onPaused: () => setToastMessage("Transfer paused"),
     });
 
     if (props.transfers.length === 0) {
@@ -524,7 +563,15 @@ export function TransferList(props: {
                                 <TransferStatusCell transfer={transfer} />
                                 <TransferActionsCell
                                     transfer={transfer}
-                                    disabled={cancelMutation.isPending}
+                                    disabled={
+                                        cancelMutation.isPending ||
+                                        pauseMutation.isPending
+                                    }
+                                    onPause={() =>
+                                        pauseMutation.mutate(
+                                            transfer.request_id,
+                                        )
+                                    }
                                     onCancel={() => {
                                         cancelMutation.reset();
                                         setSelectedTransfer(transfer);
@@ -535,6 +582,11 @@ export function TransferList(props: {
                     })}
                 </tbody>
             </table>
+            {pauseMutation.error ? (
+                <Toast tone="error" onDismiss={() => pauseMutation.reset()}>
+                    {pauseMutation.error.message}
+                </Toast>
+            ) : null}
             <TransferCancellationDialog
                 isOpen={selectedTransfer !== null}
                 isBusy={cancelMutation.isPending}

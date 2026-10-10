@@ -11,6 +11,8 @@ pub mod desktop;
 pub mod destination;
 pub mod identity;
 pub mod logging;
+pub mod partial_signatures;
+pub mod partials;
 pub mod paths;
 pub mod process;
 pub mod runtime;

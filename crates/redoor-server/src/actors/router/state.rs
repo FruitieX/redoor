@@ -144,6 +144,7 @@ impl CopyContentKind {
     ) -> Command {
         match self {
             Self::RawFile => Command::RawUpload(request::RawUpload {
+                partial: None,
                 path,
                 on_existing,
                 ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),
@@ -156,6 +157,7 @@ impl CopyContentKind {
     pub(crate) fn download_command(self, path: String) -> Command {
         match self {
             Self::RawFile => Command::RawDownload(request::RawDownload {
+                expected_identity: None,
                 path,
                 range_start: None,
                 range_end: None,

@@ -308,8 +308,8 @@ pub struct CommitDirectUploadRequest {
     pub reply: RouterReply<Result<(), RouterError>>,
 }
 
-/// Starts a local or remote copy operation managed by the router.
-pub struct StartCopyRequest {
+/// What a copy reads and writes, kept by a flow that starts its data path only later.
+pub struct CopyTarget {
     /// Source agent that provides the file or directory contents.
     pub source_agent_id: AgentId,
     /// Source path to copy from.
@@ -326,8 +326,26 @@ pub struct StartCopyRequest {
     pub on_existing: redoor_protocol::api::transfers::CopyExistingMode,
     /// Selects whether copy completion is final or followed by source deletion.
     pub operation: super::state::CopyOperation,
-    /// Prevents move cleanup from deleting a replacement created while copying.
+    /// Prevents move cleanup from deleting a replacement created while copying, and a ranged
+    /// resume from appending bytes of a different source.
     pub source_identity: Option<redoor_protocol::wire::command::MoveSourceIdentity>,
+    /// Signed durable staging, used only for regular file copies and moves.
+    pub partial: Option<Box<redoor_protocol::wire::partials::PartialTransfer>>,
+}
+
+/// A destination partial whose prefix must match the source before a remote copy appends.
+pub struct ResumeVerification {
+    /// Agent-local manifest key of the destination partial.
+    pub key: String,
+    /// Whole-segment prefix length to compare; a torn tail is re-sent instead of hashed.
+    pub end: u64,
+}
+
+/// Starts a local or remote copy operation managed by the router.
+pub struct StartCopyRequest {
+    pub target: CopyTarget,
+    /// Present when a remote copy can continue an existing partial.
+    pub resume_verification: Option<ResumeVerification>,
     /// Retains terminal progress independently of the prunable public history.
     pub terminal: Option<
         tokio::sync::watch::Sender<Option<redoor_protocol::api::transfers::TransferProgressEntry>>,
@@ -452,6 +470,18 @@ pub enum RouterMsg {
     CancelTransfer {
         agent_id: AgentId,
         request_id: RequestId,
+    },
+    /// Prefix verification progress of an agent-local resumable copy.
+    LocalVerification {
+        agent_id: AgentId,
+        request_id: RequestId,
+        bytes: u64,
+        verifying: bool,
+    },
+    /// Replies only when the destination has durably stopped, without retaining resume state.
+    PauseTransfer {
+        transfer_id: TransferId,
+        reply: RouterReply<Result<(), String>>,
     },
     CancelPublicTransfer {
         transfer_id: TransferId,

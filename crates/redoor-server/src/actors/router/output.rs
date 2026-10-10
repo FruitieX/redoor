@@ -228,7 +228,11 @@ impl RouterState {
             return Ok(());
         }
         let (agent_id, request_id) = (flow.agent_id.clone(), flow.request_id);
-        let retained_delivery = self.cancel_on_agent(&agent_id, request_id)?;
+        let retained_delivery = self.cancel_on_agent(
+            &agent_id,
+            request_id,
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        )?;
         if let Some(Flow::Output(flow)) = self.flows.get_mut(flow_id) {
             flow.phase = OutputPhase::Canceling { retained_delivery };
             flow.lease.stop();
@@ -407,7 +411,7 @@ mod tests {
         fixture.priority.recv().await.unwrap();
         assert!(matches!(
             fixture.priority.recv().await,
-            Some(ServerToAgent::Cancel { id: request_id }) if request_id == id
+            Some(ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled }) if request_id == id
         ));
         assert!(fixture.priority.try_recv().is_err());
         // The stopped stream ends for the consumer without waiting for more output.
@@ -476,7 +480,7 @@ mod tests {
         assert_eq!(fixture.cancel(id), Ok(true));
         assert!(matches!(
             receivers.priority.recv().await,
-            Some(ServerToAgent::Cancel { id: request_id }) if request_id == id
+            Some(ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled }) if request_id == id
         ));
     }
 
@@ -628,7 +632,7 @@ mod tests {
         // The worker is told to stop because its frames are no longer routed.
         assert!(matches!(
             fixture.priority.try_recv(),
-            Ok(ServerToAgent::Cancel { id: request_id }) if request_id == id
+            Ok(ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled }) if request_id == id
         ));
         let mut last = None;
         while let Some(item) = output.recv().await {

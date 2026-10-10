@@ -57,10 +57,15 @@ impl Sessions {
     /// is simply ignored, with no state kept. Terminals and log streams give up their slot at
     /// once, because the server frees its own slot when it sends the cancel and may open a
     /// replacement right away.
-    pub(crate) fn cancel_request(&mut self, request_id: RequestId) {
+    /// Workers need the disposition before their cancellation token wakes.
+    pub(crate) fn cancel_request_with_reason(
+        &mut self,
+        request_id: RequestId,
+        reason: redoor_protocol::wire::partials::CancelReason,
+    ) {
         if self.terminals.revoke(&request_id)
             || self.log_streams.revoke(&request_id)
-            || self.requests.cancel(&request_id)
+            || self.requests.cancel_with_reason(&request_id, reason)
         {
             log!(
                 Level::Info,
@@ -89,7 +94,10 @@ mod tests {
         let request = sessions.requests.register(RequestId::new(1)).unwrap();
         let terminal = sessions.terminals.register(RequestId::new(2)).unwrap();
 
-        sessions.cancel_request(RequestId::new(2));
+        sessions.cancel_request_with_reason(
+            RequestId::new(2),
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
 
         // The server closes a terminal stream with the same cancel frame it uses for requests.
         assert!(terminal.token().is_cancelled());
@@ -105,7 +113,10 @@ mod tests {
     #[test]
     fn cancel_of_a_finished_request_is_ignored() {
         let mut sessions = Sessions::new(UploadRoutes::default());
-        sessions.cancel_request(RequestId::new(5));
+        sessions.cancel_request_with_reason(
+            RequestId::new(5),
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
         let registration = sessions.requests.register(RequestId::new(5)).unwrap();
         // No tombstone exists, so a later command with the same id is not pre-canceled.
         assert!(!registration.token().is_cancelled());

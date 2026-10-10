@@ -228,6 +228,8 @@ pub struct ServerSection {
 /// to the computer hostname.
 #[derive(Debug, Clone, Default)]
 pub struct AgentSection {
+    /// Bounds disk retention of interrupted transfers; defaults to seven days.
+    pub partial_max_age_days: Option<u64>,
     /// Redoor server URL (`http(s)://` or `ws(s)://`); path optional and forced to the agent endpoint.
     pub server: Option<String>,
     /// Registration name; defaults to the hostname.

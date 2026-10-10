@@ -20,12 +20,12 @@ mod ui;
 pub use error::RouterError;
 pub use messages::{
     AgentListEntry, ApplyManagedLifecycleRequest, CancelPublicTransferError,
-    CommitDirectUploadRequest, ExecuteCommandRequest, ExecuteStreamRequest, LogStream,
+    CommitDirectUploadRequest, CopyTarget, ExecuteCommandRequest, ExecuteStreamRequest, LogStream,
     OpenAgentLogStreamRequest, OpenTerminalRequest, OutboundFailure, OutboundFailureReason,
     OutputStreamTracking, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterUiSubscriberRequest, RegistrationRejection, RouteResponse, RouteTransferReadyRequest,
-    RouterMsg, StartCopyRequest, StartUploadRequest, TerminalStream, TransferProgressUpdateRequest,
-    UnregisterManagedAgentRequest, UploadStartOutcome,
+    RegisterUiSubscriberRequest, RegistrationRejection, ResumeVerification, RouteResponse,
+    RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest, TerminalStream,
+    TransferProgressUpdateRequest, UnregisterManagedAgentRequest, UploadStartOutcome,
 };
 pub use state::CopyContentKind;
 pub use state::CopyOperation;
@@ -367,6 +367,15 @@ impl RouterState {
                 agent_id,
                 request_id,
             } => self.cancel_transfer(request_id, agent_id),
+            RouterMsg::LocalVerification {
+                agent_id,
+                request_id,
+                bytes,
+                verifying,
+            } => self.update_local_verification(&agent_id, request_id, bytes, verifying),
+            RouterMsg::PauseTransfer { transfer_id, reply } => {
+                self.pause_transfer(transfer_id, reply)
+            }
             RouterMsg::CancelPublicTransfer { transfer_id, reply } => {
                 let _ = reply.send(self.cancel_public_transfer(transfer_id));
             }
@@ -607,6 +616,7 @@ mod tests {
                 RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
                     command: Command::RawDownload(request::RawDownload {
+                        expected_identity: None,
                         path: "/tmp/big.bin".to_string(),
                         range_start: None,
                         range_end: None,

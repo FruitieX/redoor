@@ -79,6 +79,7 @@ async fn download_editable_file(
         &state.router_ref,
         endpoint.agent.clone(),
         Command::RawDownload(request::RawDownload {
+            expected_identity: None,
             path: endpoint.path.clone(),
             range_start: None,
             range_end: None,

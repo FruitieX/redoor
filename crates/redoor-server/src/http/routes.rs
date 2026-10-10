@@ -251,6 +251,14 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
             "/api/v1/agents/{agent}/trash/restore",
             post(restore_trash_handler),
         )
+        .route("/api/v1/partials", get(super::partials::list))
+        .route("/api/v1/partials/resume", post(super::partials::resume))
+        .route("/api/v1/partials/discard", post(super::partials::discard))
+        .route("/api/v1/copy/preflight", post(super::partials::preflight))
+        .route(
+            "/api/v1/transfers/{transfer_id}/pause",
+            post(super::transfer_pause::pause),
+        )
         .route("/api/v1/copy", post(copy_file_handler))
         .route("/api/v1/move", post(move_file_handler))
         .route("/api/v1/diff", post(diff_files_handler))

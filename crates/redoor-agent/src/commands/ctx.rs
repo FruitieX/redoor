@@ -30,6 +30,10 @@ const CONTENT_GREP_SLOTS: usize = 4;
 /// Long-lived agent facilities shared by every command of every connection.
 #[derive(Clone)]
 pub(crate) struct AgentServices {
+    /// Manifests of resumable partials in the agent data dir; the only resume state.
+    pub(crate) partial_store: redoor_core::partials::PartialStore,
+    /// Destinations with a running transfer; process-local, so empty after a restart.
+    pub(crate) destination_locks: crate::transfers::partials::DestinationLocks,
     /// Platform trash provider selected once at startup.
     pub(crate) trash: Trash,
     /// Bounds concurrent content greps without imposing latest-wins cancellation.
@@ -47,9 +51,16 @@ pub(crate) struct AgentServices {
 }
 
 impl AgentServices {
-    /// Bundles the startup-selected trash provider and config origin with fresh shared state.
-    pub(crate) fn new(trash: Trash, loaded_config_path: Option<&std::path::Path>) -> Self {
+    /// Bundles the startup-selected trash provider, partial store and config origin with fresh
+    /// shared state.
+    pub(crate) fn new(
+        trash: Trash,
+        partial_store: redoor_core::partials::PartialStore,
+        loaded_config_path: Option<&std::path::Path>,
+    ) -> Self {
         Self {
+            partial_store,
+            destination_locks: Default::default(),
             trash,
             grep_slots: Arc::new(Semaphore::new(CONTENT_GREP_SLOTS)),
             upload_routes: UploadRoutes::default(),
@@ -61,6 +72,34 @@ impl AgentServices {
                 .unwrap_or_default()
                 .into(),
         }
+    }
+
+    /// Expires partials of abandoned transfers at startup and then daily.
+    ///
+    /// The startup sweep finishes before the agent connects, so an expired partial is never
+    /// offered for resume. Failures are logged rather than fatal: a leftover partial must not
+    /// keep the agent from starting.
+    pub(crate) async fn start_partial_cleanup(&self, max_age_seconds: u64) {
+        const PERIOD: tokio::time::Duration = tokio::time::Duration::from_secs(24 * 60 * 60);
+        let store = self.partial_store.clone();
+        let locks = self.destination_locks.clone();
+        if let Err(error) = store.cleanup(max_age_seconds, |_| false).await {
+            log!(Level::Warning, "Partial cleanup failed: {}", error);
+        }
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + PERIOD, PERIOD);
+            loop {
+                interval.tick().await;
+                // Active transfers keep their partial however long they run.
+                if let Err(error) = store
+                    .cleanup(max_age_seconds, |path| locks.contains(path))
+                    .await
+                {
+                    log!(Level::Warning, "Partial cleanup failed: {}", error);
+                }
+            }
+        });
     }
 }
 
@@ -112,6 +151,9 @@ impl CommandCtx {
         CopyContext {
             responder: &self.responder,
             cancel: &self.cancel,
+            services: Some(&self.services),
+            registration: self.registration.as_ref(),
+            partial: None,
         }
     }
 
@@ -159,7 +201,12 @@ impl CommandCtx {
                 registration: None,
                 bulk: None,
                 credit: 0,
-                services: AgentServices::new(Trash::unsupported(), None),
+                // Never created: a test that writes partials must choose its own directory.
+                services: AgentServices::new(
+                    Trash::unsupported(),
+                    redoor_core::partials::PartialStore::new("/nonexistent/redoor-agent".into()),
+                    None,
+                ),
             },
             frames,
         )

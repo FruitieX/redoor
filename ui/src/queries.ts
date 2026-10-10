@@ -41,6 +41,8 @@ export const queryKeys = {
     all: ["server-state"] as const,
     agents: () => [...queryKeys.all, "agents"] as const,
     transfers: () => [...queryKeys.all, "transfers"] as const,
+    /** Resumable partials, rediscovered from the connected destination agents. */
+    partials: () => [...queryKeys.all, "partials"] as const,
     serverInfo: () => [...queryKeys.all, "server-info"] as const,
     protocolMismatches: () =>
         [...queryKeys.all, "protocol-mismatches"] as const,
@@ -316,5 +318,14 @@ export function contentGrepQueryOptions(
             }),
         enabled: search.query.trim() !== "",
         placeholderData: keepPreviousData,
+    });
+}
+
+/** Polling also rediscovers partials when a destination reconnects after a crash. */
+export function partialsQueryOptions(api: ApiClient) {
+    return queryOptions({
+        queryKey: queryKeys.partials(),
+        queryFn: () => api.listPartials(),
+        refetchInterval: 5000,
     });
 }

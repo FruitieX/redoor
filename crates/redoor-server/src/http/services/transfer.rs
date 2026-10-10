@@ -1,18 +1,25 @@
 //! Starting copies and moves between agent paths, shared by REST copy, REST move and MCP.
 
 use crate::actors::router::{
-    CopyContentKind, CopyOperation, RouterHandle, RouterMsg, StartCopyRequest,
+    CopyContentKind, CopyOperation, CopyTarget, ResumeVerification, RouterHandle, RouterMsg,
+    StartCopyRequest,
 };
 use crate::http::{
-    agent_client::{AgentClient, Metadata, MoveMetadata},
+    agent_client::{AgentClient, MoveMetadata},
     agent_helpers::require_absolute_path,
     error::ApiError,
 };
-use redoor_core::log;
+use redoor_core::{log, partials::SEGMENT_SIZE};
 use redoor_protocol::{
-    api::transfers::{CopyEndpoint, CopyExistingMode, TransferProgressEntry},
+    api::transfers::{CopyEndpoint, CopyExistingMode, ResumeMode, TransferProgressEntry},
     ids::TransferId,
-    wire::{command::MoveSourceIdentity, log::Level},
+    wire::{
+        command::MoveSourceIdentity,
+        log::Level,
+        partials::{
+            PartialAuthorization, PartialIdentity, PartialOperation, PartialTransfer, SignedPartial,
+        },
+    },
 };
 use tokio::sync::watch;
 
@@ -23,6 +30,8 @@ pub(crate) struct CopySpec {
     pub(crate) source: CopyEndpoint,
     pub(crate) dest: CopyEndpoint,
     pub(crate) on_existing: CopyExistingMode,
+    /// Auto continues a verified partial; restart discards it.
+    pub(crate) resume: ResumeMode,
     /// Whether the caller needs the terminal outcome after public history may be pruned (MCP
     /// operation records); REST clients poll the progress API instead.
     pub(crate) observe_terminal: bool,
@@ -40,7 +49,7 @@ pub(crate) struct StartedCopy {
 struct SourceShape {
     total_bytes: u64,
     content_kind: CopyContentKind,
-    identity: Option<MoveSourceIdentity>,
+    identity: MoveSourceIdentity,
 }
 
 /// Admits copies and moves; the router runs them.
@@ -48,12 +57,17 @@ struct SourceShape {
 pub(crate) struct TransferService {
     agents: AgentClient,
     router: RouterHandle,
+    /// Shared so the lazily loaded key is read from disk once per server process.
+    signer: std::sync::Arc<redoor_core::partial_signatures::PartialSigner>,
 }
 
 impl TransferService {
     /// Creates the service on the shared router.
-    pub(crate) fn new(router: RouterHandle) -> Self {
+    pub(crate) fn new(router: RouterHandle, data_dir: std::path::PathBuf) -> Self {
         Self {
+            signer: std::sync::Arc::new(redoor_core::partial_signatures::PartialSigner::new(
+                data_dir,
+            )),
             agents: AgentClient::new(router.clone()),
             router,
         }
@@ -61,11 +75,11 @@ impl TransferService {
 
     /// Validates the endpoints, inspects the source and starts the transfer.
     ///
-    /// Moves read the source's filesystem identity so the router deletes only the object it
-    /// copied, never a replacement created meanwhile.
+    /// The source's filesystem identity lets the router delete only the object a move copied,
+    /// and binds a resumable partial to the exact source it was copied from.
     pub(crate) async fn start_copy(&self, spec: CopySpec) -> Result<StartedCopy, ApiError> {
-        let source_path = require_absolute_path(spec.source.path)?;
-        let dest_path = require_absolute_path(spec.dest.path)?;
+        let source_path = require_absolute_path(spec.source.path.clone())?;
+        let dest_path = require_absolute_path(spec.dest.path.clone())?;
         if spec.source.agent == spec.dest.agent && source_path == dest_path {
             return Err(ApiError::bad_request(
                 "Source and destination must be different",
@@ -74,6 +88,43 @@ impl TransferService {
         let source = self
             .inspect_source(spec.op, &spec.source.agent, &source_path)
             .await?;
+        let mut partial = match source.content_kind {
+            CopyContentKind::RawFile => Some(Box::new(PartialTransfer {
+                signed: self
+                    .sign_partial(&spec, &source_path, &dest_path, &source.identity)
+                    .await?,
+                resume: spec.resume,
+                offset: 0,
+                expected_partial: None,
+            })),
+            CopyContentKind::TarDirectory => None,
+        };
+        // Same-agent copies verify inside the agent's own command, without router round trips.
+        let resume_verification = if spec.source.agent != spec.dest.agent
+            && spec.resume == ResumeMode::Auto
+            && let Some(partial) = &mut partial
+            && let Some(record) = self
+                .candidate(
+                    &spec.source.agent,
+                    &source_path,
+                    &spec.dest.agent,
+                    &dest_path,
+                    &source.identity,
+                )
+                .await?
+        {
+            // The destination must reopen exactly the inode whose prefix gets verified.
+            partial.expected_partial = Some(PartialIdentity {
+                device: record.manifest.partial_device,
+                inode: record.manifest.partial_inode,
+            });
+            Some(ResumeVerification {
+                end: record.partial_bytes.min(source.identity.size) / SEGMENT_SIZE * SEGMENT_SIZE,
+                key: record.key,
+            })
+        } else {
+            None
+        };
         let (terminal, terminal_receiver) = if spec.observe_terminal {
             let (sender, receiver) = watch::channel(None);
             (Some(sender), Some(receiver))
@@ -84,15 +135,19 @@ impl TransferService {
             .router
             .request(|reply| {
                 RouterMsg::StartCopyRest(StartCopyRequest {
-                    source_agent_id: spec.source.agent.clone(),
-                    source_path: source_path.clone(),
-                    dest_agent_id: spec.dest.agent.clone(),
-                    dest_path: dest_path.clone(),
-                    total_bytes: source.total_bytes,
-                    content_kind: source.content_kind,
-                    on_existing: spec.on_existing,
-                    operation: spec.op,
-                    source_identity: source.identity,
+                    target: CopyTarget {
+                        source_agent_id: spec.source.agent.clone(),
+                        source_path: source_path.clone(),
+                        dest_agent_id: spec.dest.agent.clone(),
+                        dest_path: dest_path.clone(),
+                        total_bytes: source.total_bytes,
+                        content_kind: source.content_kind,
+                        on_existing: spec.on_existing,
+                        operation: spec.op,
+                        source_identity: Some(source.identity),
+                        partial,
+                    },
+                    resume_verification,
                     terminal,
                     reply,
                 })
@@ -115,6 +170,98 @@ impl TransferService {
         })
     }
 
+    /// Authorizes the destination to keep a resumable partial of exactly this source.
+    async fn sign_partial(
+        &self,
+        spec: &CopySpec,
+        source_path: &str,
+        dest_path: &str,
+        identity: &MoveSourceIdentity,
+    ) -> Result<SignedPartial, ApiError> {
+        self.signer
+            .sign(PartialAuthorization {
+                version: 1,
+                source_agent_id: spec.source.agent.clone(),
+                source_path: source_path.to_string(),
+                source_identity: identity.clone(),
+                dest_agent_id: spec.dest.agent.clone(),
+                dest_path: dest_path.to_string(),
+                operation: match spec.op {
+                    CopyOperation::Copy => PartialOperation::Copy,
+                    CopyOperation::Move => PartialOperation::Move,
+                },
+                on_existing: spec.on_existing,
+                created_at: redoor_core::partials::now(),
+            })
+            .await
+            .map_err(|error| ApiError::internal(format!("Cannot sign partial: {error}")))
+    }
+
+    /// Verifies server authorization and binds it to the agent returning the manifest.
+    pub(crate) async fn verify(
+        &self,
+        agent: &redoor_protocol::ids::AgentId,
+        record: &redoor_protocol::wire::partials::PartialRecord,
+    ) -> Result<bool, ApiError> {
+        let valid = &record.manifest.signed.authorization.dest_agent_id == agent
+            && self
+                .signer
+                .verify(&record.manifest.signed)
+                .await
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if !valid {
+            log!(
+                Level::Info,
+                "Ignoring unverifiable partial: agent={}, key={}",
+                agent,
+                record.key
+            );
+        }
+        Ok(valid)
+    }
+
+    /// Preflight and ordinary copy share identity comparison; neither hashes here.
+    pub(crate) async fn candidate(
+        &self,
+        source_agent: &redoor_protocol::ids::AgentId,
+        source_path: &str,
+        dest_agent: &redoor_protocol::ids::AgentId,
+        dest_path: &str,
+        identity: &MoveSourceIdentity,
+    ) -> Result<Option<redoor_protocol::wire::partials::PartialRecord>, ApiError> {
+        let candidate = self
+            .agents
+            .call(
+                dest_agent,
+                crate::http::agent_client::ProbePartial {
+                    dest_path: dest_path.into(),
+                },
+            )
+            .await?;
+        let Some(record) = candidate else {
+            return Ok(None);
+        };
+        if !self.verify(dest_agent, &record).await? {
+            return Ok(None);
+        }
+        let authorization = &record.manifest.signed.authorization;
+        if &authorization.source_agent_id != source_agent
+            || authorization.source_path != source_path
+            || &authorization.source_identity != identity
+            || authorization.dest_path != dest_path
+        {
+            log!(
+                Level::Info,
+                "Ignoring stale partial: key={}, saved_identity={:?}, live_identity={:?}",
+                record.key,
+                authorization.source_identity,
+                identity
+            );
+            return Ok(None);
+        }
+        Ok(Some(record))
+    }
+
     /// Reads the source metadata the operation needs and picks raw-file or archive transport.
     async fn inspect_source(
         &self,
@@ -123,21 +270,8 @@ impl TransferService {
         path: &str,
     ) -> Result<SourceShape, ApiError> {
         let path = path.to_string();
-        let (file_size, is_file, is_dir, identity) = match op {
-            CopyOperation::Copy => {
-                let metadata = self.agents.call(agent_id, Metadata { path }).await?;
-                (metadata.file_size, metadata.is_file, metadata.is_dir, None)
-            }
-            CopyOperation::Move => {
-                let metadata = self.agents.call(agent_id, MoveMetadata { path }).await?;
-                (
-                    metadata.file_size,
-                    metadata.is_file,
-                    metadata.is_dir,
-                    Some(metadata.identity),
-                )
-            }
-        };
+        let metadata = self.agents.call(agent_id, MoveMetadata { path }).await?;
+        let (file_size, is_file, is_dir) = (metadata.file_size, metadata.is_file, metadata.is_dir);
         let (total_bytes, content_kind) = if is_file {
             (file_size, CopyContentKind::RawFile)
         } else if is_dir {
@@ -152,7 +286,7 @@ impl TransferService {
         Ok(SourceShape {
             total_bytes,
             content_kind,
-            identity,
+            identity: metadata.identity,
         })
     }
 }
@@ -162,11 +296,8 @@ mod tests {
     use super::*;
     use crate::http::fake_agent::FakeAgent;
     use axum::http::StatusCode;
+    use redoor_protocol::wire::command::{Command, MoveMetadataResult};
     use redoor_protocol::wire::request;
-    use redoor_protocol::{
-        api::files::MetadataResponse,
-        wire::command::{Command, MoveMetadataResult},
-    };
 
     /// A spec between two paths of the fake agent.
     fn spec(agent: &FakeAgent, op: CopyOperation, source: &str, dest: &str) -> CopySpec {
@@ -181,21 +312,8 @@ mod tests {
                 path: dest.to_string(),
             },
             on_existing: CopyExistingMode::Error,
+            resume: Default::default(),
             observe_terminal: true,
-        }
-    }
-
-    /// Metadata of a regular or special file.
-    fn metadata(is_file: bool) -> MetadataResponse {
-        MetadataResponse {
-            path: "/src".to_string(),
-            mime_type: "text/plain".to_string(),
-            file_size: 5,
-            is_file,
-            is_dir: false,
-            editable: true,
-            viewable_image: false,
-            one_time_tokens: Vec::new(),
         }
     }
 
@@ -203,7 +321,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_identical_and_relative_endpoints() {
         let mut agent = FakeAgent::connect().await;
-        let service = TransferService::new(agent.router.clone());
+        let service = TransferService::new(
+            agent.router.clone(),
+            std::env::temp_dir().join(format!("redoor-signer-{}", uuid::Uuid::new_v4())),
+        );
         let same = service
             .start_copy(spec(&agent, CopyOperation::Copy, "/a", "/a"))
             .await
@@ -226,19 +347,37 @@ mod tests {
     #[tokio::test]
     async fn rejects_sources_that_are_neither_files_nor_directories() {
         let mut agent = FakeAgent::connect().await;
-        let service = TransferService::new(agent.router.clone());
+        let service = TransferService::new(
+            agent.router.clone(),
+            std::env::temp_dir().join(format!("redoor-signer-{}", uuid::Uuid::new_v4())),
+        );
         let started = tokio::spawn({
             let spec = spec(&agent, CopyOperation::Copy, "/dev/null", "/b");
             async move { service.start_copy(spec).await }
         });
         let (request_id, command) = agent.next_command().await;
-        // Copies only need plain metadata.
+        // Copies capture the source identity too, so a resumable partial is bound to it.
         assert!(matches!(
             command,
-            Command::Metadata(request::Metadata { .. })
+            Command::MoveMetadata(request::MoveMetadata { .. })
         ));
         agent
-            .respond_ok::<request::Metadata>(request_id, metadata(false))
+            .respond_ok::<request::MoveMetadata>(
+                request_id,
+                MoveMetadataResult {
+                    file_size: 5,
+                    is_file: false,
+                    is_dir: false,
+                    identity: MoveSourceIdentity {
+                        device: 1,
+                        inode: 2,
+                        size: 5,
+                        modified_seconds: 3,
+                        modified_nanoseconds: 4,
+                        is_directory: false,
+                    },
+                },
+            )
             .await;
         let error = started.await.unwrap().err().unwrap();
         assert_eq!(
@@ -251,7 +390,10 @@ mod tests {
     #[tokio::test]
     async fn move_forwards_the_captured_source_identity() {
         let mut agent = FakeAgent::connect().await;
-        let service = TransferService::new(agent.router.clone());
+        let service = TransferService::new(
+            agent.router.clone(),
+            std::env::temp_dir().join(format!("redoor-signer-{}", uuid::Uuid::new_v4())),
+        );
         let started = tokio::spawn({
             let spec = spec(&agent, CopyOperation::Move, "/src", "/dst");
             async move { service.start_copy(spec).await }

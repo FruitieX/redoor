@@ -155,6 +155,10 @@ export class RefreshListener {
                 return;
             }
 
+            // A reconnected destination may bring back partials it kept while offline.
+            void this.queryClient.invalidateQueries({
+                queryKey: queryKeys.partials(),
+            });
             void this.queryClient
                 .invalidateQueries({
                     queryKey: queryKeys.agents(),

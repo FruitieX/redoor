@@ -52,6 +52,7 @@ struct RawServerSection {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgentSection {
+    partial_max_age_days: Option<u64>,
     server: Option<String>,
     name: Option<String>,
     home: Option<String>,
@@ -245,6 +246,7 @@ impl RawAgentSection {
             other => Ok(other),
         };
         Ok(AgentSection {
+            partial_max_age_days: self.partial_max_age_days,
             server: non_empty(self.server, "server")?,
             name: non_empty(self.name, "name")?,
             home: non_empty(self.home, "home")?,

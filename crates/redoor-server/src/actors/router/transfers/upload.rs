@@ -121,7 +121,11 @@ impl RouterState {
                 );
                 self.notify_transfer_refresh();
             }
-            let _ = self.cancel_on_agent(&request.agent_id, request_id);
+            let _ = self.cancel_on_agent(
+                &request.agent_id,
+                request_id,
+                redoor_protocol::wire::partials::CancelReason::Canceled,
+            );
         }
     }
 
@@ -154,6 +158,7 @@ impl RouterState {
             .get_mut(&request.request_id.as_transfer_id())
         {
             entry.cancelable = false;
+            entry.pausable = false;
         }
         self.notify_transfer_refresh_immediately();
         let agent_id = request.agent_id;
@@ -255,6 +260,11 @@ impl RouterState {
                 {
                     copy.progress_id
                 }
+                CopyPhase::Local { request_id: local }
+                    if *local == request_id && &copy.dest_agent_id == agent_id =>
+                {
+                    copy.progress_id
+                }
                 _ => return false,
             },
             Some(Flow::Upload(upload))
@@ -273,6 +283,7 @@ impl RouterState {
             return false;
         }
         entry.cancelable = false;
+        entry.pausable = false;
         if let Some(Flow::Upload(upload)) = self.flows.get_mut(flow_id) {
             upload.phase = UploadPhase::Publishing;
         }
@@ -332,7 +343,13 @@ impl RouterState {
         upload.stream.lease().stop();
         let (agent_id, request_id) = (upload.agent_id.clone(), upload.request_id);
         self.mark_transfer_errored(request_id.as_transfer_id(), message);
-        if self.cancel_on_agent(&agent_id, request_id).is_err()
+        if self
+            .cancel_on_agent(
+                &agent_id,
+                request_id,
+                redoor_protocol::wire::partials::CancelReason::Canceled,
+            )
+            .is_err()
             && let Some(Flow::Upload(upload)) = self.flows.remove(flow_id)
         {
             // No control owner remains that could acknowledge cancellation.
@@ -517,6 +534,7 @@ mod tests {
         state.start_upload(StartUploadRequest {
             agent_id: agent,
             command: request::RawUpload {
+                partial: None,
                 path: "/tmp/one-too-many".to_string(),
                 on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
                 ownership: Default::default(),
@@ -559,6 +577,8 @@ mod tests {
             state.flows.insert(
                 public_id,
                 Flow::Copy(Box::new(CopyFlow {
+                    pause: None,
+                    resumable: false,
                     progress_id: public_id.as_transfer_id(),
                     source_agent_id: AgentId::from("source"),
                     dest_agent_id: AgentId::from("agent-1"),

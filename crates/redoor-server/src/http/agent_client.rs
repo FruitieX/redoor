@@ -338,7 +338,7 @@ mod tests {
         // The agent is told to stop exactly the abandoned request.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::Cancel { id: canceled ,} if canceled == request_id
+            ServerToAgent::Cancel { id: canceled , reason: redoor_protocol::wire::partials::CancelReason::Canceled } if canceled == request_id
         ));
     }
 

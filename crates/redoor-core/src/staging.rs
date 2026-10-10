@@ -46,6 +46,8 @@ where
 pub enum StagingKind {
     /// Raw file upload staged next to its destination.
     Upload,
+    /// Durable file staging that can survive interrupted transfers.
+    Partial,
     /// Tar upload extracted next to its destination directory.
     UploadDirectory,
     /// Same-agent file copy staged next to its destination.
@@ -62,6 +64,7 @@ impl StagingKind {
     /// Name tag that lets operators and tests recognize leftovers of this operation.
     fn tag(self) -> &'static str {
         match self {
+            Self::Partial => "redoor-partial",
             Self::Upload => "redoor-upload",
             Self::UploadDirectory => "redoor-upload-dir",
             Self::LocalCopy => "redoor-local-copy",
@@ -74,6 +77,7 @@ impl StagingKind {
     /// Stem used when the destination has no UTF-8 file name to embed.
     fn fallback_name(self) -> &'static str {
         match self {
+            Self::Partial => "partial",
             Self::Upload => "upload",
             Self::UploadDirectory => "upload-dir",
             Self::LocalCopy => "copy",
@@ -95,6 +99,21 @@ impl StagingKind {
             Some(parent) => parent.join(name),
             None => Path::new(".").join(name),
         }
+    }
+
+    /// Stable, length-safe sibling names let subsequent attempts discover interrupted output.
+    pub fn partial_of(destination: &Path) -> PathBuf {
+        let key = blake3::hash(destination.as_os_str().as_encoded_bytes()).to_hex();
+        let suffix = format!(".{}-{}", Self::Partial.tag(), &key[..16]);
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("partial");
+        let mut end = name.len().min(255 - 1 - suffix.len());
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        destination.with_file_name(format!(".{}{suffix}", &name[..end]))
     }
 
     /// Builds an unpredictable name under the platform temporary directory for staging that is
@@ -123,6 +142,11 @@ impl StagingPath {
     /// Takes ownership of a path the caller is about to create (or has just created).
     pub fn new(path: PathBuf) -> Self {
         Self { path, armed: true }
+    }
+
+    /// Durable partials deliberately survive an aborted task until explicit disposition.
+    pub fn retained(path: PathBuf) -> Self {
+        Self { path, armed: false }
     }
 
     /// Reserves a fresh sibling name for `destination` without creating it.

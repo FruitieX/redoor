@@ -173,6 +173,7 @@ pub(crate) async fn raw_agent_handler(
         &state.router_ref,
         agent_id.clone(),
         Command::RawDownload(request::RawDownload {
+            expected_identity: None,
             path: path.clone(),
             range_start,
             range_end,
@@ -355,6 +356,7 @@ mod tests {
             &agent.router,
             agent.agent_id.clone(),
             Command::RawDownload(request::RawDownload {
+                expected_identity: None,
                 path: path.clone(),
                 range_start: None,
                 range_end: None,
@@ -402,7 +404,7 @@ mod tests {
         // The agent receives cancellation for the stalled request without a follow-up chunk.
         assert!(matches!(
             agent.next_priority().await,
-            ServerToAgent::Cancel { id: canceled ,} if canceled == request_id
+            ServerToAgent::Cancel { id: canceled , reason: redoor_protocol::wire::partials::CancelReason::Canceled } if canceled == request_id
         ));
         let progress = agent
             .router

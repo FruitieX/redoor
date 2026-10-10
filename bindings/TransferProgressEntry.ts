@@ -18,4 +18,16 @@ cancelable: boolean, error: string | null,
 /**
  * Stamped only after a same-agent filesystem rename so the UI can skip copy speeds.
  */
-atomic: boolean, };
+atomic: boolean, 
+/**
+ * Only signed regular-file staging supports pause.
+ */
+pausable: boolean, 
+/**
+ * Prefix hashing remains an active transfer with a distinct visible phase.
+ */
+verifying: boolean, 
+/**
+ * Speeds count only bytes transferred in this attempt.
+ */
+resumed_bytes: number, };

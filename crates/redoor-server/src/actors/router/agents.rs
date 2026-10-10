@@ -92,14 +92,18 @@ impl AgentConnection {
     /// and never written, and only a written one gets a `cancel` frame (on the priority lane,
     /// retained in a task when the lane is momentarily full so an admitted cancel is never
     /// lost). A closed lane is an error the caller can report and retry.
-    pub(crate) fn cancel_request(&mut self, id: RequestId) -> Result<CancelDelivery, RouterError> {
+    pub(crate) fn cancel_request(
+        &mut self,
+        id: RequestId,
+        reason: redoor_protocol::wire::partials::CancelReason,
+    ) -> Result<CancelDelivery, RouterError> {
         if let Some(ticket) = self.tickets.remove(&id)
             && ticket.withdraw()
         {
             return Ok(CancelDelivery::Withdrawn);
         }
         self.lanes
-            .queue_priority(ServerToAgent::Cancel { id })
+            .queue_priority(ServerToAgent::Cancel { id, reason })
             .map(CancelDelivery::Sent)
             .map_err(|_| RouterError::ControlQueueFull {
                 agent_id: self.agent_id.to_string(),
@@ -535,7 +539,11 @@ impl RouterState {
             // A retained delivery task finishes on its own, a withdrawn command's local
             // result finds no flow, and a closed lane means the connection is gone and its
             // teardown already stopped the command.
-            let _ = self.cancel_on_agent(&command.agent_id, command.request_id);
+            let _ = self.cancel_on_agent(
+                &command.agent_id,
+                command.request_id,
+                redoor_protocol::wire::partials::CancelReason::Canceled,
+            );
         }
     }
 
@@ -693,7 +701,10 @@ impl RouterState {
         connection.streams.close(stream);
         // The agent may still be producing. A stream whose open frame is still queued is
         // withdrawn and needs nothing else, since terminals and log streams have no result.
-        let _ = connection.cancel_request(stream);
+        let _ = connection.cancel_request(
+            stream,
+            redoor_protocol::wire::partials::CancelReason::Canceled,
+        );
     }
 }
 
@@ -907,7 +918,7 @@ mod tests {
         // Only the request-scoped command is canceled; the other is just forgotten.
         assert!(matches!(
             receivers.priority.try_recv(),
-            Ok(ServerToAgent::Cancel { id: request_id })
+            Ok(ServerToAgent::Cancel { id: request_id, reason: redoor_protocol::wire::partials::CancelReason::Canceled })
                 if request_id == redoor_protocol::ids::RequestId::new(11)
         ));
         assert!(receivers.priority.try_recv().is_err());
@@ -1014,11 +1025,9 @@ mod tests {
         state.close_stream(&agent_id, streams[0]);
         // Closing stops the PTY on the agent with the ordinary cancel frame.
         let frames: Vec<_> = std::iter::from_fn(|| receivers.priority.try_recv().ok()).collect();
-        assert!(
-            frames
-                .iter()
-                .any(|frame| matches!(frame, ServerToAgent::Cancel { id } if *id == streams[0]))
-        );
+        assert!(frames.iter().any(
+            |frame| matches!(frame, ServerToAgent::Cancel { id, reason } if *id == streams[0])
+        ));
         state.close_stream(&agent_id, streams[1]);
         // A terminal whose open frame was never written is withdrawn: a cancel could
         // overtake the open frame and leave the PTY running.
@@ -1087,6 +1096,7 @@ mod tests {
         let connection = &state.agents.by_id[&agent_id];
         assert!(connection.send_priority_message(ServerToAgent::Cancel {
             id: redoor_protocol::ids::RequestId::new(99),
+            reason: redoor_protocol::wire::partials::CancelReason::Canceled
         }));
         // Priority admission succeeds despite the unread ordinary command frame.
         assert!(matches!(

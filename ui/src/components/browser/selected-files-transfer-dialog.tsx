@@ -1,4 +1,8 @@
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
+import type { ApiClient } from "#ui/api-client";
+import type { ResumeMode } from "#bindings/ResumeMode";
+import { formatSize } from "#ui/utils/path";
 import { useSetAtom } from "jotai";
 import { Copy, FolderInput } from "lucide-react";
 import type { Agent, CopyExistingMode } from "#ui/api-client";
@@ -141,19 +145,51 @@ export function DestinationConflictDialog(props: {
 
 /** Always confirms selected paths and includes a conflict policy when needed. */
 export function SelectedFilesTransferTrigger(props: {
+    api: ApiClient;
     operation: SelectedFilesTransferOperation;
     selectedFiles: SelectedPath[];
     destinationAgent: Agent;
     directoryPath: string;
     destinationFileNames: string[];
     canTransfer: boolean;
-    onConfirm: (mode: CopyExistingMode) => void;
+    onConfirm: (mode: CopyExistingMode, resume: ResumeMode) => void;
     children: (trigger: SelectedFilesTransferTriggerApi) => React.ReactNode;
 }) {
     const [isOpen, setIsOpen] = React.useState(false);
 
     const [existingMode, setExistingMode] =
         React.useState<CopyExistingMode>("error");
+
+    const [resumeMode, setResumeMode] = React.useState<ResumeMode>("auto");
+
+    const preflight = useQuery({
+        queryKey: [
+            "copy-preflight",
+            props.destinationAgent.id,
+            props.directoryPath,
+            props.selectedFiles,
+        ],
+        enabled: isOpen,
+        queryFn: async () =>
+            Promise.all(
+                props.selectedFiles.map((file) =>
+                    props.api.copyPreflight({
+                        source: { agent: file.agentId, path: file.path },
+                        dest: {
+                            agent: props.destinationAgent.id,
+                            path: joinBrowserPath(
+                                props.directoryPath,
+                                file.fileName,
+                            ),
+                        },
+                    }),
+                ),
+            ),
+    });
+
+    const candidate = preflight.data?.find(
+        (result) => result.resume_candidate,
+    )?.resume_candidate;
 
     const unselectFile = useSetAtom(unselectFileAtom);
     const copy = props.operation === "copy";
@@ -176,6 +212,7 @@ export function SelectedFilesTransferTrigger(props: {
     /** Opens one confirmation surface for both ordinary and conflicting transfers. */
     const handleStart = () => {
         setExistingMode("error");
+        setResumeMode("auto");
         setIsOpen(true);
     };
 
@@ -217,6 +254,37 @@ export function SelectedFilesTransferTrigger(props: {
                         unselectFile({ agentId: path.agentId, path: path.path })
                     }
                 />
+                {candidate ? (
+                    <RadioCardGroup
+                        legend={`Interrupted transfer: ${formatSize(candidate.partial_bytes)} / ${formatSize(candidate.total_bytes)}`}
+                        className="mt-5"
+                    >
+                        <RadioCardOption
+                            layout="descriptive"
+                            name="transfer-resume"
+                            value="auto"
+                            label="Resume"
+                            description="Verify and continue the partial file."
+                            checked={resumeMode === "auto"}
+                            onChange={() => setResumeMode("auto")}
+                        />
+                        <RadioCardOption
+                            layout="descriptive"
+                            name="transfer-resume"
+                            value="restart"
+                            label="Start over"
+                            description="Discard partial progress and copy from the beginning."
+                            checked={resumeMode === "restart"}
+                            onChange={() => setResumeMode("restart")}
+                        />
+                    </RadioCardGroup>
+                ) : null}
+                {preflight.error ? (
+                    <p role="alert" className="mt-5 text-sm text-amber-300">
+                        Cannot check for an interrupted transfer:{" "}
+                        {preflight.error.message}
+                    </p>
+                ) : null}
                 {hasConflicts ? (
                     <RadioCardGroup
                         legend="Existing item action"
@@ -248,9 +316,12 @@ export function SelectedFilesTransferTrigger(props: {
                     </Button>
                     <Button
                         type="button"
+                        // A failed check must not block the copy; the server still resumes
+                        // a valid partial because the default mode is auto.
+                        disabled={preflight.isPending}
                         onClick={() => {
                             setIsOpen(false);
-                            props.onConfirm(existingMode);
+                            props.onConfirm(existingMode, resumeMode);
                         }}
                         className="rounded-md font-semibold"
                     >

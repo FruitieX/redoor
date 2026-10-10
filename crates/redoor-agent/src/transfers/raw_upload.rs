@@ -3,9 +3,11 @@
 use super::upload::{PublicationGate, SinkError, UploadSink};
 use crate::errors::AgentCommandError;
 use crate::ownership::{OwnershipPlan, ResolvedOwnership};
+use crate::runtime::cancel::CancelReasonCell;
 use redoor_core::destination::{check_existing_destination, place_temp_at_destination};
 use redoor_core::log;
 use redoor_core::staging::{StagingKind, StagingPath};
+use redoor_protocol::wire::partials::CancelReason;
 use redoor_protocol::{
     api::{files::CreationOwnershipOptions, transfers::CopyExistingMode},
     ids::RequestId,
@@ -51,6 +53,11 @@ async fn create_staging_file(path: &Path) -> std::io::Result<(StagingPath, File)
 
 /// Replaces or creates one file through a hidden sibling staging file.
 pub(crate) struct RawFileSink {
+    /// Durable staging of a resumable copy; `None` for browser uploads.
+    partial: Option<crate::transfers::partials::PartialOutput>,
+    /// Why the request was canceled, which decides whether a partial survives a refused
+    /// publication.
+    reason: Option<CancelReasonCell>,
     path: String,
     request_id: RequestId,
     on_existing: CopyExistingMode,
@@ -67,6 +74,8 @@ impl RawFileSink {
         path: String,
         on_existing: CopyExistingMode,
         ownership: CreationOwnershipOptions,
+        partial: Option<Box<redoor_protocol::wire::partials::PartialTransfer>>,
+        services: &crate::commands::ctx::AgentServices,
     ) -> Result<Self, AgentCommandError> {
         let destination = Path::new(&path);
         check_existing_destination(destination, on_existing, false)
@@ -90,12 +99,45 @@ impl RawFileSink {
             .for_parent(parent)
             .await
             .map_err(|error| AgentCommandError::new(error.kind(), error.to_string()))?;
-        let (staging, file) = create_staging_file(destination).await.map_err(|error| {
-            AgentCommandError::new(
-                CommandErrorKind::from_io_error(&error),
-                format!("Failed to create file: {error}"),
-            )
-        })?;
+        let partial = match partial {
+            Some(transfer) => Some(
+                crate::transfers::partials::PartialOutput::prepare(
+                    services.partial_store.clone(),
+                    services
+                        .destination_locks
+                        .acquire(&transfer.signed.authorization.dest_path)
+                        .map_err(|error| {
+                            AgentCommandError::new(CommandErrorKind::Conflict, error.to_string())
+                        })?,
+                    *transfer,
+                )
+                .await
+                .map_err(|error| {
+                    AgentCommandError::new(
+                        CommandErrorKind::from_io_error(&error),
+                        error.to_string(),
+                    )
+                })?,
+            ),
+            None => None,
+        };
+        let (staging, file) = match &partial {
+            Some(output) => (
+                StagingPath::retained(std::path::PathBuf::from(&output.manifest.partial_path)),
+                output.file.try_clone().await.map_err(|error| {
+                    AgentCommandError::new(
+                        CommandErrorKind::from_io_error(&error),
+                        error.to_string(),
+                    )
+                })?,
+            ),
+            None => create_staging_file(destination).await.map_err(|error| {
+                AgentCommandError::new(
+                    CommandErrorKind::from_io_error(&error),
+                    format!("Failed to create file: {error}"),
+                )
+            })?,
+        };
         log!(
             Level::Info,
             "Started raw upload: request_id={}, path={}, temp_path={}, on_existing={:?}",
@@ -105,6 +147,8 @@ impl RawFileSink {
             on_existing
         );
         Ok(Self {
+            partial,
+            reason: None,
             path,
             request_id,
             on_existing,
@@ -113,6 +157,12 @@ impl RawFileSink {
             existing_permissions: existing_metadata.map(|(permissions, _, _)| permissions),
             ownership,
         })
+    }
+
+    /// Stores cancellation disposition before the driver takes ownership of the context.
+    pub(crate) fn with_reason(mut self, reason: Option<CancelReasonCell>) -> Self {
+        self.reason = reason;
+        self
     }
 
     /// Logs a publication-phase failure and discards staging before it is reported.
@@ -125,7 +175,12 @@ impl RawFileSink {
             self.staging.path().display(),
             message
         );
-        self.staging.discard().await;
+        // The router, which knows the partial exists, tells the user it was kept.
+        if let Some(output) = self.partial {
+            let _ = output.stop(CancelReason::Disconnected).await;
+        } else {
+            self.staging.discard().await;
+        }
         AgentCommandError::new(kind, message)
     }
 }
@@ -157,6 +212,21 @@ impl UploadSink for RawFileSink {
                 .fail(kind, format!("Failed to flush uploaded file: {error}"))
                 .await);
         }
+        if !gate.authorize().await {
+            let reason = self
+                .reason
+                .as_ref()
+                .map_or(CancelReason::Canceled, CancelReasonCell::load);
+            self.stop(reason).await?;
+            return Err(AgentCommandError::new(
+                if reason == CancelReason::Paused {
+                    CommandErrorKind::Paused
+                } else {
+                    CommandErrorKind::Canceled
+                },
+                "Upload publication was not authorized",
+            ));
+        }
         if let Err(error) = self.ownership.apply(self.staging.path()).await {
             let kind = error.kind();
             return Err(self
@@ -177,13 +247,6 @@ impl UploadSink for RawFileSink {
                 )
                 .await);
         }
-        if !gate.authorize().await {
-            self.staging.discard().await;
-            return Err(AgentCommandError::new(
-                CommandErrorKind::InvalidInput,
-                "Upload publication was not authorized",
-            ));
-        }
         if let Err(error) = place_temp_at_destination(
             self.staging.path(),
             Path::new(&self.path),
@@ -198,13 +261,39 @@ impl UploadSink for RawFileSink {
                 .await);
         }
         self.staging.keep();
+        if let Some(output) = self.partial {
+            output.published().await;
+        }
         Ok(())
+    }
+
+    /// Durable abort completes before the driver's terminal result acknowledges pause.
+    async fn stop(
+        mut self,
+        reason: redoor_protocol::wire::partials::CancelReason,
+    ) -> Result<(), AgentCommandError> {
+        if let Some(output) = self.partial {
+            if reason != CancelReason::Canceled {
+                // The sink's cloned Tokio handle owns pending writes; drain it before fsync.
+                self.file.flush().await.map_err(|error| {
+                    AgentCommandError::new(CommandErrorKind::Internal, error.to_string())
+                })?;
+            }
+            output.stop(reason).await.map_err(|error| {
+                AgentCommandError::new(
+                    CommandErrorKind::Internal,
+                    format!("Failed to persist partial: {error}"),
+                )
+            })
+        } else {
+            self.staging.discard().await;
+            Ok(())
+        }
     }
 
     /// Closes and removes the staging file.
     async fn abort(self) {
-        drop(self.file);
-        self.staging.discard().await;
+        let _ = self.stop(CancelReason::Canceled).await;
     }
 }
 
@@ -238,6 +327,8 @@ mod tests {
             destination.display().to_string(),
             CopyExistingMode::Override,
             CreationOwnershipOptions::default(),
+            None,
+            &ctx.services,
         )
         .await;
         let task = tokio::spawn(
@@ -268,7 +359,7 @@ mod tests {
         ));
 
         // The post-body worker must retain cancellation ownership.
-        assert!(registry.cancel(&request_id));
+        assert!(registry.cancel_with_reason(&request_id, CancelReason::Canceled));
         let result = task.await.unwrap();
 
         // Canceling a publication wait must produce failure rather than success.

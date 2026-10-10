@@ -9,10 +9,10 @@
 use super::AgentCall;
 use redoor_protocol::api::search::{FindRequest, GrepRequest};
 pub(crate) use redoor_protocol::wire::request::{
-    ChmodPath, ChownPath, ContentGrep, CreateDirectory, DirectorySize, Echo, EmptyTrash,
-    FileSearch, GetAgentDetails, GetLoggingLevel, GitContext, GitDiff, GitStatus, ListAccounts,
-    ListTrash, Ls, Metadata, MoveMetadata, OpenPath, RawDelete, RenamePath, Restart, RestoreTrash,
-    SelfExec, SetLoggingLevel, Trash,
+    ChmodPath, ChownPath, ContentGrep, CreateDirectory, DeletePartial, DirectorySize, Echo,
+    EmptyTrash, FileSearch, GetAgentDetails, GetLoggingLevel, GitContext, GitDiff, GitStatus,
+    ListAccounts, ListPartials, ListTrash, Ls, Metadata, MoveMetadata, OpenPath, ProbePartial,
+    RawDelete, ReadPartial, RenamePath, Restart, RestoreTrash, SelfExec, SetLoggingLevel, Trash,
 };
 use std::time::Duration;
 
@@ -42,6 +42,10 @@ macro_rules! standard_calls {
 }
 
 standard_calls! {
+    ListPartials => "listing partials",
+    ProbePartial => "probing partial",
+    ReadPartial => "reading partial",
+    DeletePartial => "discarding partial",
     Ls => "listing a path",
     Metadata => "reading metadata",
     MoveMetadata => "reading move metadata",

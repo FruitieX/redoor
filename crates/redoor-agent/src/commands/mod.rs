@@ -36,6 +36,131 @@ impl RunCommand for Command {
     /// type `R`, so the compiler checks that a command can only return its own response.
     async fn run(self, ctx: CommandCtx) -> Reply {
         match self {
+            Command::ListPartials(_) => Reply::of::<request::ListPartials>(
+                crate::transfers::partials::list(
+                    &ctx.services.partial_store,
+                    &ctx.services.destination_locks,
+                )
+                .await,
+            ),
+            Command::ProbePartial(request) => {
+                let key = redoor_core::partials::PartialStore::key(&request.dest_path);
+                let result = if ctx.services.destination_locks.contains(&request.dest_path) {
+                    Ok(None)
+                } else {
+                    ctx.services
+                        .partial_store
+                        .probe(&key)
+                        .await
+                        .map_err(|error| request::CommandError::io("Probe partial", error))
+                };
+                Reply::of::<request::ProbePartial>(result)
+            }
+            Command::ReadPartial(request) => {
+                let result = ctx
+                    .services
+                    .partial_store
+                    .probe(&request.key)
+                    .await
+                    .map(|record| {
+                        record.filter(|record| {
+                            !ctx.services
+                                .destination_locks
+                                .contains(&record.manifest.signed.authorization.dest_path)
+                        })
+                    })
+                    .map_err(|error| request::CommandError::io("Read partial", error));
+                Reply::of::<request::ReadPartial>(result)
+            }
+            Command::DeletePartial(request) => {
+                let result = async {
+                    if let Some(record) = ctx
+                        .services
+                        .partial_store
+                        .probe(&request.key)
+                        .await
+                        .map_err(|error| request::CommandError::io("Read partial", error))?
+                    {
+                        let _guard = ctx
+                            .services
+                            .destination_locks
+                            .acquire(&record.manifest.signed.authorization.dest_path)
+                            .map_err(|error| request::CommandError::io("Discard partial", error))?;
+                        ctx.services
+                            .partial_store
+                            .discard(&request.key)
+                            .await
+                            .map_err(|error| request::CommandError::io("Discard partial", error))?;
+                    } else {
+                        // Invalid or missing output must still release its stale metadata.
+                        ctx.services
+                            .partial_store
+                            .forget(&request.key)
+                            .await
+                            .map_err(|error| {
+                                request::CommandError::io("Discard manifest", error)
+                            })?;
+                    }
+                    Ok(())
+                }
+                .await;
+                Reply::of::<request::DeletePartial>(result)
+            }
+            Command::PersistPartial(request) => {
+                let result = async {
+                    let mut manifest = ctx
+                        .services
+                        .partial_store
+                        .read(&request.key)
+                        .await
+                        .map_err(|error| request::CommandError::io("Read partial", error))?;
+                    let _guard = ctx
+                        .services
+                        .destination_locks
+                        .acquire(&manifest.signed.authorization.dest_path)
+                        .map_err(|error| request::CommandError::io("Persist partial", error))?;
+                    if let Some(signed) = request.signed {
+                        let saved = &manifest.signed.authorization;
+                        let current = &signed.authorization;
+                        if saved.dest_agent_id != current.dest_agent_id
+                            || saved.dest_path != current.dest_path
+                            || saved.source_agent_id != current.source_agent_id
+                            || saved.source_path != current.source_path
+                            || saved.source_identity != current.source_identity
+                        {
+                            return Err(request::CommandError::new(
+                                redoor_protocol::wire::command::CommandErrorKind::InvalidInput,
+                                "Partial changed during verification",
+                            ));
+                        }
+                        manifest.signed = *signed;
+                        ctx.services
+                            .partial_store
+                            .write(&manifest)
+                            .await
+                            .map_err(|error| {
+                                request::CommandError::io("Save partial authorization", error)
+                            })?;
+                    }
+                    ctx.services
+                        .partial_store
+                        .persist(&request.key)
+                        .await
+                        .map_err(|error| request::CommandError::io("Persist partial", error))
+                }
+                .await;
+                Reply::of::<request::PersistPartial>(result)
+            }
+            Command::HashSegments(request) => Reply::of::<request::HashSegments>(
+                crate::transfers::partials::hash(
+                    request,
+                    &ctx.services.partial_store,
+                    &ctx.services.destination_locks,
+                    &ctx.cancel,
+                )
+                .await,
+            ),
+
             Command::Exec(request::Exec { request: exec }) => match ctx.into_output() {
                 Ok(output) => crate::exec::run(exec, output.stream, output.registration).await,
                 Err(error) => Reply::failure(error),
@@ -91,14 +216,18 @@ impl RunCommand for Command {
                 .await,
             ),
             Command::RawDownload(request::RawDownload {
+                expected_identity,
                 path,
                 range_start,
                 range_end,
-            }) => download::download_file(path, range_start, range_end, ctx).await,
+            }) => {
+                download::download_file(path, range_start, range_end, expected_identity, ctx).await
+            }
             Command::TarDownload(request::TarDownload { path, include_root }) => {
                 download::download_directory(path, include_root, ctx).await
             }
             Command::RawUpload(request::RawUpload {
+                partial,
                 path,
                 on_existing,
                 ownership,
@@ -108,8 +237,17 @@ impl RunCommand for Command {
                     path.clone(),
                     on_existing,
                     ownership,
+                    partial,
+                    &ctx.services,
                 )
-                .await;
+                .await
+                .map(|sink| {
+                    sink.with_reason(
+                        ctx.registration
+                            .as_ref()
+                            .map(|registration| registration.reason_cell()),
+                    )
+                });
                 Reply::of::<request::RawUpload>(
                     UploadDriver::new(UploadKind::RawUpload, path, ctx)
                         .run(prepared)
@@ -138,14 +276,19 @@ impl RunCommand for Command {
                 )
             }
             Command::LocalCopyFile(request::LocalCopyFile {
+                partial,
                 source_path,
                 dest_path,
                 on_existing,
-            }) => Reply::of::<request::LocalCopyFile>(
-                ctx.copy_context()
-                    .copy_command(source_path, dest_path, on_existing, false)
-                    .await,
-            ),
+            }) => {
+                let mut context = ctx.copy_context();
+                context.partial = partial.as_deref();
+                Reply::of::<request::LocalCopyFile>(
+                    context
+                        .copy_command(source_path, dest_path, on_existing, false)
+                        .await,
+                )
+            }
             Command::LocalCopyDirectory(request::LocalCopyDirectory {
                 source_path,
                 dest_path,
@@ -156,22 +299,27 @@ impl RunCommand for Command {
                     .await,
             ),
             Command::LocalMove(request::LocalMove {
+                partial,
                 source_path,
                 dest_path,
                 source_is_directory,
                 expected_identity,
                 on_existing,
-            }) => Reply::of::<request::LocalMove>(
-                ctx.copy_context()
-                    .move_command(
-                        source_path,
-                        dest_path,
-                        source_is_directory,
-                        expected_identity,
-                        on_existing,
-                    )
-                    .await,
-            ),
+            }) => {
+                let mut context = ctx.copy_context();
+                context.partial = partial.as_deref();
+                Reply::of::<request::LocalMove>(
+                    context
+                        .move_command(
+                            source_path,
+                            dest_path,
+                            source_is_directory,
+                            expected_identity,
+                            on_existing,
+                        )
+                        .await,
+                )
+            }
             Command::RawDelete(request::RawDelete { path }) => {
                 Reply::of::<request::RawDelete>(fs::raw_delete(path).await)
             }

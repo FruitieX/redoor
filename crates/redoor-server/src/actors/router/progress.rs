@@ -207,6 +207,9 @@ impl RouterState {
                     cancelable: true,
                     error: None,
                     atomic: false,
+                    pausable: false,
+                    verifying: false,
+                    resumed_bytes: 0,
                 },
             );
         }
@@ -236,6 +239,9 @@ impl RouterState {
                 cancelable: true,
                 error: None,
                 atomic: false,
+                pausable: false,
+                verifying: false,
+                resumed_bytes: 0,
             },
         );
         // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
@@ -268,6 +274,9 @@ impl RouterState {
                 cancelable: true,
                 error: None,
                 atomic: false,
+                pausable: false,
+                verifying: false,
+                resumed_bytes: 0,
             },
         );
         // Transfer creation must reach the persistent UI bar before progress-update throttling begins.
@@ -352,6 +361,8 @@ impl RouterState {
         if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
             progress.state = TransferProgressState::Completed;
             progress.cancelable = false;
+            progress.pausable = false;
+            progress.verifying = false;
             if progress.total_bytes == 0
                 || (had_predicted_download_total
                     && progress.transferred_bytes != progress.total_bytes)
@@ -395,6 +406,8 @@ impl RouterState {
             }
             progress.state = TransferProgressState::Completed;
             progress.cancelable = false;
+            progress.pausable = false;
+            progress.verifying = false;
             progress.transferred_bytes = progress.total_bytes;
             progress.ended_at = Some(UnixTimestampSeconds::new(
                 jiff::Timestamp::now().as_second(),
@@ -422,6 +435,8 @@ impl RouterState {
                 matches!(progress.direction, TransferDirection::Edit) && !progress.cancelable;
             progress.state = TransferProgressState::Errored;
             progress.cancelable = false;
+            progress.pausable = false;
+            progress.verifying = false;
             progress.ended_at = Some(UnixTimestampSeconds::new(
                 jiff::Timestamp::now().as_second(),
             ));
@@ -446,6 +461,8 @@ impl RouterState {
         if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
             progress.state = TransferProgressState::Canceling;
             progress.cancelable = false;
+            progress.pausable = false;
+            progress.verifying = false;
             progress.error = None;
             self.notify_transfer_refresh_immediately();
         }
@@ -456,6 +473,8 @@ impl RouterState {
         if let Some(progress) = self.progress.entries.get_mut(&transfer_id) {
             progress.state = TransferProgressState::Canceled;
             progress.cancelable = false;
+            progress.pausable = false;
+            progress.verifying = false;
             progress.ended_at = Some(UnixTimestampSeconds::new(
                 jiff::Timestamp::now().as_second(),
             ));
@@ -787,6 +806,9 @@ mod tests {
                 cancelable: true,
                 error: None,
                 atomic: false,
+                pausable: false,
+                verifying: false,
+                resumed_bytes: 0,
             },
         );
 
@@ -863,6 +885,9 @@ mod tests {
                 cancelable: false,
                 error: None,
                 atomic: false,
+                pausable: false,
+                verifying: false,
+                resumed_bytes: 0,
             },
         );
 
@@ -903,6 +928,9 @@ mod tests {
                 cancelable: false,
                 error: None,
                 atomic: false,
+                pausable: false,
+                verifying: false,
+                resumed_bytes: 0,
             },
         );
 
@@ -941,6 +969,9 @@ mod tests {
             cancelable,
             error: None,
             atomic: false,
+            pausable: false,
+            verifying: false,
+            resumed_bytes: 0,
         }
     }
 

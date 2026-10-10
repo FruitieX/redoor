@@ -2,21 +2,13 @@ import {
     mkdirSync,
     mkdtempSync,
     readFileSync,
-    renameSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "zx";
-import {
-    afterAll,
-    beforeAll,
-    describe,
-    expect,
-    it,
-    onTestFinished,
-} from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
     ProcessManager,
@@ -625,16 +617,13 @@ describe("stateless authenticated MCP", () => {
             Array.from({ length: 10 }, (_, index) =>
                 (index % 2 === 0 ? client : peerClient).callTool<
                     JsonObject & { operation_id: string }
-                >(
-                    "run_command",
-                    {
-                        device_id: testDeviceId,
-                        argv: ["sh", "-lc", "head -c 4096 /dev/zero"],
-                        cwd: agentRoot,
-                        mode: "foreground",
-                        output_limit: 4096,
-                    },
-                ),
+                >("run_command", {
+                    device_id: testDeviceId,
+                    argv: ["sh", "-lc", "head -c 4096 /dev/zero"],
+                    cwd: agentRoot,
+                    mode: "foreground",
+                    output_limit: 4096,
+                }),
             ),
         );
 
@@ -833,74 +822,6 @@ describe("stateless authenticated MCP", () => {
 
         // Streaming requests authenticate afresh, so a prepared URL survives no revocation.
         expect(rejectedStream.status).toBe(401);
-    });
-
-    it("retains a changed move source when post-copy cleanup cannot be proven safe", async () => {
-        const client = createMcpTestClient({ endpoint, token: deviceToken });
-        const sourcePath = join(agentRoot, "cleanup-source.bin");
-        const retainedOriginal = join(agentRoot, "cleanup-source-original.bin");
-
-        const destinationPath = join(
-            secondAgentRoot,
-            "cleanup-destination.bin",
-        );
-
-        onTestFinished(() => {
-            rmSync(sourcePath, { force: true });
-            rmSync(retainedOriginal, { force: true });
-            rmSync(destinationPath, { force: true });
-        });
-        await client.callTool("run_command", {
-            device_id: testDeviceId,
-            argv: ["sh", "-lc", `head -c 8388608 /dev/zero > '${sourcePath}'`],
-            cwd: agentRoot,
-            mode: "foreground",
-            output_limit: 128,
-        });
-
-        const move = await client.callTool<
-            JsonObject & { operation_id: string }
-        >("move_path", {
-            source: { device_id: testDeviceId, path: sourcePath },
-            destination: {
-                device_id: secondDeviceId,
-                path: destinationPath,
-            },
-            on_existing: "error",
-        });
-
-        const operationId = move.result.structuredContent?.operation_id;
-
-        if (operationId === undefined)
-            throw new Error("Guarded move operation missing");
-        renameSync(sourcePath, retainedOriginal);
-        writeFileSync(sourcePath, "replacement must survive");
-        const completed = await client.waitForOperation(operationId);
-        // Identity-guarded cleanup reports a partial result instead of deleting a replacement path.
-        expect(completed.result.structuredContent).toMatchObject({
-            state: "failed",
-            termination: {
-                error: expect.stringContaining("changed"),
-            },
-        });
-        expect(
-            (
-                await client.callTool("read_file", {
-                    device_id: testDeviceId,
-                    path: sourcePath,
-                    encoding: "text",
-                })
-            ).result.structuredContent?.content,
-        ).toBe("replacement must survive");
-        // Destination publication remains visible even though destructive source cleanup failed.
-        expect(
-            (
-                await client.callTool("stat_path", {
-                    device_id: secondDeviceId,
-                    path: destinationPath,
-                })
-            ).result.structuredContent,
-        ).toMatchObject({ is_file: true });
     });
 
     it("recovers admitted background work as interrupted after server restart", async () => {

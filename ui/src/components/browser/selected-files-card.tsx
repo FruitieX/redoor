@@ -1,3 +1,4 @@
+import type { ResumeMode } from "#bindings/ResumeMode";
 import React from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { useMutation } from "@tanstack/react-query";
@@ -71,6 +72,9 @@ async function waitForPendingTransfers(props: {
     api: ApiClient;
     pendingTransfers: Map<number, SelectedPath>;
     completedFiles: SelectedPath[];
+    pausedFiles: SelectedPath[];
+    destinationAgentId: string;
+    directoryPath: string;
     failures: unknown[];
     failedLabel: string;
     signal: AbortSignal;
@@ -96,6 +100,38 @@ async function waitForPendingTransfers(props: {
                 } else if (transfer.state === "errored") {
                     props.failures.push(transfer.error ?? props.failedLabel);
                     props.pendingTransfers.delete(transfer.request_id);
+                }
+            }
+
+            const visibleIds = new Set(
+                progress.transfers.map((transfer) => transfer.request_id),
+            );
+
+            const missingTransfers = [...props.pendingTransfers].filter(
+                ([id]) => !visibleIds.has(id),
+            );
+
+            if (missingTransfers.length > 0) {
+                const inventory = await props.api.listPartials();
+
+                for (const [id, file] of missingTransfers) {
+                    const paused = inventory.partials.some(
+                        (partial) =>
+                            partial.source.agent === file.agentId &&
+                            partial.source.path === file.path &&
+                            partial.dest_agent_id ===
+                                props.destinationAgentId &&
+                            partial.dest.path ===
+                                joinBrowserPath(
+                                    props.directoryPath,
+                                    file.fileName,
+                                ),
+                    );
+
+                    if (paused) {
+                        props.pausedFiles.push(file);
+                        props.pendingTransfers.delete(id);
+                    }
                 }
             }
 
@@ -149,6 +185,71 @@ function canTransferSelectedFiles(props: {
     );
 }
 
+/** Starts selected transfers through one mutation shared by copy and move. */
+function useTransferStarts(props: {
+    agents: Agent[];
+    destinationAgent: Agent;
+    directoryPath: string;
+    operation: SelectedFilesTransferOperation;
+}) {
+    const isCopy = props.operation === "copy";
+
+    return useMutation({
+        mutationFn: (request: {
+            filesToTransfer: SelectedPath[];
+            existingMode: CopyExistingMode;
+            resume: ResumeMode;
+        }) => {
+            const agentsById = new Map(
+                props.agents.map((agent) => [agent.id, agent]),
+            );
+
+            return Promise.allSettled(
+                request.filesToTransfer.map(async (file) => {
+                    const sourceAgent = agentsById.get(file.agentId);
+
+                    if (!sourceAgent) {
+                        throw new Error(
+                            `Source device unavailable for selected item: ${file.agentId}`,
+                        );
+                    }
+
+                    const destination = {
+                        agent: props.destinationAgent.id,
+                        path: joinBrowserPath(
+                            props.directoryPath,
+                            file.fileName,
+                        ),
+                    };
+
+                    const options = {
+                        on_existing: request.existingMode,
+                        resume: request.resume,
+                    };
+
+                    if (isCopy) {
+                        const response = await sourceAgent.copyTo(
+                            destination,
+                            file.path,
+                            options,
+                        );
+
+                        return response.copy_request_id;
+                    }
+
+                    const response = await sourceAgent.moveTo(
+                        destination,
+                        file.path,
+                        options,
+                    );
+
+                    return response.move_request_id;
+                }),
+            );
+        },
+    });
+}
+
 /**
  * Starts every selected item into this directory so the destination is clear
  * at the point where Copy or Move is performed. Sibling in-flight state is
@@ -181,56 +282,7 @@ function TransferSelectedFilesAction(props: {
     const isCopy = props.operation === "copy";
     const labels = isCopy ? transferActionCopy : transferActionMove;
 
-    const transferStartsMutation = useMutation({
-        mutationFn: (request: {
-            filesToTransfer: SelectedPath[];
-            existingMode: CopyExistingMode;
-        }) => {
-            const agentsById = new Map(
-                props.agents.map((agent) => [agent.id, agent]),
-            );
-
-            return Promise.allSettled(
-                request.filesToTransfer.map(async (file) => {
-                    const sourceAgent = agentsById.get(file.agentId);
-
-                    if (!sourceAgent) {
-                        throw new Error(
-                            `Source device unavailable for selected item: ${file.agentId}`,
-                        );
-                    }
-
-                    const destination = {
-                        agent: props.destinationAgent.id,
-                        path: joinBrowserPath(
-                            props.directoryPath,
-                            file.fileName,
-                        ),
-                    };
-
-                    const options = { on_existing: request.existingMode };
-
-                    if (isCopy) {
-                        const response = await sourceAgent.copyTo(
-                            destination,
-                            file.path,
-                            options,
-                        );
-
-                        return response.copy_request_id;
-                    }
-
-                    const response = await sourceAgent.moveTo(
-                        destination,
-                        file.path,
-                        options,
-                    );
-
-                    return response.move_request_id;
-                }),
-            );
-        },
-    });
+    const transferStartsMutation = useTransferStarts(props);
 
     React.useEffect(() => {
         return () => activeTransferRef.current?.abort();
@@ -255,7 +307,10 @@ function TransferSelectedFilesAction(props: {
     });
 
     /** Starts every selected transfer with one consistent destination conflict policy. */
-    const transferSelectedFiles = async (mode: CopyExistingMode) => {
+    const transferSelectedFiles = async (
+        mode: CopyExistingMode,
+        resume: ResumeMode,
+    ) => {
         if (selectedFiles.length === 0) {
             return;
         }
@@ -275,11 +330,13 @@ function TransferSelectedFilesAction(props: {
             const results = await transferStartsMutation.mutateAsync({
                 filesToTransfer,
                 existingMode: mode,
+                resume,
             });
 
             if (controller.signal.aborted) return;
 
             const completedFiles: SelectedPath[] = [];
+            const pausedFiles: SelectedPath[] = [];
             const failures: unknown[] = [];
 
             const pendingTransfers = new Map(
@@ -300,6 +357,9 @@ function TransferSelectedFilesAction(props: {
                 api: props.api,
                 pendingTransfers,
                 completedFiles,
+                pausedFiles,
+                destinationAgentId: props.destinationAgent.id,
+                directoryPath: props.directoryPath,
                 failures,
                 failedLabel: labels.failed,
                 signal: controller.signal,
@@ -335,9 +395,11 @@ function TransferSelectedFilesAction(props: {
             setTransferState({
                 type: "success",
                 message:
-                    filesToTransfer.length === 1
-                        ? `${isCopy ? "Copied" : "Moved"} ${filesToTransfer[0]?.fileName ?? "item"}`
-                        : `${isCopy ? "Copied" : "Moved"} ${filesToTransfer.length} items`,
+                    pausedFiles.length > 0
+                        ? `Paused ${pausedFiles.length} ${pausedFiles.length === 1 ? "item" : "items"}`
+                        : filesToTransfer.length === 1
+                          ? `${isCopy ? "Copied" : "Moved"} ${filesToTransfer[0]?.fileName ?? "item"}`
+                          : `${isCopy ? "Copied" : "Moved"} ${filesToTransfer.length} items`,
             });
         } catch (error) {
             if (controller.signal.aborted) return;
@@ -354,13 +416,16 @@ function TransferSelectedFilesAction(props: {
     return (
         <>
             <SelectedFilesTransferTrigger
+                api={props.api}
                 operation={props.operation}
                 selectedFiles={selectedFiles}
                 destinationAgent={props.destinationAgent}
                 directoryPath={props.directoryPath}
                 destinationFileNames={props.destinationFileNames}
                 canTransfer={canTransfer}
-                onConfirm={(mode) => void transferSelectedFiles(mode)}
+                onConfirm={(mode, resume) =>
+                    void transferSelectedFiles(mode, resume)
+                }
             >
                 {props.children}
             </SelectedFilesTransferTrigger>
