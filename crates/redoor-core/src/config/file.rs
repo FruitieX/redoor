@@ -2,15 +2,14 @@
 //!
 //! The raw structs mirror the file one-to-one so `deny_unknown_fields` surfaces typos
 //! with the offending line, and type/range errors come from serde with the exact
-//! location. Everything that depends on more than one key (credential pairs, legacy
-//! aliases, local-vs-SSH entries, duplicate identities, platform support) lives in
+//! location. Everything that depends on more than one key (credential pairs,
+//! local-vs-SSH entries, duplicate identities, platform support) lives in
 //! the `validate` methods, which produce the public, already-checked config types.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use serde::de::IgnoredAny;
 
 use super::{
     AgentConfig, AgentSection, AuthMode, LocalAgentConfig, RedoorConfig, RelayConfig,
@@ -47,46 +46,23 @@ struct RawServerSection {
     cookie_secure: bool,
     #[serde(default)]
     mcp_allowed_origins: Vec<String>,
-    /// Accepted only to reject it with a migration hint instead of a generic unknown-key error.
-    agent_token: Option<IgnoredAny>,
 }
 
-/// `[agent]` as written, including the legacy spellings existing installs still use.
+/// `[agent]` as written.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgentSection {
     server: Option<String>,
-    /// Legacy name of `server`; kept separate so setting both gets an explicit error.
-    ws_address: Option<String>,
     name: Option<String>,
     home: Option<String>,
-    /// Legacy name of `home`.
-    dir: Option<String>,
     log: Option<String>,
     log_level: Option<String>,
     log_format: Option<String>,
 }
 
-/// Keys `RawAgentEntry` reads. Unknown keys in `[[agents]]` rows are ignored (with a
-/// warning) rather than rejected: managed rows are also written by the UI and older
-/// releases silently ignored extra keys, so a file shared across versions must keep loading.
-/// Keep in sync with the fields below.
-pub(super) const AGENT_ENTRY_KEYS: [&str; 10] = [
-    "local",
-    "target",
-    "username",
-    "ssh_port",
-    "name",
-    "remote_bin",
-    "home",
-    "dir",
-    "log",
-    "password",
-];
-
 /// One `[[agents]]` row; the union of SSH and local keys because `local` selects the kind.
-/// Not `deny_unknown_fields`: see [`AGENT_ENTRY_KEYS`].
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawAgentEntry {
     #[serde(default)]
     local: bool,
@@ -96,8 +72,6 @@ struct RawAgentEntry {
     name: Option<String>,
     remote_bin: Option<String>,
     home: Option<String>,
-    /// Legacy name of `home`.
-    dir: Option<String>,
     log: Option<String>,
     password: Option<String>,
 }
@@ -136,16 +110,6 @@ fn invalid(message: impl Into<String>) -> Invalid {
 impl RawConfig {
     /// Applies cross-key rules and converts into the public config model.
     pub(super) fn validate(self) -> Result<RedoorConfig, Invalid> {
-        // The legacy nested token gets its migration hint before the generic missing-token error.
-        if self
-            .server
-            .as_ref()
-            .is_some_and(|server| server.agent_token.is_some())
-        {
-            return Err(invalid(
-                "server.agent_token is no longer valid; move agent_token to the top level of the config file",
-            ));
-        }
         let agent_token = self
             .agent_token
             .filter(|token| !token.is_empty())
@@ -272,7 +236,7 @@ fn system_account_auth() -> Result<AuthMode, Invalid> {
 }
 
 impl RawAgentSection {
-    /// Folds legacy keys into their current names and rejects empty overrides.
+    /// Rejects empty overrides and parses the enum-like settings.
     fn validate(self) -> Result<AgentSection, Invalid> {
         let non_empty = |value: Option<String>, key: &str| match value {
             Some(value) if value.is_empty() => Err(invalid(format!(
@@ -280,22 +244,10 @@ impl RawAgentSection {
             ))),
             other => Ok(other),
         };
-        let server = legacy_alias(
-            non_empty(self.server, "server")?,
-            non_empty(self.ws_address, "ws_address")?,
-            "agent.server",
-            "agent.ws_address",
-        )?;
-        let home = legacy_alias(
-            non_empty(self.home, "home")?,
-            non_empty(self.dir, "dir")?,
-            "agent.home",
-            "agent.dir",
-        )?;
         Ok(AgentSection {
-            server,
+            server: non_empty(self.server, "server")?,
             name: non_empty(self.name, "name")?,
-            home,
+            home: non_empty(self.home, "home")?,
             log: non_empty(self.log, "log")?,
             log_level: parse_named(non_empty(self.log_level, "log_level")?, "agent.log_level")?,
             log_format: parse_named(
@@ -309,12 +261,7 @@ impl RawAgentSection {
 impl RawAgentEntry {
     /// Splits the row into the SSH or local model selected by `local`.
     fn validate(mut self, index: usize) -> Result<AgentConfig, Invalid> {
-        let home = legacy_alias(
-            self.home.take(),
-            self.dir.take(),
-            &format!("agents entry #{index} 'home'"),
-            &format!("agents entry #{index} 'dir'"),
-        )?;
+        let home = self.home.take();
         if self.local {
             self.validate_local(index, home)
         } else {
@@ -418,22 +365,6 @@ impl RawRelay {
                 password: non_blank(self.password, "password")?,
             },
         })
-    }
-}
-
-/// Accepts a renamed key under either spelling but refuses ambiguous files that set both.
-fn legacy_alias(
-    current: Option<String>,
-    legacy: Option<String>,
-    current_key: &str,
-    legacy_key: &str,
-) -> Result<Option<String>, Invalid> {
-    match (current, legacy) {
-        (Some(_), Some(_)) => Err(invalid(format!(
-            "{current_key} and {legacy_key} cannot both be set; use {current_key}"
-        ))),
-        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
-        (None, None) => Ok(None),
     }
 }
 

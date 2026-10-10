@@ -306,12 +306,12 @@ impl Logger {
     }
 }
 
-/// Initializes the process-global logger with compatibility defaults.
+/// Initializes the process-global logger with the info threshold and line output.
 pub async fn init(log_file_path: Option<String>) -> Result<()> {
     init_with_options(log_file_path, Level::Info, LogFormat::Line).await
 }
 
-/// Initializes logging with a threshold and compatibility line output.
+/// Initializes logging with a threshold and line output.
 pub async fn init_with_level(log_file_path: Option<String>, level: Level) -> Result<()> {
     init_with_options(log_file_path, level, LogFormat::Line).await
 }
@@ -755,7 +755,7 @@ second"
         );
         // Invalid high-priority input fails rather than falling through.
         assert!(resolve_format_sources(None, "FORMAT", Some("pretty"), None).is_err());
-        // Existing warning aliases and level ordering remain compatible.
+        // `warn`, the spelling of the line-output label, names the warning level too.
         assert_eq!("warn".parse::<Level>(), Ok(Level::Warning));
     }
 

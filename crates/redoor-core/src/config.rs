@@ -23,7 +23,6 @@ pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;
 
-use crate::log;
 use crate::logging::LogFormat;
 use redoor_protocol::wire::log::Level;
 
@@ -305,37 +304,7 @@ fn parse_config_str(path: &Path, content: &str) -> Result<RedoorConfig, ConfigEr
             path: path.to_path_buf(),
             message,
         })?;
-    for key in unknown_agent_entry_keys(content) {
-        log!(
-            Level::Warning,
-            "Ignoring unknown key '{}' in config file '{}'",
-            key,
-            path.display()
-        );
-    }
     Ok(config)
-}
-
-/// Key paths (`agents[N].key`) in `[[agents]]` rows that no field reads. Serde ignores them
-/// silently, so this second look at the already validated document makes typos visible.
-fn unknown_agent_entry_keys(content: &str) -> Vec<String> {
-    let Ok(document) = content.parse::<toml_edit::DocumentMut>() else {
-        return Vec::new();
-    };
-    let Some(rows) = document
-        .get("agents")
-        .and_then(toml_edit::Item::as_array_of_tables)
-    else {
-        return Vec::new();
-    };
-    rows.iter()
-        .enumerate()
-        .flat_map(|(index, row)| {
-            row.iter()
-                .filter(|(key, _)| !file::AGENT_ENTRY_KEYS.contains(key))
-                .map(move |(key, _)| format!("agents[{index}].{key}"))
-        })
-        .collect()
 }
 
 impl RedoorConfig {
@@ -834,35 +803,6 @@ local = true
         }
     }
 
-    /// Keeps existing managed-agent configs working after the home rename.
-    #[tokio::test]
-    async fn test_parse_config_file_ssh_entry_with_dir() {
-        let (_directory, temp) = test_config_path();
-        let content = r#"
-[[agents]]
-target = "prod-db"
-dir = "/var/www/app"
-"#;
-        write_test_config(&temp, content).unwrap();
-
-        let config = parse_config_file(&temp).await.unwrap();
-
-        assert_eq!(
-            config.agents.len(),
-            1,
-            "exactly one agent entry should be parsed"
-        );
-        let agent = match &config.agents[0] {
-            AgentConfig::SshBacked(config) => config,
-            AgentConfig::Local(_) => panic!("entry without `local = true` should be SSH-backed"),
-        };
-        assert_eq!(
-            agent.home.as_deref(),
-            Some("/var/www/app"),
-            "legacy dir should populate home"
-        );
-    }
-
     /// Verifies that a `log` on an ssh entry is accepted and forwarded into
     /// the SshBackedAgentConfig so the operator can capture a remote agent's
     /// forwarded stdout/stderr into a local log file.
@@ -1144,25 +1084,6 @@ target = "host"
         );
     }
 
-    /// Verifies nested agent_token under [server] fails with a migration hint.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_server_agent_token() {
-        let (_directory, path) = test_config_path();
-        tokio::fs::write(&path, "[server]\nagent_token = \"legacy-token\"\n")
-            .await
-            .unwrap();
-
-        let result = parse_config_file(&path).await;
-
-        let error = result
-            .expect_err("legacy server.agent_token must be rejected")
-            .to_string();
-        assert!(
-            error.contains("top level"),
-            "error should tell operators to move agent_token to the top level: {error}"
-        );
-    }
-
     /// Verifies the shared parser reads a complete [agent] table.
     #[tokio::test]
     async fn test_parse_config_file_reads_agent_section() {
@@ -1187,57 +1108,6 @@ log = "log/agent.log"
         assert_eq!(agent.name.as_deref(), Some("edge"));
         assert_eq!(agent.home.as_deref(), Some("/var/app"));
         assert_eq!(agent.log.as_deref(), Some("log/agent.log"));
-    }
-
-    /// Keeps existing agent configs working after the `server` rename.
-    #[tokio::test]
-    async fn test_parse_config_file_accepts_legacy_ws_address() {
-        let (_directory, temp) = test_config_path();
-        std::fs::write(
-            &temp,
-            r#"agent_token = "test-agent-token"
-
-[agent]
-ws_address = "wss://example.com/ws"
-"#,
-        )
-        .unwrap();
-
-        let config = parse_config_file(&temp).await.unwrap();
-
-        let agent = config.agent.as_ref().expect("[agent] should be present");
-        // Legacy key maps into the same field so resolve/start paths stay single-keyed.
-        assert_eq!(agent.server.as_deref(), Some("wss://example.com/ws"));
-        assert!(
-            standalone_agent_is_fully_configured(&config),
-            "legacy ws_address must still satisfy standalone agent setup checks"
-        );
-    }
-
-    /// Prevents ambiguous configs that set both the new and legacy server keys.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_server_and_ws_address() {
-        let (_directory, temp) = test_config_path();
-        std::fs::write(
-            &temp,
-            r#"agent_token = "test-agent-token"
-
-[agent]
-server = "https://example.com"
-ws_address = "wss://example.com/ws"
-"#,
-        )
-        .unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        let error = result
-            .expect_err("both server keys must be rejected")
-            .to_string();
-        assert!(
-            error.contains("server") && error.contains("ws_address"),
-            "error should name both keys: {error}"
-        );
     }
 
     /// Verifies Linux accepts a credentials-free [server] table for PAM login.
@@ -1386,57 +1256,27 @@ server = "http://redoor.example.com"
         }
     }
 
-    /// Unknown managed-agent keys are ignored (older releases did) and reported by path, so a
-    /// file written by a newer release still loads while typos stay visible.
+    /// An unknown `[[agents]]` key fails with its line instead of being silently ignored.
     #[test]
-    fn unknown_managed_agent_keys_are_ignored_and_reported() {
-        let content = r#"agent_token = "t"
+    fn unknown_managed_agent_key_points_at_the_line() {
+        let error = parse_config_str(
+            Path::new("/etc/redoor/config.toml"),
+            r#"agent_token = "t"
 [[agents]]
 target = "host"
 remotebin = "/opt/redoor"
-[[agents]]
-local = true
-future_option = 1
-"#;
-        let config = parse_config_str(Path::new("/etc/redoor/config.toml"), content)
-            .expect("unknown [[agents]] keys must not make the file unreadable");
-        // Both rows still load with their known settings.
-        assert_eq!(config.agents.len(), 2);
-        // Each ignored key is reported with its row so the operator can find it.
-        assert_eq!(
-            unknown_agent_entry_keys(content),
-            vec![
-                "agents[0].remotebin".to_string(),
-                "agents[1].future_option".to_string()
-            ]
+"#,
+        )
+        .expect_err("a misspelled [[agents]] key must not be silently ignored");
+        let message = error.to_string();
+        // The offending key and its location make the typo actionable.
+        assert!(
+            message.contains("remotebin") && message.contains("line 4"),
+            "{message}"
         );
     }
 
-    /// Every key the row parser reads is in the known-key list, so none of them is reported as
-    /// ignored (guards the list against drifting from `RawAgentEntry`).
-    #[test]
-    fn known_managed_agent_keys_are_not_reported() {
-        let content = r#"agent_token = "t"
-[[agents]]
-local = false
-target = "host"
-username = "u"
-ssh_port = 22
-name = "n"
-remote_bin = "/opt/redoor"
-home = "/srv"
-log = "/tmp/a.log"
-password = "p"
-[[agents]]
-local = true
-name = "l"
-dir = "/srv"
-"#;
-        parse_config_str(Path::new("config.toml"), content).expect("valid rows parse");
-        assert_eq!(unknown_agent_entry_keys(content), Vec::<String>::new());
-    }
-
-    /// Unknown keys elsewhere keep failing with their line, as they always did.
+    /// Unknown keys in `[server]` fail with their line.
     #[test]
     fn unknown_server_key_points_at_the_line() {
         let error = parse_config_str(
@@ -1470,7 +1310,7 @@ target = "deploy@web"
 target = "web"
 "#,
         )
-        .expect("parsing alone must accept duplicate names, as older releases did");
+        .expect("parsing alone must accept duplicate names, which only the server rejects");
         let error = config
             .ensure_unique_agent_names(path)
             .expect_err("both rows default to the name 'web'");

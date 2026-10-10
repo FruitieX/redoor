@@ -252,7 +252,6 @@ export type SpawnAgentArgs = {
     name?: string;
     cwd: string;
     home?: string;
-    legacyDir?: string;
     log?: string;
     token?: string;
     env?: NodeJS.ProcessEnv;
@@ -322,10 +321,6 @@ export class ProcessManager {
 
         if (args.home !== undefined) {
             cliArgs.push("--home", args.home);
-        }
-
-        if (args.legacyDir !== undefined) {
-            cliArgs.push("--dir", args.legacyDir);
         }
 
         if (args.log !== undefined) {

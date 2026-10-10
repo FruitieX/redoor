@@ -114,7 +114,7 @@ mcp_allowed_origins = ["https://trusted-client.example"]
 
 An unconfigured or malformed `Origin` receives 403. MCP has its own narrow
 CORS and bearer middleware and does not inherit the wildcard browser API CORS
-or the legacy rule that treats non-`/api/` paths as public.
+or the rule that treats non-`/api/` paths as public.
 
 Responses are bounded JSON. This initial server does not emit SSE, advertise
 subscriptions/resources/prompts, or initiate calls into a client.

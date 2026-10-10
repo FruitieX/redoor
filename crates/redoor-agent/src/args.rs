@@ -51,7 +51,7 @@ pub struct AgentArgs {
     pub(crate) log_format: Option<LogFormat>,
     /// Home directory opened by the UI without limiting filesystem access.
     /// Overrides `REDOOR_AGENT_HOME` and `[agent].home`.
-    #[arg(long, env = "REDOOR_AGENT_HOME", alias = "dir", short_alias = 'd')]
+    #[arg(long, env = "REDOOR_AGENT_HOME")]
     pub(crate) home: Option<String>,
     /// Overrides platform mount discovery with one exact same-device trash root.
     #[arg(long, env = "REDOOR_AGENT_TRASH_DIRECTORY")]

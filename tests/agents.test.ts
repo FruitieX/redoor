@@ -254,31 +254,6 @@ describe("Agents API", () => {
         expect(registeredAgent?.cwd).toBe(processHome);
     });
 
-    it("accepts the hidden legacy --dir alias", async () => {
-        const agentName = "legacy-dir-agent";
-
-        const agentPid = processManager.spawnAgent({
-            wsAddress: wsUrl,
-            name: agentName,
-            cwd: agentCwd,
-            legacyDir: agentCwd,
-        });
-
-        onTestFinished(() => processManager.kill(agentPid));
-
-        const registeredAgent = await waitForValue({
-            predicate: async () => {
-                const agents = await apiClient.listAgents();
-
-                return agents.find((agent) => agent.name === agentName);
-            },
-            description: "legacy-dir agent registration",
-        });
-
-        // Existing invocations must retain their configured browser location during migration.
-        expect(registeredAgent?.cwd).toBe(agentCwd);
-    });
-
     it("publishes a relative --home without changing the launch cwd", async () => {
         const launchDirectory = tempFiles.tempDirectory({
             suffix: "-launch-directory",

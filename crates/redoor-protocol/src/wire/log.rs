@@ -32,7 +32,7 @@ pub enum Level {
 }
 
 impl Level {
-    /// Keeps human process output compatible with the established severity labels.
+    /// Short uppercase label used in human-readable line output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Trace => "TRACE",

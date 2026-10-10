@@ -83,8 +83,6 @@ Default relay logs are isolated by ID:
 
 Root uses `/var/log/redoor/relays/production.log` by default.
 
-## Compatibility
+## Startup options
 
-Ad hoc relay startup flags and a positional SSH target are no longer accepted. Move these settings into `[[relays]]`: `--server`, `--token`, `--name`, `-l`, `-p`, `--remote-bin`, `--binary-source`, `--home`, `--log`, `--insecure`, and the positional target.
-
-`--daemon` remains a `start` option. `REDOOR_AGENT_TOKEN` may override the top-level token at startup; relay-specific settings do not have environment overrides.
+Every relay setting lives in its `[[relays]]` entry. `--daemon` is a `start` option. `REDOOR_AGENT_TOKEN` may override the top-level token at startup; relay-specific settings do not have environment overrides.
