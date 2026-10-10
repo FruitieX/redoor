@@ -299,6 +299,42 @@ describe("dedicated terminal tunnel", () => {
         expect(() => process.kill(backgroundPid, 0)).toThrow();
     });
 
+    it("reports the shell's exit status after its last output", async () => {
+        const socket = await openTerminal();
+        const marker = `exit-marker-${Date.now()}`;
+        const lifecycle: TerminalServerMessage[] = [];
+        let output = "";
+
+        const closed = new Promise<void>((resolve) => {
+            socket.addEventListener("message", (event) => {
+                const controlFrame = z.string().safeParse(event.data);
+
+                if (controlFrame.success) {
+                    lifecycle.push(
+                        terminalServerMessageSchema.parse(
+                            JSON.parse(controlFrame.data),
+                        ),
+                    );
+
+                    return;
+                }
+
+                if (event.data instanceof ArrayBuffer) {
+                    output += new TextDecoder().decode(event.data);
+                }
+            });
+            socket.addEventListener("close", () => resolve(), { once: true });
+        });
+
+        socket.send(Buffer.from(`echo ${marker}; exit 3\r`));
+        await closed;
+
+        // The shell's own status reaches the browser instead of a generic disconnect.
+        expect(lifecycle).toContainEqual({ type: "exit", code: 3, signal: null });
+        // Output written right before exiting is delivered before the exit event.
+        expect(output).toContain(marker);
+    });
+
     it("preserves bounded terminal input sent before the agent is ready", async () => {
         const socket = new WebSocket(
             testAgent.getTerminalWebSocketUrl({ rows: 24, cols: 80 }, agentCwd),

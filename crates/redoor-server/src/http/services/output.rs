@@ -296,10 +296,7 @@ mod tests {
     use super::*;
     use crate::http::fake_agent::FakeAgent;
     use futures_util::StreamExt;
-    use redoor_protocol::{
-        ids::ChunkIndex,
-        wire::{ServerToAgent, stream::StreamPayloadKind},
-    };
+    use redoor_protocol::wire::ServerToAgent;
 
     /// Opens a download of `/tmp/file` on the fake agent.
     async fn download(agent: &mut FakeAgent) -> OutputStream {
@@ -330,10 +327,8 @@ mod tests {
     fn frame(request_id: RequestId, data: &[u8], is_last: bool, is_error: bool) -> StreamChunk {
         StreamChunk {
             request_id,
-            chunk_index: ChunkIndex::new(0),
             is_last,
             is_error,
-            payload_kind: StreamPayloadKind::RawFile,
             data: data.to_vec(),
         }
     }

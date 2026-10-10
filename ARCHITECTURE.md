@@ -45,15 +45,15 @@ The contract between all parties, with no runtime dependencies (no tokio).
 - `wire/`: the agent websocket protocol.
   - `handshake` holds the upgrade contract: the `redoor.v2` subprotocol, the agent endpoint
     path, the `426` body and the protocol-mismatch types the UI lists.
-  - `ServerToAgent` and `AgentToServer` are the control-socket envelopes, one per direction,
+  - `ServerToAgent` and `AgentToServer` are the JSON control envelopes, one per direction,
     so each side's `match` is exhaustive. No frame except `hello` carries an agent id: the
     authenticated connection is the identity.
   - `Command` and `CommandResult` are the request and response payloads.
-  - `Command::policy()` is the single table that classifies every command: which lane it
-    uses, whether it needs the transfer socket, whether it is an upload, and how it is
-    cancelled. Both the server and the agent read it, so they cannot disagree.
-  - `stream` defines the binary `StreamChunk` framing (64 KiB frames) used on the transfer
-    socket. `exec`, `log`, `terminal` and `transfer` hold the feature-specific wire types.
+  - `Command::policy()` is the single table that classifies every command: whether it
+    streams bytes and in which direction, whether it is an upload, and how it is cancelled.
+    Both the server and the agent read it, so they cannot disagree.
+  - `stream` defines the binary frame (stream id, `FIN`/error flags, up to 64 KiB of payload)
+    and the credit windows. `exec`, `log` and `terminal` hold the feature-specific wire types.
   - `registration` holds `AgentIdentity` and `AgentCapabilities`, which are flattened into
     the `hello` frame.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
@@ -83,8 +83,8 @@ Infrastructure that more than one role needs:
 The agent runtime and the implementation of every command.
 
 - `runtime/`: the agent's single event loop.
-  - `links`: the control and transfer websocket links, each with a generation number so
-    events from a replaced socket are ignored.
+  - `links`: the one connection and its three outbound lanes (control, interactive, bulk),
+    with a generation number so events from a replaced socket are ignored.
   - `dispatch`: applies `Command::policy()` once per command. It handles admission,
     cancellation registration, spawning, logging and the response in one place.
   - `cancel`: a `CancellationToken` registry whose entries unregister themselves when dropped.
@@ -101,7 +101,7 @@ The agent runtime and the implementation of every command.
   unsupported implementations.
 - `platform/`: mounts, accounts and identity, which keeps OS-specific code out of the
   commands.
-- `terminal`, `logs`: PTY sessions and log streaming over their own dedicated sockets.
+- `terminal`, `logs`: PTY sessions and log streaming, each on one stream of the connection.
 
 ### `redoor-server`
 
@@ -114,14 +114,15 @@ The agent runtime and the implementation of every command.
   - `agent_ws` (in `http/`): the agent endpoint. It checks the bearer token and the
     subprotocol before accepting the upgrade, and remembers protocol-mismatched attempts
     for `GET /api/v1/protocol-mismatches`.
-  - `session`: one actor per agent control socket. It requires `hello` as the first frame,
+  - `session`: one actor per agent connection. It requires `hello` as the first frame,
     asks the router to accept it and bridges the socket to the router through bounded lanes.
   - `lanes`: the typed outbound lanes to one agent: a command lane and a priority lane.
   - `router/`: the single owner of agent registrations and in-flight work.
     - `flows`: one table where every request belongs to exactly one flow (command, output
       stream, upload or copy), each with an explicit phase enum.
-    - `streams`: the data path. Payload frames go from the transfer socket to consumers
-      without passing through the router.
+    - `streams`: the data path. Payload frames go from the connection reader to consumers
+      (HTTP bodies, copy forwarders, terminal and log bridges) without passing through the
+      router.
     - Every router handler is synchronous (enforced by `clippy::unused_async`), so the
       router mailbox never waits on a peer.
 - `watchdog`: one dormant-until-started supervisor per managed agent, with restart backoff
@@ -179,9 +180,9 @@ flowchart LR
     server -.->|"watchdog spawns"| ssh
     ssh -.->|"starts over SSH"| sshagent
 
-    local ==>|"control + transfer websockets"| server
-    external ==>|"control + transfer websockets"| server
-    sshagent ==>|"websockets through<br/>the reverse tunnel"| ssh
+    local ==>|"one multiplexed websocket"| server
+    external ==>|"one multiplexed websocket"| server
+    sshagent ==>|"websocket through<br/>the reverse tunnel"| ssh
     ssh ==> server
 ```
 
@@ -201,52 +202,90 @@ behind NAT, on a phone (Termux) or on a host that is only reachable over SSH.
 - **Browsers, the CLI and MCP clients** only use the REST API and browser websockets. They
   never talk to agents directly; the server translates each request into agent commands.
 
-## Websockets used by one agent
+## One connection per agent
 
 ```mermaid
 flowchart LR
     subgraph agent["Agent process"]
         rt["Runtime event loop<br/>+ dispatcher"]
         workers["Transfer workers<br/>(upload / download / exec)"]
-        pty["PTY session"]
-        logs["Log stream"]
+        pty["PTY sessions"]
+        logs["Log streams"]
+        awriter["Writer<br/>control > interactive > bulk"]
+        areader["Reader"]
     end
 
     subgraph server["Server process"]
-        session["Session actor"]
+        swriter["Session writer<br/>priority > commands > interactive > bulk"]
+        sreader["Session reader"]
         router["Router actor"]
-        reader["Transfer socket<br/>reader / writer"]
         consumers["HTTP bodies,<br/>copy forwarders"]
-        bridge["Terminal / log bridge"]
-        browser["Browser socket"]
+        bridge["Terminal / log bridges"]
+        browser["Browser sockets"]
     end
 
-    rt <==>|"1. control socket /api/v1/agent/ws<br/>JSON frames"| session
-    session <--> router
-    workers <==>|"2. transfer socket<br/>/api/v1/agent-transfer/ws<br/>binary StreamChunks"| reader
-    reader <--> consumers
-    pty <==>|"3. terminal socket<br/>/api/v1/terminals/{id}/agent/ws<br/>(one per terminal)"| bridge
-    logs <==>|"4. log socket<br/>/api/v1/log-streams/{id}/agent/ws<br/>(one per viewer)"| bridge
+    rt --> awriter
+    workers --> awriter
+    pty --> awriter
+    logs --> awriter
+    awriter ==>|"/api/v1/agent/ws<br/>JSON + binary frames"| sreader
+    swriter ==> areader
+    areader --> rt
+    areader --> workers
+    areader --> pty
+    sreader --> router
+    sreader --> consumers
+    sreader --> bridge
+    router --> swriter
+    consumers --> swriter
+    bridge --> swriter
     bridge <--> browser
 ```
 
-Each agent keeps up to four kinds of websocket to the server:
+Each agent keeps exactly one websocket to the server, at `/api/v1/agent/ws`. It carries:
 
-1. **Control socket (`/api/v1/agent/ws`)**: JSON frames only. It carries the `hello`,
-   commands, command responses, cancels, stream credit, upload publication decisions and the
-   requests to open terminal or log sockets. It never carries file contents, so commands
-   stay responsive during large transfers.
-2. **Transfer socket (`/api/v1/agent-transfer/ws`)**: binary `StreamChunk` frames tagged with
-   their request id. It is persistent and shared by every upload, download, exec output and
-   copy of that agent. Per-stream credit stops one stream from blocking the others.
-3. **Terminal sockets**: one short-lived socket per open terminal, paired with the browser's
-   terminal socket. PTY bytes are forwarded unchanged.
-4. **Log sockets**: one short-lived socket per live log viewer, paired the same way.
+- **Text frames**: JSON control messages (`ServerToAgent` / `AgentToServer`).
+- **Binary frames**: stream data. Each frame is an 8-byte stream id, a flags byte (`FIN`,
+  and an error flag for streams that end with a failure) and up to 64 KiB of payload.
 
-Sockets 2–4 are opened by the agent only when the server asks over the control socket, each
-time with a fresh one-time token. The transfer socket presents its token as a bearer
-credential during the upgrade. A stale or foreign connection therefore cannot attach to an
-agent's streams.
+Every stream has a per-connection `u64` id allocated by the server, from the same id space
+as request ids:
+
+| Stream | Opened by | Data direction |
+|---|---|---|
+| Request output (download, exec output, copy source) | `command` | agent → server |
+| Request input (upload, edit, archive upload, copy destination) | `command` | server → agent |
+| Terminal | `terminal_open` | both |
+| Log stream | `log_stream_open` | agent → server (NDJSON events) |
+
+**Scheduling.** Each side has one writer that drains its lanes in strict order:
+
+1. control frames (on the server: the priority lane first, then the command lane);
+2. interactive frames: terminal input and output;
+3. bulk frames: every other stream. The bulk lane holds a single frame, so producers wait in
+   the lane's fair queue and streams that have data and credit take turns frame by frame.
+
+Because no data frame exceeds 64 KiB, a control frame never waits behind more than one data
+frame. Terminal frames go ahead of downloads, so typing stays responsive during transfers.
+One TCP connection does mean one congestion window: a slow network is shared by all of an
+agent's streams. `tests/raw-upload-toxiproxy.test.ts` and `tests/stream-isolation.test.ts`
+keep that trade-off visible.
+
+**Readers never wait on consumers.** The reader on each side hands binary frames straight to
+the stream's bounded queue with `try_send`. Every stream is credited, so an honest peer can
+never overfill it; an overflow fails only that stream.
+
+**Memory bound.** A stream's receiver holds at most its credit window plus the final frame:
+
+| Stream | Window | Per connection |
+|---|---|---|
+| Request streams | 4 frames | at most 32 concurrent ordinary commands on the agent, plus uploads admitted by the server |
+| Terminals | 16 frames each way | at most 8 |
+| Log streams | 4 frames | at most 8 |
+
+So the worst case per connection is roughly (streams × (window + 1) × 64 KiB), for example
+8 terminals × 2 directions × 17 frames × 64 KiB ≈ 17 MiB for a terminal-heavy agent, and
+33 × 5 × 64 KiB ≈ 10 MiB for transfers.
 
 ## Connection setup
 
@@ -270,9 +309,7 @@ sequenceDiagram
         S->>R: register (with socket id)
         alt accepted
             R->>A: welcome {connection_id}
-            R->>A: transfer_socket_open {token}
-            A->>R: GET /api/v1/agent-transfer/ws<br/>Authorization: Bearer transfer token
-            Note over A,R: the agent is now available for commands
+            Note over A,R: the agent is connected and available for commands
         else duplicate name or stopped managed agent
             R->>A: rejected {reason, message}
             Note over S: the session flushes the frame and closes
@@ -310,19 +347,23 @@ sequenceDiagram
 flowchart LR
     rest["REST / MCP handlers<br/>via AgentClient"] --> router["Router<br/>(sync handlers)"]
     router -->|"commands"| cl[["command lane<br/>(bounded)"]]
-    router -->|"cancels, credit,<br/>publication decisions"| pl[["priority lane<br/>(bounded, reserved)"]]
-    cl --> writer["Session writer<br/>(biased select)"]
-    pl --> writer
-    writer -->|"JSON"| ws(("control<br/>socket"))
+    router -->|"cancels, credit,<br/>publication decisions,<br/>terminal resizes"| pl[["priority lane<br/>(bounded, reserved)"]]
+    bridges["Terminal bridges"] -->|"keystrokes"| il[["interactive lane"]]
+    producers["Upload producers,<br/>copy forwarders"] -->|"data frames"| bl[["bulk lane<br/>(one frame)"]]
+    pl --> writer["Session writer<br/>(biased select)"]
+    cl --> writer
+    il --> writer
+    bl --> writer
+    writer -->|"JSON + binary"| ws(("agent<br/>connection"))
 ```
 
-- Frames stay typed (`ServerToAgent`) until the session writer serializes them. JSON is
-  produced in exactly one place per socket.
+- Frames stay typed (`ServerToAgent`, `StreamChunk`) until the session writer encodes them.
+  JSON is produced in exactly one place.
 - The **command lane** is bounded. When it is full, new work is rejected instead of buffered,
   which is the server's admission control.
 - The **priority lane** is drained first. Cancels, credit grants and publication decisions
-  never wait behind a backlog of commands. Frames that must not be lost fall back to the
-  command lane if the priority lane is momentarily full.
+  never wait behind a backlog of commands or data. Frames that must not be lost fall back to
+  the command lane if the priority lane is momentarily full.
 - The router never awaits. `RouterHandle::send` reports `Full` and `Stopped` separately, and
   async callers use `send_async`, so router messages are never silently dropped.
 
@@ -361,26 +402,26 @@ sequenceDiagram
     participant C as HTTP client
     participant O as OutputStream
     participant R as Router
-    participant T as Transfer reader
+    participant T as Session reader
     participant A as Agent StreamWriter
 
     C->>O: GET download
     O->>R: admit Output flow
     R-->>O: StreamLease (stream slot, cancel token, byte counter)
-    R->>A: command (control socket)
+    R->>A: command {id} (command lane)
     loop while data remains
         A->>A: wait for credit (initial window: 4 frames)
-        A->>T: StreamChunk (transfer socket)
+        A->>T: binary frame of stream id (bulk lane)
         T->>O: try_send into this stream's slot (never waits)
         O->>C: body bytes
         O->>A: credit {stream, frames} (priority lane)
     end
-    A->>T: final StreamChunk (is_last, spends no credit)
+    A->>T: final frame (FIN, spends no credit)
     T->>R: terminal event only
 ```
 
 - **Payload bypasses the router.** The router admits the stream and hands out a
-  `StreamLease`. Frames then go from the transfer socket reader straight into that stream's
+  `StreamLease`. Frames then go from the session reader straight into that stream's
   bounded slot, and only the terminal event (done, failed or protocol violation) goes back to
   the router. Progress is read from the lease's byte counter.
 - **Credit isolates streams.** The agent may have at most the granted number of frames in
@@ -388,7 +429,8 @@ sequenceDiagram
   body. A stalled client therefore stalls only its own stream, while other downloads, exec
   output and copies from the same agent keep flowing. `tests/stream-isolation.test.ts`
   covers this.
-- An agent that sends beyond its credit fails only that stream, not the socket.
+- An agent that sends beyond its credit fails only that stream, not the connection
+  (`tests/stream-credit.test.ts`).
 - **Cancellation.** Dropping the `OutputStream` (the HTTP client went away) cancels the agent
   side through the lease. Final and error frames never need credit, so a cancel
   acknowledgement can never get stuck.
@@ -404,13 +446,13 @@ sequenceDiagram
     participant A as Agent UploadDriver
 
     C->>R: PUT upload (admit Upload flow)
-    R->>A: command (control socket)
+    R->>A: command {id} (command lane)
     A->>A: create UploadSink + staging path
     A->>R: transfer_ready
     loop request body
-        R->>A: StreamChunk (transfer socket, spends credit)
+        R->>A: binary frame of stream id (bulk lane, spends credit)
         A->>A: write to staging
-        A->>R: credit {stream, frames} (control socket)
+        A->>R: credit {stream, frames}
     end
     A->>R: publish_request {id}
     R->>A: publish_decision {id, allowed}
@@ -419,8 +461,7 @@ sequenceDiagram
     R->>C: result
 ```
 
-- `transfer_ready` confirms the agent-side worker exists before any bytes cross the transfer
-  socket.
+- `transfer_ready` confirms the agent-side worker exists before any body bytes are sent.
 - Content is written to a hidden **staging** path next to the destination. The path is
   reserved atomically and deletes itself if the upload is cancelled, fails or disconnects.
 - **Publication is a separate step decided by the router.** This orders "publish" against a
@@ -472,38 +513,48 @@ sequenceDiagram
 sequenceDiagram
     participant B as Browser
     participant S as Server bridge
+    participant R as Router
     participant A as Agent
 
     B->>S: open /api/v1/agents/{agent}/terminal/ws
-    S->>S: register pending terminal + one-time token
-    S->>A: terminal_open {terminal_id, token, size, cwd} (control socket)
-    A->>S: open /api/v1/terminals/{id}/agent/ws<br/>first frame: token
-    S->>S: pair the browser and agent sockets
+    S->>R: open terminal
+    R->>R: allocate stream id, open output slot,<br/>input credit and event queue (max 8)
+    R->>A: terminal_open {stream, size, cwd}
+    A->>S: terminal_event {stream, ready} (interactive lane)
     par browser to agent
-        B->>A: keystrokes, resize
+        B->>A: keystrokes (interactive lane, credited)
+        B->>A: terminal_resize {stream, size} (priority lane)
     and agent to browser
-        A->>B: PTY output
+        A->>B: PTY output (interactive lane, credited)
     end
+    A->>S: terminal_event {stream, exit}, then FIN
+    Note over S,A: a departing browser drops the bridge,<br/>which sends cancel {id: stream}
 ```
 
-- Terminals and live log viewers each get a dedicated pair of sockets bridged by the server.
-  Interactive traffic never shares a socket with bulk transfers.
-- Browser input that arrives before the agent connects is buffered, within a frame and byte
-  limit. Setup is abandoned if the agent does not connect in time.
-- Live logs (`log_stream_open`, `/api/v1/log-streams/{id}/agent/ws`) use the same rendezvous.
+- Terminals and live log viewers are streams of the agent's one connection. The browser
+  sockets stay as they are; the server bridge pairs a browser socket with a stream.
+- Terminal frames use the interactive lane in both directions, so keystrokes and echoes do
+  not queue behind bulk transfers. Lifecycle events travel on the same lane as the output,
+  so an exit always follows the output that preceded it.
+- Browser input that arrives before the PTY is ready is buffered, within a frame and byte
+  limit. Setup is abandoned if the agent does not report ready in time.
+- Live logs (`log_stream_open`) send NDJSON `LogEvent` lines that may span frames; the bridge
+  reassembles each line (bounded by the largest valid event) and validates it before
+  relaying it to the browser.
+- Each connection allows at most 8 terminals and 8 log streams, enforced on both sides.
 
 ## Design rules
 
 - **Memory is bounded.** All uploads, downloads and tar archives are streamed in 64 KiB frames
   through bounded channels. Nothing reads a whole file into memory.
-- **Control stays responsive.** Payload never uses the control socket or the router mailbox.
-  The priority lane bypasses the command backlog, and per-stream credit stops one slow
-  consumer from blocking others.
+- **Control stays responsive.** Payload never passes through the router mailbox, each
+  writer sends control frames before data, and no data frame exceeds 64 KiB. Per-stream
+  credit stops one slow consumer from blocking others.
 - **One owner per concern.**
   - `Command::policy()` classifies commands.
   - The router owns flow lifecycle.
   - `ApiError` owns HTTP status mapping.
-  - Each socket writer is the only place that serializes JSON for its socket.
+  - Each side's connection writer is the only place that encodes frames.
 - **Stale events are ignored.** Socket ids on the server and generations on the agent mean a
   delayed event from a replaced connection can never affect its replacement.
 - **The wire format is versioned.** Incompatible frame changes bump the `redoor.vN`

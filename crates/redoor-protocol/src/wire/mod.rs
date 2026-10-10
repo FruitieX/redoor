@@ -12,7 +12,6 @@ pub mod policy;
 pub mod registration;
 pub mod stream;
 pub mod terminal;
-pub mod transfer;
 
 use crate::ids::{AgentId, RequestId, SocketId};
 use command::{Command, CommandResult};
@@ -55,26 +54,25 @@ pub enum ServerToAgent {
     /// Orders upload publication against cancellation in the router's authoritative lifecycle.
     PublishDecision { id: RequestId, allowed: bool },
 
-    /// Instructs the agent to open its persistent payload socket with a secret that only the
-    /// current connection knows, so stale connections cannot attach to its streams.
-    TransferSocketOpen { token: String },
-
-    /// Asks the agent to abort a request-cancelable command.
+    /// Asks the agent to stop a request-cancelable command, a terminal or a log stream; they
+    /// share one id space per connection.
     Cancel { id: RequestId },
 
-    /// Requests one ephemeral dedicated terminal connection from this agent.
+    /// Starts a PTY whose output and input travel on stream `stream` of this connection.
     TerminalOpen {
-        terminal_id: terminal::TerminalId,
-        token: String,
+        stream: RequestId,
         size: terminal::TerminalSize,
         cwd: String,
     },
 
-    /// Requests one ephemeral dedicated log connection from this agent.
-    LogStreamOpen {
-        log_stream_id: log::LogStreamId,
-        token: String,
+    /// Resizes the PTY of terminal stream `stream`.
+    TerminalResize {
+        stream: RequestId,
+        size: terminal::TerminalSize,
     },
+
+    /// Starts relaying this agent's log events as NDJSON on stream `stream`.
+    LogStreamOpen { stream: RequestId },
 }
 
 impl ServerToAgent {
@@ -141,10 +139,19 @@ pub enum AgentToServer {
     /// Requests router authorization before staged upload content can change the destination.
     PublishRequest { id: RequestId },
 
-    /// Returns flow-control credit for one server-to-agent stream (upload, edit or copy
-    /// destination) as the agent's worker stages frames, so a slow destination stalls only
-    /// its own stream.
+    /// Returns flow-control credit for one server-to-agent stream (upload, edit, copy
+    /// destination or terminal input) as the agent consumes frames, so a slow consumer stalls
+    /// only its own stream.
     Credit { stream: RequestId, frames: u32 },
+
+    /// Lifecycle of terminal stream `stream` (ready, exit, setup error).
+    ///
+    /// Sent in the terminal's own frame order, so an exit always follows the output that
+    /// preceded it.
+    TerminalEvent {
+        stream: RequestId,
+        event: terminal::TerminalServerMessage,
+    },
 }
 
 impl AgentToServer {
@@ -158,6 +165,7 @@ impl AgentToServer {
             Self::TransferProgress { .. } => "transfer_progress",
             Self::PublishRequest { .. } => "publish_request",
             Self::Credit { .. } => "credit",
+            Self::TerminalEvent { .. } => "terminal_event",
         }
     }
 }
@@ -182,12 +190,6 @@ mod tests {
                     message: "m".to_string(),
                 },
                 r#"{"type":"evicted","message":"m"}"#,
-            ),
-            (
-                ServerToAgent::TransferSocketOpen {
-                    token: "t".to_string(),
-                },
-                r#"{"type":"transfer_socket_open","token":"t"}"#,
             ),
             (
                 ServerToAgent::Credit {

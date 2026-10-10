@@ -145,54 +145,6 @@ impl fmt::Display for TransferId {
     }
 }
 
-/// Monotonic index of one binary chunk within a streamed transfer.
-///
-/// This is used in the binary streaming protocol to preserve chunk ordering
-/// across uploads, downloads, and agent-to-agent copy forwarding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[ts(type = "number")]
-pub struct ChunkIndex(pub u64);
-
-impl ChunkIndex {
-    /// Wraps a raw index so chunk positions cannot be mixed up with other counters.
-    pub fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the index the following frame of the same stream must carry.
-    pub fn next_index(self) -> Self {
-        Self(self.0 + 1)
-    }
-
-    /// Like `next_index` but never overflows, for long-lived streams where a panic would
-    /// tear down the transfer instead of reporting an ordering error.
-    pub fn saturating_next_index(self) -> Self {
-        Self(self.0.saturating_add(1))
-    }
-
-    /// One-based position for human-readable error messages and logs.
-    pub fn display_number(self) -> u64 {
-        self.0 + 1
-    }
-
-    /// Encodes the index for the binary stream frame header, which is little-endian.
-    pub fn to_le_bytes(self) -> [u8; 8] {
-        self.0.to_le_bytes()
-    }
-
-    /// Decodes the index from a binary stream frame header.
-    pub fn from_le_bytes(bytes: [u8; 8]) -> Self {
-        Self(u64::from_le_bytes(bytes))
-    }
-}
-
-impl fmt::Display for ChunkIndex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
 impl UnixTimestampSeconds {
     /// Wraps raw epoch seconds so they cannot be confused with millisecond timestamps.
     pub fn new(value: i64) -> Self {

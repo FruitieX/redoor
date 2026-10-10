@@ -96,7 +96,7 @@ describe("Raw Download API", () => {
         const connected = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${proxiedAgentName},`,
+                `Agent registered: agent_id=${proxiedAgentName},`,
             ),
             10000,
         );
@@ -442,7 +442,7 @@ describe("Raw Download API", () => {
         const waitForEphemeralAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${ephemeralAgentName},`,
+                `Agent registered: agent_id=${ephemeralAgentName},`,
             ),
             10000,
         );
@@ -601,7 +601,7 @@ describe("Raw Download API", () => {
         const waitForProxiedAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${proxiedAgentName},`,
+                `Agent registered: agent_id=${proxiedAgentName},`,
             ),
             10000,
         );
@@ -717,7 +717,7 @@ describe("Raw Download API", () => {
             upstream: `127.0.0.1:${serverPort}`,
         });
 
-        // Limit the transfer socket from birth so the agent cannot finish the file before abort.
+        // Limit the agent connection from birth so the agent cannot finish the file before abort.
         await proxy.addToxic({
             name: "slow-cancel-download",
             type: "bandwidth",
@@ -732,7 +732,7 @@ describe("Raw Download API", () => {
         const waitForProxiedAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${proxiedAgentName},`,
+                `Agent registered: agent_id=${proxiedAgentName},`,
             ),
             10000,
         );

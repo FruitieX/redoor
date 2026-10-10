@@ -1,28 +1,43 @@
-//! Typed outbound lanes to one agent session.
+//! Typed outbound lanes to one agent connection.
 //!
-//! The router, the stream data path and the session queue typed [`ServerToAgent`] frames (and
-//! the transfer path queues [`StreamChunk`] frames); only the socket writers turn them into
-//! websocket messages. JSON is therefore produced in exactly one place per socket, and tests
-//! observe the frames an agent would receive as values instead of parsing text.
+//! The router, the stream data path and the session queue typed [`ServerToAgent`] and
+//! [`StreamChunk`] frames; only the session writer turns them into websocket messages. JSON is
+//! therefore produced in exactly one place, and tests observe the frames an agent would
+//! receive as values instead of parsing text.
 
-use redoor_protocol::wire::ServerToAgent;
+use redoor_protocol::wire::{ServerToAgent, stream::StreamChunk};
 use tokio::sync::mpsc;
 
-/// The two bounded control lanes of one agent session.
+/// Queue depth of the interactive (terminal input) lane.
+const INTERACTIVE_QUEUE_CAPACITY: usize = 8;
+/// Queue depth of the bulk lane.
+///
+/// One slot means producers wait in the lane's fair queue, so streams with data and credit
+/// take turns frame by frame, and a control frame waits behind at most one bulk frame.
+const BULK_QUEUE_CAPACITY: usize = 1;
+
+/// The bounded outbound lanes of one agent connection, drained by one writer in strict order:
+/// priority, commands, interactive, bulk.
 ///
 /// Ordinary commands use the command lane, whose fullness is admission control. Cancellation,
 /// credit grants and lifecycle frames use the reserved priority lane, so they never queue
-/// behind a command backlog and the session writer drains them first.
+/// behind a command backlog or stream data. Terminal input uses the interactive lane and every
+/// other stream the bulk lane; since a data frame is at most 64 KiB, a control frame never
+/// waits behind more than one of them.
 #[derive(Clone, Debug)]
 pub struct ControlLanes {
     commands: mpsc::Sender<ServerToAgent>,
     priority: mpsc::Sender<ServerToAgent>,
+    interactive: mpsc::Sender<StreamChunk>,
+    bulk: mpsc::Sender<StreamChunk>,
 }
 
 /// Receiving ends of [`ControlLanes`], owned by the session writer.
 pub struct ControlLaneReceivers {
     pub commands: mpsc::Receiver<ServerToAgent>,
     pub priority: mpsc::Receiver<ServerToAgent>,
+    pub interactive: mpsc::Receiver<StreamChunk>,
+    pub bulk: mpsc::Receiver<StreamChunk>,
 }
 
 /// The agent session behind a lane has ended, so nothing queued there will be delivered.
@@ -31,17 +46,35 @@ pub struct ControlLaneReceivers {
 pub struct LaneClosed;
 
 impl ControlLanes {
-    /// Creates both lanes with the given capacities.
+    /// Creates the lanes with the given control capacities.
     pub fn bounded(commands: usize, priority: usize) -> (Self, ControlLaneReceivers) {
         let (commands, command_receiver) = mpsc::channel(commands);
         let (priority, priority_receiver) = mpsc::channel(priority);
+        let (interactive, interactive_receiver) = mpsc::channel(INTERACTIVE_QUEUE_CAPACITY);
+        let (bulk, bulk_receiver) = mpsc::channel(BULK_QUEUE_CAPACITY);
         (
-            Self { commands, priority },
+            Self {
+                commands,
+                priority,
+                interactive,
+                bulk,
+            },
             ControlLaneReceivers {
                 commands: command_receiver,
                 priority: priority_receiver,
+                interactive: interactive_receiver,
+                bulk: bulk_receiver,
             },
         )
+    }
+
+    /// Lane for stream data of the given class.
+    pub(crate) fn data(&self, interactive: bool) -> &mpsc::Sender<StreamChunk> {
+        if interactive {
+            &self.interactive
+        } else {
+            &self.bulk
+        }
     }
 
     /// Admits one ordinary frame without waiting; `false` when the lane is full or closed.

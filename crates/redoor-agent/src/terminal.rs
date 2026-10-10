@@ -1,137 +1,337 @@
-//! Interactive terminal sessions: one PTY bridged to a dedicated websocket per terminal so
-//! keystrokes and output never queue behind transfers.
+//! Interactive terminal sessions: one PTY bridged to one stream of the agent connection.
+//!
+//! PTY output travels on the interactive lane, which the connection writer drains before bulk
+//! transfer data, so keystroke echoes never queue behind a download. Both directions are
+//! credited with a terminal-sized window.
 
-use super::connection::AgentConnection;
-use anyhow::{Context, Result, anyhow, bail};
-use futures_util::{SinkExt, StreamExt, stream::SplitSink, stream::SplitStream};
+use crate::runtime::responder::{ControlSender, OutboundFrame};
+use crate::transfers::stream::{OutputCredits, StreamWriter};
+use anyhow::{Context, Result, anyhow};
 use nix::{
     errno::Errno,
     sys::signal::{Signal, kill, killpg},
     unistd::Pid,
 };
-use redoor_core::log;
-use redoor_protocol::wire::{
-    log::Level,
-    terminal::{
-        TerminalAgentHandshake, TerminalClientMessage, TerminalId, TerminalServerMessage,
-        TerminalSize,
+use redoor_core::{log, stream_credit::CreditLedger};
+use redoor_protocol::{
+    ids::RequestId,
+    wire::{
+        AgentToServer,
+        log::Level,
+        stream::{StreamChunk, TERMINAL_CREDIT_WINDOW_FRAMES, receive_queue_frames},
+        terminal::{TerminalServerMessage, TerminalSize},
     },
 };
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::{ffi::OsString, os::unix::process::ExitStatusExt, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
     process::Child,
-    sync::{mpsc, oneshot, watch},
+    sync::mpsc,
     task::JoinHandle,
     time::timeout,
-};
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, tungstenite::protocol::Message as WsMessage,
 };
 use tokio_util::sync::CancellationToken;
 
 /// PTY read size; small enough to keep interactive output latency low.
 const PTY_BUFFER_SIZE: usize = 8 * 1024;
-/// Short output queue so a slow browser backpressures the PTY instead of buffering output.
-const OUTPUT_QUEUE_SIZE: usize = 8;
-/// Bounded queue for lifecycle and protocol control frames that the socket writer sends
-/// ahead of PTY output.
-const CONTROL_QUEUE_SIZE: usize = 8;
+/// Pending resizes per terminal; resizes are rare, and a full queue only drops a stale size.
+const RESIZE_QUEUE_SIZE: usize = 4;
 /// How long teardown waits for the shell or a bridge task before escalating, so a stuck
 /// session cannot hold resources indefinitely.
 const PROCESS_EXIT_GRACE: Duration = Duration::from_secs(2);
 
-/// Dedicated websocket carrying one terminal's input and output.
-type TerminalSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-/// Write half, owned by one writer task that prioritizes control frames over output.
-type TerminalSink = SplitSink<TerminalSocket, WsMessage>;
-/// Read half, owned by the input and resize task.
-type TerminalStream = SplitStream<TerminalSocket>;
-
-/// One prioritized websocket command with optional delivery acknowledgement.
-struct SocketCommand {
-    message: WsMessage,
-    sent: Option<oneshot::Sender<Result<(), String>>>,
+/// Input queues of one terminal, fed by the connection reader.
+struct TerminalRoute {
+    input: mpsc::Sender<StreamChunk>,
+    resize: mpsc::Sender<TerminalSize>,
 }
 
-/// Identifies which independently backpressured terminal component stopped first.
+/// Routes inbound terminal input frames and resizes to their PTY sessions.
+///
+/// Shared by the connection reader (frames), the runtime (resizes) and the sessions, so input
+/// never passes through the runtime mailbox.
+#[derive(Clone, Default)]
+pub(crate) struct TerminalInputs {
+    routes: Arc<Mutex<HashMap<RequestId, TerminalRoute>>>,
+}
+
+/// Input of one terminal; dropping it unroutes the stream.
+pub(crate) struct TerminalInput {
+    inputs: TerminalInputs,
+    stream: RequestId,
+    pub(crate) frames: mpsc::Receiver<StreamChunk>,
+    pub(crate) resizes: mpsc::Receiver<TerminalSize>,
+}
+
+impl Drop for TerminalInput {
+    /// Unroutes the stream so late frames are dropped instead of queued for nobody.
+    fn drop(&mut self) {
+        self.inputs.table().remove(&self.stream);
+    }
+}
+
+impl TerminalInputs {
+    /// Locks the table, tolerating poison because every operation leaves it consistent.
+    fn table(&self) -> std::sync::MutexGuard<'_, HashMap<RequestId, TerminalRoute>> {
+        self.routes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Routes stream `stream` to a new terminal.
+    pub(crate) fn open(&self, stream: RequestId) -> TerminalInput {
+        let (input, frames) = mpsc::channel(receive_queue_frames(TERMINAL_CREDIT_WINDOW_FRAMES));
+        let (resize, resizes) = mpsc::channel(RESIZE_QUEUE_SIZE);
+        self.table().insert(stream, TerminalRoute { input, resize });
+        TerminalInput {
+            inputs: self.clone(),
+            stream,
+            frames,
+            resizes,
+        }
+    }
+
+    /// Hands `chunk` to its terminal, or returns it when the stream is not a terminal.
+    ///
+    /// The server sends at most its credit window, so a full queue is a protocol violation;
+    /// it unroutes only that terminal, whose session then ends.
+    pub(crate) fn deliver(&self, chunk: StreamChunk) -> Option<StreamChunk> {
+        let mut table = self.table();
+        let Some(route) = table.get(&chunk.request_id) else {
+            return Some(chunk);
+        };
+        let stream = chunk.request_id;
+        if let Err(mpsc::error::TrySendError::Full(_)) = route.input.try_send(chunk) {
+            log!(
+                Level::Warning,
+                "Terminal input exceeded its flow-control credit: stream={}",
+                stream
+            );
+            table.remove(&stream);
+        }
+        None
+    }
+
+    /// Queues a resize for terminal `stream`; resizes for unknown terminals are ignored.
+    pub(crate) fn resize(&self, stream: RequestId, size: TerminalSize) {
+        if let Some(route) = self.table().get(&stream) {
+            let _ = route.resize.try_send(size);
+        }
+    }
+}
+
+/// Connection resources one terminal session uses.
+pub(crate) struct TerminalLink {
+    pub(crate) stream: RequestId,
+    /// Interactive lane for output frames and lifecycle events, in one order.
+    pub(crate) interactive: ControlSender,
+    /// Control lane for input credit grants.
+    pub(crate) control: ControlSender,
+    pub(crate) credits: OutputCredits,
+    pub(crate) input: TerminalInput,
+}
+
+/// Why the session ended first.
 enum SessionEnd {
     Cancelled,
     Child(std::process::ExitStatus),
-    PtyReader(Result<()>),
-    SocketReader(Result<()>),
-    SocketWriter(Result<()>),
+    /// PTY EOF; carries the writer back because its task must not be polled again.
+    OutputEnded(Option<StreamWriter>),
+    InputEnded(Result<()>),
 }
 
-/// Builds the dedicated data-plane URL without making assumptions about its authority.
-fn terminal_url(server_url: &str, terminal_id: &TerminalId) -> Result<url::Url> {
-    let mut url = url::Url::parse(server_url).context("invalid agent websocket URL")?;
-    url.set_path(&format!("/api/v1/terminals/{}/agent/ws", terminal_id.0));
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
-/// Connects one dedicated websocket and owns the PTY until all descendants are torn down.
-pub(crate) async fn connect_and_run(
-    connection: &AgentConnection,
-    terminal_id: TerminalId,
-    token: String,
+/// Runs one terminal until its shell exits, the server cancels it or the connection ends.
+///
+/// The stream always ends with FIN after the last output and lifecycle event, so the server
+/// knows no frame of it follows.
+pub(crate) async fn run(
+    link: TerminalLink,
     size: TerminalSize,
     cwd: String,
     cancel: CancellationToken,
 ) -> Result<()> {
     size.validate()
         .map_err(|error| anyhow!(error.to_string()))?;
-    let url = terminal_url(connection.server_url(), &terminal_id)?;
-    if cancel.is_cancelled() {
-        return Ok(());
-    }
-    let connection = tokio::select! {
-        _ = cancel.cancelled() => return Ok(()),
-        result = connection.connect(url.as_str()) => result,
-    };
-    let (mut socket, _) = connection.context("failed to connect dedicated terminal websocket")?;
-
-    let handshake = TerminalAgentHandshake::Authenticate { token };
-    let handshake =
-        serde_json::to_string(&handshake).context("failed to encode terminal handshake")?;
-    let authenticated = tokio::select! {
-        _ = cancel.cancelled() => return Ok(()),
-        result = socket.send(WsMessage::text(handshake)) => result,
-    };
-    authenticated.context("failed to authenticate dedicated terminal websocket")?;
-
-    match start_pty(size, &cwd) {
-        Ok((reader, writer, child, process_group_id)) => {
-            log!(
-                Level::Info,
-                "Terminal created: terminal_id={}, cwd={}",
-                terminal_id.0,
-                cwd
-            );
-            let result =
-                run_pty_session(socket, reader, writer, child, process_group_id, cancel).await;
-            log!(
-                Level::Info,
-                "Terminal destroyed: terminal_id={}",
-                terminal_id.0
-            );
-            result
-        }
+    let TerminalLink {
+        stream,
+        interactive,
+        control,
+        credits,
+        input,
+    } = link;
+    let mut writer = StreamWriter::new(
+        interactive,
+        stream,
+        credits.register_with_window(stream, TERMINAL_CREDIT_WINDOW_FRAMES),
+    );
+    let (reader, pty_writer, mut child, process_group_id) = match start_pty(size, &cwd) {
+        Ok(started) => started,
         Err(error) => {
-            let _ = timeout(
-                PROCESS_EXIT_GRACE,
-                send_setup_error(&mut socket, "Failed to start terminal"),
+            send_event(
+                &mut writer,
+                stream,
+                TerminalServerMessage::Error {
+                    message: "Failed to start terminal".to_string(),
+                },
             )
             .await;
-            Err(error)
+            writer.send(&[], true).await;
+            return Err(error);
+        }
+    };
+    log!(
+        Level::Info,
+        "Terminal created: stream={}, cwd={}",
+        stream,
+        cwd
+    );
+    send_event(&mut writer, stream, TerminalServerMessage::Ready).await;
+
+    let mut output = tokio::spawn(forward_output(reader, writer));
+    let mut input_task = tokio::spawn(apply_input(input, pty_writer, control, stream));
+    let end = wait_for_end(&mut child, &cancel, &mut output, &mut input_task).await;
+
+    let (status, finished_writer, result) = match end {
+        SessionEnd::Child(status) => (Some(status), None, Ok(())),
+        SessionEnd::OutputEnded(writer) => (
+            timeout(Duration::from_millis(100), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok),
+            Some(writer),
+            Ok(()),
+        ),
+        SessionEnd::Cancelled => (None, None, Ok(())),
+        SessionEnd::InputEnded(result) => (None, None, result),
+    };
+    teardown_process_group(&mut child, process_group_id).await;
+    input_task.abort();
+    // The PTY closes with the shell, so the output task drains the remaining output and
+    // hands the writer back; the exit status then follows that output on the same lane.
+    let writer = match finished_writer {
+        Some(writer) => writer,
+        None => timeout(PROCESS_EXIT_GRACE, &mut output)
+            .await
+            .ok()
+            .and_then(Result::ok),
+    };
+    if let Some(mut writer) = writer {
+        if let Some(status) = status.filter(|_| !cancel.is_cancelled()) {
+            send_event(
+                &mut writer,
+                stream,
+                TerminalServerMessage::Exit {
+                    code: status.code(),
+                    signal: status.signal(),
+                },
+            )
+            .await;
+        }
+        writer.send(&[], true).await;
+    } else {
+        output.abort();
+    }
+    log!(Level::Info, "Terminal destroyed: stream={}", stream);
+    result
+}
+
+/// Waits for the first terminal-ending event with small select arms.
+async fn wait_for_end(
+    child: &mut Child,
+    cancel: &CancellationToken,
+    output: &mut JoinHandle<StreamWriter>,
+    input: &mut JoinHandle<Result<()>>,
+) -> SessionEnd {
+    tokio::select! {
+        _ = cancel.cancelled() => SessionEnd::Cancelled,
+        status = child.wait() => match status {
+            Ok(status) => SessionEnd::Child(status),
+            Err(error) => SessionEnd::InputEnded(Err(error.into())),
+        },
+        writer = &mut *output => SessionEnd::OutputEnded(writer.ok()),
+        result = &mut *input => SessionEnd::InputEnded(
+            result.context("terminal input task failed").and_then(|result| result),
+        ),
+    }
+}
+
+/// Sends one lifecycle event on the terminal's own lane, ordered with its output.
+async fn send_event(writer: &mut StreamWriter, stream: RequestId, event: TerminalServerMessage) {
+    writer
+        .send_message(AgentToServer::TerminalEvent { stream, event })
+        .await;
+}
+
+/// Copies PTY output into credited stream frames until EOF or a closed lane, then returns
+/// the writer so the session can end the stream after the last output.
+async fn forward_output(
+    mut reader: pty_process::OwnedReadPty,
+    mut writer: StreamWriter,
+) -> StreamWriter {
+    let mut buffer = vec![0; PTY_BUFFER_SIZE];
+    loop {
+        let read = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return writer,
+            Ok(read) => read,
+        };
+        if !writer.send(&buffer[..read], false).await {
+            return writer;
         }
     }
 }
 
-/// Allocates and starts the shell only after the dedicated socket handshake is sent.
+/// Writes input frames to the PTY, applies resizes and returns credit for consumed input.
+async fn apply_input(
+    mut input: TerminalInput,
+    mut pty: pty_process::OwnedWritePty,
+    control: ControlSender,
+    stream: RequestId,
+) -> Result<()> {
+    let mut ledger = CreditLedger::default();
+    loop {
+        let event = tokio::select! {
+            size = input.resizes.recv() => size.map(InputEvent::Resize),
+            chunk = input.frames.recv() => chunk.map(InputEvent::Frame),
+        };
+        match event {
+            None => return Ok(()),
+            Some(InputEvent::Resize(size)) => resize(&pty, size)?,
+            Some(InputEvent::Frame(chunk)) => {
+                if !write_input(&mut pty, &chunk).await? {
+                    return Ok(());
+                }
+                if let Some(frames) = ledger.drained(chunk.consumes_credit()) {
+                    let grant = AgentToServer::Credit { stream, frames };
+                    let _ = control.send(OutboundFrame::message(grant)).await;
+                }
+            }
+        }
+    }
+}
+
+/// One piece of terminal input from the server.
+enum InputEvent {
+    Resize(TerminalSize),
+    Frame(StreamChunk),
+}
+
+/// Writes one input frame; returns `false` once the server ended the input stream.
+async fn write_input(pty: &mut pty_process::OwnedWritePty, chunk: &StreamChunk) -> Result<bool> {
+    pty.write_all(&chunk.data)
+        .await
+        .context("failed to write PTY input")?;
+    Ok(!chunk.is_last && !chunk.is_error)
+}
+
+/// Validates a resize again before invoking the PTY ioctl.
+fn resize(pty: &pty_process::OwnedWritePty, size: TerminalSize) -> Result<()> {
+    size.validate()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    pty.resize(pty_process::Size::new(size.rows, size.cols))
+        .context("failed to resize PTY")
+}
+
+/// Allocates the PTY and starts the login shell in `cwd`.
 fn start_pty(
     size: TerminalSize,
     cwd: &str,
@@ -165,339 +365,6 @@ fn start_pty(
         i32::try_from(process_group_id).context("terminal process id is too large")?;
     let (reader, writer) = pty.into_split();
     Ok((reader, writer, child, process_group_id))
-}
-
-/// Reports setup failure while the socket is still available, then closes it.
-async fn send_setup_error(socket: &mut TerminalSocket, message: &str) {
-    let notification = TerminalServerMessage::Error {
-        message: message.to_owned(),
-    };
-    if let Ok(json) = serde_json::to_string(&notification) {
-        let _ = socket.send(WsMessage::text(json)).await;
-    }
-    let _ = socket.close(None).await;
-}
-
-/// Runs bounded bridge tasks and always tears down and reaps the process group.
-async fn run_pty_session(
-    socket: TerminalSocket,
-    reader: pty_process::OwnedReadPty,
-    writer: pty_process::OwnedWritePty,
-    mut child: Child,
-    process_group_id: i32,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let (socket_sink, socket_stream) = socket.split();
-    let (output_sender, output_receiver) = mpsc::channel(OUTPUT_QUEUE_SIZE);
-    let (control_sender, control_receiver) = mpsc::channel(CONTROL_QUEUE_SIZE);
-    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-
-    let mut pty_reader = tokio::spawn(read_pty(reader, output_sender, shutdown_receiver.clone()));
-    let mut socket_reader = tokio::spawn(control_pty(
-        socket_stream,
-        writer,
-        control_sender.clone(),
-        shutdown_receiver.clone(),
-    ));
-    let mut socket_writer = tokio::spawn(write_socket(
-        socket_sink,
-        control_receiver,
-        output_receiver,
-        shutdown_receiver,
-    ));
-
-    let mut end = match send_ready_or_cancel(&control_sender, &cancel).await {
-        Ok(true) => {
-            wait_for_session_end(
-                &mut child,
-                &cancel,
-                &mut pty_reader,
-                &mut socket_reader,
-                &mut socket_writer,
-            )
-            .await
-        }
-        Ok(false) => SessionEnd::Cancelled,
-        Err(error) => SessionEnd::SocketWriter(Err(error)),
-    };
-
-    // PTY EOF may be promoted to a child exit below, but its bridge handle was
-    // already consumed and must never be polled a second time during cleanup.
-    let pty_reader_completed = matches!(end, SessionEnd::PtyReader(_));
-    let socket_reader_completed = matches!(end, SessionEnd::SocketReader(_));
-    let socket_writer_completed = matches!(end, SessionEnd::SocketWriter(_));
-    end = resolve_pty_end(end, &mut child).await;
-
-    if let SessionEnd::Child(status) = &end {
-        let notification = exit_notification(status);
-        let _ = timeout(
-            PROCESS_EXIT_GRACE,
-            send_lifecycle(&control_sender, notification),
-        )
-        .await;
-    }
-
-    let _ = shutdown_sender.send(true);
-    drop(control_sender);
-    teardown_process_group(&mut child, process_group_id).await;
-    if !pty_reader_completed {
-        finish_task(pty_reader).await;
-    }
-    if !socket_reader_completed {
-        finish_task(socket_reader).await;
-    }
-    if !socket_writer_completed {
-        finish_task(socket_writer).await;
-    }
-    session_result(end)
-}
-
-/// Sends readiness while still allowing control-plane loss to cancel setup promptly.
-async fn send_ready_or_cancel(
-    control_sender: &mpsc::Sender<SocketCommand>,
-    cancel: &CancellationToken,
-) -> Result<bool> {
-    if cancel.is_cancelled() {
-        return Ok(false);
-    }
-    tokio::select! {
-        _ = cancel.cancelled() => Ok(false),
-        result = send_lifecycle(control_sender, TerminalServerMessage::Ready) => result.map(|()| true),
-    }
-}
-
-/// Gives PTY EOF a short chance to produce the child status used by the exit lifecycle.
-async fn resolve_pty_end(end: SessionEnd, child: &mut Child) -> SessionEnd {
-    if !matches!(end, SessionEnd::PtyReader(_)) {
-        return end;
-    }
-    match timeout(Duration::from_millis(100), child.wait()).await {
-        Ok(Ok(status)) => SessionEnd::Child(status),
-        _ => end,
-    }
-}
-
-/// Waits for the first authoritative terminal-ending event with small select arms.
-async fn wait_for_session_end(
-    child: &mut Child,
-    cancel: &CancellationToken,
-    pty_reader: &mut JoinHandle<Result<()>>,
-    socket_reader: &mut JoinHandle<Result<()>>,
-    socket_writer: &mut JoinHandle<Result<()>>,
-) -> SessionEnd {
-    if cancel.is_cancelled() {
-        return SessionEnd::Cancelled;
-    }
-    tokio::select! {
-        _ = cancel.cancelled() => SessionEnd::Cancelled,
-        status = child.wait() => child_end(status),
-        result = pty_reader => SessionEnd::PtyReader(join_result(result)),
-        result = socket_reader => SessionEnd::SocketReader(join_result(result)),
-        result = socket_writer => SessionEnd::SocketWriter(join_result(result)),
-    }
-}
-
-/// Converts child wait failures into a task-style terminal result.
-fn child_end(status: std::io::Result<std::process::ExitStatus>) -> SessionEnd {
-    match status {
-        Ok(status) => SessionEnd::Child(status),
-        Err(error) => SessionEnd::PtyReader(Err(error.into())),
-    }
-}
-
-/// Preserves worker errors while giving task panics an actionable boundary error.
-fn join_result(result: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
-    result.context("terminal bridge task failed")?
-}
-
-/// Converts the first bridge completion into the terminal task's public result.
-fn session_result(end: SessionEnd) -> Result<()> {
-    match end {
-        SessionEnd::Cancelled | SessionEnd::Child(_) => Ok(()),
-        SessionEnd::PtyReader(result)
-        | SessionEnd::SocketReader(result)
-        | SessionEnd::SocketWriter(result) => result,
-    }
-}
-
-/// Reads fixed-size PTY chunks into a bounded queue so output cannot grow without limit.
-async fn read_pty(
-    mut reader: pty_process::OwnedReadPty,
-    output_sender: mpsc::Sender<Vec<u8>>,
-    mut shutdown_receiver: watch::Receiver<bool>,
-) -> Result<()> {
-    let mut buffer = vec![0; PTY_BUFFER_SIZE];
-    loop {
-        let read = tokio::select! {
-            _ = shutdown_receiver.changed() => return Ok(()),
-            read = reader.read(&mut buffer) => read,
-        }?;
-        if read == 0 {
-            return Ok(());
-        }
-        let output = buffer[..read].to_vec();
-        tokio::select! {
-            _ = shutdown_receiver.changed() => return Ok(()),
-            result = output_sender.send(output) => {
-                if result.is_err() {
-                    return Ok(());
-                }
-            }
-        }
-    }
-}
-
-/// Applies browser input and validated resizes while independently observing socket EOF.
-async fn control_pty(
-    mut socket_stream: TerminalStream,
-    mut writer: pty_process::OwnedWritePty,
-    control_sender: mpsc::Sender<SocketCommand>,
-    mut shutdown_receiver: watch::Receiver<bool>,
-) -> Result<()> {
-    loop {
-        let message = tokio::select! {
-            _ = shutdown_receiver.changed() => return Ok(()),
-            message = socket_stream.next() => message,
-        };
-        let Some(message) = message else {
-            return Ok(());
-        };
-        if !handle_socket_message(message?, &mut writer, &control_sender).await? {
-            return Ok(());
-        }
-    }
-}
-
-/// Handles one dedicated-socket frame without retaining terminal payloads.
-async fn handle_socket_message(
-    message: WsMessage,
-    writer: &mut pty_process::OwnedWritePty,
-    control_sender: &mpsc::Sender<SocketCommand>,
-) -> Result<bool> {
-    match message {
-        WsMessage::Binary(bytes) => writer
-            .write_all(&bytes)
-            .await
-            .context("failed to write PTY input")
-            .map(|()| true),
-        WsMessage::Text(text) => resize_pty(text.as_ref(), writer).map(|()| true),
-        WsMessage::Ping(bytes) => queue_socket_message(control_sender, WsMessage::Pong(bytes))
-            .await
-            .map(|()| true),
-        WsMessage::Pong(_) => Ok(true),
-        WsMessage::Close(_) => Ok(false),
-        _ => bail!("unsupported terminal websocket frame"),
-    }
-}
-
-/// Parses and validates resize controls again before invoking the PTY ioctl.
-fn resize_pty(text: &str, writer: &pty_process::OwnedWritePty) -> Result<()> {
-    let message: TerminalClientMessage =
-        serde_json::from_str(text).context("invalid terminal control message")?;
-    match message {
-        TerminalClientMessage::Resize { size } => {
-            size.validate()
-                .map_err(|error| anyhow!(error.to_string()))?;
-            writer
-                .resize(pty_process::Size::new(size.rows, size.cols))
-                .context("failed to resize PTY")
-        }
-    }
-}
-
-/// Queues a protocol-level websocket response without bypassing bounded backpressure.
-async fn queue_socket_message(
-    control_sender: &mpsc::Sender<SocketCommand>,
-    message: WsMessage,
-) -> Result<()> {
-    control_sender
-        .send(SocketCommand {
-            message,
-            sent: None,
-        })
-        .await
-        .context("terminal websocket writer stopped")
-}
-
-/// Serializes a lifecycle notification and waits until the websocket sink accepts it.
-async fn send_lifecycle(
-    control_sender: &mpsc::Sender<SocketCommand>,
-    message: TerminalServerMessage,
-) -> Result<()> {
-    let json = serde_json::to_string(&message).context("failed to encode terminal lifecycle")?;
-    let (sent, received) = oneshot::channel();
-    control_sender
-        .send(SocketCommand {
-            message: WsMessage::text(json),
-            sent: Some(sent),
-        })
-        .await
-        .context("terminal websocket writer stopped")?;
-    received
-        .await
-        .context("terminal websocket writer dropped lifecycle acknowledgement")?
-        .map_err(anyhow::Error::msg)
-}
-
-/// Prioritizes lifecycle and protocol controls over bounded PTY output frames.
-async fn write_socket(
-    mut socket_sink: TerminalSink,
-    mut control_receiver: mpsc::Receiver<SocketCommand>,
-    mut output_receiver: mpsc::Receiver<Vec<u8>>,
-    mut shutdown_receiver: watch::Receiver<bool>,
-) -> Result<()> {
-    let mut control_closed = false;
-    let mut output_closed = false;
-    loop {
-        let message = tokio::select! {
-            biased;
-            command = control_receiver.recv(), if !control_closed => take_socket_command(command, &mut control_closed),
-            _ = shutdown_receiver.changed() => break,
-            output = output_receiver.recv(), if !output_closed => take_output_message(output, &mut output_closed),
-            else => break,
-        };
-        let Some(mut command) = message else {
-            continue;
-        };
-        let result = socket_sink.send(command.message).await;
-        if let Some(sent) = command.sent.take() {
-            let _ = sent.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-        }
-        result.context("failed to send terminal websocket frame")?;
-    }
-    let _ = socket_sink.send(WsMessage::Close(None)).await;
-    let _ = socket_sink.close().await;
-    Ok(())
-}
-
-/// Marks the control lane closed without prematurely dropping pending PTY output.
-fn take_socket_command(
-    command: Option<SocketCommand>,
-    control_closed: &mut bool,
-) -> Option<SocketCommand> {
-    if command.is_none() {
-        *control_closed = true;
-    }
-    command
-}
-
-/// Marks PTY EOF while preserving the control lane for a final exit notification.
-fn take_output_message(output: Option<Vec<u8>>, output_closed: &mut bool) -> Option<SocketCommand> {
-    if output.is_none() {
-        *output_closed = true;
-    }
-    output.map(|bytes| SocketCommand {
-        message: WsMessage::Binary(bytes.into()),
-        sent: None,
-    })
-}
-
-/// Produces the lifecycle status understood by the browser for a reaped child.
-fn exit_notification(status: &std::process::ExitStatus) -> TerminalServerMessage {
-    TerminalServerMessage::Exit {
-        code: status.code(),
-        signal: status.signal(),
-    }
 }
 
 /// Sends escalating signals to every PTY session member and reaps its leader.
@@ -558,14 +425,6 @@ fn signal_process_group(process_group_id: i32, signal: Signal) {
     match killpg(Pid::from_raw(process_group_id), signal) {
         Ok(()) | Err(Errno::ESRCH) => {}
         Err(_) => {}
-    }
-}
-
-/// Joins a cancelled bridge task, aborting only if it did not observe shutdown promptly.
-async fn finish_task(mut task: JoinHandle<Result<()>>) {
-    if timeout(PROCESS_EXIT_GRACE, &mut task).await.is_err() {
-        task.abort();
-        let _ = task.await;
     }
 }
 

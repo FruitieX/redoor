@@ -18,10 +18,10 @@ use super::super::streams::{
     OutboundError, OutboundStream, OutputReceiver, StreamEnd, StreamLease, StreamOutcome,
 };
 use redoor_core::log;
-use redoor_protocol::ids::{AgentId, ChunkIndex, RequestId};
+use redoor_protocol::ids::{AgentId, RequestId};
 use redoor_protocol::wire::ServerToAgent;
 use redoor_protocol::wire::log::Level;
-use redoor_protocol::wire::stream::{StreamChunk, StreamChunkFrameRequest, StreamPayloadKind};
+use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk};
 use redoor_protocol::{
     api::transfers::{TransferDirection, TransferProgressState},
     wire::command::{Command, CommandResult},
@@ -38,13 +38,11 @@ pub(crate) enum CopyRelease<'a> {
 /// Moves one remote copy's frames from the source stream to the destination stream.
 ///
 /// Runs outside the router so per-frame work never touches its mailbox. It owns the
-/// destination chunk numbering, so it is also the one that sends the destination's abort
-/// frame when the router fails the copy.
+/// destination stream, so it is also the one that sends the destination's abort frame when
+/// the router fails the copy.
 struct CopyForwarder {
     source: OutputReceiver,
     dest: OutboundStream,
-    payload_kind: StreamPayloadKind,
-    next_index: ChunkIndex,
 }
 
 impl CopyForwarder {
@@ -78,20 +76,8 @@ impl CopyForwarder {
             self.abort(&message).await;
             return false;
         }
-        if chunk.payload_kind != self.payload_kind {
-            // The destination's error response carries this reason back to the router.
-            let message = format!(
-                "Copy payload kind mismatch: expected {:?}, got {:?}",
-                self.payload_kind, chunk.payload_kind
-            );
-            self.abort(&message).await;
-            return false;
-        }
         let is_last = chunk.is_last;
-        let request = StreamChunkFrameRequest::new(self.dest.request_id(), &chunk.data)
-            .payload_kind(self.payload_kind)
-            .is_last(is_last);
-        match self.dest.send_frames(&mut self.next_index, request).await {
+        match self.dest.send_data(&chunk.data, is_last).await {
             Ok(()) => !is_last,
             Err(OutboundError::Stopped) => {
                 self.abort_if_failed().await;
@@ -111,17 +97,14 @@ impl CopyForwarder {
 
     /// Ends the destination upload with an error frame so its worker discards staging.
     async fn abort(&mut self, reason: &str) {
-        self.dest
-            .send_abort(self.next_index, self.payload_kind, reason)
-            .await;
-        self.next_index = self.next_index.saturating_next_index();
+        self.dest.send_abort(reason).await;
     }
 }
 
 impl RouterState {
     /// Starts a local copy or move, or a remote streamed one, and replies with its public id.
     pub(crate) fn start_copy(&mut self, request: StartCopyRequest) {
-        let (Some(source), Some(dest)) = (
+        let (Some(_), Some(_)) = (
             self.agents.by_id.get(&request.source_agent_id),
             self.agents.by_id.get(&request.dest_agent_id),
         ) else {
@@ -136,14 +119,6 @@ impl RouterState {
             return;
         };
         let remote = request.source_agent_id != request.dest_agent_id;
-        if remote
-            && let Err(error) = source
-                .transfer_connection()
-                .and_then(|_| dest.transfer_connection())
-        {
-            let _ = request.reply.send(Err(error));
-            return;
-        }
         let then = match (request.operation, request.source_identity.clone()) {
             (CopyOperation::Copy, _) => None,
             (CopyOperation::Move, Some(identity)) => Some(DeleteSource {
@@ -284,17 +259,20 @@ impl RouterState {
             return (request.source_agent_id.clone(), false);
         };
         let source = StreamLease::new(source_id, source_agent.link(), 0);
-        let source_receiver = source_agent.streams.open_inbound(source.clone());
+        let source_receiver = source_agent
+            .streams
+            .open_inbound(source.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         let dest = OutboundStream::new(
             StreamLease::new(dest_id, dest_agent.link(), 0),
-            dest_agent.streams.open_outbound(dest_id),
+            dest_agent
+                .streams
+                .open_outbound(dest_id, STREAM_CREDIT_WINDOW_FRAMES),
+            false,
         );
         tokio::spawn(
             CopyForwarder {
                 source: source_receiver,
                 dest: dest.clone(),
-                payload_kind: request.content_kind.payload_kind(),
-                next_index: ChunkIndex::new(0),
             }
             .run(),
         );
@@ -746,30 +724,22 @@ mod tests {
     use super::super::super::streams::{AgentLink, ConnectionStreams};
     use super::*;
     use crate::actors::lanes::ControlLanes;
-    use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
     use tokio::sync::mpsc;
 
-    /// Builds one credited agent session with an observable transfer lane.
+    /// Builds one agent connection with an observable bulk lane.
     fn agent(name: &str) -> (ConnectionStreams, AgentLink, mpsc::Receiver<StreamChunk>) {
-        let (transfer, lane) = mpsc::channel(64);
         let agent = AgentId::from(name);
+        let (lanes, receivers) = ControlLanes::bounded(16, 16);
         (
             ConnectionStreams::new(agent.clone()),
-            AgentLink::new(ControlLanes::bounded(16, 16).0, Some(transfer)),
-            lane,
+            AgentLink::new(lanes),
+            receivers.bulk,
         )
     }
 
     /// Builds one source data frame.
     fn frame(request_id: RequestId, is_last: bool) -> StreamChunk {
-        StreamChunk {
-            request_id,
-            chunk_index: ChunkIndex::new(0),
-            is_last,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data: vec![3; 8],
-        }
+        StreamChunk::data(request_id, vec![3; 8], is_last)
     }
 
     /// A stalled destination stalls only its own copy: the source agent's reader keeps
@@ -779,38 +749,42 @@ mod tests {
         let (source_streams, source_link, _source_lane) = agent("source");
         let (dest_streams, dest_link, mut dest_lane) = agent("dest");
         let source = StreamLease::new(RequestId::new(1), source_link.clone(), 0);
-        let receiver = source_streams.open_inbound(source.clone());
+        let receiver = source_streams.open_inbound(source.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         let dest = OutboundStream::new(
             StreamLease::new(RequestId::new(2), dest_link, 0),
-            dest_streams.open_outbound(RequestId::new(2)),
+            dest_streams.open_outbound(RequestId::new(2), STREAM_CREDIT_WINDOW_FRAMES),
+            false,
         );
         tokio::spawn(
             CopyForwarder {
                 source: receiver,
                 dest: dest.clone(),
-                payload_kind: StreamPayloadKind::RawFile,
-                next_index: ChunkIndex::new(0),
             }
             .run(),
         );
-        let mut other =
-            source_streams.open_inbound(StreamLease::new(RequestId::new(3), source_link, 0));
-        // The destination never grants credit, so only its window can be forwarded.
+        let mut other = source_streams.open_inbound(
+            StreamLease::new(RequestId::new(3), source_link, 0),
+            STREAM_CREDIT_WINDOW_FRAMES,
+        );
+        // The destination never grants credit, so only its window can be forwarded. The
+        // one-slot lane is drained as frames arrive, so only credit limits the forwarder.
+        let mut forwarded = 0;
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES * 2 {
             assert!(
                 source_streams
                     .deliver(frame(RequestId::new(1), false))
                     .is_none()
             );
-            tokio::task::yield_now().await;
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+                while dest_lane.try_recv().is_ok() {
+                    forwarded += 1;
+                }
+            }
         }
         // Unrelated streams of the source agent are still served by the same reader.
         source_streams.deliver(frame(RequestId::new(3), false));
         assert_eq!(other.recv().await.unwrap().request_id, RequestId::new(3));
-        let mut forwarded = 0;
-        while dest_lane.try_recv().is_ok() {
-            forwarded += 1;
-        }
         // The destination's credit window bounds what the forwarder pushed to it.
         assert_eq!(forwarded, STREAM_CREDIT_WINDOW_FRAMES as usize);
         // Failing the copy makes the forwarder abort the destination worker.
@@ -824,18 +798,19 @@ mod tests {
     async fn forwarder_relays_last_frame() {
         let (source_streams, source_link, _source_lane) = agent("source");
         let (dest_streams, dest_link, mut dest_lane) = agent("dest");
-        let receiver =
-            source_streams.open_inbound(StreamLease::new(RequestId::new(1), source_link, 0));
+        let receiver = source_streams.open_inbound(
+            StreamLease::new(RequestId::new(1), source_link, 0),
+            STREAM_CREDIT_WINDOW_FRAMES,
+        );
         let dest = OutboundStream::new(
             StreamLease::new(RequestId::new(2), dest_link, 0),
-            dest_streams.open_outbound(RequestId::new(2)),
+            dest_streams.open_outbound(RequestId::new(2), STREAM_CREDIT_WINDOW_FRAMES),
+            false,
         );
         let forwarder = tokio::spawn(
             CopyForwarder {
                 source: receiver,
                 dest: dest.clone(),
-                payload_kind: StreamPayloadKind::RawFile,
-                next_index: ChunkIndex::new(0),
             }
             .run(),
         );
@@ -843,19 +818,19 @@ mod tests {
         let end = source_streams.deliver(frame(RequestId::new(1), true));
         // The router learns the source finished from the reader, independent of forwarding.
         assert!(end.is_some_and(|end| end.delivered));
+        let frames = [
+            dest_lane.recv().await.unwrap(),
+            dest_lane.recv().await.unwrap(),
+        ];
         forwarder.await.unwrap();
-        let mut frames = Vec::new();
-        while let Ok(frame) = dest_lane.try_recv() {
-            frames.push(frame);
-        }
-        // Frames are renumbered for the destination stream and the last one stays terminal.
+        // Frames are relabeled for the destination stream and the last one stays terminal.
         assert_eq!(frames.len(), 2);
         assert!(
             frames
                 .iter()
                 .all(|frame| frame.request_id == RequestId::new(2))
         );
-        assert!(frames[1].is_last && frames[1].chunk_index == ChunkIndex::new(1));
+        assert!(frames[1].is_last);
         // Forwarded bytes are the copy's progress.
         assert_eq!(dest.lease().bytes(), 16);
     }
@@ -864,11 +839,7 @@ mod tests {
     /// acknowledges, instead of waiting for a source acknowledgement that can never come.
     #[tokio::test]
     async fn cancel_after_source_finished_settles_on_destination_ack() {
-        let mut state = RouterState::new(
-            tokio::spawn(async {}),
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(tokio::spawn(async {}));
         let flow_id = RequestId::new(70);
         let (dest_id, source_id) = (RequestId::new(71), RequestId::new(72));
         state.record_copy_start(CopyStartContext {
@@ -880,8 +851,7 @@ mod tests {
             total_bytes: 8,
             direction: TransferDirection::Copy,
         });
-        let detached =
-            |id| StreamLease::new(id, AgentLink::new(ControlLanes::bounded(1, 1).0, None), 0);
+        let detached = |id| StreamLease::new(id, AgentLink::new(ControlLanes::bounded(1, 1).0), 0);
         state.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
@@ -895,6 +865,7 @@ mod tests {
                     dest: OutboundStream::new(
                         detached(dest_id),
                         redoor_core::stream_credit::CreditGate::default(),
+                        false,
                     ),
                     stage: RemoteStage::Streaming,
                     source_finished: true,

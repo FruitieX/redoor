@@ -3,10 +3,7 @@
 use super::cancel::{CancelRegistry, RegisterError, Registration};
 use crate::transfers::upload::UploadRoutes;
 use redoor_core::log;
-use redoor_protocol::{
-    ids::RequestId,
-    wire::{log::Level, log::LogStreamId, terminal::TerminalId},
-};
+use redoor_protocol::{ids::RequestId, wire::log::Level};
 use std::collections::{BTreeMap, HashMap};
 use tokio_util::sync::CancellationToken;
 
@@ -16,9 +13,9 @@ use tokio_util::sync::CancellationToken;
 /// tombstones could push it out.
 const MAX_EARLY_CANCELS: usize = 1024;
 
-/// Bounds dedicated terminal sockets and PTYs per agent.
+/// Bounds terminal streams and their PTYs per connection.
 const MAX_TERMINALS: usize = 8;
-/// Bounds dedicated log-stream sockets per agent.
+/// Bounds log streams per connection.
 const MAX_LOG_STREAMS: usize = 8;
 
 /// Registries of everything a server may cancel or a disconnect must stop.
@@ -29,14 +26,14 @@ pub(crate) struct Sessions {
     pending_cancellations: EarlyCancels,
     /// Chunk and publication routing for upload workers.
     upload_routes: UploadRoutes,
-    /// Dedicated terminal sockets; duplicates and excess sessions are rejected.
-    pub(crate) terminals: CancelRegistry<TerminalId>,
-    /// Dedicated log-stream sockets; duplicates and excess sessions are rejected.
-    pub(crate) log_streams: CancelRegistry<LogStreamId>,
+    /// Terminal streams; duplicates and excess sessions are rejected.
+    pub(crate) terminals: CancelRegistry<RequestId>,
+    /// Log streams; duplicates and excess sessions are rejected.
+    pub(crate) log_streams: CancelRegistry<RequestId>,
 }
 
 impl Sessions {
-    /// Creates empty registries; `upload_routes` is shared with the transfer socket reader.
+    /// Creates empty registries; `upload_routes` is shared with the connection reader.
     pub(crate) fn new(upload_routes: UploadRoutes) -> Self {
         Self {
             requests: CancelRegistry::new(None),
@@ -56,17 +53,11 @@ impl Sessions {
         self.upload_routes.clear();
     }
 
-    /// Stops request work after the transfer socket was lost; terminals and logs keep running
-    /// because they use their own dedicated sockets.
-    pub(crate) fn invalidate_transfers(&mut self) {
+    /// Stops everything owned by the connection that just ended.
+    pub(crate) fn invalidate(&mut self) {
         self.requests.revoke_all();
         self.upload_routes.clear();
         self.pending_cancellations.clear();
-    }
-
-    /// Stops everything owned by the control connection that just ended.
-    pub(crate) fn invalidate(&mut self) {
-        self.invalidate_transfers();
         self.terminals.revoke_all();
         self.log_streams.revoke_all();
     }
@@ -89,8 +80,14 @@ impl Sessions {
         Ok(registration)
     }
 
-    /// Applies `cancel_transfer`, remembering it when the command has not registered yet.
+    /// Applies `cancel`, remembering it when the command has not registered yet.
+    ///
+    /// Terminals and log streams share the id space with requests, so a cancel for one of
+    /// them stops it the same way.
     pub(crate) fn cancel_request(&mut self, request_id: RequestId) {
+        if self.terminals.cancel(&request_id) || self.log_streams.cancel(&request_id) {
+            return;
+        }
         if self.requests.cancel(&request_id) {
             log!(
                 Level::Info,
@@ -165,7 +162,6 @@ impl EarlyCancels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
 
     /// Cancels for already finished requests must not grow the tombstones without bound,
     /// while the newest (the ones that can still meet their command) are kept.
@@ -203,68 +199,51 @@ mod tests {
         assert!(!sessions.take_pending_cancel(RequestId::new(3)));
     }
 
-    /// Verifies transfer loss stops request work but not dedicated sockets.
+    /// Verifies a cancel reaches terminals, which share the request id space.
     #[test]
-    fn transfer_loss_keeps_dedicated_sockets_running() {
+    fn cancel_reaches_terminals_and_connection_loss_stops_everything() {
         let mut sessions = Sessions::new(UploadRoutes::default());
         let request = sessions.register_request(RequestId::new(1), false).unwrap();
-        let terminal = sessions
-            .terminals
-            .register(TerminalId(Uuid::from_u128(1)))
-            .unwrap();
+        let terminal = sessions.terminals.register(RequestId::new(2)).unwrap();
 
-        sessions.invalidate_transfers();
+        sessions.cancel_request(RequestId::new(2));
 
-        // Request workers depend on the lost transfer socket and must stop.
-        assert!(request.token().is_cancelled());
-        // Terminals use their own sockets and survive payload-socket loss.
-        assert!(!terminal.token().is_cancelled());
+        // The server closes a terminal stream with the same cancel frame it uses for requests.
+        assert!(terminal.token().is_cancelled());
+        // Other streams are untouched.
+        assert!(!request.token().is_cancelled());
 
         sessions.invalidate();
-        // Control loss stops everything, including dedicated sockets.
-        assert!(terminal.token().is_cancelled());
+        // Connection loss stops everything on the connection.
+        assert!(request.token().is_cancelled());
     }
 
     /// Verifies log streams are unique, bounded, and freed by RAII.
     #[test]
     fn log_streams_are_bounded_and_unique() {
         let sessions = Sessions::new(UploadRoutes::default());
-        let first = sessions
-            .log_streams
-            .register(LogStreamId(Uuid::from_u128(1)))
-            .unwrap();
+        let first = sessions.log_streams.register(RequestId::new(1)).unwrap();
 
         // A duplicate bootstrap must not start a second task for the same viewer.
         assert_eq!(
-            sessions
-                .log_streams
-                .register(LogStreamId(Uuid::from_u128(1)))
-                .err(),
+            sessions.log_streams.register(RequestId::new(1)).err(),
             Some(RegisterError::Duplicate)
         );
         let _others: Vec<_> = (2..=MAX_LOG_STREAMS as u128)
             .map(|id| {
                 sessions
                     .log_streams
-                    .register(LogStreamId(Uuid::from_u128(id)))
+                    .register(RequestId::new(id as u64))
                     .unwrap()
             })
             .collect();
         // The cap bounds dedicated sockets per agent.
         assert_eq!(
-            sessions
-                .log_streams
-                .register(LogStreamId(Uuid::from_u128(99)))
-                .err(),
+            sessions.log_streams.register(RequestId::new(99)).err(),
             Some(RegisterError::Full)
         );
         drop(first);
         // Completion frees capacity without explicit bookkeeping.
-        assert!(
-            sessions
-                .log_streams
-                .register(LogStreamId(Uuid::from_u128(99)))
-                .is_ok()
-        );
+        assert!(sessions.log_streams.register(RequestId::new(99)).is_ok());
     }
 }

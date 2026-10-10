@@ -221,10 +221,7 @@ mod tests {
     use crate::runtime::cancel::CancelRegistry;
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
-    use redoor_protocol::{
-        ids::ChunkIndex,
-        wire::{AgentToServer, policy::UploadKind, stream::StreamChunk, stream::StreamPayloadKind},
-    };
+    use redoor_protocol::wire::{AgentToServer, policy::UploadKind, stream::StreamChunk};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     /// Waits for the real worker's publication request so cancellation cannot depend on IO timing.
@@ -262,16 +259,8 @@ mod tests {
         ));
         let (control, _control_frames) = tokio::sync::mpsc::channel(1);
         routes
-            .route_frame(
-                &StreamChunk {
-                    request_id,
-                    chunk_index: ChunkIndex::new(0),
-                    is_last: true,
-                    is_error: false,
-                    payload_kind: StreamPayloadKind::RawFile,
-                    data: b"replacement".to_vec(),
-                }
-                .to_bytes(),
+            .route_chunk(
+                StreamChunk::data(request_id, b"replacement".to_vec(), true),
                 &control,
             )
             .await;

@@ -9,11 +9,11 @@ use axum::body::Body;
 use futures_util::StreamExt;
 use redoor_core::log_failure;
 use redoor_protocol::{
-    ids::{AgentId, ChunkIndex, RequestId},
+    ids::{AgentId, RequestId},
     wire::{
         command::{Command, CommandResult},
         policy::UploadKind,
-        stream::{StreamChunkFrameRequest, StreamChunkFrames, StreamPayloadKind},
+        stream::StreamChunk,
     },
 };
 use tokio::sync::oneshot;
@@ -33,9 +33,8 @@ pub(crate) struct AgentUpload {
     kind: UploadKind,
     total_bytes: u64,
     bytes_written: u64,
-    /// Writes frames straight onto the agent's transfer lane, spending per-stream credit.
+    /// Writes frames straight onto the connection's bulk lane, spending per-stream credit.
     stream: OutboundStream,
-    chunk_index: ChunkIndex,
     completion: oneshot::Receiver<Result<CommandResult, RouterError>>,
     cancel_guard: UploadCancelGuard,
 }
@@ -100,7 +99,6 @@ impl AgentUpload {
             total_bytes,
             bytes_written: 0,
             stream,
-            chunk_index: ChunkIndex::new(0),
             completion,
             cancel_guard,
         })))
@@ -134,9 +132,10 @@ impl AgentUpload {
                 self.bytes_written
             );
             let result = self
-                .forward(
-                    StreamChunkFrameRequest::new(self.request_id(), message.as_bytes())
-                        .is_error(true),
+                .forward_result(
+                    self.stream
+                        .send(StreamChunk::error(self.request_id(), &message))
+                        .await,
                 )
                 .await;
             self.cancel_guard.armed = false;
@@ -152,13 +151,8 @@ impl AgentUpload {
                 .await;
             return Err(ApiError::bad_request(message));
         }
-        let payload_kind = self.payload_kind();
-        self.forward(
-            StreamChunkFrameRequest::new(self.request_id(), data)
-                .payload_kind(payload_kind)
-                .is_last(false),
-        )
-        .await
+        let result = self.stream.send_data(data, false).await;
+        self.forward_result(result).await
     }
 
     /// Ends the body and waits for the agent to publish it; returns the bytes written.
@@ -176,11 +170,8 @@ impl AgentUpload {
         if self.kind == UploadKind::EditFile {
             self.commit_edit().await?;
         } else {
-            let payload_kind = self.payload_kind();
-            self.forward(
-                StreamChunkFrameRequest::new(self.request_id(), &[]).payload_kind(payload_kind),
-            )
-            .await?;
+            let result = self.stream.send_data(&[], true).await;
+            self.forward_result(result).await?;
         }
         let result = (&mut self.completion).await.map_err(|error| {
             ApiError::internal(format!("Failed waiting for upload completion: {error}"))
@@ -200,14 +191,10 @@ impl AgentUpload {
         }
     }
 
-    /// Reframes one producer payload and sends it directly to the agent, never through the
-    /// router; only a lost lane is reported to the router as a terminal event.
-    async fn forward(&mut self, request: StreamChunkFrameRequest<'_>) -> Result<(), ApiError> {
-        match self
-            .stream
-            .send_frames(&mut self.chunk_index, request)
-            .await
-        {
+    /// Maps the outcome of sending frames directly to the agent, never through the router;
+    /// only a lost lane is reported to the router as a terminal event.
+    async fn forward_result(&mut self, result: Result<(), OutboundError>) -> Result<(), ApiError> {
+        match result {
             Ok(()) => Ok(()),
             Err(OutboundError::Stopped) => Err(RouterError::ClientCanceledUpload.into()),
             Err(OutboundError::LaneClosed) => {
@@ -242,21 +229,9 @@ impl AgentUpload {
         }
     }
 
-    /// Payload framing the agent worker expects for data and terminal frames alike.
-    fn payload_kind(&self) -> StreamPayloadKind {
-        self.kind.payload_kind()
-    }
-
     /// Atomically publishes the edit boundary with router ownership of its terminal frame.
     async fn commit_edit(&mut self) -> Result<(), ApiError> {
-        let mut frames = StreamChunkFrames::new(
-            StreamChunkFrameRequest::new(self.request_id(), &[])
-                .starting_chunk_index(self.chunk_index),
-        );
-        let terminal = frames
-            .next()
-            .expect("an empty terminal request always emits one frame");
-        self.chunk_index = frames.next_chunk_index();
+        let terminal = StreamChunk::data(self.request_id(), Vec::new(), true);
         let (reply, response) = oneshot::channel();
         self.router
             .send_async(RouterMsg::CommitDirectUpload(CommitDirectUploadRequest {

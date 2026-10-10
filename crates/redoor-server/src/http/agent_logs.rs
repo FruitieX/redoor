@@ -1,10 +1,9 @@
-//! Browser and agent websocket endpoints for live agent log streaming over a dedicated
-//! socket pair.
+//! Browser endpoint for live agent logs: bridges one browser websocket to one log stream of
+//! the agent's connection.
 
 use super::{state::ServerState, websocket_security::is_same_origin};
-use crate::{
-    actors::router::{OpenAgentLogStreamRequest, RouterMsg},
-    log_registry::LogRegistry,
+use crate::actors::router::{
+    LogStream, OpenAgentLogStreamRequest, OutputReceiver, RouterError, RouterMsg, StreamCloseGuard,
 };
 use axum::{
     extract::{
@@ -21,27 +20,13 @@ use futures_util::{
 use redoor_core::{log, websocket::WebSocketTimeouts};
 use redoor_protocol::{
     ids::AgentId,
-    wire::log::{Level, LogAgentHandshake, LogEvent, LogStreamId},
+    wire::log::{Level, LogEvent, MAX_LOG_EVENT_SIZE},
 };
-use std::time::Duration;
-use tokio::sync::{oneshot, watch};
-use uuid::Uuid;
 
 /// Caps websocket frames on log sockets so one oversized event cannot force a large allocation.
 const MAX_LOG_MESSAGE_SIZE: usize = 256 * 1024;
-/// How long a browser waits for the agent to open its socket before setup is abandoned.
-const LOG_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
-/// Limits how long an unauthenticated agent socket can sit before sending its first frame.
-const LOG_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Distinguishes a paired socket from setup timeout and browser-owned cancellation.
-enum SetupResult {
-    Paired(Box<WebSocket>),
-    TimedOut,
-    BrowserDisconnected,
-}
-
-/// Upgrades an authenticated same-origin browser into one ephemeral agent log stream.
+/// Upgrades an authenticated same-origin browser into one live agent log stream.
 pub(crate) async fn browser_agent_logs_websocket_handler(
     Path(agent): Path<String>,
     headers: HeaderMap,
@@ -58,147 +43,50 @@ pub(crate) async fn browser_agent_logs_websocket_handler(
     websocket
         .max_message_size(MAX_LOG_MESSAGE_SIZE)
         .max_frame_size(MAX_LOG_MESSAGE_SIZE)
-        .on_upgrade(move |socket| run_browser_setup(socket, AgentId::from(agent), state))
+        .on_upgrade(move |socket| run_log_relay(socket, AgentId::from(agent), state))
         .into_response()
 }
 
-/// Upgrades the public data-plane endpoint before validating its one-time first frame.
-pub(crate) async fn agent_logs_websocket_handler(
-    Path(log_stream_id): Path<String>,
-    AxumState(state): AxumState<ServerState>,
-    websocket: WebSocketUpgrade,
-) -> Response {
-    let log_stream_id = match Uuid::parse_str(&log_stream_id) {
-        Ok(id) => LogStreamId(id),
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    websocket
-        .max_message_size(MAX_LOG_MESSAGE_SIZE)
-        .max_frame_size(MAX_LOG_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            authenticate_agent_socket(socket, log_stream_id, state.log_registry)
-        })
-        .into_response()
-}
-
-/// Registers setup before sending one small bootstrap over the authoritative control socket.
-async fn run_browser_setup(mut browser: WebSocket, agent_id: AgentId, state: ServerState) {
-    let log_stream_id = LogStreamId::new();
-    let token = Uuid::new_v4().to_string();
-    let (agent_sender, agent_receiver) = oneshot::channel();
-    let agent_disconnect = match state.log_registry.register_pending(
-        log_stream_id.clone(),
-        agent_id.clone(),
-        token.clone(),
-        agent_sender,
-    ) {
-        Ok(receiver) => receiver,
-        Err(_) => {
-            send_log_error(&mut browser, "Too many log connections are pending").await;
-            return;
-        }
-    };
-
-    let request_result = state
+/// Opens the log stream and relays its events until the browser or the agent goes away.
+async fn run_log_relay(mut browser: WebSocket, agent_id: AgentId, state: ServerState) {
+    let opened = state
         .router_ref
         .request(|reply| {
             RouterMsg::OpenAgentLogStream(OpenAgentLogStreamRequest {
                 agent_id: agent_id.clone(),
-                log_stream_id: log_stream_id.clone(),
-                token,
                 reply,
             })
         })
         .await;
-    if !matches!(request_result, Ok(Ok(()))) {
-        state.log_registry.remove(&log_stream_id);
-        send_log_error(&mut browser, "Agent is not connected").await;
-        return;
-    }
-
-    let setup = wait_for_agent(&mut browser, agent_receiver).await;
-    match setup {
-        SetupResult::Paired(agent) => {
-            log!(
-                Level::Info,
-                "Agent log relay started: agent_id={}, log_stream_id={}",
-                agent_id,
-                log_stream_id.0
-            );
-            relay_logs(browser, *agent, agent_disconnect, state.runtime.ws_timeouts).await;
-            state.log_registry.remove(&log_stream_id);
-            log!(
-                Level::Info,
-                "Agent log relay stopped: agent_id={}, log_stream_id={}",
-                agent_id,
-                log_stream_id.0
-            );
+    let LogStream { stream, output } = match opened {
+        Ok(Ok(log_stream)) => log_stream,
+        Ok(Err(RouterError::StreamLimitReached { .. })) => {
+            send_log_error(&mut browser, "Too many log viewers are open on this agent").await;
+            return;
         }
-        SetupResult::TimedOut => {
-            state.log_registry.remove(&log_stream_id);
-            send_log_error(&mut browser, "Agent did not establish the log connection").await;
+        _ => {
+            send_log_error(&mut browser, "Agent is not connected").await;
+            return;
         }
-        SetupResult::BrowserDisconnected => {
-            state.log_registry.remove(&log_stream_id);
-        }
-    }
-}
-
-/// Waits for pairing while rejecting browser data and detecting route teardown immediately.
-async fn wait_for_agent(
-    browser: &mut WebSocket,
-    mut agent_receiver: oneshot::Receiver<WebSocket>,
-) -> SetupResult {
-    let setup_timeout = tokio::time::sleep(LOG_SETUP_TIMEOUT);
-    tokio::pin!(setup_timeout);
-    loop {
-        tokio::select! {
-            result = &mut agent_receiver => {
-                return result
-                    .map(|agent| SetupResult::Paired(Box::new(agent)))
-                    .unwrap_or(SetupResult::TimedOut);
-            }
-            _ = &mut setup_timeout => return SetupResult::TimedOut,
-            frame = browser.recv() => {
-                if !handle_browser_setup_frame(browser, frame).await {
-                    return SetupResult::BrowserDisconnected;
-                }
-            }
-        }
-    }
-}
-
-/// Allows only keepalive frames because agent log viewing is server-to-browser only.
-async fn handle_browser_setup_frame(
-    browser: &mut WebSocket,
-    frame: Option<Result<WsMessage, axum::Error>>,
-) -> bool {
-    match frame {
-        Some(Ok(WsMessage::Ping(bytes))) => browser.send(WsMessage::Pong(bytes)).await.is_ok(),
-        Some(Ok(WsMessage::Pong(_))) => true,
-        Some(Ok(WsMessage::Text(_) | WsMessage::Binary(_) | WsMessage::Close(_)))
-        | Some(Err(_))
-        | None => false,
-    }
-}
-
-/// Authenticates exactly one initial text frame before consuming pending browser ownership.
-async fn authenticate_agent_socket(
-    mut socket: WebSocket,
-    log_stream_id: LogStreamId,
-    registry: LogRegistry,
-) {
-    let frame = tokio::time::timeout(LOG_HANDSHAKE_TIMEOUT, socket.recv()).await;
-    let token = match frame {
-        Ok(Some(Ok(WsMessage::Text(text)))) => {
-            match serde_json::from_str::<LogAgentHandshake>(&text) {
-                Ok(LogAgentHandshake::Authenticate { token }) => token,
-                Err(_) => return,
-            }
-        }
-        _ => return,
     };
-    let _ = registry.attach_agent(&log_stream_id, &token, socket);
+    let _close = StreamCloseGuard::new(state.router_ref.clone(), agent_id.clone(), stream);
+    log!(
+        Level::Info,
+        "Agent log relay started: agent_id={}, stream={}",
+        agent_id,
+        stream
+    );
+    let (browser_sink, browser_stream) = browser.split();
+    tokio::select! {
+        _ = forward_agent_events(output, browser_sink, state.runtime.ws_timeouts) => {}
+        _ = wait_for_browser_disconnect(browser_stream) => {}
+    }
+    log!(
+        Level::Info,
+        "Agent log relay stopped: agent_id={}, stream={}",
+        agent_id,
+        stream
+    );
 }
 
 /// Sends a typed safe setup failure and closes so mounted viewers can reconnect cleanly.
@@ -212,93 +100,126 @@ async fn send_log_error(socket: &mut WebSocket, message: &str) {
     let _ = socket.close().await;
 }
 
-/// Runs independent directions so browser closure drops the agent socket even during backpressure.
-async fn relay_logs(
-    browser: WebSocket,
-    agent: WebSocket,
-    mut agent_disconnect: watch::Receiver<bool>,
-    timeouts: WebSocketTimeouts,
-) {
-    let (browser_sink, browser_stream) = browser.split();
-    let (agent_sink, agent_stream) = agent.split();
-    tokio::select! {
-        _ = forward_agent_events(agent_stream, browser_sink, timeouts) => {}
-        _ = wait_for_browser_disconnect(browser_stream, agent_sink, timeouts) => {}
-        _ = wait_for_authoritative_agent_disconnect(&mut agent_disconnect) => {}
+/// Reassembles newline-delimited log events that may span several stream frames.
+///
+/// Bounded by the largest event the agent may send, so a malformed stream cannot make the
+/// server buffer without limit.
+#[derive(Default)]
+struct LineAssembler {
+    buffer: Vec<u8>,
+}
+
+impl LineAssembler {
+    /// Appends frame data and returns every complete line, or an error once a line exceeds
+    /// the event size bound.
+    fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>, ()> {
+        let mut lines = Vec::new();
+        for byte in data {
+            if *byte == b'\n' {
+                lines.push(std::mem::take(&mut self.buffer));
+            } else if self.buffer.len() >= MAX_LOG_EVENT_SIZE {
+                return Err(());
+            } else {
+                self.buffer.push(*byte);
+            }
+        }
+        Ok(lines)
     }
 }
 
-/// Ends a paired relay even when the dedicated socket outlives its authoritative control socket.
-async fn wait_for_authoritative_agent_disconnect(disconnect: &mut watch::Receiver<bool>) {
-    if *disconnect.borrow() {
-        return;
-    }
-    let _ = disconnect.changed().await;
+/// One thing the log stream produced for the browser.
+enum StreamOutput {
+    Data(Option<redoor_protocol::wire::stream::StreamChunk>),
+    Keepalive,
 }
 
-/// Validates typed agent events before forwarding them unchanged to the browser.
+/// Validates the agent's events before forwarding them unchanged to the browser.
 async fn forward_agent_events(
-    mut agent: SplitStream<WebSocket>,
+    mut output: OutputReceiver,
     mut browser: SplitSink<WebSocket, WsMessage>,
     timeouts: WebSocketTimeouts,
 ) -> Result<(), ()> {
     let mut keepalive = timeouts.keepalive_interval();
+    let mut lines = LineAssembler::default();
     loop {
-        let frame = tokio::select! {
-            _ = keepalive.tick() => {
-                browser.send(WsMessage::Ping(bytes::Bytes::new())).await.map_err(|_| ())?;
+        let next = tokio::select! {
+            chunk = output.recv() => StreamOutput::Data(chunk),
+            _ = keepalive.tick() => StreamOutput::Keepalive,
+        };
+        let chunk = match next {
+            StreamOutput::Keepalive => {
+                browser
+                    .send(WsMessage::Ping(bytes::Bytes::new()))
+                    .await
+                    .map_err(|_| ())?;
                 continue;
             }
-            frame = agent.next() => frame,
+            StreamOutput::Data(None) => return close(&mut browser).await,
+            StreamOutput::Data(Some(chunk)) => chunk,
         };
-        let Some(frame) = frame else {
-            return Ok(());
-        };
-        match frame.map_err(|_| ())? {
-            WsMessage::Text(text) => {
-                let event = serde_json::from_str::<LogEvent>(&text).map_err(|_| ())?;
-                if !event.diagnostics_are_bounded() {
-                    return Err(());
-                }
-                browser.send(WsMessage::Text(text)).await.map_err(|_| ())?;
-            }
-            WsMessage::Ping(bytes) => browser.send(WsMessage::Ping(bytes)).await.map_err(|_| ())?,
-            WsMessage::Pong(bytes) => browser.send(WsMessage::Pong(bytes)).await.map_err(|_| ())?,
-            WsMessage::Close(frame) => {
-                let _ = browser.send(WsMessage::Close(frame)).await;
-                return Ok(());
-            }
-            WsMessage::Binary(_) => return Err(()),
+        if chunk.is_error {
+            return close(&mut browser).await;
+        }
+        for line in lines.push(&chunk.data)? {
+            forward_line(&mut browser, line).await?;
+        }
+        if chunk.is_last {
+            return close(&mut browser).await;
         }
     }
 }
 
-/// Observes browser departure and owns the opposite sink so cancellation closes the agent socket.
-async fn wait_for_browser_disconnect(
-    mut browser: SplitStream<WebSocket>,
-    mut agent: SplitSink<WebSocket, WsMessage>,
-    timeouts: WebSocketTimeouts,
+/// Forwards one complete event line after checking it is a bounded `LogEvent`.
+async fn forward_line(
+    browser: &mut SplitSink<WebSocket, WsMessage>,
+    line: Vec<u8>,
 ) -> Result<(), ()> {
-    let mut keepalive = timeouts.keepalive_interval();
-    loop {
-        let frame = tokio::select! {
-            _ = keepalive.tick() => {
-                agent.send(WsMessage::Ping(bytes::Bytes::new())).await.map_err(|_| ())?;
-                continue;
-            }
-            frame = browser.next() => frame,
-        };
-        let Some(frame) = frame else {
-            return Ok(());
-        };
-        match frame.map_err(|_| ())? {
-            WsMessage::Ping(bytes) => agent.send(WsMessage::Ping(bytes)).await.map_err(|_| ())?,
-            WsMessage::Pong(bytes) => agent.send(WsMessage::Pong(bytes)).await.map_err(|_| ())?,
-            WsMessage::Close(frame) => {
-                let _ = agent.send(WsMessage::Close(frame)).await;
-                return Ok(());
-            }
-            WsMessage::Text(_) | WsMessage::Binary(_) => return Err(()),
+    let event = serde_json::from_slice::<LogEvent>(&line).map_err(|_| ())?;
+    if !event.diagnostics_are_bounded() {
+        return Err(());
+    }
+    let text = String::from_utf8(line).map_err(|_| ())?;
+    browser
+        .send(WsMessage::Text(text.into()))
+        .await
+        .map_err(|_| ())
+}
+
+/// Closes the browser socket so the viewer reconnects with a fresh snapshot.
+async fn close(browser: &mut SplitSink<WebSocket, WsMessage>) -> Result<(), ()> {
+    let _ = browser.send(WsMessage::Close(None)).await;
+    Ok(())
+}
+
+/// Returns when the browser leaves; log viewing is server-to-browser only.
+async fn wait_for_browser_disconnect(mut browser: SplitStream<WebSocket>) {
+    while let Some(Ok(frame)) = browser.next().await {
+        if matches!(
+            frame,
+            WsMessage::Close(_) | WsMessage::Text(_) | WsMessage::Binary(_)
+        ) {
+            return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies events split across frames are reassembled and oversized lines are refused.
+    #[test]
+    fn line_assembler_joins_frames_and_bounds_lines() {
+        let mut lines = LineAssembler::default();
+        // A partial line waits for its remainder.
+        assert!(lines.push(br#"{"a""#).unwrap().is_empty());
+        // The newline completes the line across frames, and a second line in the same frame
+        // is returned too.
+        assert_eq!(
+            lines.push(b":1}\n{}\n").unwrap(),
+            vec![br#"{"a":1}"#.to_vec(), b"{}".to_vec()]
+        );
+        // A line longer than any valid event fails instead of growing the buffer forever.
+        assert!(lines.push(&vec![b'x'; MAX_LOG_EVENT_SIZE + 1]).is_err());
     }
 }

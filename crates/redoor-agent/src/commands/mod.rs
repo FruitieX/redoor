@@ -19,7 +19,6 @@ use ctx::{CommandCtx, Reply};
 use redoor_protocol::wire::{
     command::{Command, CommandResult},
     policy::UploadKind,
-    stream::StreamPayloadKind,
 };
 use std::future::Future;
 
@@ -33,7 +32,7 @@ impl RunCommand for Command {
     /// The single exhaustive mapping from wire commands to their domain implementations.
     async fn run(self, ctx: CommandCtx) -> Reply {
         match self {
-            Command::Exec { request } => match ctx.into_output(StreamPayloadKind::RawFile) {
+            Command::Exec { request } => match ctx.into_output() {
                 Ok(output) => crate::exec::run(request, output.stream, output.registration).await,
                 Err(error) => CommandResult::from(error).into(),
             },

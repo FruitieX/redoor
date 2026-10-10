@@ -1,146 +1,87 @@
-//! Binary framing for streamed payloads (uploads, downloads, copies and exec output) that
-//! travel on the transfer socket separately from JSON control frames.
+//! Binary framing for stream data on the multiplexed agent connection.
+//!
+//! Every binary websocket message is one frame of one stream: an 8-byte stream id, a flags
+//! byte and up to 64 KiB of payload. Request streams use the request id as their stream id;
+//! terminals and log streams get their own ids from the same per-connection id space.
 
-use crate::ids::{ChunkIndex, RequestId};
+use crate::ids::RequestId;
 use anyhow::{Result, bail};
 
-/// Leading marker that lets receivers reject binary frames that are not stream chunks.
-pub const PROTOCOL_MAGIC: u32 = 0x52415844;
-/// Fixed header length: magic (4) + request id (8) + chunk index (8) + last, error and
-/// payload-kind flag bytes (3), so the payload offset is known without parsing.
-pub const HEADER_SIZE: usize = 23;
+/// Fixed header length: stream id (8) + flags (1), so the payload offset is known without
+/// parsing.
+pub const HEADER_SIZE: usize = 9;
 /// Preferred file read size for disk IO before websocket framing.
 pub const CHUNK_SIZE: usize = 64 * 1024;
-/// Keeps allocations and bounded queue residency small while allowing fair
-/// multiplexing among concurrent streams sharing one persistent transfer socket.
+/// Keeps allocations, queue residency and the wait a control frame can see behind one data
+/// frame small while many streams share one connection.
 pub const MAX_TRANSFER_FRAME_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Largest binary message either side accepts.
+pub const MAX_STREAM_MESSAGE_BYTES: usize = HEADER_SIZE + MAX_TRANSFER_FRAME_PAYLOAD_BYTES;
 
-/// Non-terminal frames a receiver initially allows in flight per stream.
+/// Flag bit marking the final frame of a stream.
+const FLAG_FIN: u8 = 0x01;
+/// Flag bit marking a final frame whose payload is an error message instead of data.
+const FLAG_ERROR: u8 = 0x02;
+
+/// Non-terminal frames a receiver initially allows in flight per request or log stream.
 ///
 /// Together with the 64 KiB frame size this bounds the memory one stream can occupy on its
-/// receiver to `(window + 1)` frames, independently of how many streams share a socket.
+/// receiver to `(window + 1)` frames, independently of how many streams share a connection.
 pub const STREAM_CREDIT_WINDOW_FRAMES: u32 = 4;
+/// Window of terminal streams in both directions.
+///
+/// Terminal frames are small keystroke and output bursts, so a larger window keeps typing and
+/// output smooth without waiting for a grant round trip, while still bounding memory.
+pub const TERMINAL_CREDIT_WINDOW_FRAMES: u32 = 16;
 /// Receivers return credit in batches so a grant is not sent for every single frame.
 ///
-/// Must not exceed the window, or a drained receiver could hold back credit the sender needs.
+/// Must not exceed the smallest window, or a drained receiver could hold back credit the
+/// sender needs.
 pub const STREAM_CREDIT_BATCH_FRAMES: u32 = 2;
-/// Receive queue depth of a stream: the full window plus the one terminal frame,
-/// which is exempt from credit so cancellation and completion can never wait for a grant.
-pub const STREAM_CREDIT_QUEUE_FRAMES: usize = STREAM_CREDIT_WINDOW_FRAMES as usize + 1;
 
-/// Identifies how the chunk payload bytes should be interpreted by the receiver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamPayloadKind {
-    RawFile = 0,
-    Tar = 1,
+/// Receive queue depth of a stream with `window` frames of credit: the full window plus the
+/// one terminal frame, which is exempt from credit so cancellation and completion can never
+/// wait for a grant.
+pub const fn receive_queue_frames(window: u32) -> usize {
+    window as usize + 1
 }
 
-impl StreamPayloadKind {
-    /// Decodes the header byte strictly so an unknown payload kind fails the frame instead of
-    /// being misinterpreted as file data.
-    fn from_byte(byte: u8) -> Result<Self> {
-        match byte {
-            0 => Ok(Self::RawFile),
-            1 => Ok(Self::Tar),
-            _ => bail!("Invalid payload kind byte: {}", byte),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-/// One websocket transfer frame carrying a portion of a logical streamed
-/// payload. `StreamChunkFrameRequest` describes the full logical payload to
-/// send, `StreamChunkFrames` splits it into frame-sized pieces, and each item
-/// yielded by that iterator is one `StreamChunk` serialized on the wire.
+/// One binary frame of one stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamChunk {
+    /// Stream the frame belongs to (the request id for request streams).
     pub request_id: RequestId,
-    pub chunk_index: ChunkIndex,
+    /// FIN of a successful stream: no frame of this stream follows.
     pub is_last: bool,
+    /// The payload is an error message that ends the stream instead of data.
     pub is_error: bool,
-    /// Marks whether `data` contains raw file bytes or a tar stream chunk.
-    pub payload_kind: StreamPayloadKind,
     pub data: Vec<u8>,
 }
 
-/// Iterator state type implementing `Iterator<Item = StreamChunk>`, produced
-/// from a `StreamChunkFrameRequest` to emit that one logical payload as one or
-/// more websocket-sized frames while preserving chunk ordering and final-frame
-/// semantics.
-pub struct StreamChunkFrames<'a> {
-    request_id: RequestId,
-    next_chunk_index: ChunkIndex,
-    payload_kind: StreamPayloadKind,
-    is_error: bool,
-    data: &'a [u8],
-    offset: usize,
-    is_last: bool,
-    emitted_empty_final_chunk: bool,
-}
-
-/// Builder-style description of one logical transfer payload that should be
-/// reframed into websocket-sized `StreamChunk` values by `StreamChunkFrames`.
-#[derive(Debug, Clone, Copy)]
-pub struct StreamChunkFrameRequest<'a> {
-    request_id: RequestId,
-    starting_chunk_index: ChunkIndex,
-    payload_kind: StreamPayloadKind,
-    is_error: bool,
-    data: &'a [u8],
-    is_last: bool,
-}
-
-impl<'a> StreamChunkFrameRequest<'a> {
-    /// Defaults to a single complete raw-file payload starting at chunk 0, the most common
-    /// case, so callers only override what differs.
-    pub fn new(request_id: RequestId, data: &'a [u8]) -> Self {
+impl StreamChunk {
+    /// A data frame; `is_last` marks the successful end of the stream.
+    pub fn data(request_id: RequestId, data: Vec<u8>, is_last: bool) -> Self {
         Self {
             request_id,
-            starting_chunk_index: ChunkIndex::new(0),
-            payload_kind: StreamPayloadKind::RawFile,
+            is_last,
             is_error: false,
             data,
-            is_last: true,
         }
     }
 
-    /// Continues numbering from an earlier payload of the same stream so ordering holds
-    /// across multiple framed writes.
-    pub fn starting_chunk_index(mut self, starting_chunk_index: ChunkIndex) -> Self {
-        self.starting_chunk_index = starting_chunk_index;
-        self
+    /// A terminal error frame carrying `message`; it ends the stream like FIN, but is not a
+    /// successful end, so `is_last` stays false.
+    pub fn error(request_id: RequestId, message: &str) -> Self {
+        let mut data = message.as_bytes().to_vec();
+        data.truncate(MAX_TRANSFER_FRAME_PAYLOAD_BYTES);
+        Self {
+            request_id,
+            is_last: false,
+            is_error: true,
+            data,
+        }
     }
 
-    /// Tags the frames so the receiver knows whether to write raw bytes or unpack a tar stream.
-    pub fn payload_kind(mut self, payload_kind: StreamPayloadKind) -> Self {
-        self.payload_kind = payload_kind;
-        self
-    }
-
-    /// Marks the payload as an error message that terminates the stream instead of file data.
-    pub fn is_error(mut self, is_error: bool) -> Self {
-        self.is_error = is_error;
-        self
-    }
-
-    /// Controls whether the final emitted frame ends the stream, so large payloads can be
-    /// written in several framed pieces.
-    pub fn is_last(mut self, is_last: bool) -> Self {
-        self.is_last = is_last;
-        self
-    }
-
-    /// Exposes the configured error flag; named apart from the builder setter it shadows.
-    pub fn is_error_flag(&self) -> bool {
-        self.is_error
-    }
-
-    /// Exposes the configured last-frame flag; named apart from the builder setter it shadows.
-    pub fn is_last_flag(&self) -> bool {
-        self.is_last
-    }
-}
-
-impl StreamChunk {
     /// Whether sending this frame spends one frame of per-stream credit.
     ///
     /// Terminal frames (the last data frame or an error) are exempt: each stream has at most
@@ -150,131 +91,74 @@ impl StreamChunk {
         !self.is_last && !self.is_error
     }
 
-    /// Serializes the frame into its binary wire form, header first, for one websocket message.
+    /// Serializes the frame into its binary wire form for one websocket message.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(HEADER_SIZE + self.data.len());
-
-        bytes.extend_from_slice(&PROTOCOL_MAGIC.to_le_bytes());
         bytes.extend_from_slice(&self.request_id.to_le_bytes());
-        bytes.extend_from_slice(&self.chunk_index.to_le_bytes());
-        bytes.push(if self.is_last { 1 } else { 0 });
-        bytes.push(if self.is_error { 1 } else { 0 });
-        bytes.push(self.payload_kind as u8);
+        let mut flags = 0;
+        if self.is_last || self.is_error {
+            flags |= FLAG_FIN;
+        }
+        if self.is_error {
+            flags |= FLAG_ERROR;
+        }
+        bytes.push(flags);
         bytes.extend_from_slice(&self.data);
-
         bytes
     }
 
-    /// Validates a frame and keeps only its payload, for callers that do not need the header.
-    pub fn parse_data(bytes: &[u8]) -> Result<Vec<u8>> {
-        Self::from_bytes(bytes).map(|chunk| chunk.data)
-    }
-
-    /// Parses and validates a binary websocket message, rejecting short frames and wrong magic
-    /// so corrupt or foreign data is never treated as transfer content.
+    /// Parses and validates a binary websocket message, rejecting short or oversized frames
+    /// and unknown flags so corrupt data is never treated as stream content.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < HEADER_SIZE {
             bail!(
-                "Chunk too short: {} bytes (minimum {})",
+                "Frame too short: {} bytes (minimum {})",
                 bytes.len(),
                 HEADER_SIZE
             );
         }
-
-        let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if magic != PROTOCOL_MAGIC {
-            bail!(
-                "Invalid magic: 0x{:08x} (expected 0x{:08x})",
-                magic,
-                PROTOCOL_MAGIC
-            );
+        if bytes.len() > MAX_STREAM_MESSAGE_BYTES {
+            bail!("Frame too long: {} bytes", bytes.len());
         }
-
         let request_id = RequestId::from_le_bytes([
-            bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
-
-        let chunk_index = ChunkIndex::from_le_bytes([
-            bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
-        ]);
-
-        let is_last = bytes[20] == 1;
-        let is_error = bytes[21] == 1;
-        let payload_kind = StreamPayloadKind::from_byte(bytes[22])?;
-
-        let data = bytes[HEADER_SIZE..].to_vec();
-
-        Ok(StreamChunk {
+        let flags = bytes[8];
+        if flags & !(FLAG_FIN | FLAG_ERROR) != 0 {
+            bail!("Unknown frame flags: 0x{flags:02x}");
+        }
+        let is_error = flags & FLAG_ERROR != 0;
+        if is_error && flags & FLAG_FIN == 0 {
+            bail!("Error frame without FIN");
+        }
+        Ok(Self {
             request_id,
-            chunk_index,
-            is_last,
+            is_last: flags & FLAG_FIN != 0 && !is_error,
             is_error,
-            payload_kind,
-            data,
+            data: bytes[HEADER_SIZE..].to_vec(),
         })
     }
-}
 
-impl StreamChunkFrames<'_> {
-    /// Creates an iterator over websocket-sized `StreamChunk` frames for the
-    /// logical payload described by `request`.
-    pub fn new(request: StreamChunkFrameRequest<'_>) -> StreamChunkFrames<'_> {
-        StreamChunkFrames {
-            request_id: request.request_id,
-            next_chunk_index: request.starting_chunk_index,
-            payload_kind: request.payload_kind,
-            is_error: request.is_error,
-            data: request.data,
-            offset: 0,
-            is_last: request.is_last,
-            emitted_empty_final_chunk: false,
-        }
-    }
-
-    /// Returns the next chunk index that should be used after exhausting the
-    /// iterator or after stopping early during incremental forwarding.
-    pub fn next_chunk_index(&self) -> ChunkIndex {
-        self.next_chunk_index
-    }
-}
-
-impl Iterator for StreamChunkFrames<'_> {
-    type Item = StreamChunk;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.offset >= self.data.len() {
-            if self.data.is_empty() && self.is_last && !self.emitted_empty_final_chunk {
-                self.emitted_empty_final_chunk = true;
-                let chunk = StreamChunk {
-                    request_id: self.request_id,
-                    chunk_index: self.next_chunk_index,
-                    is_last: true,
-                    is_error: self.is_error,
-                    payload_kind: self.payload_kind,
-                    data: Vec::new(),
-                };
-                self.next_chunk_index = self.next_chunk_index.saturating_next_index();
-                return Some(chunk);
-            }
-
-            return None;
-        }
-
-        let end = (self.offset + MAX_TRANSFER_FRAME_PAYLOAD_BYTES).min(self.data.len());
-        let is_final_data_chunk = end == self.data.len();
-        let chunk = StreamChunk {
-            request_id: self.request_id,
-            chunk_index: self.next_chunk_index,
-            is_last: self.is_last && is_final_data_chunk,
-            is_error: self.is_error,
-            payload_kind: self.payload_kind,
-            data: self.data[self.offset..end].to_vec(),
-        };
-
-        self.offset = end;
-        self.next_chunk_index = self.next_chunk_index.saturating_next_index();
-
-        Some(chunk)
+    /// Splits one logical payload into frame-sized chunks; `is_last` marks the final one.
+    ///
+    /// An empty final payload still yields one (empty) FIN frame, so a stream can always be
+    /// ended; an empty non-final payload yields nothing.
+    pub fn split(
+        request_id: RequestId,
+        data: &[u8],
+        is_last: bool,
+    ) -> impl Iterator<Item = StreamChunk> + '_ {
+        let pieces = data.len().div_ceil(MAX_TRANSFER_FRAME_PAYLOAD_BYTES);
+        let count = if pieces == 0 && is_last { 1 } else { pieces };
+        (0..count).map(move |index| {
+            let start = index * MAX_TRANSFER_FRAME_PAYLOAD_BYTES;
+            let end = (start + MAX_TRANSFER_FRAME_PAYLOAD_BYTES).min(data.len());
+            StreamChunk::data(
+                request_id,
+                data[start.min(end)..end].to_vec(),
+                is_last && index + 1 == count,
+            )
+        })
     }
 }
 
@@ -282,231 +166,67 @@ impl Iterator for StreamChunkFrames<'_> {
 mod tests {
     use super::*;
 
-    fn collect_split_chunks(
-        starting_chunk_index: ChunkIndex,
-        payload_kind: StreamPayloadKind,
-        is_error: bool,
-        data: &[u8],
-        is_last: bool,
-    ) -> (Vec<StreamChunk>, ChunkIndex) {
-        let mut frames = StreamChunkFrames::new(
-            StreamChunkFrameRequest::new(RequestId::new(42), data)
-                .starting_chunk_index(starting_chunk_index)
-                .payload_kind(payload_kind)
-                .is_error(is_error)
-                .is_last(is_last),
-        );
-        let chunks: Vec<_> = (&mut frames).collect();
-        (chunks, frames.next_chunk_index())
+    /// Verifies data, FIN and error frames survive the round trip.
+    #[test]
+    fn frames_round_trip() {
+        for frame in [
+            StreamChunk::data(RequestId::new(123), vec![1, 2, 3], false),
+            StreamChunk::data(RequestId::new(u64::MAX), Vec::new(), true),
+            StreamChunk::error(RequestId::new(7), "disk gone"),
+        ] {
+            // Both sides must decode exactly what the other side encoded.
+            assert_eq!(StreamChunk::from_bytes(&frame.to_bytes()).unwrap(), frame);
+        }
     }
 
+    /// Verifies the header layout the fake agents in the integration tests encode by hand.
     #[test]
-    fn test_stream_chunk_serialization() {
-        let chunk = StreamChunk {
-            request_id: RequestId::new(123),
-            chunk_index: ChunkIndex::new(0),
-            is_last: false,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data: vec![1u8, 2u8, 3u8, 4u8],
-        };
-        let bytes = chunk.to_bytes();
-        let decoded = StreamChunk::from_bytes(&bytes).unwrap();
-        println!(
-            "Decoded: request_id={}, chunk_index={}, is_last={}, is_error={}, payload_kind={:?}, data.len={}, data={:?}",
-            decoded.request_id,
-            decoded.chunk_index,
-            decoded.is_last,
-            decoded.is_error,
-            decoded.payload_kind,
-            decoded.data.len(),
-            decoded.data
-        );
-        assert_eq!(decoded.request_id, RequestId::new(123));
-        assert_eq!(decoded.chunk_index, ChunkIndex::new(0));
-        assert!(!decoded.is_last);
-        assert!(!decoded.is_error);
-        assert_eq!(decoded.payload_kind, StreamPayloadKind::RawFile);
-        assert_eq!(decoded.data, vec![1u8, 2u8, 3u8, 4u8]);
+    fn header_is_stream_id_then_flags() {
+        let bytes = StreamChunk::data(RequestId::new(0x0102), vec![9], true).to_bytes();
+        // Little-endian stream id, then FIN, then the payload.
+        assert_eq!(bytes, vec![0x02, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 9]);
+        let error = StreamChunk::error(RequestId::new(1), "x").to_bytes();
+        // Error frames always carry FIN as well.
+        assert_eq!(error[8], 0x03);
     }
 
+    /// Verifies malformed frames are rejected instead of misread.
     #[test]
-    fn test_stream_chunk_last_chunk() {
-        let chunk = StreamChunk {
-            request_id: RequestId::new(456),
-            chunk_index: ChunkIndex::new(10),
-            is_last: true,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data: Vec::<u8>::new(),
-        };
-        let bytes = chunk.to_bytes();
-        let decoded = StreamChunk::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.request_id, RequestId::new(456));
-        assert_eq!(decoded.chunk_index, ChunkIndex::new(10));
-        assert!(decoded.is_last);
-        assert!(!decoded.is_error);
-        assert_eq!(decoded.payload_kind, StreamPayloadKind::RawFile);
-        assert_eq!(decoded.data, Vec::<u8>::new());
-    }
-
-    #[test]
-    fn test_stream_chunk_tar_serialization() {
-        let chunk = StreamChunk {
-            request_id: RequestId::new(789),
-            chunk_index: ChunkIndex::new(2),
-            is_last: false,
-            is_error: false,
-            payload_kind: StreamPayloadKind::Tar,
-            data: vec![9u8, 8u8, 7u8],
-        };
-        let bytes = chunk.to_bytes();
-        let decoded = StreamChunk::from_bytes(&bytes).unwrap();
-
-        assert_eq!(decoded.request_id, RequestId::new(789));
-        assert_eq!(decoded.chunk_index, ChunkIndex::new(2));
-        assert_eq!(decoded.payload_kind, StreamPayloadKind::Tar);
-        assert_eq!(decoded.data, vec![9u8, 8u8, 7u8]);
-    }
-
-    #[test]
-    fn test_stream_chunk_invalid_magic() {
-        let mut bytes = vec![0u8; 24];
-        bytes[0..4].copy_from_slice(&[0, 0, 0, 0]);
+    fn malformed_frames_are_rejected() {
+        // Shorter than the header.
+        assert!(StreamChunk::from_bytes(&[0; 8]).is_err());
+        // An unknown flag bit means a newer or corrupt sender.
+        let mut bytes = vec![0; HEADER_SIZE];
+        bytes[8] = 0x80;
         assert!(StreamChunk::from_bytes(&bytes).is_err());
-    }
-
-    #[test]
-    fn test_stream_chunk_invalid_payload_kind() {
-        let mut bytes = vec![0u8; HEADER_SIZE];
-        bytes[0..4].copy_from_slice(&PROTOCOL_MAGIC.to_le_bytes());
-        bytes[22] = 2;
-
+        // An error frame must end its stream.
+        bytes[8] = 0x02;
         assert!(StreamChunk::from_bytes(&bytes).is_err());
+        // Oversized payloads would defeat the per-frame memory bound.
+        assert!(StreamChunk::from_bytes(&vec![0; MAX_STREAM_MESSAGE_BYTES + 1]).is_err());
     }
 
+    /// Verifies payload splitting at frame boundaries.
     #[test]
-    fn test_stream_chunk_too_short() {
-        let bytes = vec![0u8; 10];
-        assert!(StreamChunk::from_bytes(&bytes).is_err());
-    }
+    fn split_respects_frame_size_and_fin() {
+        let exact = vec![7u8; MAX_TRANSFER_FRAME_PAYLOAD_BYTES];
+        let frames: Vec<_> = StreamChunk::split(RequestId::new(1), &exact, true).collect();
+        // Exactly one full frame carries FIN.
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].is_last);
 
-    #[test]
-    fn test_protocol_constants() {
-        assert_eq!(PROTOCOL_MAGIC, 0x52415844);
-        assert_eq!(HEADER_SIZE, 23);
-        assert_eq!(CHUNK_SIZE, 64 * 1024);
-        assert_eq!(MAX_TRANSFER_FRAME_PAYLOAD_BYTES, 64 * 1024);
-    }
+        let over = vec![7u8; MAX_TRANSFER_FRAME_PAYLOAD_BYTES + 1];
+        let frames: Vec<_> = StreamChunk::split(RequestId::new(1), &over, true).collect();
+        // One byte over the limit needs a second frame, and only it is final.
+        assert_eq!(frames.len(), 2);
+        assert!(!frames[0].is_last && frames[1].is_last);
+        assert_eq!(frames[1].data, vec![7]);
 
-    #[test]
-    fn test_split_stream_chunk_exact_boundary() {
-        let data = vec![7u8; MAX_TRANSFER_FRAME_PAYLOAD_BYTES];
-        let (chunks, next_chunk_index) = collect_split_chunks(
-            ChunkIndex::new(3),
-            StreamPayloadKind::RawFile,
-            false,
-            &data,
-            true,
-        );
-
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].chunk_index, ChunkIndex::new(3));
-        assert!(chunks[0].is_last);
-        assert_eq!(chunks[0].data, data);
-        assert_eq!(next_chunk_index, ChunkIndex::new(4));
-    }
-
-    #[test]
-    fn test_split_stream_chunk_one_byte_over_boundary() {
-        let data = vec![9u8; MAX_TRANSFER_FRAME_PAYLOAD_BYTES + 1];
-        let (chunks, next_chunk_index) = collect_split_chunks(
-            ChunkIndex::new(0),
-            StreamPayloadKind::RawFile,
-            false,
-            &data,
-            true,
-        );
-
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].chunk_index, ChunkIndex::new(0));
-        assert!(!chunks[0].is_last);
-        assert_eq!(chunks[0].data.len(), MAX_TRANSFER_FRAME_PAYLOAD_BYTES);
-        assert_eq!(chunks[1].chunk_index, ChunkIndex::new(1));
-        assert!(chunks[1].is_last);
-        assert_eq!(chunks[1].data, vec![9u8]);
-        assert_eq!(next_chunk_index, ChunkIndex::new(2));
-    }
-
-    #[test]
-    fn test_split_stream_chunk_empty_final_chunk() {
-        let (chunks, next_chunk_index) = collect_split_chunks(
-            ChunkIndex::new(11),
-            StreamPayloadKind::Tar,
-            false,
-            &[],
-            true,
-        );
-
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].chunk_index, ChunkIndex::new(11));
-        assert!(chunks[0].is_last);
-        assert!(chunks[0].data.is_empty());
-        assert_eq!(chunks[0].payload_kind, StreamPayloadKind::Tar);
-        assert_eq!(next_chunk_index, ChunkIndex::new(12));
-    }
-
-    #[test]
-    fn test_split_stream_chunk_large_error_payload() {
-        let data = vec![5u8; MAX_TRANSFER_FRAME_PAYLOAD_BYTES * 2 + 3];
-        let (chunks, next_chunk_index) = collect_split_chunks(
-            ChunkIndex::new(8),
-            StreamPayloadKind::Tar,
-            true,
-            &data,
-            true,
-        );
-
-        assert_eq!(chunks.len(), 3);
-        assert!(chunks.iter().all(|chunk| chunk.is_error));
-        assert_eq!(chunks[0].payload_kind, StreamPayloadKind::Tar);
-        assert!(!chunks[0].is_last);
-        assert!(!chunks[1].is_last);
-        assert!(chunks[2].is_last);
-        assert_eq!(chunks[2].data.len(), 3);
-        assert_eq!(next_chunk_index, ChunkIndex::new(11));
-    }
-
-    #[test]
-    fn test_split_stream_chunk_skips_empty_non_final_payload() {
-        let (chunks, next_chunk_index) = collect_split_chunks(
-            ChunkIndex::new(2),
-            StreamPayloadKind::RawFile,
-            false,
-            &[],
-            false,
-        );
-
-        assert!(chunks.is_empty());
-        assert_eq!(next_chunk_index, ChunkIndex::new(2));
-    }
-
-    #[test]
-    fn test_split_stream_chunk_preserves_chunk_indexes() {
-        let data = vec![1u8; MAX_TRANSFER_FRAME_PAYLOAD_BYTES * 2];
-        let (chunks, next_chunk_index) = collect_split_chunks(
-            ChunkIndex::new(5),
-            StreamPayloadKind::RawFile,
-            false,
-            &data,
-            false,
-        );
-
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].chunk_index, ChunkIndex::new(5));
-        assert_eq!(chunks[1].chunk_index, ChunkIndex::new(6));
-        assert!(!chunks[0].is_last);
-        assert!(!chunks[1].is_last);
-        assert_eq!(next_chunk_index, ChunkIndex::new(7));
+        // An empty final payload still ends the stream.
+        let empty: Vec<_> = StreamChunk::split(RequestId::new(1), &[], true).collect();
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].is_last && empty[0].data.is_empty());
+        // An empty non-final payload sends nothing.
+        assert_eq!(StreamChunk::split(RequestId::new(1), &[], false).count(), 0);
     }
 }

@@ -114,13 +114,7 @@ fn execution_body(
 mod tests {
     use super::*;
     use crate::actors::router::{ConnectionStreams, spawn_router};
-    use redoor_protocol::{
-        ids::ChunkIndex,
-        wire::{
-            exec::ExecEvent,
-            stream::{StreamChunk, StreamPayloadKind},
-        },
-    };
+    use redoor_protocol::wire::{exec::ExecEvent, stream::StreamChunk};
 
     /// A slow HTTP consumer can have buffered output when the independent fallback arrives.
     #[tokio::test]
@@ -134,20 +128,15 @@ mod tests {
         data.push(b'\n');
         streams.deliver(StreamChunk {
             request_id: RequestId::new(1),
-            chunk_index: ChunkIndex::new(0),
             is_last: false,
             is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
             data,
         });
         let (terminal, terminal_receiver) = tokio::sync::watch::channel(None);
         terminal.send_replace(Some(ExecEvent::TimedOut));
         // The router's fallback closes the stream without a terminal frame.
         streams.close_inbound(RequestId::new(1));
-        let (router, task) = spawn_router(
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let (router, task) = spawn_router();
         let output = OutputStream::detached(router, AgentId::from("test"), receiver);
         let bytes = axum::body::to_bytes(execution_body(output, terminal_receiver), 4096)
             .await

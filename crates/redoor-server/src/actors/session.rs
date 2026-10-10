@@ -1,5 +1,5 @@
-//! Per-agent websocket session actor: authenticates registration and bridges the control
-//! socket to the router through bounded, prioritized lanes.
+//! Per-agent websocket session actor: requires the `hello`, then bridges the multiplexed
+//! connection to the router and the stream tables through bounded, prioritized lanes.
 
 use crate::actors::lanes::{ControlLaneReceivers, ControlLanes};
 use crate::actors::router::{
@@ -15,7 +15,7 @@ use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
     ids::{AgentId, SocketId},
-    wire::{AgentToServer, ServerToAgent},
+    wire::{AgentToServer, ServerToAgent, stream::StreamChunk},
 };
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -42,6 +42,15 @@ fn take_outbound_frame(
         *lane_closed = true;
     }
     frame
+}
+
+/// Converts a data lane receive result into the next outbound frame while tracking when that
+/// lane has closed.
+fn take_data_frame(frame: Option<StreamChunk>, lane_closed: &mut bool) -> Option<WsMessage> {
+    if frame.is_none() {
+        *lane_closed = true;
+    }
+    frame.map(|chunk| WsMessage::Binary(chunk.to_bytes().into()))
 }
 
 /// Encodes one typed control frame for the socket; this writer is the only place the
@@ -314,6 +323,11 @@ impl SessionRuntime {
                     streams.grant_outbound(stream, frames);
                 }
             }
+            AgentToServer::TerminalEvent { stream, event } => {
+                if let Some(streams) = &self.streams {
+                    streams.deliver_terminal_event(stream, event);
+                }
+            }
             AgentToServer::TransferProgress {
                 id,
                 transferred_bytes,
@@ -394,16 +408,47 @@ impl SessionRuntime {
                     SessionStep::Continue
                 }
             },
-            WsMessage::Binary(_) => {
-                log!(
-                    Level::Warning,
-                    "Binary frame on control socket: socket_id={}",
-                    self.socket_id
-                );
-                SessionStep::Close
-            }
+            WsMessage::Binary(bytes) => self.handle_stream_frame(&bytes).await,
             _ => SessionStep::Continue,
         }
+    }
+
+    /// Hands one binary frame straight to its stream's consumer.
+    ///
+    /// Payload never passes through the router: only a stream's terminal frame is reported to
+    /// it. Every stream is credited, so delivery never waits on a consumer and a stalled HTTP
+    /// client or copy destination cannot freeze the other streams of this connection.
+    async fn handle_stream_frame(&mut self, bytes: &[u8]) -> SessionStep {
+        let Some(streams) = &self.streams else {
+            log!(
+                Level::Warning,
+                "Closing agent socket that sent stream data before hello: socket_id={}",
+                self.socket_id
+            );
+            return SessionStep::Close;
+        };
+        let chunk = match StreamChunk::from_bytes(bytes) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                log!(
+                    Level::Warning,
+                    "Closing agent socket that sent a malformed stream frame: socket_id={}, error={}",
+                    self.socket_id,
+                    error
+                );
+                return SessionStep::Close;
+            }
+        };
+        if let Some(end) = streams.deliver(chunk)
+            && self
+                .router_ref
+                .send_async(RouterMsg::InboundStreamEnded(end))
+                .await
+                .is_err()
+        {
+            return SessionStep::Close;
+        }
+        SessionStep::Continue
     }
 }
 
@@ -424,6 +469,8 @@ pub async fn handle_websocket(
     let ControlLaneReceivers {
         commands: mut rx_out_commands,
         priority: mut rx_out_priority,
+        interactive: mut rx_out_interactive,
+        bulk: mut rx_out_bulk,
     } = receivers;
 
     let mut runtime = SessionRuntime {
@@ -445,10 +492,14 @@ pub async fn handle_websocket(
     let mut writer_task = tokio::spawn(async move {
         let mut commands_closed = false;
         let mut priority_closed = false;
+        let mut interactive_closed = false;
+        let mut bulk_closed = false;
         let mut ping_interval = timeouts.keepalive_interval();
 
         loop {
-            // `biased` keeps control-plane text messages responsive while binary streaming is active.
+            // `biased` drains the classes in strict order: priority control, commands,
+            // interactive terminal input, then bulk data. A data frame is at most 64 KiB, so a
+            // control frame never waits behind more than one of them.
             let next_message = tokio::select! {
                 biased;
                 _ = ping_interval.tick() => {
@@ -466,16 +517,18 @@ pub async fn handle_websocket(
                     }
                     continue;
                 }
-                frame = rx_out_priority.recv(), if !priority_closed => take_outbound_frame(frame, &mut priority_closed),
-                frame = rx_out_commands.recv(), if !commands_closed => take_outbound_frame(frame, &mut commands_closed),
-                // Both bounded lanes are closed, so no future application frames can be produced.
+                frame = rx_out_priority.recv(), if !priority_closed => take_outbound_frame(frame, &mut priority_closed).as_ref().and_then(encode_frame),
+                frame = rx_out_commands.recv(), if !commands_closed => take_outbound_frame(frame, &mut commands_closed).as_ref().and_then(encode_frame),
+                frame = rx_out_interactive.recv(), if !interactive_closed => take_data_frame(frame, &mut interactive_closed),
+                frame = rx_out_bulk.recv(), if !bulk_closed => take_data_frame(frame, &mut bulk_closed),
+                // Every bounded lane is closed, so no future frames can be produced.
                 else => {
                     let _ = sender.send(WsMessage::Close(None)).await;
                     break;
                 }
             };
 
-            let Some(message) = next_message.as_ref().and_then(encode_frame) else {
+            let Some(message) = next_message else {
                 continue;
             };
 

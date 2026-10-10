@@ -1,7 +1,7 @@
 //! Agent-to-consumer output streams: file downloads (with transfer history) and exec output.
 //!
-//! The router admits the stream and opens its inbound slot; frames then flow from the transfer
-//! reader to the consumer's [`OutputReceiver`](super::streams::OutputReceiver) directly. The
+//! The router admits the stream and opens its inbound slot; frames then flow from the
+//! connection reader to the consumer's [`OutputReceiver`](super::streams::OutputReceiver) directly. The
 //! router sees the stream again only for its terminal frame, a control-lane fallback result,
 //! or cancellation.
 
@@ -21,6 +21,7 @@ use redoor_protocol::{
         exec::ExecEvent,
         log::Level,
         policy::CommandLane,
+        stream::STREAM_CREDIT_WINDOW_FRAMES,
     },
 };
 use std::sync::atomic::Ordering;
@@ -80,12 +81,10 @@ impl RouterState {
             }));
             return;
         };
-        if let Err(error) = connection.transfer_connection() {
-            let _ = reply.send(Err(error));
-            return;
-        }
         let lease = StreamLease::new(id, connection.link(), 0);
-        let receiver = connection.streams.open_inbound(lease.clone());
+        let receiver = connection
+            .streams
+            .open_inbound(lease.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         if !connection.send_message(ServerToAgent::Command { id, command }) {
             connection.streams.close_inbound(id);
             let _ = reply.send(Err(RouterError::ControlQueueFull {
@@ -340,9 +339,8 @@ mod tests {
     use super::super::streams::{ConnectionStreams, OutputReceiver};
     use super::*;
     use crate::actors::lanes::ControlLanes;
-    use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
-    use redoor_protocol::ids::{AgentId, ChunkIndex, SocketId};
-    use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
+    use redoor_protocol::ids::AgentId;
+    use redoor_protocol::wire::stream::StreamChunk;
     use tokio::sync::{mpsc, oneshot, watch};
 
     /// Keeps lane receivers alive so tests can exercise real admission pressure.
@@ -357,23 +355,13 @@ mod tests {
     impl Fixture {
         /// Single-slot control lanes make saturation deterministic without a network peer.
         fn new() -> Self {
-            let mut state = RouterState::new(
-                tokio::spawn(std::future::pending()),
-                TerminalRegistry::new(),
-                LogRegistry::new(),
-            );
+            let mut state = RouterState::new(tokio::spawn(std::future::pending()));
             let agent = AgentId::from("output-test");
             let (lanes, receivers) = ControlLanes::bounded(1, 1);
             let streams = ConnectionStreams::new(agent.clone());
-            let mut connection = AgentConnection::from_register_request(
+            let connection = AgentConnection::from_register_request(
                 RegisterAgentRequest::for_test(&agent, lanes, streams.clone()),
             );
-            let (binary, _binary_receiver) = mpsc::channel(1);
-            connection.transfer = Some(super::super::state::TransferConnection {
-                socket_id: SocketId::new(),
-                outgoing_binary: binary,
-                shutdown: watch::channel(false).0,
-            });
             state.agents.by_id.insert(agent.clone(), connection);
             Self {
                 state,
@@ -432,10 +420,8 @@ mod tests {
         fn deliver(&mut self, id: RequestId, is_last: bool, data: Vec<u8>) {
             let end = self.streams.deliver(StreamChunk {
                 request_id: id,
-                chunk_index: ChunkIndex::new(0),
                 is_last,
                 is_error: false,
-                payload_kind: StreamPayloadKind::RawFile,
                 data,
             });
             if let Some(end) = end {

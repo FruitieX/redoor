@@ -83,7 +83,7 @@ describe("File Diff API", () => {
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${secondAgentName},`,
+                `Agent registered: agent_id=${secondAgentName},`,
             ),
             10000,
         );

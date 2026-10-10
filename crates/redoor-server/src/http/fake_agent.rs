@@ -2,18 +2,16 @@
 
 use crate::actors::lanes::ControlLanes;
 use crate::actors::router::{
-    ConnectionStreams, RegisterAgentRequest, RegisterTransferConnectionRequest, RouteResponse,
-    RouterHandle, RouterMsg, spawn_router,
+    ConnectionStreams, RegisterAgentRequest, RouteResponse, RouterHandle, RouterMsg, spawn_router,
 };
-use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
 use redoor_protocol::{
     ids::{AgentId, RequestId, SocketId},
     wire::{ServerToAgent, command::Command, command::CommandResult, stream::StreamChunk},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 /// The socket-facing ends of one registered agent: what the server queued for it, and the
-/// stream tables its transfer reader would deliver frames into.
+/// stream tables its connection reader would deliver frames into.
 pub(crate) struct FakeAgent {
     pub(crate) router: RouterHandle,
     pub(crate) agent_id: AgentId,
@@ -22,19 +20,17 @@ pub(crate) struct FakeAgent {
     pub(crate) commands: mpsc::Receiver<ServerToAgent>,
     pub(crate) priority: mpsc::Receiver<ServerToAgent>,
     /// Kept open so server-to-agent payload frames have somewhere to go.
-    _transfer: mpsc::Receiver<StreamChunk>,
+    _bulk: mpsc::Receiver<StreamChunk>,
     pub(crate) streams: ConnectionStreams,
-    _transfer_shutdown: watch::Receiver<bool>,
 }
 
 impl FakeAgent {
-    /// Starts a router and registers one agent with control and transfer sockets.
+    /// Starts a router and registers one agent.
     pub(crate) async fn connect() -> Self {
-        let (router, _task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
+        let (router, _task) = spawn_router();
         let agent_id = AgentId::from("fake-agent");
         let (lanes, receivers) = ControlLanes::bounded(16, 16);
         let (commands, mut priority) = (receivers.commands, receivers.priority);
-        let (transfer_sender, transfer) = mpsc::channel(16);
         let streams = ConnectionStreams::new(agent_id.clone());
         let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
         let socket_id = registration.socket_id.clone();
@@ -45,32 +41,14 @@ impl FakeAgent {
         let ServerToAgent::Welcome { .. } = Self::next(&mut priority).await else {
             panic!("registration starts with the welcome");
         };
-        let ServerToAgent::TransferSocketOpen { token } = Self::next(&mut priority).await else {
-            panic!("the welcome is followed by the transfer bootstrap");
-        };
-        let (shutdown, transfer_shutdown) = watch::channel(false);
-        router
-            .request(|reply| {
-                RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                    token,
-                    socket_id: SocketId::new(),
-                    outgoing_binary: transfer_sender,
-                    shutdown,
-                    reply,
-                })
-            })
-            .await
-            .unwrap()
-            .unwrap();
         Self {
             router,
             agent_id,
             socket_id,
             commands,
             priority,
-            _transfer: transfer,
+            _bulk: receivers.bulk,
             streams,
-            _transfer_shutdown: transfer_shutdown,
         }
     }
 
@@ -111,7 +89,7 @@ impl FakeAgent {
         self.respond(request_id, result).await;
     }
 
-    /// Delivers one stream frame through the transfer reader's routing.
+    /// Delivers one stream frame through the connection reader's routing.
     pub(crate) async fn deliver(&self, chunk: StreamChunk) {
         if let Some(end) = self.streams.deliver(chunk) {
             self.router

@@ -10,14 +10,14 @@ export const AGENT_PROTOCOL = "redoor.v2";
 /** Path of the single agent websocket endpoint. */
 export const AGENT_WS_PATH = "/api/v1/agent/ws";
 
-/** Path of the payload socket that carries binary stream frames. */
-const AGENT_TRANSFER_WS_PATH = "/api/v1/agent-transfer/ws";
+/** Fixed header length of one binary stream frame: stream id (8) and flags (1). */
+const STREAM_HEADER_SIZE = 9;
 
-/** Fixed header length of one binary stream frame. */
-const STREAM_HEADER_SIZE = 23;
+/** Flag bit marking the final frame of a stream. */
+const FLAG_FIN = 0x01;
 
-/** Leading marker of binary stream frames. */
-const STREAM_MAGIC = 0x52415844;
+/** Flag bit marking a final frame that carries an error message. */
+const FLAG_ERROR = 0x02;
 
 /** Every control frame is a JSON object tagged by `type`. */
 const controlFrameSchema = z
@@ -48,12 +48,6 @@ const rejectedSchema = z.object({
     type: z.literal("rejected"),
     reason: z.string(),
     message: z.string(),
-});
-
-/** The bootstrap that tells the agent how to open its payload socket. */
-const transferSocketOpenSchema = z.object({
-    type: z.literal("transfer_socket_open"),
-    token: z.string().min(1),
 });
 
 /** Upgrade request settings; every field defaults to what a correct agent sends. */
@@ -187,10 +181,7 @@ export class FakeAgentRejectedError extends Error {
 
 /** Settings for a fully connected fake agent. */
 export type FakeAgentOptions = HelloOptions &
-    Omit<UpgradeOptions, "path" | "protocols"> & {
-        /** Whether to open the payload socket the server asks for; on by default. */
-        openTransfer?: boolean;
-    };
+    Omit<UpgradeOptions, "path" | "protocols">;
 
 /** One queued control frame consumer. */
 type FrameWaiter = {
@@ -209,8 +200,7 @@ export class FakeAgent {
     private readonly waiters: FrameWaiter[] = [];
     private readonly commandHandlers: ((command: FakeCommand) => void)[] = [];
     private readonly receivedCommands: FakeCommand[] = [];
-    /** Payload socket, once the server asked for it and it was opened. */
-    transfer: WebSocket | undefined;
+    private readonly streamHandlers: ((frame: StreamFrame) => void)[] = [];
     /** Connection id from the server's `welcome`. */
     connectionId = "";
 
@@ -220,6 +210,12 @@ export class FakeAgent {
     ) {
         control.on("message", (data, isBinary) => {
             if (isBinary) {
+                const frame = decodeStreamFrame(rawDataToBuffer(data));
+
+                for (const handler of this.streamHandlers) {
+                    handler(frame);
+                }
+
                 return;
             }
 
@@ -232,8 +228,8 @@ export class FakeAgent {
     }
 
     /**
-     * Upgrades, says hello and waits for the welcome; then opens the payload socket unless
-     * told not to. Throws [`FakeAgentRejectedError`] when the server refuses the hello.
+     * Upgrades, says hello and waits for the welcome. Throws [`FakeAgentRejectedError`] when
+     * the server refuses the hello.
      */
     static async connect(options: FakeAgentOptions): Promise<FakeAgent> {
         const outcome = await upgradeAgentSocket(options);
@@ -263,34 +259,7 @@ export class FakeAgent {
 
         agent.connectionId = welcomeSchema.parse(answer).connection_id;
 
-        if (options.openTransfer ?? true) {
-            await agent.openTransfer(options.serverPort);
-        }
-
         return agent;
-    }
-
-    /** Opens the payload socket with the token from `transfer_socket_open`. */
-    private async openTransfer(serverPort: number): Promise<void> {
-        const bootstrap = transferSocketOpenSchema.parse(
-            await this.waitForFrame(
-                (frame) => frame.type === "transfer_socket_open",
-            ),
-        );
-
-        const outcome = await upgradeAgentSocket({
-            serverPort,
-            path: AGENT_TRANSFER_WS_PATH,
-            token: bootstrap.token,
-        });
-
-        if (outcome.kind === "refused") {
-            throw new Error(
-                `transfer upgrade refused with ${outcome.status}: ${outcome.body}`,
-            );
-        }
-
-        this.transfer = outcome.socket;
     }
 
     /** Hands a received frame to the oldest waiter that wants it, or queues it. */
@@ -390,39 +359,68 @@ export class FakeAgent {
         this.send({ type: "command_response", id, result });
     }
 
-    /** Sends one binary stream frame of request `id` on the payload socket. */
+    /** Sends one binary frame of stream `stream` on the connection. */
     sendStreamFrame(
-        id: number,
+        stream: number,
         data: Buffer,
-        flags: { last?: boolean; error?: boolean; tar?: boolean } = {},
+        flags: { last?: boolean; error?: boolean } = {},
     ): void {
-        if (this.transfer === undefined) {
-            throw new Error("the payload socket is not open");
-        }
-
-        this.transfer.send(encodeStreamFrame(id, data, flags));
+        this.control.send(encodeStreamFrame(stream, data, flags));
     }
 
-    /** Closes both sockets. */
+    /** Calls `handler` for every binary stream frame the server sends from now on. */
+    onStreamFrame(handler: (frame: StreamFrame) => void): void {
+        this.streamHandlers.push(handler);
+    }
+
+    /** Closes the connection. */
     close(): void {
         this.control.close();
-        this.transfer?.close();
     }
 }
 
+/** One binary frame of one stream. */
+export type StreamFrame = {
+    stream: number;
+    last: boolean;
+    error: boolean;
+    data: Buffer;
+};
+
 /** Encodes one binary stream frame the way the agent's stream writer does. */
 export function encodeStreamFrame(
-    id: number,
+    stream: number,
     data: Buffer,
-    flags: { last?: boolean; error?: boolean; tar?: boolean } = {},
+    flags: { last?: boolean; error?: boolean } = {},
 ): Buffer {
     const header = Buffer.alloc(STREAM_HEADER_SIZE);
-    header.writeUInt32LE(STREAM_MAGIC, 0);
-    header.writeBigUInt64LE(BigInt(id), 4);
-    header.writeBigUInt64LE(0n, 12);
-    header.writeUInt8(flags.last ? 1 : 0, 20);
-    header.writeUInt8(flags.error ? 1 : 0, 21);
-    header.writeUInt8(flags.tar ? 1 : 0, 22);
+    const error = flags.error === true;
+    const fin = error || flags.last === true;
+
+    header.writeBigUInt64LE(BigInt(stream), 0);
+    header.writeUInt8((fin ? FLAG_FIN : 0) | (error ? FLAG_ERROR : 0), 8);
 
     return Buffer.concat([header, data]);
+}
+
+/** Decodes one binary stream frame the server sent. */
+export function decodeStreamFrame(bytes: Buffer): StreamFrame {
+    const flags = bytes.readUInt8(8);
+    const error = (flags & FLAG_ERROR) !== 0;
+
+    return {
+        stream: Number(bytes.readBigUInt64LE(0)),
+        last: (flags & FLAG_FIN) !== 0 && !error,
+        error,
+        data: bytes.subarray(STREAM_HEADER_SIZE),
+    };
+}
+
+/** Normalizes every binary payload representation `ws` may hand to a listener. */
+function rawDataToBuffer(data: WebSocket.RawData): Buffer {
+    if (Array.isArray(data)) {
+        return Buffer.concat(data);
+    }
+
+    return data instanceof ArrayBuffer ? Buffer.from(data) : data;
 }

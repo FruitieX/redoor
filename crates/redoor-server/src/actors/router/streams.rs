@@ -1,22 +1,20 @@
 //! The router-free data path: stream leases, per-connection stream tables and consumers.
 //!
 //! The router admits streams, tracks their lifecycle and handles cancellation, but payload
-//! frames never pass through its mailbox. They travel directly between the transfer-socket
-//! tasks and the HTTP or copy consumers through the types here, so a 64 KiB chunk costs no
-//! router messages, and only terminal events (completion, failure, protocol violation) go back
-//! to the router. Every stream is credited, so the transfer reader never waits for a consumer
-//! and one stalled HTTP client cannot freeze the other streams sharing its agent's socket.
+//! frames never pass through its mailbox. They travel directly between the connection's
+//! session and the HTTP, copy, terminal or log consumers through the types here, so a 64 KiB
+//! chunk costs no router messages, and only terminal events (completion, failure, protocol
+//! violation) go back to the router. Every stream is credited, so the connection reader never
+//! waits for a consumer and one stalled client cannot freeze the other streams of its agent.
 
 use crate::actors::lanes::ControlLanes;
 use redoor_core::stream_credit::{CreditGate, CreditLedger};
 use redoor_protocol::{
-    ids::{AgentId, ChunkIndex, RequestId},
+    ids::{AgentId, RequestId},
     wire::{
         ServerToAgent,
-        stream::{
-            STREAM_CREDIT_QUEUE_FRAMES, StreamChunk, StreamChunkFrameRequest, StreamChunkFrames,
-            StreamPayloadKind,
-        },
+        stream::{StreamChunk, receive_queue_frames},
+        terminal::TerminalServerMessage,
     },
 };
 use std::collections::HashMap;
@@ -30,16 +28,20 @@ use tokio_util::sync::CancellationToken;
 /// What a stream needs to reach its agent without asking the router.
 #[derive(Clone, Debug)]
 pub struct AgentLink {
-    /// Control lanes; credit grants use the priority lane so they never queue behind commands.
+    /// Lanes of the connection; credit grants use the priority lane so they never queue
+    /// behind commands or data.
     control: ControlLanes,
-    /// Payload lane for server-to-agent frames; absent when the transfer socket is down.
-    transfer: Option<mpsc::Sender<StreamChunk>>,
 }
 
 impl AgentLink {
-    /// Captures the lanes of one control session and its current transfer socket.
-    pub(crate) fn new(control: ControlLanes, transfer: Option<mpsc::Sender<StreamChunk>>) -> Self {
-        Self { control, transfer }
+    /// Captures the lanes of one connection.
+    pub(crate) fn new(control: ControlLanes) -> Self {
+        Self { control }
+    }
+
+    /// The connection's lanes, for stream-scoped control frames (resizes, cancels).
+    pub(crate) fn lanes(&self) -> &ControlLanes {
+        &self.control
     }
 
     /// Returns credit for frames a consumer drained, waiting for priority-lane capacity so a
@@ -137,7 +139,7 @@ pub struct StreamEnd {
     pub(crate) received_bytes: u64,
 }
 
-/// One inbound stream as seen by the transfer reader.
+/// One inbound stream as seen by the connection reader.
 #[derive(Debug)]
 struct InboundSlot {
     sender: mpsc::Sender<StreamChunk>,
@@ -145,19 +147,23 @@ struct InboundSlot {
     received: u64,
 }
 
-/// The stream tables of one control session, shared by the router, the control session (for
-/// credit grants from the agent) and the transfer reader.
+/// The stream tables of one connection, shared by the router and the connection's session.
 #[derive(Debug)]
 struct StreamTables {
     agent_id: AgentId,
     inbound: Mutex<HashMap<RequestId, InboundSlot>>,
     outbound: Mutex<HashMap<RequestId, CreditGate>>,
+    /// Lifecycle events of open terminals, delivered in their stream's frame order.
+    terminal_events: Mutex<HashMap<RequestId, mpsc::Sender<TerminalServerMessage>>>,
 }
+
+/// Pending terminal lifecycle events per terminal; there are at most three (ready, exit or
+/// error), so the queue never fills for an honest agent.
+const TERMINAL_EVENT_QUEUE: usize = 4;
 
 /// Per-control-session routing for payload streams, used without the router actor.
 ///
-/// Created by the control session at registration, stored in the router's connection entry,
-/// and handed to the transfer socket when it authenticates.
+/// Created by the session at registration and stored in the router's connection entry.
 #[derive(Clone, Debug)]
 pub struct ConnectionStreams {
     tables: Arc<StreamTables>,
@@ -171,6 +177,7 @@ impl ConnectionStreams {
                 agent_id,
                 inbound: Mutex::new(HashMap::new()),
                 outbound: Mutex::new(HashMap::new()),
+                terminal_events: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -191,12 +198,12 @@ impl ConnectionStreams {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Opens an inbound stream and returns its consumer.
+    /// Opens an inbound stream with `window` frames of credit and returns its consumer.
     ///
     /// Must happen before the command is sent so no frame can arrive unroutable. The queue
     /// holds the credit window plus the terminal frame, so an honest agent never overflows it.
-    pub(crate) fn open_inbound(&self, lease: StreamLease) -> OutputReceiver {
-        let (sender, chunks) = mpsc::channel(STREAM_CREDIT_QUEUE_FRAMES);
+    pub(crate) fn open_inbound(&self, lease: StreamLease, window: u32) -> OutputReceiver {
+        let (sender, chunks) = mpsc::channel(receive_queue_frames(window));
         self.inbound().insert(
             lease.id,
             InboundSlot {
@@ -219,9 +226,9 @@ impl ConnectionStreams {
         self.inbound().remove(&request_id);
     }
 
-    /// Registers credit for an outbound stream.
-    pub(crate) fn open_outbound(&self, request_id: RequestId) -> CreditGate {
-        let gate = CreditGate::default();
+    /// Registers credit for an outbound stream with `window` frames.
+    pub(crate) fn open_outbound(&self, request_id: RequestId, window: u32) -> CreditGate {
+        let gate = CreditGate::with_window(window);
         self.outbound().insert(request_id, gate.clone());
         gate
     }
@@ -240,15 +247,52 @@ impl ConnectionStreams {
         }
     }
 
-    /// Ends every stream of this session because its control or transfer link is gone.
+    /// Opens the lifecycle event queue of terminal `request_id`.
+    pub(crate) fn open_terminal_events(
+        &self,
+        request_id: RequestId,
+    ) -> mpsc::Receiver<TerminalServerMessage> {
+        let (sender, events) = mpsc::channel(TERMINAL_EVENT_QUEUE);
+        self.terminal_events().insert(request_id, sender);
+        events
+    }
+
+    /// Delivers one terminal lifecycle event; events of unknown or closed terminals are
+    /// dropped, and a flooding agent cannot make the reader wait.
+    pub fn deliver_terminal_event(&self, request_id: RequestId, event: TerminalServerMessage) {
+        if let Some(events) = self.terminal_events().get(&request_id) {
+            let _ = events.try_send(event);
+        }
+    }
+
+    /// Forgets every table entry of one stream (terminals and log streams end this way).
+    pub(crate) fn close(&self, request_id: RequestId) {
+        self.close_inbound(request_id);
+        self.close_outbound(request_id);
+        self.terminal_events().remove(&request_id);
+    }
+
+    /// Locks the terminal event table, tolerating poison because every operation leaves it
+    /// valid.
+    fn terminal_events(
+        &self,
+    ) -> MutexGuard<'_, HashMap<RequestId, mpsc::Sender<TerminalServerMessage>>> {
+        self.tables
+            .terminal_events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Ends every stream of this connection because it is gone.
     pub(crate) fn clear(&self) {
         self.inbound().clear();
         for (_, gate) in self.outbound().drain() {
             gate.close();
         }
+        self.terminal_events().clear();
     }
 
-    /// Hands one frame from the transfer socket to its stream's consumer.
+    /// Hands one frame from the connection to its stream's consumer.
     ///
     /// Streams are filled with `try_send` and never make the reader wait; a full queue means
     /// the agent ignored its credit, which fails that stream only. Frames of stopped streams
@@ -378,14 +422,13 @@ impl OutputReceiver {
         }
         let message = self.lease.fault()?.to_string();
         self.fault_reported = true;
-        Some(StreamChunk {
-            request_id: self.lease.id,
-            chunk_index: ChunkIndex::new(0),
-            is_last: true,
-            is_error: true,
-            payload_kind: StreamPayloadKind::RawFile,
-            data: message.into_bytes(),
-        })
+        Some(StreamChunk::error(self.lease.id, &message))
+    }
+
+    /// Takes one already queued frame without waiting and without returning credit; used to
+    /// drain output that precedes a terminal's exit event.
+    pub(crate) fn try_recv(&mut self) -> Option<StreamChunk> {
+        self.chunks.try_recv().ok()
     }
 }
 
@@ -393,8 +436,11 @@ impl OutputReceiver {
 impl ConnectionStreams {
     /// Opens an inbound stream on a detached link so consumer tests need no router.
     pub(crate) fn open_detached(&self, request_id: RequestId) -> OutputReceiver {
-        let link = AgentLink::new(ControlLanes::bounded(1, 1).0, None);
-        self.open_inbound(StreamLease::new(request_id, link, 0))
+        let link = AgentLink::new(ControlLanes::bounded(1, 1).0);
+        self.open_inbound(
+            StreamLease::new(request_id, link, 0),
+            redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES,
+        )
     }
 }
 
@@ -403,28 +449,29 @@ impl ConnectionStreams {
 pub enum OutboundError {
     /// The router stopped the stream (cancellation, teardown or completion).
     Stopped,
-    /// The agent's transfer socket is gone.
+    /// The agent's connection is gone.
     LaneClosed,
 }
 
-/// Producer end of one server-to-agent stream (upload, edit or copy destination).
+/// Producer end of one server-to-agent stream (upload, edit, copy destination or terminal
+/// input).
 ///
-/// Sends directly onto the agent's transfer lane, spending per-stream credit so a slow
-/// destination worker stalls only this stream.
+/// Sends directly onto the connection's bulk or interactive lane, spending per-stream credit
+/// so a slow destination worker stalls only this stream.
 #[derive(Clone, Debug)]
 pub struct OutboundStream {
     lease: StreamLease,
-    transfer: Option<mpsc::Sender<StreamChunk>>,
+    lane: mpsc::Sender<StreamChunk>,
     credit: CreditGate,
 }
 
 impl OutboundStream {
-    /// Binds a lease to the agent's transfer lane and the stream's credit gate.
-    pub(crate) fn new(lease: StreamLease, credit: CreditGate) -> Self {
-        let transfer = lease.link.transfer.clone();
+    /// Binds a lease to its lane class and the stream's credit gate.
+    pub(crate) fn new(lease: StreamLease, credit: CreditGate, interactive: bool) -> Self {
+        let lane = lease.link.control.data(interactive).clone();
         Self {
             lease,
-            transfer,
+            lane,
             credit,
         }
     }
@@ -439,21 +486,11 @@ impl OutboundStream {
         &self.lease
     }
 
-    /// Reframes one logical payload and sends its frames in order.
-    ///
-    /// `chunk_index` is advanced past every frame attempted so a later abort frame never
-    /// reuses an index.
-    pub(crate) async fn send_frames(
-        &self,
-        chunk_index: &mut ChunkIndex,
-        request: StreamChunkFrameRequest<'_>,
-    ) -> Result<(), OutboundError> {
-        let mut frames = StreamChunkFrames::new(request.starting_chunk_index(*chunk_index));
-        while let Some(chunk) = frames.next() {
-            *chunk_index = frames.next_chunk_index();
+    /// Splits one logical payload into frames and sends them in order.
+    pub(crate) async fn send_data(&self, data: &[u8], is_last: bool) -> Result<(), OutboundError> {
+        for chunk in StreamChunk::split(self.lease.id, data, is_last) {
             self.send(chunk).await?;
         }
-        *chunk_index = frames.next_chunk_index();
         Ok(())
     }
 
@@ -479,11 +516,10 @@ impl OutboundStream {
         } else {
             chunk.data.len() as u64
         };
-        let transfer = self.transfer.as_ref().ok_or(OutboundError::LaneClosed)?;
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(OutboundError::Stopped),
-            result = transfer.send(chunk) => result.map_err(|_| OutboundError::LaneClosed)?,
+            result = self.lane.send(chunk) => result.map_err(|_| OutboundError::LaneClosed)?,
         }
         self.lease.bytes.fetch_add(bytes, Ordering::Relaxed);
         Ok(())
@@ -491,22 +527,11 @@ impl OutboundStream {
 
     /// Sends a terminal error frame even after the stream was stopped, so the destination
     /// worker fails promptly instead of waiting for frames that will never come.
-    pub(crate) async fn send_abort(
-        &self,
-        chunk_index: ChunkIndex,
-        payload_kind: StreamPayloadKind,
-        reason: &str,
-    ) {
-        let Some(transfer) = &self.transfer else {
-            return;
-        };
-        let request = StreamChunkFrameRequest::new(self.lease.id, reason.as_bytes())
-            .starting_chunk_index(chunk_index)
-            .payload_kind(payload_kind)
-            .is_error(true);
-        if let Some(chunk) = StreamChunkFrames::new(request).next() {
-            let _ = transfer.send(chunk).await;
-        }
+    pub(crate) async fn send_abort(&self, reason: &str) {
+        let _ = self
+            .lane
+            .send(StreamChunk::error(self.lease.id, reason))
+            .await;
     }
 
     /// Failure reason set by the router, if it failed rather than merely stopped the stream.
@@ -526,21 +551,14 @@ mod tests {
         let agent = AgentId::from("agent");
         (
             ConnectionStreams::new(agent.clone()),
-            AgentLink::new(lanes, None),
+            AgentLink::new(lanes),
             receivers.priority,
         )
     }
 
     /// Builds one data or terminal frame of `request_id`.
     fn frame(request_id: u64, is_last: bool) -> StreamChunk {
-        StreamChunk {
-            request_id: RequestId::new(request_id),
-            chunk_index: ChunkIndex::new(0),
-            is_last,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data: vec![7; 16],
-        }
+        StreamChunk::data(RequestId::new(request_id), vec![7; 16], is_last)
     }
 
     /// A stalled consumer must not stall the reader: other streams keep flowing, and a frame
@@ -548,8 +566,14 @@ mod tests {
     #[tokio::test]
     async fn stalled_consumer_does_not_block_other_streams() {
         let (streams, link, _grants) = session();
-        let _stalled = streams.open_inbound(StreamLease::new(RequestId::new(1), link.clone(), 0));
-        let mut live = streams.open_inbound(StreamLease::new(RequestId::new(2), link, 0));
+        let _stalled = streams.open_inbound(
+            StreamLease::new(RequestId::new(1), link.clone(), 0),
+            STREAM_CREDIT_WINDOW_FRAMES,
+        );
+        let mut live = streams.open_inbound(
+            StreamLease::new(RequestId::new(2), link, 0),
+            STREAM_CREDIT_WINDOW_FRAMES,
+        );
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
             // Frames within the window are queued without waiting for the consumer.
             assert!(streams.deliver(frame(1, false)).is_none());
@@ -566,7 +590,10 @@ mod tests {
     #[tokio::test]
     async fn credit_overflow_fails_only_the_violating_stream() {
         let (streams, link, _grants) = session();
-        let _stalled = streams.open_inbound(StreamLease::new(RequestId::new(1), link, 0));
+        let _stalled = streams.open_inbound(
+            StreamLease::new(RequestId::new(1), link, 0),
+            STREAM_CREDIT_WINDOW_FRAMES,
+        );
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES + 1 {
             assert!(streams.deliver(frame(1, false)).is_none());
         }
@@ -582,7 +609,7 @@ mod tests {
     async fn draining_grants_credit_and_counts_bytes() {
         let (streams, link, mut grants) = session();
         let lease = StreamLease::new(RequestId::new(3), link, 0);
-        let mut receiver = streams.open_inbound(lease.clone());
+        let mut receiver = streams.open_inbound(lease.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         streams.deliver(frame(3, false));
         streams.deliver(frame(3, false));
         receiver.recv().await.unwrap();
@@ -605,7 +632,7 @@ mod tests {
     async fn stopped_stream_discards_payload_and_reports_terminal() {
         let (streams, link, _grants) = session();
         let lease = StreamLease::new(RequestId::new(4), link, 0);
-        let mut receiver = streams.open_inbound(lease.clone());
+        let mut receiver = streams.open_inbound(lease.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         lease.stop();
         assert!(streams.deliver(frame(4, false)).is_none());
         let end = streams.deliver(frame(4, true)).unwrap();
@@ -620,7 +647,7 @@ mod tests {
     async fn failed_stream_yields_reason_once() {
         let (streams, link, _grants) = session();
         let lease = StreamLease::new(RequestId::new(5), link, 0);
-        let mut receiver = streams.open_inbound(lease.clone());
+        let mut receiver = streams.open_inbound(lease.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         lease.fail("Agent disconnected".to_string());
         let chunk = receiver.recv().await.unwrap();
         // Consumers need a real error, not a silently truncated body.
@@ -633,10 +660,15 @@ mod tests {
     #[tokio::test]
     async fn outbound_stream_spends_credit_and_stops_promptly() {
         let streams = ConnectionStreams::new(AgentId::from("agent"));
-        let (transfer, mut lane) = mpsc::channel(64);
-        let link = AgentLink::new(ControlLanes::bounded(1, 1).0, Some(transfer));
-        let lease = StreamLease::new(RequestId::new(7), link, 0);
-        let outbound = OutboundStream::new(lease.clone(), streams.open_outbound(lease.id));
+        let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
+        let lease = StreamLease::new(RequestId::new(7), AgentLink::new(lanes), 0);
+        let outbound = OutboundStream::new(
+            lease.clone(),
+            streams.open_outbound(lease.id, STREAM_CREDIT_WINDOW_FRAMES),
+            false,
+        );
+        // Drains the one-slot bulk lane in the background so only credit limits the producer.
+        let drain = tokio::spawn(async move { while receivers.bulk.recv().await.is_some() {} });
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
             outbound.send(frame(7, false)).await.unwrap();
         }
@@ -658,12 +690,9 @@ mod tests {
         lease.stop();
         // Cancellation releases a producer stuck on credit instead of leaking it.
         assert_eq!(blocked.await.unwrap(), Err(OutboundError::Stopped));
-        let mut sent = 0;
-        while lane.try_recv().is_ok() {
-            sent += 1;
-        }
-        assert_eq!(sent, STREAM_CREDIT_WINDOW_FRAMES as usize + 2);
-        // Outbound progress counts bytes the lane accepted.
+        // Outbound progress counts bytes the lane accepted: the window, FIN and the granted
+        // frame, but not the canceled one.
         assert_eq!(lease.bytes(), 16 * (STREAM_CREDIT_WINDOW_FRAMES as u64 + 2));
+        drain.abort();
     }
 }

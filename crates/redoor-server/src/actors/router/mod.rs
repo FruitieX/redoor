@@ -20,19 +20,17 @@ mod ui;
 pub use error::RouterError;
 pub use messages::{
     AgentListEntry, ApplyManagedLifecycleRequest, CancelPublicTransferError,
-    CommitDirectUploadRequest, ExecuteCommandRequest, ExecuteStreamRequest,
+    CommitDirectUploadRequest, ExecuteCommandRequest, ExecuteStreamRequest, LogStream,
     OpenAgentLogStreamRequest, OpenTerminalRequest, OutboundFailure, OutboundFailureReason,
     OutputStreamTracking, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterTransferConnectionRequest, RegisterUiSubscriberRequest, RegistrationRejection,
-    RouteResponse, RouteTransferReadyRequest, RouterMsg, StartCopyRequest, StartUploadRequest,
-    TransferProgressUpdateRequest, UnregisterManagedAgentRequest, UploadStartOutcome,
+    RegisterUiSubscriberRequest, RegistrationRejection, RouteResponse, RouteTransferReadyRequest,
+    RouterMsg, StartCopyRequest, StartUploadRequest, TerminalStream, TransferProgressUpdateRequest,
+    UnregisterManagedAgentRequest, UploadStartOutcome,
 };
 pub use state::CopyContentKind;
 pub use state::CopyOperation;
 pub use streams::{ConnectionStreams, OutboundError, OutboundStream, OutputReceiver};
 
-use crate::log_registry::LogRegistry;
-use crate::terminal_registry::TerminalRegistry;
 use flows::Flow;
 use redoor_core::log;
 use redoor_protocol::ids::{AgentId, SocketId, UnixTimestampSeconds};
@@ -120,6 +118,50 @@ impl RouterHandle {
     }
 }
 
+/// Closes one terminal or log stream when its bridge ends, however it ends.
+///
+/// The router then forgets the stream and cancels it on the agent, so a browser that leaves
+/// always stops its PTY or log relay and frees the connection's stream slot.
+pub struct StreamCloseGuard {
+    router: RouterHandle,
+    agent_id: AgentId,
+    stream: redoor_protocol::ids::RequestId,
+}
+
+impl StreamCloseGuard {
+    /// Arms the guard for `stream` of `agent_id`.
+    pub fn new(
+        router: RouterHandle,
+        agent_id: AgentId,
+        stream: redoor_protocol::ids::RequestId,
+    ) -> Self {
+        Self {
+            router,
+            agent_id,
+            stream,
+        }
+    }
+}
+
+impl Drop for StreamCloseGuard {
+    /// Queues the close without waiting; a full mailbox hands it to a task so it is not lost.
+    fn drop(&mut self) {
+        let message = RouterMsg::CloseStream {
+            agent_id: self.agent_id.clone(),
+            stream: self.stream,
+        };
+        if let Err(RouterSendError::Full) = self.router.send(message) {
+            let router = self.router.clone();
+            let (agent_id, stream) = (self.agent_id.clone(), self.stream);
+            tokio::spawn(async move {
+                let _ = router
+                    .send_async(RouterMsg::CloseStream { agent_id, stream })
+                    .await;
+            });
+        }
+    }
+}
+
 /// Why a router message was not queued; a full mailbox must never look like a stopped router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RouterSendError {
@@ -143,17 +185,10 @@ pub enum RouterCallError {
 }
 
 /// Spawns the router task and returns its handle plus join handle.
-pub fn spawn_router(
-    terminal_registry: TerminalRegistry,
-    log_registry: LogRegistry,
-) -> (RouterHandle, tokio::task::JoinHandle<()>) {
+pub fn spawn_router() -> (RouterHandle, tokio::task::JoinHandle<()>) {
     let (sender, receiver) = mpsc::channel::<RouterMsg>(ROUTER_MAILBOX_CAPACITY);
     let router_handle = RouterHandle::new(sender);
-    let state = RouterState::new(
-        ui::start_refresh_check_task(router_handle.clone()),
-        terminal_registry,
-        log_registry,
-    );
+    let state = RouterState::new(ui::start_refresh_check_task(router_handle.clone()));
     let task_handle = tokio::spawn(state.run(receiver));
     (router_handle, task_handle)
 }
@@ -256,14 +291,6 @@ impl RouterState {
     fn handle(&mut self, message: RouterMsg) {
         match message {
             RouterMsg::RegisterAgent(request) => self.register_agent(request),
-            RouterMsg::AuthorizeTransferToken { token, reply } => {
-                let _ = reply.send(self.transfer_token_owner(&token).is_some());
-            }
-            RouterMsg::RegisterTransferConnection(request) => self.register_transfer(request),
-            RouterMsg::UnregisterTransferConnection {
-                agent_id,
-                socket_id,
-            } => self.unregister_transfer(agent_id, socket_id),
             RouterMsg::RegisterManagedAgent(request) => self.register_managed(request),
             RouterMsg::UnregisterManagedAgent(request) => self.unregister_managed(request),
             RouterMsg::ApplyManagedLifecycle(request) => self.apply_managed_lifecycle(request),
@@ -329,6 +356,7 @@ impl RouterState {
             }
             RouterMsg::OpenTerminal(request) => self.open_terminal(request),
             RouterMsg::OpenAgentLogStream(request) => self.open_log_stream(request),
+            RouterMsg::CloseStream { agent_id, stream } => self.close_stream(&agent_id, stream),
             RouterMsg::CheckPendingUiRefresh => self.tick(),
             RouterMsg::Shutdown => {}
         }
@@ -353,15 +381,12 @@ mod tests {
     use super::*;
     use crate::actors::lanes::ControlLanes;
     use crate::actors::router::messages::AgentListEntry;
-    use redoor_protocol::ids::{AgentId, ChunkIndex, RequestId, SocketId};
+    use redoor_protocol::ids::{AgentId, RequestId};
     use redoor_protocol::wire::command::{Command, CommandResult};
     use redoor_protocol::wire::exec::{ExecEvent, ExecRequest};
-    use redoor_protocol::wire::stream::{
-        STREAM_CREDIT_WINDOW_FRAMES, StreamChunk, StreamPayloadKind,
-    };
+    use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk};
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::{Duration, timeout};
-    use uuid::Uuid;
 
     /// A full mailbox and a stopped router are different failures and must stay distinguishable.
     #[tokio::test]
@@ -400,21 +425,19 @@ mod tests {
     fn agent_frame(request_id: RequestId, is_last: bool, data: Vec<u8>) -> StreamChunk {
         StreamChunk {
             request_id,
-            chunk_index: ChunkIndex::new(0),
             is_last,
             is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
             data,
         }
     }
 
     #[tokio::test]
     async fn slow_upload_send_does_not_block_unrelated_router_work() {
-        let (router_ref, router_task) = spawn_router(TerminalRegistry::new(), LogRegistry::new());
+        let (router_ref, router_task) = spawn_router();
 
         let (lanes, receivers) = ControlLanes::bounded(64, 16);
-        let (mut text_rx, mut priority_rx) = (receivers.commands, receivers.priority);
-        let (binary_tx, mut binary_rx) = mpsc::channel::<StreamChunk>(1);
+        let (mut text_rx, mut priority_rx, mut binary_rx) =
+            (receivers.commands, receivers.priority, receivers.bulk);
         let agent_id = AgentId::from("agent-1");
         // Every stream is credited, so the reader never waits on any stream's consumer.
         let streams = ConnectionStreams::new(agent_id.clone());
@@ -431,25 +454,6 @@ mod tests {
             next_control(&mut priority_rx).await,
             redoor_protocol::wire::ServerToAgent::Welcome { .. }
         ));
-        let transfer_token = match next_control(&mut priority_rx).await {
-            redoor_protocol::wire::ServerToAgent::TransferSocketOpen { token } => token,
-            other => panic!("unexpected control message: {other:?}"),
-        };
-        let (transfer_shutdown, _transfer_shutdown_rx) = watch::channel(false);
-        router_ref
-            .request(|reply| {
-                RouterMsg::RegisterTransferConnection(RegisterTransferConnectionRequest {
-                    token: transfer_token,
-                    socket_id: SocketId::from(Uuid::from_u128(2)),
-                    outgoing_binary: binary_tx,
-                    shutdown: transfer_shutdown,
-                    reply,
-                })
-            })
-            .await
-            .expect("transfer registration rpc succeeded")
-            .expect("valid transfer token accepted");
-
         let (completion_tx, completion_rx) = oneshot::channel();
         let (ready_tx, ready_rx) = oneshot::channel();
         let router_for_start = router_ref.clone();
@@ -502,21 +506,14 @@ mod tests {
 
         // Holding the first queued binary frame keeps the bounded lane full so the second
         // chunk must wait in its producer, which never involves the router.
-        let upload_frame = |index, data| StreamChunk {
-            request_id,
-            chunk_index: ChunkIndex::new(index),
-            is_last: false,
-            is_error: false,
-            payload_kind: StreamPayloadKind::RawFile,
-            data,
-        };
+        let upload_frame = |data| StreamChunk::data(request_id, data, false);
         upload
-            .send(upload_frame(0, vec![1, 2, 3, 4]))
+            .send(upload_frame(vec![1, 2, 3, 4]))
             .await
             .expect("first chunk accepted");
         let blocked_chunk = tokio::spawn({
             let upload = upload.clone();
-            let frame = upload_frame(1, vec![5, 6, 7, 8]);
+            let frame = upload_frame(vec![5, 6, 7, 8]);
             async move { upload.send(frame).await }
         });
         tokio::task::yield_now().await;
@@ -654,10 +651,8 @@ mod tests {
                 request_id,
                 chunk: StreamChunk {
                     request_id,
-                    chunk_index: ChunkIndex::new(2),
                     is_last: true,
                     is_error: false,
-                    payload_kind: StreamPayloadKind::RawFile,
                     data: Vec::new(),
                 },
                 reply: commit_reply,

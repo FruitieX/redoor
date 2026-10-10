@@ -144,17 +144,6 @@ impl AgentConnection {
         &self.server_url
     }
 
-    /// Opens TCP through the tunnel when configured while retaining URL authority for TLS and HTTP.
-    pub(crate) async fn connect(&self, url: &str) -> Result<(AgentSocket, Response)> {
-        let request = url
-            .into_client_request()
-            .context("invalid agent websocket URL")?;
-        self.upgrade(request).await.map_err(|error| match error {
-            ConnectError::Transport(error) => error,
-            other => anyhow::Error::new(other),
-        })
-    }
-
     /// Connects to an endpoint that authenticates during the upgrade with `token` and requires
     /// the agent protocol, classifying rejections so the caller can stop retrying.
     pub(crate) async fn connect_authenticated(
@@ -167,7 +156,8 @@ impl AgentConnection {
         Ok(socket)
     }
 
-    /// Performs the upgrade directly or through the tunnel endpoint.
+    /// Performs the upgrade directly or through the tunnel endpoint, retaining the URL's
+    /// authority for TLS and HTTP when TCP goes through a tunnel.
     async fn upgrade(&self, request: Request) -> Result<(AgentSocket, Response), ConnectError> {
         let result = match &self.connect_address {
             None => connect_async(request).await,
@@ -259,6 +249,17 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
     use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 
+    /// Echoes the agent protocol, as the real server does when it accepts an upgrade.
+    fn with_agent_protocol(
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> tokio_tungstenite::tungstenite::handshake::server::Response {
+        response.headers_mut().insert(
+            "sec-websocket-protocol",
+            redoor_protocol::wire::handshake::PROTOCOL.parse().unwrap(),
+        );
+        response
+    }
+
     /// Creates a private WSS endpoint so certificate behavior is deterministic and offline.
     fn self_signed_acceptor() -> TlsAcceptor {
         let CertifiedKey { cert, signing_key } =
@@ -293,7 +294,7 @@ mod tests {
                         .unwrap_or_default()
                         .to_string();
                     let _ = authority_sender.send(authority);
-                    Ok(response)
+                    Ok(with_agent_protocol(response))
                 },
             )
             .await
@@ -307,8 +308,8 @@ mod tests {
         )
         .unwrap();
 
-        let (_socket, _response) = connection
-            .connect("ws://redoor.example:8443/api/v1/agent-transfer/ws")
+        let _socket = connection
+            .connect_authenticated("ws://redoor.example:8443/api/v1/agent/ws", "token")
             .await
             .unwrap();
 
@@ -346,7 +347,7 @@ mod tests {
                         .unwrap_or_default()
                         .to_string();
                     let _ = identity_sender.send((sni, authority));
-                    Ok(response)
+                    Ok(with_agent_protocol(response))
                 },
             )
             .await
@@ -360,8 +361,8 @@ mod tests {
         )
         .unwrap();
 
-        let (_socket, _response) = connection
-            .connect("wss://redoor.example:443/api/v1/agent-transfer/ws")
+        let _socket = connection
+            .connect_authenticated("wss://redoor.example:443/api/v1/agent/ws", "token")
             .await
             .unwrap();
 
@@ -390,7 +391,9 @@ mod tests {
         )
         .unwrap();
 
-        let result = connection.connect(connection.server_url()).await;
+        let result = connection
+            .connect_authenticated(connection.server_url(), "token")
+            .await;
 
         // Trusted mode must never silently accept a self-signed routed endpoint.
         assert!(result.is_err());

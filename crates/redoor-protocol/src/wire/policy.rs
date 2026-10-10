@@ -6,16 +6,15 @@
 
 use crate::api::transfers::TransferDirection;
 use crate::wire::command::{Command, CommandResult};
-use crate::wire::stream::StreamPayloadKind;
 
 /// Socket lanes a command occupies while it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandLane {
-    /// Request and response travel only on the control socket.
+    /// Request and response are control frames only.
     Control,
-    /// The agent streams framed output bytes to the server over the transfer socket.
+    /// The agent streams output bytes to the server on the request's stream.
     Output,
-    /// The server streams framed input bytes to the agent over the transfer socket.
+    /// The server streams input bytes to the agent on the request's stream.
     Upload(UploadKind),
 }
 
@@ -48,14 +47,6 @@ impl UploadKind {
                 | (Self::EditFile, CommandResult::EditFile)
         )
     }
-
-    /// Payload framing the agent must receive; any other kind indicates protocol corruption.
-    pub fn payload_kind(self) -> StreamPayloadKind {
-        match self {
-            Self::RawUpload | Self::EditFile => StreamPayloadKind::RawFile,
-            Self::TarUpload => StreamPayloadKind::Tar,
-        }
-    }
 }
 
 /// How a running command reacts to explicit cancellation and connection loss.
@@ -63,7 +54,7 @@ impl UploadKind {
 pub enum CancelScope {
     /// Dropped when its control connection ends; there is no explicit cancel message for it.
     Connection,
-    /// Registered by request id so `cancel_transfer`, transfer loss and connection loss stop it
+    /// Registered by request id so `cancel` and connection loss stop it
     /// cooperatively, letting the command remove its staging output before it reports.
     Request,
     /// Runs to completion even when the connection ends because interrupting a half-applied
@@ -74,7 +65,7 @@ pub enum CancelScope {
 /// Admission and lifecycle rules for one command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandPolicy {
-    /// Sockets the command needs; anything but `Control` requires a transfer connection.
+    /// Whether the command streams bytes, and in which direction.
     pub lane: CommandLane,
     /// Which cancellation sources stop the command and whether it may be dropped.
     pub cancel_scope: CancelScope,
@@ -96,7 +87,7 @@ impl CommandPolicy {
         cancel_scope: CancelScope::Request,
         exclusive: false,
     };
-    /// Agent-to-server byte stream over the transfer socket.
+    /// Agent-to-server byte stream.
     const OUTPUT: Self = Self {
         lane: CommandLane::Output,
         cancel_scope: CancelScope::Request,
@@ -121,8 +112,8 @@ impl CommandPolicy {
         }
     }
 
-    /// Whether admission must fail fast when no transfer socket is connected.
-    pub fn requires_transfer(&self) -> bool {
+    /// Whether the command carries a byte stream in either direction.
+    pub fn streams_bytes(&self) -> bool {
         !matches!(self.lane, CommandLane::Control)
     }
 
@@ -396,8 +387,8 @@ mod tests {
     fn streaming_commands_are_request_cancelable() {
         for command in every_command() {
             let policy = command.policy();
-            if policy.requires_transfer() {
-                // Byte streams own staging output or a server consumer, so cancel_transfer must reach them.
+            if policy.streams_bytes() {
+                // Byte streams own staging output or a server consumer, so cancel must reach them.
                 assert_eq!(
                     policy.cancel_scope,
                     CancelScope::Request,
@@ -425,7 +416,7 @@ mod tests {
         }
     }
 
-    /// Verifies upload kinds match their commands, results and payload framing.
+    /// Verifies upload kinds match their commands and results.
     #[test]
     fn upload_lane_matches_the_command_and_its_success_result() {
         let expected = [
@@ -455,7 +446,5 @@ mod tests {
             UploadKind::EditFile.direction(),
             TransferDirection::Edit
         ));
-        // Tar uploads are the only inbound stream framed as tar payloads.
-        assert_eq!(UploadKind::TarUpload.payload_kind(), StreamPayloadKind::Tar);
     }
 }

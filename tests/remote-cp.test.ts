@@ -15,7 +15,7 @@ import {
     TempFileManager,
     startServerAndAgent,
     waitForValue,
-    waitForAgentTransfer,
+    waitForAgentReady,
 } from "./test-utils";
 import type { ArchiveUploadResponse } from "#bindings/ArchiveUploadResponse";
 import type { CancelUploadRequestResponse } from "#bindings/CancelUploadRequestResponse";
@@ -39,7 +39,7 @@ describe("Remote cp and streaming archive upload", () => {
         const server = processes.getProcess(setup.serverPid);
 
         if (server === undefined) throw new Error("Missing server process");
-        const ready = waitForAgentTransfer(server, "remote-cp-dest");
+        const ready = waitForAgentReady(server, "remote-cp-dest");
         processes.spawnAgent({
             wsAddress: setup.wsUrl,
             name: "remote-cp-dest",

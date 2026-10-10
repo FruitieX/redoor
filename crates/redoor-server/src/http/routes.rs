@@ -12,8 +12,7 @@ use super::{
         delete_ssh_agent_handler, get_local_agent_configuration_handler,
         get_ssh_agent_configuration_handler, update_local_agent_handler, update_ssh_agent_handler,
     },
-    agent_logs::{agent_logs_websocket_handler, browser_agent_logs_websocket_handler},
-    agent_transfers::agent_transfer_websocket_handler,
+    agent_logs::browser_agent_logs_websocket_handler,
     agent_ws::{agent_websocket_handler, legacy_agent_websocket_handler},
     agents::{
         accounts_handler, chmod_path_handler, chown_path_handler, content_grep_handler,
@@ -40,7 +39,7 @@ use super::{
     retry_agent_start::retry_agent_start_handler,
     server_info::server_info_handler,
     state::ServerState,
-    terminals::{agent_terminal_websocket_handler, browser_terminal_websocket_handler},
+    terminals::browser_terminal_websocket_handler,
     transfer_cancellation::cancel_transfer_handler,
     transfer_progress::list_transfer_progress_handler,
     trash::{empty_trash_handler, list_trash_handler, restore_trash_handler},
@@ -61,10 +60,6 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
             "/api/v1/protocol-mismatches",
             get(list_protocol_mismatches_handler),
         )
-        .route(
-            "/api/v1/agent-transfer/ws",
-            get(agent_transfer_websocket_handler),
-        )
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/logout", post(logout_handler))
         .route("/api/v1/ui/ws", get(ui_websocket_handler))
@@ -74,16 +69,8 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
             get(browser_agent_logs_websocket_handler),
         )
         .route(
-            "/api/v1/log-streams/{log_stream_id}/agent/ws",
-            get(agent_logs_websocket_handler),
-        )
-        .route(
             "/api/v1/agents/{agent}/terminal/ws",
             get(browser_terminal_websocket_handler),
-        )
-        .route(
-            "/api/v1/terminals/{terminal_id}/agent/ws",
-            get(agent_terminal_websocket_handler),
         )
         .route(
             "/api/v1/agents",

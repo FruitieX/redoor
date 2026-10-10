@@ -9,31 +9,30 @@ pub(crate) mod sessions;
 use crate::commands::ctx::AgentServices;
 use crate::connection::AgentConnection;
 use crate::platform::identity::HostIdentity;
-use crate::transfer::{
-    TransferConnectContext, schedule_transfer_reconnect, spawn_transfer_connection,
-};
-use crate::ws::{spawn_read_task, spawn_stdin_task, spawn_write_task};
+use crate::terminal::TerminalLink;
+use crate::transfers::stream::StreamWriter;
+use crate::ws::{LaneReceivers, spawn_read_task, spawn_stdin_task, spawn_write_task};
 use dispatch::{DispatchLink, Dispatcher};
 use futures_util::StreamExt;
-use links::{ControlLink, TransferLink};
+use links::{
+    BULK_QUEUE_CAPACITY, CONTROL_QUEUE_CAPACITY, ConnectionLanes, ControlLink,
+    INTERACTIVE_QUEUE_CAPACITY,
+};
 use redoor_core::{log, log_error};
 use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
-    ids::AgentId,
+    ids::{AgentId, RequestId},
     wire::{
         AgentToServer, ServerToAgent,
         command::{CommandErrorKind, CommandResult},
-        log::{Level, LogStreamId},
-        terminal::{TerminalId, TerminalSize},
+        log::Level,
+        terminal::TerminalSize,
     },
 };
 use responder::{OutboundFrame, Responder};
 use sessions::Sessions;
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+use tokio::sync::{mpsc, watch};
 
-/// Bounded control-lane depth; full queues backpressure responders instead of dropping frames.
-const CONTROL_QUEUE_CAPACITY: usize = 32;
 /// Number of quick reconnect attempts allowed before switching to the slower window.
 const QUICK_RECONNECT_ATTEMPTS: u32 = 10;
 /// Inclusive jitter window for quick reconnect attempts.
@@ -58,36 +57,15 @@ fn reconnect_delay(attempt: u32) -> tokio::time::Duration {
 /// Internal events consumed by the single agent runtime actor.
 pub(crate) enum AgentMsg {
     Connect,
-    /// One text frame read from the control socket of `connection_generation`.
+    /// One text frame read from the connection of `connection_generation`.
     WebSocketMessage {
         connection_generation: u64,
         text: String,
     },
-    /// Carries a oneshot so setup can wait until the transfer writer is installed before
-    /// authenticating, which prevents the server from admitting transfers too early.
-    TransferConnected {
-        control_generation: u64,
-        transfer_generation: u64,
-        token: String,
-        sender: mpsc::Sender<WsMessage>,
-        shutdown: watch::Sender<bool>,
-        /// Reports whether the actor accepted this generation so auth cannot race readiness.
-        installed: oneshot::Sender<bool>,
-    },
-    TransferConnectionLost {
-        control_generation: u64,
-        transfer_generation: u64,
-        reason: String,
-    },
-    ReconnectTransfer {
-        control_generation: u64,
-        transfer_generation: u64,
-        token: String,
-    },
-    /// Delays desktop UI work and carries socket generations so stale timers are harmless.
+    /// Delays desktop UI work and carries the connection generation so stale timers are
+    /// harmless.
     StartupNotificationDue {
         connection_generation: u64,
-        transfer_generation: u64,
     },
     /// Operator text from stdin forwarded verbatim for manual protocol debugging.
     SendRawText {
@@ -183,8 +161,8 @@ struct StartupNotification {
     desktop_environment: Option<redoor_core::desktop::DesktopEnvironment>,
     /// User-selected wait after a successful connection, or `None` when disabled.
     delay: Option<tokio::time::Duration>,
-    /// Identifies the socket pair whose delayed notification is currently authoritative.
-    generation: Option<(u64, u64)>,
+    /// Identifies the connection whose delayed notification is currently authoritative.
+    generation: Option<u64>,
     /// Prevents reconnects from repeating the process-start notification.
     sent: bool,
 }
@@ -204,7 +182,6 @@ pub(crate) struct AgentRuntime {
     /// Shared connection policy so every agent websocket uses the same tunnel and TLS identity.
     connection: AgentConnection,
     control: ControlLink,
-    transfer: TransferLink,
     sessions: Sessions,
     dispatcher: Dispatcher,
     notification: StartupNotification,
@@ -224,7 +201,6 @@ impl AgentRuntime {
             profile,
             connection,
             control: ControlLink::new(),
-            transfer: TransferLink::new(),
             sessions: Sessions::new(services.upload_routes.clone()),
             dispatcher: Dispatcher::new(services),
             notification: StartupNotification {
@@ -282,10 +258,9 @@ impl AgentRuntime {
         exit
     }
 
-    /// Stops both sockets, cancels all connection-owned work and joins command tasks.
+    /// Stops the socket, cancels all connection-owned work and joins command tasks.
     async fn invalidate_connection(&mut self) {
         self.control.invalidate();
-        self.transfer.invalidate();
         self.sessions.invalidate();
         self.dispatcher.stop().await;
     }
@@ -311,52 +286,10 @@ impl AgentRuntime {
                     self.handle_server_text(handle, text).await;
                 }
             }
-            AgentMsg::TransferConnected {
-                control_generation,
-                transfer_generation,
-                token,
-                sender,
-                shutdown,
-                installed,
-            } => {
-                let is_current = self.control.is_current(control_generation)
-                    && self.transfer.is_current(transfer_generation, &token);
-                if is_current {
-                    // Install before acknowledging so transfer auth cannot expose the server first.
-                    self.transfer.install(sender, shutdown);
-                    let _ = installed.send(true);
-                    self.schedule_startup_notification(handle);
-                } else {
-                    let _ = shutdown.send(true);
-                    let _ = installed.send(false);
-                }
-            }
-            AgentMsg::TransferConnectionLost {
-                control_generation,
-                transfer_generation,
-                reason,
-            } => self.handle_transfer_loss(handle, control_generation, transfer_generation, reason),
-            AgentMsg::ReconnectTransfer {
-                control_generation,
-                transfer_generation,
-                token,
-            } => {
-                if self.control.is_current(control_generation)
-                    && self.transfer.is_current(transfer_generation, &token)
-                    && self.control.sender().is_some()
-                    && self.transfer.sender().is_none()
-                {
-                    self.begin_transfer_connection(handle, token);
-                }
-            }
             AgentMsg::StartupNotificationDue {
                 connection_generation,
-                transfer_generation,
             } => {
-                self.show_startup_notification_if_current(
-                    connection_generation,
-                    transfer_generation,
-                );
+                self.show_startup_notification_if_current(connection_generation);
             }
             AgentMsg::SendRawText { text } => {
                 if let Some(control) = self.control.sender()
@@ -374,48 +307,6 @@ impl AgentRuntime {
             }
         }
         None
-    }
-
-    /// Detaches a failed payload socket and schedules a reconnect with the same credentials.
-    fn handle_transfer_loss(
-        &mut self,
-        handle: AgentHandle,
-        control_generation: u64,
-        transfer_generation: u64,
-        reason: String,
-    ) {
-        if !self.control.is_current(control_generation)
-            || self.transfer.generation() != transfer_generation
-        {
-            log!(
-                Level::Debug,
-                "Ignoring stale transfer loss: generation={}",
-                transfer_generation
-            );
-            return;
-        }
-        log!(
-            Level::Warning,
-            "Transfer connection lost: agent_id={}, reason={}",
-            self.profile.agent_id,
-            reason
-        );
-        let next_generation = self.transfer.lose();
-        self.sessions.invalidate_transfers();
-        if let Some(token) = self.transfer.token() {
-            log!(
-                Level::Info,
-                "Transfer reconnect scheduled: agent_id={}, generation={}",
-                self.profile.agent_id,
-                next_generation
-            );
-            schedule_transfer_reconnect(
-                handle,
-                control_generation,
-                next_generation,
-                token.to_string(),
-            );
-        }
     }
 
     /// Applies transport lifecycle ahead of bounded application traffic.
@@ -484,6 +375,7 @@ impl AgentRuntime {
                     self.profile.agent_id,
                     connection_id
                 );
+                self.schedule_startup_notification(handle);
             }
             ServerToAgent::Rejected { reason, message } => {
                 log_error!(
@@ -499,21 +391,18 @@ impl AgentRuntime {
                 );
                 let _ = handle.try_send(AgentMsg::ExitWithError);
             }
-            ServerToAgent::TransferSocketOpen { token } => {
-                self.begin_transfer_connection(handle, token);
-            }
             ServerToAgent::Credit { stream, frames } => self
                 .dispatcher
                 .services()
                 .output_credits
                 .grant(stream, frames),
             ServerToAgent::Command { id, command } => {
-                let Some(control) = self.control.sender() else {
+                let Some(lanes) = self.control.lanes() else {
                     return;
                 };
                 let link = DispatchLink {
-                    control,
-                    transfer: self.transfer.sender(),
+                    control: &lanes.control,
+                    bulk: &lanes.bulk,
                     scope: self.control.scope(),
                 };
                 self.dispatcher
@@ -528,81 +417,50 @@ impl AgentRuntime {
             ServerToAgent::Cancel { id } => {
                 self.sessions.cancel_request(id);
             }
-            ServerToAgent::TerminalOpen {
-                terminal_id,
-                token,
-                size,
-                cwd,
-            } => self.start_terminal(terminal_id, token, size, cwd),
-            ServerToAgent::LogStreamOpen {
-                log_stream_id,
-                token,
-            } => self.start_log_stream(log_stream_id, token),
+            ServerToAgent::TerminalOpen { stream, size, cwd } => {
+                self.start_terminal(stream, size, cwd)
+            }
+            ServerToAgent::TerminalResize { stream, size } => self
+                .dispatcher
+                .services()
+                .terminal_inputs
+                .resize(stream, size),
+            ServerToAgent::LogStreamOpen { stream } => self.start_log_stream(stream),
         }
     }
 
-    /// Replaces transfer credentials and starts non-blocking setup for the current control link.
-    fn begin_transfer_connection(&mut self, handle: AgentHandle, token: String) {
-        let Some(control_sender) = self.control.sender().cloned() else {
+    /// Starts one terminal on stream `stream`; its registration lives as long as its task.
+    fn start_terminal(&mut self, stream: RequestId, size: TerminalSize, cwd: String) {
+        let Some(lanes) = self.control.lanes().cloned() else {
             return;
         };
-        let transfer_generation = self.transfer.begin(token.clone());
-        spawn_transfer_connection(TransferConnectContext {
-            connection: self.connection.clone(),
-            token,
-            control_generation: self.control.generation(),
-            transfer_generation,
-            control_sender,
-            upload_routes: self.dispatcher.services().upload_routes.clone(),
-            handle,
-        });
-    }
-
-    /// Starts one dedicated terminal socket whose registration lives as long as its task.
-    fn start_terminal(
-        &mut self,
-        terminal_id: TerminalId,
-        token: String,
-        size: TerminalSize,
-        cwd: String,
-    ) {
-        if size.validate().is_err() {
-            log!(
-                Level::Warning,
-                "Rejected terminal with invalid dimensions: terminal_id={}",
-                terminal_id.0
-            );
-            return;
-        }
-        let registration = match self.sessions.terminals.register(terminal_id.clone()) {
+        let registration = match self.sessions.terminals.register(stream) {
             Ok(registration) => registration,
             Err(error) => {
                 log!(
                     Level::Warning,
-                    "Rejected terminal bootstrap ({}): terminal_id={}",
+                    "Rejected terminal ({}): stream={}",
                     error.reason(),
-                    terminal_id.0
+                    stream
                 );
                 return;
             }
         };
-        let connection = self.connection.clone();
+        let services = self.dispatcher.services();
+        let link = TerminalLink {
+            stream,
+            interactive: lanes.interactive,
+            control: lanes.control,
+            credits: services.output_credits.clone(),
+            input: services.terminal_inputs.open(stream),
+        };
         tokio::spawn(async move {
             let cancel = registration.token().clone();
-            if let Err(error) = crate::terminal::connect_and_run(
-                &connection,
-                terminal_id.clone(),
-                token,
-                size,
-                cwd,
-                cancel,
-            )
-            .await
-            {
+            if let Err(error) = crate::terminal::run(link, size, cwd, cancel).await {
                 log!(
                     Level::Warning,
-                    "Terminal session ended with an error: terminal_id={}, error={}",
-                    terminal_id.0,
+                    "Terminal session ended with an error: stream={}, error={}",
+                    stream,
                     error
                 );
             }
@@ -610,31 +468,35 @@ impl AgentRuntime {
         });
     }
 
-    /// Starts one dedicated log-stream socket whose registration lives as long as its task.
-    fn start_log_stream(&mut self, log_stream_id: LogStreamId, token: String) {
-        let registration = match self.sessions.log_streams.register(log_stream_id.clone()) {
+    /// Starts one log stream on stream `stream`; its registration lives as long as its task.
+    fn start_log_stream(&mut self, stream: RequestId) {
+        let Some(lanes) = self.control.lanes() else {
+            return;
+        };
+        let registration = match self.sessions.log_streams.register(stream) {
             Ok(registration) => registration,
             Err(error) => {
                 log!(
                     Level::Warning,
-                    "Rejected log stream bootstrap ({}): log_stream_id={}",
+                    "Rejected log stream ({}): stream={}",
                     error.reason(),
-                    log_stream_id.0
+                    stream
                 );
                 return;
             }
         };
-        let connection = self.connection.clone();
+        let writer = StreamWriter::new(
+            lanes.bulk.clone(),
+            stream,
+            self.dispatcher.services().output_credits.register(stream),
+        );
         tokio::spawn(async move {
             let cancel = registration.token().clone();
-            if let Err(error) =
-                crate::logs::connect_and_run(&connection, log_stream_id.clone(), token, cancel)
-                    .await
-            {
+            if let Err(error) = crate::logs::run(stream, writer, cancel).await {
                 log!(
                     Level::Warning,
-                    "Log stream ended with an error: log_stream_id={}, error={}",
-                    log_stream_id.0,
+                    "Log stream ended with an error: stream={}, error={}",
+                    stream,
                     error
                 );
             }
@@ -661,7 +523,7 @@ impl AgentRuntime {
         });
     }
 
-    /// Starts a replaceable timer only after both authenticated websocket lanes are ready.
+    /// Starts a replaceable timer once the server accepted the agent.
     fn schedule_startup_notification(&mut self, handle: AgentHandle) {
         if self.notification.desktop_environment.is_none() || self.notification.sent {
             return;
@@ -670,31 +532,22 @@ impl AgentRuntime {
             return;
         };
         let connection_generation = self.control.generation();
-        let transfer_generation = self.transfer.generation();
-        self.notification.generation = Some((connection_generation, transfer_generation));
+        self.notification.generation = Some(connection_generation);
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
             let _ = handle
                 .send(AgentMsg::StartupNotificationDue {
                     connection_generation,
-                    transfer_generation,
                 })
                 .await;
         });
     }
 
-    /// Shows the delayed notification only when its fully connected socket pair is still current.
-    fn show_startup_notification_if_current(
-        &mut self,
-        connection_generation: u64,
-        transfer_generation: u64,
-    ) {
-        let is_current = self.notification.generation
-            == Some((connection_generation, transfer_generation))
+    /// Shows the delayed notification only when its connection is still current.
+    fn show_startup_notification_if_current(&mut self, connection_generation: u64) {
+        let is_current = self.notification.generation == Some(connection_generation)
             && self.control.is_current(connection_generation)
-            && self.transfer.generation() == transfer_generation
-            && self.control.sender().is_some()
-            && self.transfer.sender().is_some();
+            && self.control.sender().is_some();
         if !is_current {
             return;
         }
@@ -772,10 +625,17 @@ impl AgentRuntime {
 
         let (write, read) = ws_stream.split();
         let (control_tx, control_rx) = mpsc::channel::<OutboundFrame>(CONTROL_QUEUE_CAPACITY);
+        let (interactive_tx, interactive_rx) = mpsc::channel(INTERACTIVE_QUEUE_CAPACITY);
+        let (bulk_tx, bulk_rx) = mpsc::channel(BULK_QUEUE_CAPACITY);
         let (control_shutdown, control_shutdown_rx) = watch::channel(false);
-        let connection_generation = self
-            .control
-            .attach(control_tx.clone(), control_shutdown.clone());
+        let connection_generation = self.control.attach(
+            ConnectionLanes {
+                control: control_tx.clone(),
+                interactive: interactive_tx,
+                bulk: bulk_tx,
+            },
+            control_shutdown.clone(),
+        );
         self.sessions.rebind(self.control.scope());
 
         if let Err(error) = redoor_core::systemd_notify::ready().await {
@@ -790,6 +650,7 @@ impl AgentRuntime {
             handle.clone(),
             connection_generation,
             control_tx.clone(),
+            self.dispatcher.services().clone(),
             control_shutdown.clone(),
             control_shutdown_rx.clone(),
             self.profile.ws_timeouts,
@@ -797,7 +658,11 @@ impl AgentRuntime {
         .await;
         spawn_write_task(
             write,
-            control_rx,
+            LaneReceivers {
+                control: control_rx,
+                interactive: interactive_rx,
+                bulk: bulk_rx,
+            },
             control_shutdown,
             control_shutdown_rx,
             handle.clone(),
@@ -868,19 +733,25 @@ mod tests {
         )
     }
 
-    /// Attaches fake control and transfer writers as if both sockets were connected.
+    /// Attaches fake lanes as if the connection were open; returns the control and bulk
+    /// receivers.
     fn attach_links(
         runtime: &mut AgentRuntime,
-    ) -> (mpsc::Receiver<OutboundFrame>, mpsc::Receiver<WsMessage>) {
+    ) -> (mpsc::Receiver<OutboundFrame>, mpsc::Receiver<OutboundFrame>) {
         let (control_tx, control_rx) = mpsc::channel(8);
+        let (interactive, _) = mpsc::channel(1);
+        let (bulk, bulk_rx) = mpsc::channel(1);
         let (shutdown, _) = watch::channel(false);
-        runtime.control.attach(control_tx, shutdown);
+        runtime.control.attach(
+            ConnectionLanes {
+                control: control_tx,
+                interactive,
+                bulk,
+            },
+            shutdown,
+        );
         runtime.sessions.rebind(runtime.control.scope());
-        let (transfer_tx, transfer_rx) = mpsc::channel(1);
-        let (transfer_shutdown, _) = watch::channel(false);
-        runtime.transfer.begin("session-token".to_string());
-        runtime.transfer.install(transfer_tx, transfer_shutdown);
-        (control_rx, transfer_rx)
+        (control_rx, bulk_rx)
     }
 
     /// Verifies the first ten reconnect attempts retain the quick jitter window.
@@ -918,9 +789,9 @@ mod tests {
     #[tokio::test]
     async fn stale_connection_loss_does_not_clear_replacement_connection() {
         let mut runtime = runtime();
-        let (_control_rx, _transfer_rx) = attach_links(&mut runtime);
+        let (_control_rx, _bulk_rx) = attach_links(&mut runtime);
         let stale_generation = runtime.control.generation();
-        let (_control_rx, _transfer_rx) = attach_links(&mut runtime);
+        let (_control_rx, _bulk_rx) = attach_links(&mut runtime);
         let current_generation = runtime.control.generation();
         let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);
 
@@ -938,39 +809,6 @@ mod tests {
         assert_eq!(runtime.control.generation(), current_generation);
         // The current control sender must survive a delayed loss from the old generation.
         assert!(runtime.control.sender().is_some());
-        // The independently attached transfer sender must also remain available.
-        assert!(runtime.transfer.sender().is_some());
-    }
-
-    /// Verifies delayed transfer teardown cannot detach a newer payload socket.
-    #[tokio::test]
-    async fn stale_transfer_loss_does_not_clear_replacement_sender() {
-        let mut runtime = runtime();
-        let (_control_rx, _transfer_rx) = attach_links(&mut runtime);
-        let stale_generation = runtime.transfer.generation();
-        let current_generation = runtime.transfer.begin("session-token".to_string());
-        let (transfer_tx, _replacement_rx) = mpsc::channel(1);
-        let (transfer_shutdown, _) = watch::channel(false);
-        runtime.transfer.install(transfer_tx, transfer_shutdown);
-        let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);
-
-        let exit = runtime
-            .handle_message(
-                handle,
-                AgentMsg::TransferConnectionLost {
-                    control_generation: runtime.control.generation(),
-                    transfer_generation: stale_generation,
-                    reason: "old transfer reader ended".to_string(),
-                },
-            )
-            .await;
-
-        // A stale transfer event must not stop the authoritative control actor.
-        assert_eq!(exit, None);
-        // The current transfer generation must remain unchanged by delayed teardown.
-        assert_eq!(runtime.transfer.generation(), current_generation);
-        // The replacement payload sender must remain installed and usable.
-        assert!(runtime.transfer.sender().is_some());
     }
 
     /// Verifies a reconnect timer waits for bounded capacity instead of dropping the only retry.
@@ -1041,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn unparsable_command_frames_are_answered() {
         let mut runtime = runtime();
-        let (mut control_rx, _transfer_rx) = attach_links(&mut runtime);
+        let (mut control_rx, _bulk_rx) = attach_links(&mut runtime);
         let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);
 
         runtime
@@ -1066,7 +904,7 @@ mod tests {
     #[tokio::test]
     async fn connection_loss_cancels_and_joins_commands() {
         let mut runtime = runtime();
-        let (_control_rx, transfer_rx) = attach_links(&mut runtime);
+        let (_control_rx, bulk_rx) = attach_links(&mut runtime);
         let (handle, _receiver, _lifecycle_receiver) = AgentHandle::channel(1);
         runtime
             .handle_server_frame(
@@ -1081,8 +919,8 @@ mod tests {
                 },
             )
             .await;
-        // The transfer writer task exits with its socket, closing the payload queue.
-        drop(transfer_rx);
+        // The writer task exits with its socket, closing the bulk lane.
+        drop(bulk_rx);
 
         runtime
             .handle_lifecycle_message(

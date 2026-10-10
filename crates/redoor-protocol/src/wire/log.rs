@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use ts_rs::TS;
-use uuid::Uuid;
 
 /// Gives relay validation the same per-section diagnostic bound used by producers.
 pub const LOG_DIAGNOSTIC_LIMIT: usize = 64 * 1_024;
@@ -140,24 +139,6 @@ impl LogEntry {
     }
 }
 
-/// Identifies one browser-owned agent log tunnel until both sockets are released.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LogStreamId(pub Uuid);
-
-impl LogStreamId {
-    /// Creates an unpredictable rendezvous id so pending stream URLs cannot be enumerated.
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for LogStreamId {
-    /// Generates a fresh identifier rather than a reusable nil UUID.
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Carries bounded history and live updates for either server or agent logs.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -242,14 +223,6 @@ impl LogEvent {
     }
 }
 
-/// First dedicated-agent frame proving possession of the bootstrap secret.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LogAgentHandshake {
-    /// Consumes the one-time token only after the server validates it.
-    Authenticate { token: String },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,20 +295,6 @@ mod tests {
         assert_eq!(
             entries.last().map(|entry| entry.message.as_str()),
             Some(expected_latest.as_str())
-        );
-    }
-
-    /// Locks authentication to a first-frame tagged message rather than URL credentials.
-    #[test]
-    fn serializes_agent_handshake_without_changing_its_tag() {
-        let handshake = serde_json::to_value(LogAgentHandshake::Authenticate {
-            token: "secret".to_string(),
-        })
-        .expect("handshake should serialize");
-        // Keeping the token in a text frame prevents it from leaking through request URLs and access logs.
-        assert_eq!(
-            handshake,
-            serde_json::json!({"type":"authenticate","token":"secret"})
         );
     }
 }

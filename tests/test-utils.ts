@@ -506,7 +506,7 @@ export async function startServerAndAgent(options: {
 }> {
     const serverPort = VITEST_SERVER_PORT;
     const apiClient = new ApiClient(`http://127.0.0.1:${serverPort}`);
-    const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+    const wsUrl = `ws://127.0.0.1:${serverPort}/api/v1/agent/ws`;
 
     process.env.REDOOR_PORT = serverPort.toString();
     const serverPid = options.processManager.spawnServer({});
@@ -526,7 +526,7 @@ export async function startServerAndAgent(options: {
         10000,
     );
 
-    const waitForTransferPromise = waitForAgentTransfer(
+    const waitForTransferPromise = waitForAgentReady(
         serverProcess,
         options.agentName,
     );
@@ -559,14 +559,14 @@ export async function startServerAndAgent(options: {
     };
 }
 
-/** Waits until the agent's payload socket is router-owned before tests start streamed work. */
-export async function waitForAgentTransfer(
+/** Waits until the router accepted the agent's connection, which carries all of its streams. */
+export async function waitForAgentReady(
     serverProcess: ChildProcess,
     agentId: string,
 ): Promise<void> {
     await waitForLogMessage(
         serverProcess,
-        new RegExp(`Transfer socket registered: agent_id=${agentId},`),
+        new RegExp(`Agent registered: agent_id=${agentId},`),
         10000,
     );
 }

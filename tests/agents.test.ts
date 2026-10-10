@@ -1177,7 +1177,7 @@ describe("Agents API", () => {
 
         await waitForLogMessage(
             serverProcess,
-            /Transfer socket registered: agent_id=duplicate-test-agent,/,
+            /Agent registered: agent_id=duplicate-test-agent,/,
         );
 
         const agentsAfterFirst = await apiClient.listAgents();
@@ -1244,7 +1244,6 @@ describe("Agents API", () => {
             hostname: "stale-host",
             username: "stale-user",
             autoPong: false,
-            openTransfer: false,
         });
 
         onTestFinished(() => fixture.close());
@@ -1260,7 +1259,7 @@ describe("Agents API", () => {
                 ),
         });
 
-        // A control connection id proves the fixture was accepted without requiring a transfer socket.
+        // A connection id proves the fixture was accepted.
         expect(connected.managed).toBe(false);
 
         const disconnected = await waitForValue({
@@ -1287,7 +1286,6 @@ describe("Agents API", () => {
             agentId: targetName,
             hostname: "forge-host",
             username: "forge-user",
-            openTransfer: false,
         });
 
         onTestFinished(() => target.close());
@@ -1295,7 +1293,6 @@ describe("Agents API", () => {
         const attacker = await FakeAgent.connect({
             serverPort,
             agentId: "forge-attacker-agent",
-            openTransfer: false,
         });
 
         onTestFinished(() => attacker.close());

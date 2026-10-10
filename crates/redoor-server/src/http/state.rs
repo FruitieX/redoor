@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::actors;
-use crate::log_registry::LogRegistry;
 use crate::one_time_token_registry::OneTimeTokenRegistry;
-use crate::terminal_registry::TerminalRegistry;
 use crate::watchdog::WatchdogRegistry;
 use clap::Args;
 use redoor_core::logging::LogFormat;
@@ -35,10 +33,6 @@ pub(crate) struct ServerState {
     /// this to look up the supervisor for the agent it just registered
     /// and signal it when the connection goes stale.
     pub(crate) watchdog_registry: WatchdogRegistry,
-    /// Pairs short-lived browser and dedicated agent terminal connections.
-    pub(crate) terminal_registry: TerminalRegistry,
-    /// Pairs short-lived browser and dedicated agent log connections.
-    pub(crate) log_registry: LogRegistry,
     /// Keeps download credentials process-local and atomically single-use.
     pub(crate) one_time_token_registry: OneTimeTokenRegistry,
     /// Correlates client-owned upload requests while their destination workers are still active.

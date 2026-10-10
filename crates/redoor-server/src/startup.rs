@@ -18,9 +18,7 @@ use crate::http::auth::AuthState;
 use crate::http::routes::build_app;
 use crate::http::state::{CoordinatorArgs, ServerState};
 use crate::http::watchdog::ManagedLauncher;
-use crate::log_registry::LogRegistry;
 use crate::one_time_token_registry::OneTimeTokenRegistry;
-use crate::terminal_registry::TerminalRegistry;
 use crate::watchdog::WatchdogRegistry;
 use redoor_core::config::{AgentConfig, AuthMode, RedoorConfig};
 use redoor_core::log;
@@ -282,9 +280,7 @@ impl ServerRuntime {
         .await
         .context("Failed to initialize MCP operation storage")?;
 
-        let terminal_registry = TerminalRegistry::new();
-        let log_registry = LogRegistry::new();
-        let (router, _router_task) = spawn_router(terminal_registry.clone(), log_registry.clone());
+        let (router, _router_task) = spawn_router();
         // Built before the listener so the registry exists when the first WebSocket connects.
         let watchdogs = WatchdogRegistry::new();
         let binaries = crate::binaries::BinaryCache::new(runtime.paths.clone());
@@ -308,8 +304,6 @@ impl ServerRuntime {
             agents: crate::http::agent_client::AgentClient::new(router.clone()),
             transfers: crate::http::services::transfer::TransferService::new(router.clone()),
             watchdog_registry: watchdogs.clone(),
-            terminal_registry,
-            log_registry,
             one_time_token_registry: OneTimeTokenRegistry::new(),
             upload_requests: crate::http::upload_requests::UploadRequests::default(),
             protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches::default(),

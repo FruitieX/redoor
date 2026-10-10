@@ -1,6 +1,6 @@
 //! Per-stream flow-control credit shared by the agent and server transfer paths.
 //!
-//! Many streams share one transfer socket. Without per-stream credit, a receiver that cannot
+//! Many streams share one agent connection. Without per-stream credit, a receiver that cannot
 //! hand a frame to a slow consumer has to stop reading the socket, which freezes every other
 //! stream on it. With credit, a sender may only have a bounded number of non-terminal frames
 //! outstanding per stream, so the receiver can always accept a frame into that stream's own
@@ -17,18 +17,26 @@ use tokio::sync::Semaphore;
 #[derive(Clone, Debug)]
 pub struct CreditGate {
     permits: Arc<Semaphore>,
+    /// Largest balance the receiver may grant, so a misbehaving peer cannot inflate it.
+    window: usize,
 }
 
 impl Default for CreditGate {
-    /// A fresh stream starts with the full window so it can begin sending immediately.
+    /// A fresh request stream starts with the full window so it can begin sending immediately.
     fn default() -> Self {
-        Self {
-            permits: Arc::new(Semaphore::new(STREAM_CREDIT_WINDOW_FRAMES as usize)),
-        }
+        Self::with_window(STREAM_CREDIT_WINDOW_FRAMES)
     }
 }
 
 impl CreditGate {
+    /// A gate whose stream starts with, and may never hold more than, `window` frames.
+    pub fn with_window(window: u32) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(window as usize)),
+            window: window as usize,
+        }
+    }
+
     /// Waits for one frame of credit and spends it.
     ///
     /// Returns `false` once the gate was closed because the stream ended, so a producer blocked
@@ -48,8 +56,7 @@ impl CreditGate {
     /// An honest receiver only returns frames it drained, so the clamp only matters for a
     /// misbehaving peer, which must not be able to make this side buffer without bound.
     pub fn grant(&self, frames: u32) {
-        let window = STREAM_CREDIT_WINDOW_FRAMES as usize;
-        let room = window.saturating_sub(self.permits.available_permits());
+        let room = self.window.saturating_sub(self.permits.available_permits());
         let granted = (frames as usize).min(room);
         if granted > 0 {
             self.permits.add_permits(granted);
@@ -128,6 +135,17 @@ mod tests {
         gate.grant(1000);
         // Over-granting would let a misbehaving receiver force unbounded buffering here.
         assert_eq!(gate.available(), STREAM_CREDIT_WINDOW_FRAMES as usize);
+    }
+
+    /// Larger windows (terminals) clamp grants to their own size.
+    #[test]
+    fn custom_windows_clamp_to_their_size() {
+        let gate = CreditGate::with_window(16);
+        // A terminal stream starts with its whole window.
+        assert_eq!(gate.available(), 16);
+        gate.grant(100);
+        // Over-granting cannot exceed the stream's own window.
+        assert_eq!(gate.available(), 16);
     }
 
     /// Closing the gate releases a producer that would otherwise wait forever.

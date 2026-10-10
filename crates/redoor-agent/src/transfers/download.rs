@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use redoor_core::{log, log_error};
 use redoor_protocol::{
     ids::RequestId,
-    wire::{command::CommandResult, log::Level, stream, stream::StreamPayloadKind},
+    wire::{command::CommandResult, log::Level, stream},
 };
 use std::future::Future;
 use std::io::Write;
@@ -194,7 +194,7 @@ pub(crate) async fn download_file(
         range_start,
         range_end
     );
-    let output = match ctx.into_output(StreamPayloadKind::RawFile) {
+    let output = match ctx.into_output() {
         Ok(output) => output,
         Err(error) => return CommandResult::from(error).into(),
     };
@@ -212,7 +212,7 @@ pub(crate) async fn download_directory(path: String, include_root: bool, ctx: Co
         ctx.responder.request_id(),
         path
     );
-    let output = match ctx.into_output(StreamPayloadKind::Tar) {
+    let output = match ctx.into_output() {
         Ok(output) => output,
         Err(error) => return CommandResult::from(error).into(),
     };
@@ -700,10 +700,10 @@ mod tests {
         .await;
         let mut decoded = Vec::new();
         while let Ok(frame) = frames.try_recv() {
-            let tokio_tungstenite::tungstenite::protocol::Message::Binary(bytes) = frame else {
-                panic!("downloads must use binary frames");
+            let Some(chunk) = frame.as_stream() else {
+                panic!("downloads must use stream frames");
             };
-            decoded.push(StreamChunk::from_bytes(&bytes).unwrap());
+            decoded.push(chunk.clone());
         }
         (
             decoded,
@@ -836,12 +836,10 @@ mod tests {
 
         // A failed worker must not leave its cancellation handle in the registry.
         assert!(!registry.contains(&RequestId::new(1)));
-        let tokio_tungstenite::tungstenite::protocol::Message::Binary(bytes) =
-            frames.recv().await.unwrap()
-        else {
-            panic!("seek failure should use the binary stream protocol");
+        let frame = frames.recv().await.unwrap();
+        let Some(chunk) = frame.as_stream() else {
+            panic!("seek failure should use the stream protocol");
         };
-        let chunk = StreamChunk::from_bytes(&bytes).unwrap();
         // Check the failing seek branch, rather than merely any early worker exit.
         assert!(chunk.is_error);
         assert!(chunk.data.starts_with(b"Failed to seek file:"));

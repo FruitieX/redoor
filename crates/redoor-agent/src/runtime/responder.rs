@@ -8,13 +8,13 @@
 use redoor_core::log;
 use redoor_protocol::{
     ids::RequestId,
-    wire::{AgentToServer, command::CommandResult, log::Level},
+    wire::{AgentToServer, command::CommandResult, log::Level, stream::StreamChunk},
 };
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
-/// Bounded control lane shared by the runtime, command workers and the liveness monitor.
+/// Bounded lane of the connection writer; the control, interactive and bulk lanes share it.
 pub(crate) type ControlSender = mpsc::Sender<OutboundFrame>;
 
 /// Action the control writer runs only after the carrying frame was written successfully.
@@ -49,11 +49,13 @@ impl PostSend {
     }
 }
 
-/// Payload of one control-socket frame.
+/// Payload of one websocket frame.
 #[derive(Debug)]
 pub(crate) enum ControlFrame {
     /// Protocol message serialized by the writer.
     Message(Box<AgentToServer>),
+    /// Binary data frame of one stream.
+    Stream(StreamChunk),
     /// Keepalive that lets the server's stale check observe a quiet but healthy agent.
     Ping,
     /// Operator text forwarded verbatim from stdin for manual protocol debugging.
@@ -72,6 +74,14 @@ impl OutboundFrame {
     pub(crate) fn message(message: AgentToServer) -> Self {
         Self {
             frame: ControlFrame::Message(Box::new(message)),
+            after_send: None,
+        }
+    }
+
+    /// Wraps one binary stream frame.
+    pub(crate) fn stream(chunk: StreamChunk) -> Self {
+        Self {
+            frame: ControlFrame::Stream(chunk),
             after_send: None,
         }
     }
@@ -105,8 +115,18 @@ impl OutboundFrame {
                     None
                 }
             },
+            ControlFrame::Stream(chunk) => Some(WsMessage::Binary(chunk.to_bytes().into())),
             ControlFrame::Ping => Some(WsMessage::Ping(bytes::Bytes::new())),
             ControlFrame::RawText(text) => Some(WsMessage::text(text.clone())),
+        }
+    }
+
+    /// Returns the stream frame, if this frame carries one; used by tests.
+    #[cfg(test)]
+    pub(crate) fn as_stream(&self) -> Option<&StreamChunk> {
+        match &self.frame {
+            ControlFrame::Stream(chunk) => Some(chunk),
+            _ => None,
         }
     }
 
@@ -115,7 +135,7 @@ impl OutboundFrame {
     pub(crate) fn as_message(&self) -> Option<&AgentToServer> {
         match &self.frame {
             ControlFrame::Message(message) => Some(message.as_ref()),
-            ControlFrame::Ping | ControlFrame::RawText(_) => None,
+            ControlFrame::Stream(_) | ControlFrame::Ping | ControlFrame::RawText(_) => None,
         }
     }
 }

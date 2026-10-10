@@ -27,7 +27,7 @@ import {
     TEST_SERVER_HOME,
     TEST_USERNAME,
     VITEST_SERVER_PORT,
-    waitForAgentTransfer,
+    waitForAgentReady,
     waitForLogMessage,
     waitForPort,
 } from "./test-utils";
@@ -221,7 +221,7 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
         10_000,
     );
 
-    const transferred = waitForAgentTransfer(server, testDeviceId);
+    const transferred = waitForAgentReady(server, testDeviceId);
     processManager.spawnAgent({
         wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}/ws`,
         name: testDeviceId,
@@ -236,7 +236,7 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
         10_000,
     );
 
-    const secondTransferred = waitForAgentTransfer(server, secondDeviceId);
+    const secondTransferred = waitForAgentReady(server, secondDeviceId);
     processManager.spawnAgent({
         wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}/ws`,
         name: secondDeviceId,

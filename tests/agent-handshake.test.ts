@@ -142,7 +142,6 @@ describe("agent websocket handshake", () => {
                 serverPort,
                 agentId: "handshake-impostor",
                 agentName: AGENT_NAME,
-                openTransfer: false,
             });
         } catch (caught) {
             error = caught;

@@ -3,11 +3,8 @@
 use super::flows::FlowTable;
 use super::streams::ConnectionStreams;
 use crate::actors::lanes::ControlLanes;
-use crate::log_registry::LogRegistry;
-use crate::terminal_registry::TerminalRegistry;
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
 use redoor_protocol::wire::policy::UploadKind;
-use redoor_protocol::wire::stream::{StreamChunk, StreamPayloadKind};
 use redoor_protocol::{
     api::{agents::AgentConnectionStatus, transfers::TransferProgressEntry},
     wire::{
@@ -18,19 +15,8 @@ use redoor_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-/// Bounded payload transport attached to one authoritative control connection.
 #[derive(Clone, Debug)]
-pub struct TransferConnection {
-    /// Distinguishes the current transfer socket from stale teardown events.
-    pub socket_id: SocketId,
-    /// Keeps a slow transfer peer from causing unbounded payload buffering.
-    pub outgoing_binary: tokio::sync::mpsc::Sender<StreamChunk>,
-    /// Lets control or transfer replacement stop both socket halves promptly.
-    pub shutdown: tokio::sync::watch::Sender<bool>,
-}
-
-#[derive(Clone, Debug)]
-/// Registration metadata and control websocket handle for one connected agent.
+/// Registration metadata and the connection handle of one connected agent.
 pub struct AgentConnection {
     /// Stable identity used in transfer readiness errors and routing logs.
     pub agent_id: AgentId,
@@ -38,20 +24,21 @@ pub struct AgentConnection {
     pub agent_name: String,
     /// Unique websocket session identifier for logging.
     pub socket_id: SocketId,
-    /// Typed command lane (admission-controlled) and priority lane (cancels, lifecycle).
+    /// Command lane (admission-controlled), priority lane (cancels, lifecycle) and the data
+    /// lanes of the connection.
     pub lanes: ControlLanes,
-    /// Secret accepted only while this control connection remains authoritative.
-    pub transfer_token: String,
-    /// Payload transport may be absent briefly while the agent reconnects it.
-    pub transfer: Option<TransferConnection>,
     /// Registration timestamp stored by the router.
     pub connected_at: UnixTimestampSeconds,
     /// Platform, account, start directory and binary announced by this session.
     pub identity: AgentIdentity,
     /// Optional protocol features announced by this session.
     pub capabilities: AgentCapabilities,
-    /// Payload stream routing shared with the control session and the transfer socket.
+    /// Payload stream routing shared with the connection's session.
     pub streams: ConnectionStreams,
+    /// Open terminal streams, bounded per connection.
+    pub terminals: HashSet<RequestId>,
+    /// Open log streams, bounded per connection.
+    pub log_streams: HashSet<RequestId>,
 }
 
 /// Retained UI inventory record for an agent seen during this server process.
@@ -176,14 +163,6 @@ impl CopyContentKind {
         }
     }
 
-    /// Maps the copy mode to the expected streaming payload kind.
-    pub(crate) fn payload_kind(self) -> StreamPayloadKind {
-        match self {
-            Self::RawFile => StreamPayloadKind::RawFile,
-            Self::TarDirectory => StreamPayloadKind::Tar,
-        }
-    }
-
     /// Checks whether a final command result matches this copy mode.
     pub(crate) fn completion_matches(self, result: &CommandResult) -> bool {
         self.upload_kind().completion_matches(result)
@@ -257,10 +236,6 @@ pub struct UiState {
 
 /// Aggregate router state split into domain-specific registries and stores.
 pub struct RouterState {
-    /// Pending dedicated terminal setups cleaned when authoritative agents leave.
-    pub(crate) terminal_registry: TerminalRegistry,
-    /// Pending dedicated log setups cleaned when authoritative agents leave.
-    pub(crate) log_registry: LogRegistry,
     /// Connected-agent registry used for all routing decisions.
     pub(crate) agents: AgentRegistry,
     /// Every in-flight command, stream, upload and copy.
@@ -275,14 +250,8 @@ pub struct RouterState {
 
 impl RouterState {
     /// Constructs a fresh router state with the background UI refresh task attached.
-    pub(crate) fn new(
-        ui_refresh_check_task: tokio::task::JoinHandle<()>,
-        terminal_registry: TerminalRegistry,
-        log_registry: LogRegistry,
-    ) -> Self {
+    pub(crate) fn new(ui_refresh_check_task: tokio::task::JoinHandle<()>) -> Self {
         Self {
-            terminal_registry,
-            log_registry,
             agents: AgentRegistry::default(),
             flows: FlowTable::default(),
             progress: TransferProgressStore::default(),

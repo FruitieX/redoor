@@ -267,18 +267,6 @@ impl Flow {
         }
     }
 
-    /// Whether this flow needs `agent_id`'s transfer socket, so losing it must fail the flow.
-    pub(crate) fn needs_transfer_of(&self, agent_id: &AgentId) -> bool {
-        match self {
-            Self::Command(_) => false,
-            Self::Output(flow) => &flow.agent_id == agent_id,
-            Self::Upload(flow) => &flow.agent_id == agent_id,
-            Self::Copy(flow) => {
-                matches!(flow.phase, CopyPhase::Remote(_)) && flow.involves(agent_id)
-            }
-        }
-    }
-
     /// Progress row and the bytes its data path has counted, while that count is still the
     /// authoritative progress (not after cancellation took over the row).
     fn live_progress(&self) -> Option<(TransferId, u64)> {

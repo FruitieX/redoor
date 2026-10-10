@@ -40,7 +40,7 @@ describe("Smart Move API", () => {
         const connected = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${destinationName},`,
+                `Agent registered: agent_id=${destinationName},`,
             ),
             10000,
         );

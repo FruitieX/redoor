@@ -510,17 +510,8 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
 
 /// Allows only resources needed to establish a session before enforcing authentication globally.
 fn is_public_path(path: &str) -> bool {
-    let is_agent_terminal_socket =
-        path.starts_with("/api/v1/terminals/") && path.ends_with("/agent/ws");
-    let is_agent_log_socket = path
-        .strip_prefix("/api/v1/log-streams/")
-        .and_then(|remainder| remainder.strip_suffix("/agent/ws"))
-        .is_some_and(|stream_id| !stream_id.is_empty() && !stream_id.contains('/'));
     path == "/ws"
         || path == redoor_protocol::wire::handshake::AGENT_WS_PATH
-        || path == "/api/v1/agent-transfer/ws"
-        || is_agent_terminal_socket
-        || is_agent_log_socket
         || path == "/api/v1/login"
         || path == "/api/v1/logout"
         || !path.starts_with("/api/")
@@ -831,27 +822,22 @@ mod tests {
         );
     }
 
-    /// Protects the dedicated agent exception without exposing browser or neighboring API routes.
+    /// Protects the agent endpoint exception without exposing browser or neighboring API routes.
     #[test]
-    fn only_exact_agent_log_socket_shape_is_public() {
-        // A dedicated agent socket must reach its one-time-token handshake without a browser cookie.
-        assert!(is_public_path(
-            "/api/v1/log-streams/00000000-0000-0000-0000-000000000001/agent/ws"
-        ));
-        // The exact payload socket must reach its session-token handshake without a browser cookie.
-        assert!(is_public_path("/api/v1/agent-transfer/ws"));
+    fn only_the_agent_endpoints_are_public() {
         // The agent endpoint authenticates with the agent token during the upgrade instead.
         assert!(is_public_path("/api/v1/agent/ws"));
+        // The pre-negotiation endpoint only answers 426, so it needs no cookie either.
+        assert!(is_public_path("/ws"));
         // Neighboring agent paths must not inherit the exception.
         assert!(!is_public_path("/api/v1/agent/ws/extra"));
-        // Neighboring transfer paths must not inherit the public authentication exception.
-        assert!(!is_public_path("/api/v1/agent-transfer/ws/extra"));
+        // The removed dedicated sockets must not stay reachable without a session.
+        assert!(!is_public_path("/api/v1/agent-transfer/ws"));
+        assert!(!is_public_path(
+            "/api/v1/log-streams/00000000-0000-0000-0000-000000000001/agent/ws"
+        ));
         // The browser-owned endpoint must remain protected by normal session authentication.
         assert!(!is_public_path("/api/v1/agents/agent-1/logs/ws"));
-        // Nested paths cannot exploit broad prefix/suffix matching to bypass authentication.
-        assert!(!is_public_path("/api/v1/log-streams/not/a-stream/agent/ws"));
-        // Unrelated resources under the log-stream namespace remain private.
-        assert!(!is_public_path("/api/v1/log-streams/example/status"));
     }
 
     /// Keeps the cookie bypass limited to raw GETs that present a non-empty token parameter.

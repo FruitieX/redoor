@@ -17,6 +17,7 @@ use redoor_core::log;
 use redoor_protocol::wire::command::CommandResult;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::UploadKind;
+use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
 use redoor_protocol::{
     api::transfers::TransferProgressState,
     ids::{AgentId, RequestId},
@@ -54,21 +55,15 @@ impl RouterState {
             }));
             return;
         };
-        if let Err(error) = connection.transfer_connection() {
-            log!(
-                Level::Warning,
-                "Transfer unavailable for upload: agent_id={}",
-                request.agent_id
-            );
-            let _ = request.reply.send(Err(error));
-            return;
-        }
         if request.reply.is_closed() {
             return;
         }
         let stream = OutboundStream::new(
             StreamLease::new(request_id, connection.link(), 0),
-            connection.streams.open_outbound(request_id),
+            connection
+                .streams
+                .open_outbound(request_id, STREAM_CREDIT_WINDOW_FRAMES),
+            false,
         );
         if !connection.send_message(ServerToAgent::Command {
             id: request_id,
@@ -190,8 +185,6 @@ impl RouterState {
         if request.chunk.request_id != request.request_id
             || !request.chunk.is_last
             || request.chunk.is_error
-            || request.chunk.payload_kind
-                != redoor_protocol::wire::stream::StreamPayloadKind::RawFile
             || !request.chunk.data.is_empty()
         {
             return Err(RouterError::UnexpectedResponseType {
@@ -461,18 +454,14 @@ mod tests {
 
     /// Builds isolated router state for upload transition tests.
     fn router_state() -> RouterState {
-        RouterState::new(
-            tokio::spawn(async {}),
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        )
+        RouterState::new(tokio::spawn(async {}))
     }
 
     /// Builds a lease on a detached link; these tests never send frames.
     fn lease(request_id: RequestId) -> StreamLease {
         StreamLease::new(
             request_id,
-            AgentLink::new(crate::actors::lanes::ControlLanes::bounded(1, 1).0, None),
+            AgentLink::new(crate::actors::lanes::ControlLanes::bounded(1, 1).0),
             0,
         )
     }
@@ -503,6 +492,7 @@ mod tests {
                 stream: OutboundStream::new(
                     lease(request_id),
                     redoor_core::stream_credit::CreditGate::default(),
+                    false,
                 ),
             }),
         );
@@ -549,6 +539,7 @@ mod tests {
                         dest: OutboundStream::new(
                             lease(destination_id),
                             redoor_core::stream_credit::CreditGate::default(),
+                            false,
                         ),
                         stage: RemoteStage::Streaming,
                         source_finished: false,
@@ -630,10 +621,8 @@ mod tests {
         let mut state = router_state();
         let terminal = |request_id| redoor_protocol::wire::stream::StreamChunk {
             request_id,
-            chunk_index: redoor_protocol::ids::ChunkIndex::new(1),
             is_last: true,
             is_error: false,
-            payload_kind: redoor_protocol::wire::stream::StreamPayloadKind::RawFile,
             data: Vec::new(),
         };
         let edit_id = RequestId::new(41);

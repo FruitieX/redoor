@@ -1,4 +1,4 @@
-//! Cancellation of flows and the cleanup that follows losing an agent's sockets.
+//! Cancellation of flows and the cleanup that follows losing an agent's connection.
 
 use super::RouterError;
 use super::flows::{Flow, FlowId, OutputKind, OutputPhase, UploadPhase};
@@ -15,15 +15,6 @@ use redoor_protocol::{
         command::{CommandErrorKind, CommandResult},
     },
 };
-
-/// Which of an agent's sockets went away, deciding which flows cannot continue.
-pub(crate) enum AgentLoss {
-    /// The control session ended: every flow involving the agent fails.
-    Control,
-    /// Only the transfer socket ended: flows that move payload bytes fail with this reason,
-    /// control-only work (commands, local copies) continues.
-    Transfer(String),
-}
 
 impl RouterState {
     /// Resolves a public transfer id and admits its cancellation on the priority lanes.
@@ -215,29 +206,21 @@ impl RouterState {
         }
     }
 
-    /// Fails every flow that cannot continue without the lost socket, in one pass over the
-    /// flow table, and settles each one exactly once.
-    pub(crate) fn fail_agent_flows(&mut self, agent_id: &AgentId, loss: AgentLoss) {
+    /// Fails every flow that cannot continue without the lost connection, in one pass over
+    /// the flow table, and settles each one exactly once.
+    pub(crate) fn fail_agent_flows(&mut self, agent_id: &AgentId) {
         self.sync_progress();
-        let lost = match &loss {
-            AgentLoss::Control => self.flows.extract_if(|flow| flow.involves(agent_id)),
-            AgentLoss::Transfer(_) => self
-                .flows
-                .extract_if(|flow| flow.needs_transfer_of(agent_id)),
-        };
+        let lost = self.flows.extract_if(|flow| flow.involves(agent_id));
         if lost.is_empty() {
             return;
         }
-        let reason = match &loss {
-            AgentLoss::Control => format!("Agent disconnected: {agent_id}"),
-            AgentLoss::Transfer(reason) => reason.clone(),
-        };
+        let reason = format!("Agent disconnected: {agent_id}");
         let mut transfers = 0usize;
         for (_, flow) in lost {
             if !matches!(flow, Flow::Command(_)) {
                 transfers += 1;
             }
-            self.settle_lost_flow(agent_id, flow, &reason, &loss);
+            self.settle_lost_flow(agent_id, flow, &reason);
         }
         if transfers > 0 {
             log!(
@@ -252,7 +235,7 @@ impl RouterState {
     }
 
     /// Settles one flow removed because its agent went away.
-    fn settle_lost_flow(&mut self, agent_id: &AgentId, flow: Flow, reason: &str, loss: &AgentLoss) {
+    fn settle_lost_flow(&mut self, agent_id: &AgentId, flow: Flow, reason: &str) {
         match flow {
             Flow::Command(command) => {
                 log!(
@@ -290,13 +273,8 @@ impl RouterState {
                 );
                 self.release_upload(&upload);
                 self.settle_lost_transfer(upload.request_id.as_transfer_id(), reason);
-                let error = match loss {
-                    AgentLoss::Control => RouterError::AgentNotFound {
-                        agent_id: agent_id.to_string(),
-                    },
-                    AgentLoss::Transfer(_) => RouterError::TransferConnectionUnavailable {
-                        agent_id: agent_id.to_string(),
-                    },
+                let error = RouterError::AgentNotFound {
+                    agent_id: agent_id.to_string(),
                 };
                 if let Some(sender) = upload.completion.take() {
                     let _ = sender.send(Err(error.clone()));

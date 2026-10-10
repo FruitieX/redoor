@@ -335,10 +335,7 @@ mod tests {
     use crate::runtime::cancel::CancelRegistry;
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
-    use redoor_protocol::{
-        ids::ChunkIndex,
-        wire::{policy::UploadKind, stream::StreamChunk, stream::StreamPayloadKind},
-    };
+    use redoor_protocol::wire::{policy::UploadKind, stream::StreamChunk};
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::path::PathBuf;
 
@@ -631,23 +628,9 @@ mod tests {
             .await
             .expect("edit readiness should be announced");
         let (control, _control_frames) = tokio::sync::mpsc::channel(1);
-        for (index, (data, is_last)) in [(b"replacement".to_vec(), false), (Vec::new(), true)]
-            .into_iter()
-            .enumerate()
-        {
+        for (data, is_last) in [(b"replacement".to_vec(), false), (Vec::new(), true)] {
             routes
-                .route_frame(
-                    &StreamChunk {
-                        request_id,
-                        chunk_index: ChunkIndex::new(index as u64),
-                        is_last,
-                        is_error: false,
-                        payload_kind: StreamPayloadKind::RawFile,
-                        data,
-                    }
-                    .to_bytes(),
-                    &control,
-                )
+                .route_chunk(StreamChunk::data(request_id, data, is_last), &control)
                 .await;
         }
 

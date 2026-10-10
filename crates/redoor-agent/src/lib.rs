@@ -12,7 +12,6 @@ mod ownership;
 mod platform;
 mod runtime;
 mod terminal;
-mod transfer;
 mod transfers;
 mod trash;
 mod ws;

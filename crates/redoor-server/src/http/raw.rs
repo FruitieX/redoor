@@ -342,11 +342,7 @@ mod tests {
     use crate::{actors::router::RouterMsg, http::fake_agent::FakeAgent};
     use redoor_protocol::{
         api::transfers::TransferProgressState,
-        ids::ChunkIndex,
-        wire::{
-            ServerToAgent,
-            stream::{StreamChunk, StreamPayloadKind},
-        },
+        wire::{ServerToAgent, stream::StreamChunk},
     };
 
     /// Dropping an HTTP body must cancel even when the agent never sends another chunk.
@@ -382,10 +378,8 @@ mod tests {
             async move {
                 streams.deliver(StreamChunk {
                     request_id,
-                    chunk_index: ChunkIndex::new(0),
                     is_last: false,
                     is_error: false,
-                    payload_kind: StreamPayloadKind::RawFile,
                     data: vec![b'a'],
                 })
             }

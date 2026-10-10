@@ -19,9 +19,8 @@ use redoor_protocol::{
     },
 };
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
 /// Caps independently executing non-upload commands for one control generation.
@@ -30,7 +29,8 @@ const MAX_CONCURRENT_COMMANDS: usize = 32;
 /// Connection resources a command may use, captured when it is dispatched.
 pub(crate) struct DispatchLink<'a> {
     pub(crate) control: &'a ControlSender,
-    pub(crate) transfer: Option<&'a mpsc::Sender<WsMessage>>,
+    /// Lane for stream data of output commands.
+    pub(crate) bulk: &'a ControlSender,
     /// Cancelled when the control connection ends.
     pub(crate) scope: &'a CancellationToken,
 }
@@ -57,7 +57,7 @@ impl Dispatcher {
         }
     }
 
-    /// Shared facilities, also used by the transfer socket reader.
+    /// Shared facilities, also used by the connection reader.
     pub(crate) fn services(&self) -> &AgentServices {
         &self.services
     }
@@ -79,16 +79,6 @@ impl Dispatcher {
         );
         let policy = command.policy();
         let responder = Responder::new(link.control.clone(), request_id);
-        let transfer = link.transfer.cloned();
-        if policy.requires_transfer() && transfer.is_none() {
-            let _ = responder
-                .respond(CommandResult::error(
-                    CommandErrorKind::Internal,
-                    "Transfer connection unavailable",
-                ))
-                .await;
-            return;
-        }
         let is_upload = policy.upload_kind().is_some();
         if !is_upload && !self.command_capacity_available() {
             let _ = responder
@@ -117,7 +107,7 @@ impl Dispatcher {
             responder,
             cancel,
             registration,
-            transfer,
+            bulk: Some(link.bulk.clone()),
             services: self.services.clone(),
         };
         let task = Self::execute(command, policy, ctx, self.exclusive.clone());
@@ -237,29 +227,25 @@ mod tests {
         api::{agents::EchoRequest, transfers::CopyExistingMode},
         wire::AgentToServer,
     };
+    use tokio::sync::mpsc;
 
-    /// Owns a dispatcher with recording control and transfer lanes.
+    /// Owns a dispatcher with recording control and bulk lanes.
     struct Fixture {
         dispatcher: Dispatcher,
         sessions: Sessions,
         control: ControlSender,
         frames: mpsc::Receiver<OutboundFrame>,
-        transfer: Option<mpsc::Sender<WsMessage>>,
+        bulk: ControlSender,
         scope: CancellationToken,
     }
 
     impl Fixture {
-        /// Builds a dispatcher bound to a live scope; `with_transfer` attaches a payload lane.
-        async fn new(with_transfer: bool) -> (Self, Option<mpsc::Receiver<WsMessage>>) {
+        /// Builds a dispatcher bound to a live scope plus the receiver of its bulk lane.
+        async fn new() -> (Self, mpsc::Receiver<OutboundFrame>) {
             let routes = UploadRoutes::default();
             let services = AgentServices::new(Trash::unsupported(), None);
             let (control, frames) = mpsc::channel(8);
-            let (transfer, payload) = if with_transfer {
-                let (sender, receiver) = mpsc::channel(8);
-                (Some(sender), Some(receiver))
-            } else {
-                (None, None)
-            };
+            let (bulk, payload) = mpsc::channel(8);
             let scope = CancellationToken::new();
             let mut sessions = Sessions::new(routes);
             sessions.rebind(&scope);
@@ -269,7 +255,7 @@ mod tests {
                     sessions,
                     control,
                     frames,
-                    transfer,
+                    bulk,
                     scope,
                 },
                 payload,
@@ -280,7 +266,7 @@ mod tests {
         async fn dispatch(&mut self, request_id: u64, command: Command) {
             let link = DispatchLink {
                 control: &self.control,
-                transfer: self.transfer.as_ref(),
+                bulk: &self.bulk,
                 scope: &self.scope,
             };
             self.dispatcher
@@ -316,7 +302,7 @@ mod tests {
     /// Verifies the dispatcher, not the command, sends the typed response.
     #[tokio::test]
     async fn control_commands_respond_through_the_dispatcher() {
-        let (mut fixture, _) = Fixture::new(false).await;
+        let (mut fixture, _payload) = Fixture::new().await;
 
         fixture
             .dispatch(
@@ -340,7 +326,7 @@ mod tests {
     /// Verifies restart responses carry their post-send re-exec.
     #[tokio::test]
     async fn restart_response_carries_the_reexec_action() {
-        let (mut fixture, _) = Fixture::new(false).await;
+        let (mut fixture, _payload) = Fixture::new().await;
 
         fixture.dispatch(2, Command::Restart).await;
         let (result, after_send) = fixture.next_response().await;
@@ -351,28 +337,10 @@ mod tests {
         assert_eq!(after_send, Some(PostSend::Reexec { path: None }));
     }
 
-    /// Verifies transfer-lane commands fail fast without a transfer socket.
-    #[tokio::test]
-    async fn streaming_commands_require_a_transfer_link() {
-        let (mut fixture, _) = Fixture::new(false).await;
-
-        fixture.dispatch(3, blocking_download()).await;
-        let (result, _) = fixture.next_response().await;
-
-        // Admission fails fast instead of starting a stream with nowhere to write.
-        assert!(matches!(
-            result,
-            CommandResult::Error { kind: CommandErrorKind::Internal, message } if message == "Transfer connection unavailable"
-        ));
-        // Rejected commands never register for cancellation.
-        assert!(!fixture.sessions.requests.contains(&RequestId::new(3)));
-    }
-
     /// Verifies a cancel that overtook its command still stops it.
     #[tokio::test]
     async fn early_cancel_stops_the_command_when_it_registers() {
-        let (mut fixture, payload) = Fixture::new(true).await;
-        let mut payload = payload.unwrap();
+        let (mut fixture, mut payload) = Fixture::new().await;
 
         fixture.sessions.cancel_request(RequestId::new(4));
         fixture.dispatch(4, blocking_download()).await;
@@ -380,10 +348,9 @@ mod tests {
             .recv()
             .await
             .expect("download reports on its stream");
-        let WsMessage::Binary(bytes) = frame else {
-            panic!("downloads use binary frames");
+        let Some(chunk) = frame.as_stream() else {
+            panic!("downloads use stream frames");
         };
-        let chunk = redoor_protocol::wire::stream::StreamChunk::from_bytes(&bytes).unwrap();
 
         // The overtaking cancel ends the stream with the cancellation frame.
         assert!(chunk.is_error);
@@ -393,7 +360,7 @@ mod tests {
     /// Verifies one request id cannot own two cancellation registrations.
     #[tokio::test]
     async fn duplicate_request_ids_are_rejected() {
-        let (mut fixture, payload) = Fixture::new(true).await;
+        let (mut fixture, payload) = Fixture::new().await;
 
         fixture.dispatch(5, blocking_download()).await;
         fixture
@@ -416,7 +383,7 @@ mod tests {
                 ..
             }
         ));
-        // Teardown closes the transfer writer, which releases the blocked download.
+        // Teardown closes the bulk lane, which releases the blocked download.
         drop(payload);
         fixture.scope.cancel();
         fixture.sessions.invalidate();
@@ -426,7 +393,7 @@ mod tests {
     /// Verifies stalled commands cannot grow the task set without bound.
     #[tokio::test]
     async fn capacity_limit_rejects_excess_commands() {
-        let (mut fixture, _) = Fixture::new(false).await;
+        let (mut fixture, _payload) = Fixture::new().await;
         for _ in 0..MAX_CONCURRENT_COMMANDS {
             fixture
                 .dispatcher
@@ -451,7 +418,7 @@ mod tests {
     /// Verifies teardown cancels and joins every running command.
     #[tokio::test]
     async fn teardown_cancels_and_joins_running_commands() {
-        let (mut fixture, payload) = Fixture::new(true).await;
+        let (mut fixture, payload) = Fixture::new().await;
         fixture.dispatch(7, blocking_download()).await;
         fixture
             .dispatch(
@@ -467,7 +434,7 @@ mod tests {
             )
             .await;
 
-        // Teardown closes the transfer writer before joining, as the runtime does.
+        // Teardown closes the bulk lane before joining, as the runtime does.
         drop(payload);
         fixture.scope.cancel();
         fixture.sessions.invalidate();

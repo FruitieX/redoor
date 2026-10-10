@@ -647,11 +647,7 @@ mod tests {
     /// Pruning must preserve logical download identity for the existing client retry workflow.
     #[tokio::test]
     async fn recent_download_resumes_after_history_pruning() {
-        let mut state = RouterState::new(
-            tokio::spawn(async {}),
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(tokio::spawn(async {}));
         let now = jiff::Timestamp::now().as_second();
         for id in 1..=1500 {
             state
@@ -699,11 +695,7 @@ mod tests {
     #[tokio::test]
     async fn transfer_start_bypasses_ui_refresh_throttle() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         state.ui.subscribers.insert("ui-1".to_string(), ui_tx);
         state.ui.refresh_pending = true;
@@ -738,11 +730,7 @@ mod tests {
     #[tokio::test]
     async fn agent_refresh_does_not_consume_transfer_throttle() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         state.ui.subscribers.insert("ui-1".to_string(), ui_tx);
 
@@ -777,11 +765,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_progress_updates_bypass_ui_refresh_throttle() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         state.ui.subscribers.insert("ui-1".to_string(), ui_tx);
 
@@ -858,11 +842,7 @@ mod tests {
     #[tokio::test]
     async fn completed_edits_refresh_browser_routes() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         state.ui.subscribers.insert("ui-1".to_string(), ui_tx);
         let transfer_id = TransferId::new(10);
@@ -902,11 +882,7 @@ mod tests {
     #[tokio::test]
     async fn errored_edits_after_commit_refresh_browser_routes() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         state.ui.subscribers.insert("ui-1".to_string(), ui_tx);
         let transfer_id = TransferId::new(11);
@@ -971,11 +947,7 @@ mod tests {
     #[tokio::test]
     async fn download_total_leaves_counted_bytes_alone() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let transfer_id = TransferId::new(11);
         state.progress.entries.insert(
             transfer_id,
@@ -1004,11 +976,7 @@ mod tests {
     #[tokio::test]
     async fn late_download_total_is_ignored_after_completion() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let transfer_id = TransferId::new(12);
         state.progress.entries.insert(
             transfer_id,
@@ -1037,11 +1005,7 @@ mod tests {
     #[tokio::test]
     async fn mismatched_download_prediction_keeps_counted_bytes() {
         let refresh_check_task = tokio::spawn(async {});
-        let mut state = RouterState::new(
-            refresh_check_task,
-            crate::terminal_registry::TerminalRegistry::new(),
-            crate::log_registry::LogRegistry::new(),
-        );
+        let mut state = RouterState::new(refresh_check_task);
         let transfer_id = TransferId::new(13);
         state.progress.entries.insert(
             transfer_id,

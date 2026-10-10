@@ -468,9 +468,7 @@ log_format = "line"
             /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:Z|[+-]\d{2}:\d{2})$/,
         );
 
-        const id = started.entry.message.match(
-            /log_stream_id=([0-9a-f-]+)/,
-        )?.[1];
+        const id = started.entry.message.match(/stream=(\d+)/)?.[1];
 
         // Lifecycle correlation requires the same non-secret identifier at both relay ends.
         expect(id).toBeDefined();
@@ -486,7 +484,7 @@ log_format = "line"
                 const contents = await readFile(agentLogPath, "utf8");
 
                 return contents.includes(
-                    `Agent log stream stopped: log_stream_id=${id}`,
+                    `Agent log stream stopped: stream=${id}`,
                 )
                     ? true
                     : undefined;
@@ -495,14 +493,14 @@ log_format = "line"
         });
         // The agent marker proves its broadcast receiver and active handle were released.
         expect(await readFile(agentLogPath, "utf8")).toContain(
-            `Agent log stream stopped: log_stream_id=${id}`,
+            `Agent log stream stopped: stream=${id}`,
         );
         await waitForValue({
             predicate: async () =>
                 processManager
                     .getStdout(serverPid)
                     .includes(
-                        `Agent log relay stopped: agent_id=${testAgent.id}, log_stream_id=${id}`,
+                        `Agent log relay stopped: agent_id=${testAgent.id}, stream=${id}`,
                     )
                     ? true
                     : undefined,
@@ -510,7 +508,7 @@ log_format = "line"
         });
         // The matching server marker proves no detached relay survived browser teardown.
         expect(processManager.getStdout(serverPid)).toContain(
-            `Agent log relay stopped: agent_id=${testAgent.id}, log_stream_id=${id}`,
+            `Agent log relay stopped: agent_id=${testAgent.id}, stream=${id}`,
         );
     });
 

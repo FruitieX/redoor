@@ -6,8 +6,7 @@ use super::streams::{ConnectionStreams, OutboundStream, OutputReceiver, StreamEn
 use crate::actors::lanes::ControlLanes;
 use crate::watchdog::WatchdogSnapshot;
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
-use redoor_protocol::wire::log::LogStreamId;
-use redoor_protocol::wire::terminal::{TerminalId, TerminalSize};
+use redoor_protocol::wire::terminal::{TerminalServerMessage, TerminalSize};
 use redoor_protocol::{
     api::{
         agents::{AgentConnectionStatus, AgentDetailsResponse, AgentInfoResponse},
@@ -187,22 +186,6 @@ pub struct ApplyManagedLifecycleRequest {
     pub reply: Option<RouterReply<()>>,
 }
 
-/// Requests that a payload socket attach to the current control connection.
-pub struct RegisterTransferConnectionRequest {
-    /// Per-connection secret the socket presented during its upgrade; it identifies the
-    /// control connection (and thereby the agent) the socket belongs to.
-    pub token: String,
-    /// Unique socket identity used to reject stale teardown.
-    pub socket_id: SocketId,
-    /// Bounded lane of stream frames, encoded only by the transfer socket writer.
-    pub outgoing_binary: tokio::sync::mpsc::Sender<redoor_protocol::wire::stream::StreamChunk>,
-    /// Stops an older or control-orphaned transfer task promptly.
-    pub shutdown: tokio::sync::watch::Sender<bool>,
-    /// Confirms that router state owns the connection before payload is accepted, and hands
-    /// the socket its agent and the stream tables its reader delivers frames into.
-    pub reply: RouterReply<Result<(AgentId, ConnectionStreams), RouterError>>,
-}
-
 /// Confirms destination upload setup before payload producers are allowed to run.
 pub struct RouteTransferReadyRequest {
     /// Agent that registered the destination-side upload worker.
@@ -371,7 +354,7 @@ pub struct TransferProgressUpdateRequest {
 /// Why a server-to-agent stream stopped on the producer side.
 #[derive(Debug)]
 pub enum OutboundFailureReason {
-    /// The agent's transfer lane closed while frames were still being sent.
+    /// The agent's connection closed while frames were still being sent.
     LaneClosed,
     /// The producer aborted the stream with an error frame (for example a body that exceeded
     /// its declared length).
@@ -388,39 +371,40 @@ pub struct OutboundFailure {
     pub reason: OutboundFailureReason,
 }
 
-/// Requests a connected agent to establish one dedicated terminal socket.
+/// Opens a terminal on a connected agent as one stream of its connection.
 pub struct OpenTerminalRequest {
     pub agent_id: AgentId,
-    pub terminal_id: TerminalId,
-    pub token: String,
     pub size: TerminalSize,
     pub cwd: String,
-    pub reply: RouterReply<Result<(), RouterError>>,
+    pub reply: RouterReply<Result<TerminalStream, RouterError>>,
 }
 
-/// Requests a connected agent to establish one dedicated log socket.
+/// Opens a live log stream of a connected agent as one stream of its connection.
 pub struct OpenAgentLogStreamRequest {
     pub agent_id: AgentId,
-    pub log_stream_id: LogStreamId,
-    pub token: String,
-    pub reply: RouterReply<Result<(), RouterError>>,
+    pub reply: RouterReply<Result<LogStream, RouterError>>,
+}
+
+/// The server's ends of one terminal stream.
+pub struct TerminalStream {
+    pub stream: RequestId,
+    /// PTY output frames, credited with the terminal window.
+    pub output: OutputReceiver,
+    /// Keystrokes to the PTY, on the interactive lane.
+    pub input: OutboundStream,
+    /// Ready, exit and setup error events, in the stream's frame order.
+    pub events: tokio::sync::mpsc::Receiver<TerminalServerMessage>,
+}
+
+/// The server's end of one log stream: NDJSON `LogEvent` lines split across frames.
+pub struct LogStream {
+    pub stream: RequestId,
+    pub output: OutputReceiver,
 }
 
 /// Enumerates router work so live streams and lifecycle controls share explicit lanes.
 pub enum RouterMsg {
     RegisterAgent(RegisterAgentRequest),
-    /// Checks a transfer socket's upgrade token before the upgrade is accepted, so a socket
-    /// with a stale or forged token is refused with `401` instead of being opened.
-    AuthorizeTransferToken {
-        token: String,
-        reply: RouterReply<bool>,
-    },
-    RegisterTransferConnection(RegisterTransferConnectionRequest),
-    UnregisterTransferConnection {
-        agent_id: AgentId,
-        /// Prevents a replaced transfer socket from clearing its successor.
-        socket_id: SocketId,
-    },
     RegisterManagedAgent(RegisterManagedAgentRequest),
     UnregisterManagedAgent(UnregisterManagedAgentRequest),
     ApplyManagedLifecycle(ApplyManagedLifecycleRequest),
@@ -444,7 +428,7 @@ pub enum RouterMsg {
         subscriber_id: String,
     },
     ExecuteCommandRest(ExecuteCommandRequest),
-    /// The transfer reader saw an inbound stream's terminal frame (or a credit violation).
+    /// The connection reader saw an inbound stream's terminal frame (or a credit violation).
     InboundStreamEnded(StreamEnd),
     /// A producer could not finish a server-to-agent stream.
     OutboundStreamFailed(OutboundFailure),
@@ -481,6 +465,11 @@ pub enum RouterMsg {
     TransferProgressUpdate(TransferProgressUpdateRequest),
     OpenTerminal(OpenTerminalRequest),
     OpenAgentLogStream(OpenAgentLogStreamRequest),
+    /// A terminal or log bridge ended: forget the stream and stop it on the agent.
+    CloseStream {
+        agent_id: AgentId,
+        stream: RequestId,
+    },
     /// Periodic tick: prunes abandoned replies, publishes stream progress and releases
     /// throttled UI refreshes.
     CheckPendingUiRefresh,

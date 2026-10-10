@@ -1,28 +1,32 @@
-//! Router handlers for agent registration, transfer-socket pairing, managed lifecycle and
-//! one-shot command routing.
+//! Router handlers for agent registration, managed lifecycle, one-shot command routing and the
+//! terminal and log streams of a connection.
 
 use super::RouterError;
-use super::cleanup::AgentLoss;
 use super::flows::{CommandFlow, Flow};
 use super::messages::{
-    AgentListEntry, ApplyManagedLifecycleRequest, ExecuteCommandRequest, OpenAgentLogStreamRequest,
-    OpenTerminalRequest, RegisterAgentRequest, RegisterManagedAgentRequest,
-    RegisterTransferConnectionRequest, RegistrationRejection, RouteResponse,
+    AgentListEntry, ApplyManagedLifecycleRequest, ExecuteCommandRequest, LogStream,
+    OpenAgentLogStreamRequest, OpenTerminalRequest, RegisterAgentRequest,
+    RegisterManagedAgentRequest, RegistrationRejection, RouteResponse, TerminalStream,
     UnregisterManagedAgentRequest,
 };
-use super::state::{AgentConnection, KnownAgent, RouterState, TransferConnection};
-use super::streams::AgentLink;
+use super::state::{AgentConnection, KnownAgent, RouterState};
+use super::streams::{AgentLink, OutboundStream, StreamLease};
 use redoor_core::log;
 use redoor_protocol::wire::handshake::RejectReason;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::CancelScope;
+use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, TERMINAL_CREDIT_WINDOW_FRAMES};
 use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
 use redoor_protocol::{
-    ids::{AgentId, SocketId, UnixTimestampSeconds},
+    ids::{AgentId, RequestId, SocketId, UnixTimestampSeconds},
     wire::ServerToAgent,
 };
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
+
+/// Terminals one connection may run at once, matching the agent's own limit so the server
+/// refuses excess terminals before the agent has to.
+const MAX_TERMINALS_PER_CONNECTION: usize = 8;
+/// Live log streams one connection may run at once, matching the agent's own limit.
+const MAX_LOG_STREAMS_PER_CONNECTION: usize = 8;
 
 impl AgentConnection {
     /// Builds one live router connection entry from the agent registration payload.
@@ -32,23 +36,18 @@ impl AgentConnection {
             agent_name: request.agent_name,
             socket_id: request.socket_id,
             lanes: request.lanes,
-            transfer_token: uuid::Uuid::new_v4().to_string(),
-            transfer: None,
             connected_at: UnixTimestampSeconds::new(jiff::Timestamp::now().as_second()),
             identity: request.identity,
             capabilities: request.capabilities,
             streams: request.streams,
+            terminals: Default::default(),
+            log_streams: Default::default(),
         }
     }
 
     /// Lanes a stream of this connection uses without going through the router.
     pub(crate) fn link(&self) -> AgentLink {
-        AgentLink::new(
-            self.lanes.clone(),
-            self.transfer
-                .as_ref()
-                .map(|transfer| transfer.outgoing_binary.clone()),
-        )
+        AgentLink::new(self.lanes.clone())
     }
 
     /// Admits one ordinary command or bootstrap onto the bounded command lane.
@@ -72,29 +71,6 @@ impl AgentConnection {
         }
         admitted
     }
-
-    /// Returns the payload transport without ever falling back to the control socket.
-    pub(crate) fn transfer_connection(&self) -> Result<TransferConnection, RouterError> {
-        self.transfer
-            .clone()
-            .ok_or_else(|| RouterError::TransferConnectionUnavailable {
-                agent_id: self.agent_id.to_string(),
-            })
-    }
-
-    /// Stops the attached payload socket when this control session loses authority.
-    pub(crate) fn shutdown_transfer(&self) {
-        if let Some(transfer) = &self.transfer {
-            let _ = transfer.shutdown.send(true);
-        }
-    }
-}
-
-/// Compares transfer tokens in constant time so rejection timing does not reveal token contents.
-fn transfer_tokens_match(left: &str, right: &str) -> bool {
-    let left_digest = Sha256::digest(left.as_bytes());
-    let right_digest = Sha256::digest(right.as_bytes());
-    bool::from(left_digest.ct_eq(&right_digest))
 }
 
 /// Current wall-clock second, used for inventory timestamps.
@@ -105,10 +81,9 @@ fn now() -> UnixTimestampSeconds {
 impl RouterState {
     /// Commits live routing and retained inventory together after lifecycle admission.
     ///
-    /// Public status stays non-Connected until the payload socket attaches so clients
-    /// that gate on `Connected` do not start transfers during the normal handshake window.
     /// `welcome` is queued before anything else on the priority lane, so it is always the
-    /// first frame the agent reads.
+    /// first frame the agent reads. The connection carries every stream, so the agent is
+    /// fully usable from this point on.
     fn commit_registration(&mut self, mut request: RegisterAgentRequest) {
         let reply = request.reply.take();
         log!(
@@ -123,10 +98,7 @@ impl RouterState {
         let welcome = ServerToAgent::Welcome {
             connection_id: connection.socket_id.clone(),
         };
-        let transfer_open = ServerToAgent::TransferSocketOpen {
-            token: connection.transfer_token.clone(),
-        };
-        let transfer_open_lanes = connection.lanes.clone();
+        let lanes = connection.lanes.clone();
         let known = self
             .agents
             .known_by_id
@@ -140,15 +112,7 @@ impl RouterState {
             });
         known.name = connection.agent_name.clone();
         known.default_directory = Some(connection.identity.default_directory.clone());
-        // Control is live, but transfer usability still depends on the async payload handshake.
-        // Leave Starting/Disconnected (or any non-Connected state) until register_transfer promotes.
-        if known.status == AgentConnectionStatus::Connected {
-            known.status = if known.managed {
-                AgentConnectionStatus::Starting
-            } else {
-                AgentConnectionStatus::Disconnected
-            };
-        }
+        known.status = AgentConnectionStatus::Connected;
         known.connected_at = Some(connection.connected_at);
         known.connection_issue = None;
         known.socket_id = Some(connection.socket_id.clone());
@@ -157,8 +121,7 @@ impl RouterState {
         self.agents.by_id.insert(agent_id, connection);
         self.notify_agents_changed();
 
-        let _ = transfer_open_lanes.try_priority(welcome);
-        let _ = transfer_open_lanes.try_priority(transfer_open);
+        let _ = lanes.try_priority(welcome);
         if let Some(reply) = reply {
             let _ = reply.send(Ok(()));
         }
@@ -175,35 +138,20 @@ impl RouterState {
         }
     }
 
-    /// Marks inventory fully ready only after both control and payload sockets are live.
-    fn mark_agent_transfer_ready(&mut self, agent_id: &AgentId) {
-        let Some(known) = self.agents.known_by_id.get_mut(agent_id) else {
-            return;
-        };
-        if known.status == AgentConnectionStatus::Connected {
-            return;
-        }
-        known.status = AgentConnectionStatus::Connected;
-        known.connection_issue = None;
-        self.notify_agents_changed();
-    }
-
     /// Ends an evicted control session and fails everything that depended on it.
     ///
     /// `notice` is sent on the old session's priority lane so a replaced agent process exits
     /// promptly instead of lingering as a zombie.
     fn release_connection(&mut self, connection: AgentConnection, notice: Option<&str>) {
-        connection.shutdown_transfer();
         if let Some(message) = notice {
             let _ = connection.send_priority_message(ServerToAgent::Evicted {
                 message: message.to_string(),
             });
         }
         let agent_id = connection.agent_id.clone();
-        self.fail_agent_flows(&agent_id, AgentLoss::Control);
+        self.fail_agent_flows(&agent_id);
+        // Ends terminal and log bridges too: their output queues close with the tables.
         connection.streams.clear();
-        self.terminal_registry.remove_agent_pending(&agent_id);
-        self.log_registry.remove_agent(&agent_id);
     }
 
     /// Records in the inventory that an agent's authoritative connection ended.
@@ -336,128 +284,6 @@ impl RouterState {
         self.release_connection(connection, None);
     }
 
-    /// Authenticates and installs a payload socket under the current control session.
-    ///
-    /// When a broken transfer socket reconnects before the server processes the old socket's
-    /// unregister, replacement must fail in-flight payload work first. Otherwise the delayed
-    /// unregister is ignored as stale while the agent has already dropped the old workers,
-    /// leaving HTTP requests stuck forever.
-    ///
-    /// Registration is cancellation-aware: if the socket handler timed out and dropped the
-    /// reply receiver, its already-dead senders must not be installed. A timed-out handler
-    /// never reaches unregister, so committing would leave a zombie transfer lane.
-    pub(crate) fn register_transfer(&mut self, request: RegisterTransferConnectionRequest) {
-        if request.reply.is_closed() {
-            log!(
-                Level::Warning,
-                "Ignoring cancelled transfer registration: socket_id={}",
-                request.socket_id
-            );
-            let _ = request.shutdown.send(true);
-            return;
-        }
-        let Some(agent_id) = self.transfer_token_owner(&request.token) else {
-            let _ = request
-                .reply
-                .send(Err(RouterError::TransferAuthenticationFailed));
-            return;
-        };
-        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
-            let _ = request
-                .reply
-                .send(Err(RouterError::TransferAuthenticationFailed));
-            return;
-        };
-        // Evict the old payload lane before installing the replacement so cleanup cannot race
-        // with new traffic on the incoming socket.
-        if let Some(previous) = connection.transfer.take() {
-            let _ = previous.shutdown.send(true);
-            log!(
-                Level::Info,
-                "Transfer socket replaced: agent_id={}, old_socket_id={}, socket_id={}",
-                agent_id,
-                previous.socket_id,
-                request.socket_id
-            );
-            // The agent already cleared workers tied to the old socket, and the old socket's
-            // unregister will be ignored as stale, so its flows must fail here.
-            self.lose_transfer(
-                &agent_id,
-                format!("Transfer connection replaced: {}", agent_id),
-            );
-        }
-        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
-            let _ = request.shutdown.send(true);
-            let _ = request
-                .reply
-                .send(Err(RouterError::TransferAuthenticationFailed));
-            return;
-        };
-        connection.transfer = Some(TransferConnection {
-            socket_id: request.socket_id.clone(),
-            outgoing_binary: request.outgoing_binary,
-            shutdown: request.shutdown,
-        });
-        let streams = connection.streams.clone();
-        log!(
-            Level::Info,
-            "Transfer socket registered: agent_id={}, socket_id={}",
-            agent_id,
-            request.socket_id
-        );
-        // Promote only here so Connected means transfers can succeed, not merely control is up.
-        self.mark_agent_transfer_ready(&agent_id);
-        let _ = request.reply.send(Ok((agent_id, streams)));
-    }
-
-    /// Finds the live connection that issued a transfer token.
-    ///
-    /// Every connection is compared so the time taken does not reveal which token matched.
-    pub(crate) fn transfer_token_owner(&self, token: &str) -> Option<AgentId> {
-        self.agents
-            .by_id
-            .values()
-            .filter(|connection| transfer_tokens_match(&connection.transfer_token, token))
-            .map(|connection| connection.agent_id.clone())
-            .last()
-    }
-
-    /// Fails payload flows of an agent whose transfer socket is gone and resets its streams.
-    fn lose_transfer(&mut self, agent_id: &AgentId, reason: String) {
-        self.fail_agent_flows(agent_id, AgentLoss::Transfer(reason));
-        if let Some(connection) = self.agents.by_id.get(agent_id) {
-            connection.streams.clear();
-        }
-    }
-
-    /// Clears only the matching payload socket so stale teardown cannot evict a replacement.
-    pub(crate) fn unregister_transfer(&mut self, agent_id: AgentId, socket_id: SocketId) {
-        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
-            return;
-        };
-        if connection
-            .transfer
-            .as_ref()
-            .is_none_or(|transfer| transfer.socket_id != socket_id)
-        {
-            log!(
-                Level::Debug,
-                "Ignoring stale transfer unregister: agent_id={}, socket_id={}",
-                agent_id,
-                socket_id
-            );
-            return;
-        }
-        connection.transfer = None;
-        log!(
-            Level::Info,
-            "Transfer socket unregistered: agent_id={}, socket_id={}",
-            agent_id,
-            socket_id
-        );
-        self.lose_transfer(&agent_id, format!("Transfer connection lost: {agent_id}"));
-    }
-
     /// Adds a configured stopped record before its dormant supervisor can be controlled.
     pub(crate) fn register_managed(&mut self, request: RegisterManagedAgentRequest) {
         let id = request.agent_id;
@@ -509,26 +335,19 @@ impl RouterState {
             self.release_connection(connection, Some("Managed agent startup was retried"));
         }
 
-        let live_connection = self.agents.by_id.get(&agent_id);
-        let live_socket = live_connection.map(|connection| connection.socket_id.clone());
-        let transfer_ready = live_connection
-            .and_then(|connection| connection.transfer.as_ref())
-            .is_some();
+        let live_socket = self
+            .agents
+            .by_id
+            .get(&agent_id)
+            .map(|connection| connection.socket_id.clone());
         let known = self
             .agents
             .known_by_id
             .get_mut(&agent_id)
             .expect("managed agent disappeared during lifecycle projection");
         if live_socket.is_some() && snapshot.status != AgentConnectionStatus::Stopped {
-            // Watchdog learns about control registration first; do not advertise Connected
-            // until the payload socket is installed. Once Connected, transfer loss must not demote.
-            if transfer_ready || known.status == AgentConnectionStatus::Connected {
-                known.status = AgentConnectionStatus::Connected;
-            } else if snapshot.status == AgentConnectionStatus::Connected {
-                known.status = AgentConnectionStatus::Starting;
-            } else {
-                known.status = snapshot.status.clone();
-            }
+            // A live connection is fully usable, whatever the supervisor learned last.
+            known.status = AgentConnectionStatus::Connected;
             known.connection_issue = snapshot.connection_issue;
             known.provisioning_status = snapshot.provisioning_status.clone();
         } else {
@@ -683,48 +502,128 @@ impl RouterState {
         }
     }
 
-    /// Queues only the log bootstrap secret on the existing control connection.
-    pub(crate) fn open_log_stream(&self, request: OpenAgentLogStreamRequest) {
-        let result = match self.agents.by_id.get(&request.agent_id) {
-            Some(connection)
-                if connection.send_message(ServerToAgent::LogStreamOpen {
-                    log_stream_id: request.log_stream_id.clone(),
-                    token: request.token.clone(),
-                }) =>
-            {
-                Ok(())
-            }
-            Some(_) => Err(RouterError::ControlQueueFull {
-                agent_id: request.agent_id.to_string(),
-            }),
-            None => Err(RouterError::AgentNotFound {
-                agent_id: request.agent_id.to_string(),
-            }),
-        };
+    /// Opens a terminal as one stream of the agent's connection.
+    ///
+    /// Output gets an inbound slot and input an interactive-lane producer before
+    /// `terminal_open` is queued, so no frame of the terminal can arrive unroutable.
+    pub(crate) fn open_terminal(&mut self, request: OpenTerminalRequest) {
+        let stream = self.next_id();
+        let result = self
+            .open_stream(&request.agent_id, stream, true)
+            .and_then(|connection| {
+                let link = connection.link();
+                let output = connection.streams.open_inbound(
+                    StreamLease::new(stream, link.clone(), 0),
+                    TERMINAL_CREDIT_WINDOW_FRAMES,
+                );
+                let input = OutboundStream::new(
+                    StreamLease::new(stream, link, 0),
+                    connection
+                        .streams
+                        .open_outbound(stream, TERMINAL_CREDIT_WINDOW_FRAMES),
+                    true,
+                );
+                let events = connection.streams.open_terminal_events(stream);
+                let open = ServerToAgent::TerminalOpen {
+                    stream,
+                    size: request.size,
+                    cwd: request.cwd.clone(),
+                };
+                Self::admit_stream(connection, stream, open)?;
+                Ok(TerminalStream {
+                    stream,
+                    output,
+                    input,
+                    events,
+                })
+            });
         let _ = request.reply.send(result);
     }
 
-    /// Queues only the terminal bootstrap secret on the existing control connection.
-    pub(crate) fn open_terminal(&self, request: OpenTerminalRequest) {
-        let result = match self.agents.by_id.get(&request.agent_id) {
-            Some(connection)
-                if connection.send_message(ServerToAgent::TerminalOpen {
-                    terminal_id: request.terminal_id.clone(),
-                    token: request.token.clone(),
-                    size: request.size,
-                    cwd: request.cwd.clone(),
-                }) =>
-            {
-                Ok(())
-            }
-            Some(_) => Err(RouterError::ControlQueueFull {
-                agent_id: request.agent_id.to_string(),
-            }),
-            None => Err(RouterError::AgentNotFound {
-                agent_id: request.agent_id.to_string(),
-            }),
-        };
+    /// Opens a live log stream as one stream of the agent's connection.
+    pub(crate) fn open_log_stream(&mut self, request: OpenAgentLogStreamRequest) {
+        let stream = self.next_id();
+        let result = self
+            .open_stream(&request.agent_id, stream, false)
+            .and_then(|connection| {
+                let output = connection.streams.open_inbound(
+                    StreamLease::new(stream, connection.link(), 0),
+                    STREAM_CREDIT_WINDOW_FRAMES,
+                );
+                Self::admit_stream(connection, stream, ServerToAgent::LogStreamOpen { stream })?;
+                Ok(LogStream { stream, output })
+            });
         let _ = request.reply.send(result);
+    }
+
+    /// Reserves a terminal or log stream slot on the agent's connection, within its cap.
+    fn open_stream(
+        &mut self,
+        agent_id: &AgentId,
+        stream: RequestId,
+        terminal: bool,
+    ) -> Result<&mut AgentConnection, RouterError> {
+        let connection =
+            self.agents
+                .by_id
+                .get_mut(agent_id)
+                .ok_or_else(|| RouterError::AgentNotFound {
+                    agent_id: agent_id.to_string(),
+                })?;
+        let (open, limit, kind) = if terminal {
+            (
+                &mut connection.terminals,
+                MAX_TERMINALS_PER_CONNECTION,
+                "terminals",
+            )
+        } else {
+            (
+                &mut connection.log_streams,
+                MAX_LOG_STREAMS_PER_CONNECTION,
+                "log streams",
+            )
+        };
+        if open.len() >= limit {
+            return Err(RouterError::StreamLimitReached {
+                agent_id: agent_id.to_string(),
+                kind,
+            });
+        }
+        open.insert(stream);
+        Ok(connection)
+    }
+
+    /// Queues the frame that opens a stream, undoing the reservation when the lane is full.
+    fn admit_stream(
+        connection: &mut AgentConnection,
+        stream: RequestId,
+        open: ServerToAgent,
+    ) -> Result<(), RouterError> {
+        if connection.send_message(open) {
+            return Ok(());
+        }
+        connection.streams.close(stream);
+        connection.terminals.remove(&stream);
+        connection.log_streams.remove(&stream);
+        Err(RouterError::ControlQueueFull {
+            agent_id: connection.agent_id.to_string(),
+        })
+    }
+
+    /// Forgets a terminal or log stream whose bridge ended and stops it on the agent.
+    pub(crate) fn close_stream(&mut self, agent_id: &AgentId, stream: RequestId) {
+        let Some(connection) = self.agents.by_id.get_mut(agent_id) else {
+            return;
+        };
+        let known = connection.terminals.remove(&stream) | connection.log_streams.remove(&stream);
+        if !known {
+            return;
+        }
+        connection.streams.close(stream);
+        // The agent may still be producing; a full priority lane falls back to commands.
+        connection
+            .lanes
+            .try_priority_or_command(ServerToAgent::Cancel { id: stream });
     }
 }
 
@@ -733,19 +632,18 @@ mod tests {
     use super::*;
     use crate::actors::lanes::ControlLanes;
     use crate::actors::router::state::RouterState;
-    use crate::{log_registry::LogRegistry, terminal_registry::TerminalRegistry};
-    use tokio::sync::{mpsc, oneshot, watch};
+    use tokio::sync::oneshot;
 
     /// Builds isolated router state without starting a router mailbox task.
     fn test_state() -> RouterState {
         let refresh_task = tokio::spawn(async {
             std::future::pending::<()>().await;
         });
-        RouterState::new(refresh_task, TerminalRegistry::new(), LogRegistry::new())
+        RouterState::new(refresh_task)
     }
 
-    /// Inserts one authoritative control connection and returns its issued transfer token.
-    fn insert_control(state: &mut RouterState, agent_id: &str) -> String {
+    /// Inserts one authoritative connection for `agent_id`.
+    fn insert_control(state: &mut RouterState, agent_id: &str) {
         let (lanes, _receivers) = ControlLanes::bounded(64, 16);
         let request = RegisterAgentRequest::for_test(
             &AgentId::from(agent_id),
@@ -753,9 +651,6 @@ mod tests {
             super::super::streams::ConnectionStreams::new(AgentId::from(agent_id)),
         );
         state.commit_registration(request);
-        state.agents.by_id[&AgentId::from(agent_id)]
-            .transfer_token
-            .clone()
     }
 
     /// Inserts a pending one-shot command owned by `agent_id` and returns its reply port.
@@ -919,14 +814,10 @@ mod tests {
             lanes,
             super::super::streams::ConnectionStreams::new(agent_id.clone()),
         ));
-        // Drain the welcome and transfer bootstrap queued by registration.
+        // Drain the welcome queued by registration.
         assert!(matches!(
             receivers.priority.try_recv(),
             Ok(ServerToAgent::Welcome { .. })
-        ));
-        assert!(matches!(
-            receivers.priority.try_recv(),
-            Ok(ServerToAgent::TransferSocketOpen { .. })
         ));
         let cancelable = insert_command(&mut state, 11, "prune-agent");
         if let Some(Flow::Command(command)) = state
@@ -993,259 +884,67 @@ mod tests {
         assert_eq!(state.agents.known_by_id[&agent_id].socket_id, None);
     }
 
-    /// Reply of a transfer registration: the owning agent and its stream tables.
-    type TransferReply = Result<(AgentId, super::super::streams::ConnectionStreams), RouterError>;
-
-    /// Creates a transfer registration request and exposes its shutdown observer.
-    fn transfer_request(
-        token: String,
-        socket_id: redoor_protocol::ids::SocketId,
-    ) -> (
-        RegisterTransferConnectionRequest,
-        oneshot::Receiver<TransferReply>,
-        watch::Receiver<bool>,
-    ) {
-        let (binary_sender, _binary_receiver) = mpsc::channel(1);
-        let (shutdown, shutdown_receiver) = watch::channel(false);
-        let (reply, reply_receiver) = oneshot::channel();
-        (
-            RegisterTransferConnectionRequest {
-                token,
-                socket_id,
-                outgoing_binary: binary_sender,
-                shutdown,
-                reply,
-            },
-            reply_receiver,
-            shutdown_receiver,
-        )
-    }
-
-    /// Verifies clients that wait for Connected never see it before the payload socket is usable.
+    /// The single connection carries every stream, so an accepted hello is fully usable.
     #[tokio::test]
-    async fn connected_status_waits_for_transfer_socket() {
+    async fn registration_marks_the_agent_connected() {
         let mut state = test_state();
-        let token = insert_control(&mut state, "agent");
-        // Control registration alone must not advertise full readiness.
-        assert_eq!(
-            state.agents.known_by_id[&AgentId::from("agent")].status,
-            AgentConnectionStatus::Disconnected
-        );
-        assert!(
-            state.agents.by_id[&AgentId::from("agent")]
-                .transfer_connection()
-                .is_err()
-        );
-
-        let socket_id = redoor_protocol::ids::SocketId::new();
-        let (request, reply, _shutdown) = transfer_request(token, socket_id);
-        state.register_transfer(request);
-        assert!(reply.await.expect("transfer reply delivered").is_ok());
-        // Connected is reserved for the moment both sockets can serve work.
+        insert_control(&mut state, "agent");
+        // Clients that gate transfers on Connected may start them right after the welcome.
         assert_eq!(
             state.agents.known_by_id[&AgentId::from("agent")].status,
             AgentConnectionStatus::Connected
         );
-        assert!(
-            state.agents.by_id[&AgentId::from("agent")]
-                .transfer_connection()
-                .is_ok()
-        );
+        state.ui.refresh_check_task.abort();
     }
 
-    /// Verifies only the current session token can attach and replacements shut down old sockets.
+    /// Terminal and log streams are capped per connection and freed when their bridge ends.
     #[tokio::test]
-    async fn transfer_registration_authenticates_and_replaces_atomically() {
+    async fn terminal_streams_are_capped_and_closing_cancels_them_on_the_agent() {
         let mut state = test_state();
-        let token = insert_control(&mut state, "agent");
-        let first_socket = redoor_protocol::ids::SocketId::new();
-        let (wrong_request, wrong_reply, _wrong_shutdown) =
-            transfer_request("wrong-token".to_string(), first_socket.clone());
-        state.register_transfer(wrong_request);
-        // Rejecting a wrong token proves stale or unauthenticated processes cannot attach.
-        assert!(matches!(
-            wrong_reply.await.expect("wrong-token reply delivered"),
-            Err(RouterError::TransferAuthenticationFailed)
+        let agent_id = AgentId::from("agent");
+        let (lanes, mut receivers) = ControlLanes::bounded(64, 16);
+        state.commit_registration(RegisterAgentRequest::for_test(
+            &agent_id,
+            lanes,
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
         ));
-        // A failed attempt must leave the valid token usable rather than consuming it.
-        assert!(
-            state.agents.by_id[&AgentId::from("agent")]
-                .transfer
-                .is_none()
-        );
-
-        let (first_request, first_reply, first_shutdown) =
-            transfer_request(token.clone(), first_socket.clone());
-        state.register_transfer(first_request);
-        // The current session token must install the payload connection successfully.
-        assert!(first_reply.await.expect("first reply delivered").is_ok());
-
-        let replacement_socket = redoor_protocol::ids::SocketId::new();
-        let (replacement_request, replacement_reply, _replacement_shutdown) =
-            transfer_request(token, replacement_socket.clone());
-        state.register_transfer(replacement_request);
-        // Replacement is acknowledged only after router state owns the new socket.
-        assert!(
-            replacement_reply
-                .await
-                .expect("replacement reply delivered")
-                .is_ok()
-        );
-        // Replacing the socket must promptly stop both halves of the old connection.
-        assert!(*first_shutdown.borrow());
-        // The router must retain the replacement identity for stale teardown checks.
-        assert_eq!(
-            state.agents.by_id[&AgentId::from("agent")]
-                .transfer
-                .as_ref()
-                .map(|transfer| transfer.socket_id.clone()),
-            Some(replacement_socket)
-        );
-    }
-
-    /// Verifies replacement fails payload-dependent work the delayed unregister would skip.
-    #[tokio::test]
-    async fn transfer_replacement_cleans_up_payload_requests() {
-        let mut state = test_state();
-        let token = insert_control(&mut state, "agent");
-        let first_socket = redoor_protocol::ids::SocketId::new();
-        let (first_request, first_reply, _first_shutdown) =
-            transfer_request(token.clone(), first_socket);
-        state.register_transfer(first_request);
-        assert!(first_reply.await.expect("first reply delivered").is_ok());
-
-        let download_id = state.next_id();
-        let upload_id = state.next_id();
-        let connection = &state.agents.by_id[&AgentId::from("agent")];
-        let link = connection.link();
-        let download = super::super::streams::StreamLease::new(download_id, link.clone(), 0);
-        let mut download_receiver = connection.streams.open_inbound(download.clone());
-        state.flows.insert(
-            download_id,
-            Flow::Output(super::super::flows::OutputFlow {
-                request_id: download_id,
+        let open = |state: &mut RouterState| {
+            let (reply, receiver) = oneshot::channel();
+            state.open_terminal(super::super::messages::OpenTerminalRequest {
                 agent_id: AgentId::from("agent"),
-                kind: super::super::flows::OutputKind::Download {
-                    progress_id: download_id.as_transfer_id(),
-                    base_bytes: 0,
-                },
-                lease: download,
-                phase: super::super::flows::OutputPhase::Streaming,
-            }),
-        );
-
-        let (completion_sender, completion_receiver) = oneshot::channel();
-        state.flows.insert(
-            upload_id,
-            Flow::Upload(super::super::flows::UploadFlow {
-                request_id: upload_id,
-                agent_id: AgentId::from("agent"),
-                kind: redoor_protocol::wire::policy::UploadKind::RawUpload,
-                phase: super::super::flows::UploadPhase::Streaming,
-                completion: Some(completion_sender),
-                ready: None,
-                stream: super::super::streams::OutboundStream::new(
-                    super::super::streams::StreamLease::new(upload_id, link, 0),
-                    redoor_core::stream_credit::CreditGate::default(),
-                ),
-            }),
-        );
-
-        let replacement_socket = redoor_protocol::ids::SocketId::new();
-        let (replacement_request, replacement_reply, _replacement_shutdown) =
-            transfer_request(token, replacement_socket);
-        state.register_transfer(replacement_request);
-        assert!(
-            replacement_reply
-                .await
-                .expect("replacement reply delivered")
-                .is_ok()
-        );
-
-        // Stale unregister is ignored after replacement, so cleanup must happen here.
-        let agent = AgentId::from("agent");
-        assert!(state.flows.id_for(&agent, download_id).is_none());
-        assert!(state.flows.id_for(&agent, upload_id).is_none());
-        // The download consumer observes the lost payload path as an error, not a clean end.
-        assert!(
-            download_receiver
-                .recv()
-                .await
-                .is_some_and(|chunk| chunk.is_error)
-        );
-        // Waiting HTTP upload clients must observe the lost payload path.
+                size: redoor_protocol::wire::terminal::TerminalSize::new(24, 80).unwrap(),
+                cwd: "/".to_string(),
+                reply,
+            });
+            receiver
+        };
+        let mut streams = Vec::new();
+        for _ in 0..MAX_TERMINALS_PER_CONNECTION {
+            let terminal = open(&mut state).await.unwrap().unwrap();
+            streams.push(terminal.stream);
+        }
+        // The agent learns each terminal's stream id from its open frame.
         assert!(matches!(
-            completion_receiver
-                .await
-                .expect("upload completion delivered"),
-            Err(RouterError::TransferConnectionUnavailable { .. })
+            receivers.commands.try_recv(),
+            Ok(ServerToAgent::TerminalOpen { stream, .. }) if stream == streams[0]
         ));
-    }
-
-    /// Verifies a timed-out socket handler cannot install dead channels or evict a live socket.
-    #[tokio::test]
-    async fn transfer_registration_ignores_cancelled_reply() {
-        let mut state = test_state();
-        let token = insert_control(&mut state, "agent");
-        let live_socket = redoor_protocol::ids::SocketId::new();
-        let (live_request, live_reply, _live_shutdown) =
-            transfer_request(token.clone(), live_socket.clone());
-        state.register_transfer(live_request);
-        assert!(live_reply.await.expect("live reply delivered").is_ok());
-
-        let cancelled_socket = redoor_protocol::ids::SocketId::new();
-        let (cancelled_request, cancelled_reply, cancelled_shutdown) =
-            transfer_request(token, cancelled_socket);
-        // Dropping the reply models the socket handler's request timeout path,
-        // which exits without ever sending UnregisterTransferConnection.
-        drop(cancelled_reply);
-        state.register_transfer(cancelled_request);
-
-        // The live payload lane must survive; installing dead senders would
-        // admit transfers against a socket task that already exited.
-        assert_eq!(
-            state.agents.by_id[&AgentId::from("agent")]
-                .transfer
-                .as_ref()
-                .map(|transfer| transfer.socket_id.clone()),
-            Some(live_socket)
-        );
-        // Signal the abandoned registration's half so any lingering task exits.
-        assert!(*cancelled_shutdown.borrow());
-    }
-
-    /// Verifies unknown agents and stale unregister events cannot affect live payload state.
-    #[tokio::test]
-    async fn transfer_registration_rejects_unknown_and_ignores_stale_unregister() {
-        let mut state = test_state();
-        let unknown_socket = redoor_protocol::ids::SocketId::new();
-        let (unknown_request, unknown_reply, _unknown_shutdown) =
-            transfer_request("unknown-token".to_string(), unknown_socket);
-        state.register_transfer(unknown_request);
-        // Unknown identities use the same generic rejection as bad tokens to avoid disclosure.
+        // One more would exceed the agent's own limit, so the server refuses it first.
         assert!(matches!(
-            unknown_reply.await.expect("unknown reply delivered"),
-            Err(RouterError::TransferAuthenticationFailed)
+            open(&mut state).await.unwrap(),
+            Err(RouterError::StreamLimitReached { .. })
         ));
 
-        let token = insert_control(&mut state, "agent");
-        let current_socket = redoor_protocol::ids::SocketId::new();
-        let (request, reply, _shutdown) = transfer_request(token, current_socket.clone());
-        state.register_transfer(request);
-        // Setup must succeed before exercising stale teardown behavior.
-        assert!(reply.await.expect("registration reply delivered").is_ok());
-        state.unregister_transfer(
-            AgentId::from("agent"),
-            redoor_protocol::ids::SocketId::new(),
+        state.close_stream(&agent_id, streams[0]);
+        // Closing stops the PTY on the agent with the ordinary cancel frame.
+        let frames: Vec<_> = std::iter::from_fn(|| receivers.priority.try_recv().ok()).collect();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, ServerToAgent::Cancel { id } if *id == streams[0]))
         );
-        // An unrelated socket id must not clear the authoritative transfer connection.
-        assert_eq!(
-            state.agents.by_id[&AgentId::from("agent")]
-                .transfer
-                .as_ref()
-                .map(|transfer| transfer.socket_id.clone()),
-            Some(current_socket)
-        );
+        // The freed slot admits a new terminal.
+        assert!(open(&mut state).await.unwrap().is_ok());
+        state.ui.refresh_check_task.abort();
     }
 
     /// Verifies command overload is explicit while priority cancellation remains admitted.
@@ -1253,21 +952,16 @@ mod tests {
     async fn full_control_queue_rejects_commands_and_preserves_priority_lane() {
         let mut state = test_state();
         let agent_id = AgentId::from("bounded-agent");
-        // Room for the welcome and the transfer bootstrap that registration queues.
-        let (lanes, mut receivers) = ControlLanes::bounded(1, 2);
+        let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
             lanes,
             super::super::streams::ConnectionStreams::new(agent_id.clone()),
         ));
-        // Remove the lifecycle bootstrap so the reserved lane is available for cancellation.
+        // Remove the welcome so the reserved lane is available for cancellation.
         assert!(matches!(
             receivers.priority.recv().await,
             Some(ServerToAgent::Welcome { .. })
-        ));
-        assert!(matches!(
-            receivers.priority.recv().await,
-            Some(ServerToAgent::TransferSocketOpen { .. })
         ));
 
         let (first_reply, first_receiver) = oneshot::channel();

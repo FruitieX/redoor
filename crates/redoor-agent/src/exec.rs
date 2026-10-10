@@ -195,12 +195,12 @@ pub(crate) async fn run(
 mod tests {
     use super::*;
     use crate::runtime::cancel::CancelRegistry;
+    use crate::runtime::responder::OutboundFrame;
     use crate::runtime::responder::Responder;
     use futures_util::poll;
-    use redoor_protocol::wire::{command::CommandErrorKind, stream::StreamChunk};
+    use redoor_protocol::wire::command::CommandErrorKind;
     use std::time::Duration;
     use tokio::sync::mpsc;
-    use tokio_tungstenite::tungstenite::protocol::Message;
 
     /// Uses a real nonzero exit so delivery cannot accidentally substitute a local success or failure.
     fn exit_request() -> ExecRequest {
@@ -213,9 +213,12 @@ mod tests {
     }
 
     /// Saturates the actual framed-payload sender without involving socket buffer sizes or wall time.
-    async fn blocked_stream() -> (StreamWriter, mpsc::Receiver<Message>) {
+    async fn blocked_stream() -> (StreamWriter, mpsc::Receiver<OutboundFrame>) {
         let (write, receiver) = mpsc::channel(1);
-        write.send(Message::binary(vec![0])).await.unwrap();
+        write
+            .send(OutboundFrame::raw_text("occupied".to_string()))
+            .await
+            .unwrap();
         (StreamWriter::for_test(write, RequestId::new(41)), receiver)
     }
 
@@ -255,10 +258,10 @@ mod tests {
         assert!(responses.try_recv().is_ok());
         payload.recv().await.unwrap();
         terminal.await.unwrap();
-        let Message::Binary(bytes) = payload.recv().await.unwrap() else {
+        let frame = payload.recv().await.unwrap();
+        let Some(chunk) = frame.as_stream() else {
             panic!("Expected framed terminal event");
         };
-        let chunk = StreamChunk::from_bytes(&bytes).unwrap();
         // Resuming the consumer must deliver the last frame and the actual nonzero remote exit.
         assert!(chunk.is_last);
         assert!(matches!(

@@ -1,5 +1,6 @@
-//! Control-socket reader, writer, liveness monitor and stdin forwarding.
+//! Connection reader, writer, liveness monitor and stdin forwarding.
 
+use crate::commands::ctx::AgentServices;
 use crate::runtime::responder::{ControlSender, OutboundFrame, PostSend};
 use crate::runtime::{AgentHandle, AgentMsg};
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -12,7 +13,18 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, tungstenite::protocol::Message as WsMessage,
 };
 
-/// Spawns control ingress and an independent liveness monitor for one socket generation.
+/// The receiving ends of one connection's outbound lanes, drained by its single writer.
+pub(super) struct LaneReceivers {
+    pub(super) control: mpsc::Receiver<OutboundFrame>,
+    pub(super) interactive: mpsc::Receiver<OutboundFrame>,
+    pub(super) bulk: mpsc::Receiver<OutboundFrame>,
+}
+
+/// Spawns ingress and an independent liveness monitor for one socket generation.
+///
+/// Text frames go to the runtime; binary stream frames go straight to the worker that owns
+/// their stream, so payload never passes through the runtime mailbox.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_read_task(
     mut read: futures_util::stream::SplitStream<
         WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
@@ -20,6 +32,7 @@ pub(super) async fn spawn_read_task(
     agent_ref: AgentHandle,
     connection_generation: u64,
     control_tx: ControlSender,
+    services: AgentServices,
     shutdown_sender: watch::Sender<bool>,
     mut shutdown: watch::Receiver<bool>,
     timeouts: redoor_core::websocket::WebSocketTimeouts,
@@ -30,7 +43,7 @@ pub(super) async fn spawn_read_task(
     let reader_shutdown_sender = shutdown_sender.clone();
     tokio::spawn(monitor_connection_liveness(
         activity_receiver,
-        control_tx,
+        control_tx.clone(),
         shutdown_sender,
         monitor_shutdown,
         monitor_handle,
@@ -73,15 +86,8 @@ pub(super) async fn spawn_read_task(
                         break;
                     }
                 }
-                Ok(WsMessage::Binary(_)) => {
-                    connection_loss_reported = true;
-                    report_connection_loss(
-                        &reader_shutdown_sender,
-                        &agent_ref,
-                        connection_generation,
-                        "Binary frame received on control socket".to_string(),
-                    );
-                    break;
+                Ok(WsMessage::Binary(bytes)) => {
+                    services.route_stream_frame(&bytes, &control_tx).await;
                 }
                 Ok(WsMessage::Close(_)) => {
                     connection_loss_reported = true;
@@ -175,10 +181,11 @@ fn report_connection_loss(
     agent_ref.report_connection_lost(connection_generation, reason);
 }
 
-/// Spawns the control writer and reports write failures through the non-blocking lifecycle lane.
+/// Spawns the connection writer and reports write failures through the non-blocking lifecycle
+/// lane.
 pub(super) fn spawn_write_task<W>(
     write: W,
-    control_rx: mpsc::Receiver<OutboundFrame>,
+    lanes: LaneReceivers,
     shutdown_sender: watch::Sender<bool>,
     shutdown: watch::Receiver<bool>,
     agent_ref: AgentHandle,
@@ -188,7 +195,7 @@ pub(super) fn spawn_write_task<W>(
     W::Error: Send,
 {
     tokio::spawn(async move {
-        if write_control_frames(write, control_rx, shutdown, PostSend::run)
+        if write_frames(write, lanes, shutdown, PostSend::run)
             .await
             .is_err()
         {
@@ -203,13 +210,15 @@ pub(super) fn spawn_write_task<W>(
     });
 }
 
-/// Writes queued control frames while allowing shutdown to cancel an in-progress socket write.
+/// Writes queued frames in class order while allowing shutdown to cancel an in-progress write.
 ///
+/// Control frames always go first, then interactive terminal frames, then bulk data. Since a
+/// data frame is at most 64 KiB, a control frame never waits behind more than one of them.
 /// A frame's post-send action (process re-exec after a restart response) runs only once the
 /// frame was written, so the server always sees the response before the connection drops.
-async fn write_control_frames<W, F>(
+async fn write_frames<W, F>(
     mut write: W,
-    mut control_rx: mpsc::Receiver<OutboundFrame>,
+    mut lanes: LaneReceivers,
     mut shutdown: watch::Receiver<bool>,
     mut after_send: F,
 ) -> Result<(), ()>
@@ -226,10 +235,12 @@ where
                 }
                 continue;
             }
-            frame = control_rx.recv() => match frame {
+            frame = lanes.control.recv() => match frame {
                 Some(frame) => frame,
                 None => return Ok(()),
             },
+            Some(frame) = lanes.interactive.recv() => frame,
+            Some(frame) = lanes.bulk.recv() => frame,
         };
         let Some(message) = frame.encode() else {
             continue;
@@ -306,6 +317,61 @@ mod tests {
     use crate::runtime::AgentLifecycleMsg;
     use redoor_protocol::wire::{AgentToServer, command::CommandResult};
     use std::sync::{Arc, Mutex};
+
+    /// Wraps a control lane with idle interactive and bulk lanes.
+    fn lanes(control: mpsc::Receiver<OutboundFrame>) -> LaneReceivers {
+        LaneReceivers {
+            control,
+            interactive: mpsc::channel(1).1,
+            bulk: mpsc::channel(1).1,
+        }
+    }
+
+    /// Verifies control frames overtake queued bulk data, so commands stay responsive.
+    #[tokio::test]
+    async fn control_frames_are_written_before_queued_bulk_data() {
+        let journal = Arc::new(Mutex::new(Vec::new()));
+        let (control_tx, control) = mpsc::channel(4);
+        let (bulk_tx, bulk) = mpsc::channel(4);
+        let (interactive_tx, interactive) = mpsc::channel(4);
+        bulk_tx
+            .send(OutboundFrame::raw_text("bulk".to_string()))
+            .await
+            .unwrap();
+        interactive_tx
+            .send(OutboundFrame::raw_text("interactive".to_string()))
+            .await
+            .unwrap();
+        control_tx
+            .send(OutboundFrame::raw_text("control".to_string()))
+            .await
+            .unwrap();
+        drop((control_tx, bulk_tx, interactive_tx));
+        let (_shutdown_sender, shutdown_receiver) = watch::channel(false);
+
+        let result = write_frames(
+            JournalSink {
+                journal: journal.clone(),
+                fail: false,
+            },
+            LaneReceivers {
+                control,
+                interactive,
+                bulk,
+            },
+            shutdown_receiver,
+            |_| {},
+        )
+        .await;
+
+        // The writer ends once the control lane closes.
+        assert_eq!(result, Ok(()));
+        // Class order holds although the bulk frame was queued first.
+        assert_eq!(
+            journal.lock().unwrap().first().map(String::as_str),
+            Some("frame:control")
+        );
+    }
 
     /// Sink that models a socket whose transport never accepts another frame.
     struct BlockedSink;
@@ -409,7 +475,7 @@ mod tests {
             .await
             .expect("writer setup should queue one frame");
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
-        let write = write_control_frames(BlockedSink, control_rx, shutdown_receiver, |_| {});
+        let write = write_frames(BlockedSink, lanes(control_rx), shutdown_receiver, |_| {});
         tokio::pin!(write);
 
         // Polling pending proves the writer reached the sink rather than waiting on its queue.
@@ -473,7 +539,7 @@ mod tests {
         control_tx.send(frame).await.unwrap();
         drop(control_tx);
         let (_shutdown_sender, shutdown_receiver) = watch::channel(false);
-        write_control_frames(sink, control_rx, shutdown_receiver, move |action| {
+        write_frames(sink, lanes(control_rx), shutdown_receiver, move |action| {
             journal.lock().unwrap().push(format!("{action:?}"));
         })
         .await

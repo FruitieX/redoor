@@ -25,11 +25,15 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Bounded per-upload chunk queue between the transfer socket reader and the worker.
+/// Bounded per-upload chunk queue between the connection reader and the worker.
 const CHUNK_QUEUE_CAPACITY: usize = 8;
 // A credited sender may have the full window plus the terminal frame queued at once.
-const _: () =
-    assert!(CHUNK_QUEUE_CAPACITY >= redoor_protocol::wire::stream::STREAM_CREDIT_QUEUE_FRAMES);
+const _: () = assert!(
+    CHUNK_QUEUE_CAPACITY
+        >= redoor_protocol::wire::stream::receive_queue_frames(
+            redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES
+        )
+);
 /// Upper bound on waiting for the router's publication decision.
 const PUBLICATION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -282,20 +286,8 @@ impl UploadDriver {
         }
     }
 
-    /// Rejects frames that indicate protocol corruption or a server-side abort.
+    /// Rejects frames that indicate a server-side abort.
     fn validate(&self, chunk: &StreamChunk) -> Result<(), AgentCommandError> {
-        let expected = self.kind.payload_kind();
-        if chunk.payload_kind != expected {
-            return Err(AgentCommandError::new(
-                CommandErrorKind::InvalidInput,
-                format!(
-                    "{} payload kind mismatch: expected {:?}, got {:?}",
-                    self.subject(),
-                    expected,
-                    chunk.payload_kind
-                ),
-            ));
-        }
         if chunk.is_error {
             let message = if chunk.data.is_empty() {
                 format!("{} aborted by server", self.subject())
@@ -334,7 +326,7 @@ struct RouteTable {
     next_serial: u64,
 }
 
-/// Routes transfer-socket chunks and router publication decisions to upload workers.
+/// Routes inbound stream frames and router publication decisions to upload workers.
 ///
 /// Chunks bypass the runtime mailbox entirely so a slow disk backpressures only the transfer
 /// socket, never control traffic.
@@ -382,23 +374,12 @@ impl UploadRoutes {
         )
     }
 
-    /// Delivers one binary frame to its upload worker.
+    /// Delivers one stream frame to its upload worker.
     ///
     /// Routes are filled with `try_send`: the server never has more than the window plus the
     /// terminal frame outstanding, so a full queue is a protocol violation that fails only
     /// this upload while the reader keeps serving every other stream.
-    pub(crate) async fn route_frame(&self, bytes: &[u8], control: &ControlSender) {
-        let chunk = match StreamChunk::from_bytes(bytes) {
-            Ok(chunk) => chunk,
-            Err(error) => {
-                log!(
-                    Level::Warning,
-                    "Failed to parse binary stream chunk: {}",
-                    error
-                );
-                return;
-            }
-        };
+    pub(crate) async fn route_chunk(&self, chunk: StreamChunk, control: &ControlSender) {
         let request_id = chunk.request_id;
         let route = self
             .table()
@@ -507,7 +488,6 @@ impl Drop for RouteGuard {
 mod tests {
     use super::*;
     use crate::runtime::cancel::CancelRegistry;
-    use redoor_protocol::{ids::ChunkIndex, wire::stream::StreamPayloadKind};
 
     /// Records lifecycle calls and whether the request was still routed and registered.
     struct RecordingSink {
@@ -605,17 +585,9 @@ mod tests {
         }
     }
 
-    /// Encodes one chunk for the given request as the transfer socket would deliver it.
-    fn frame(kind: StreamPayloadKind, is_last: bool) -> Vec<u8> {
-        StreamChunk {
-            request_id: RequestId::new(5),
-            chunk_index: ChunkIndex::new(0),
-            is_last,
-            is_error: false,
-            payload_kind: kind,
-            data: b"bytes".to_vec(),
-        }
-        .to_bytes()
+    /// Builds one data chunk of the upload under test as the connection reader parses it.
+    fn frame(is_last: bool) -> StreamChunk {
+        StreamChunk::data(RequestId::new(5), b"bytes".to_vec(), is_last)
     }
 
     /// Extracts the terminal result from a driver reply.
@@ -669,10 +641,7 @@ mod tests {
         // More frames than the queue holds: with the route still registered the reader would
         // report a credit violation for a worker that is busy aborting.
         for _ in 0..=CHUNK_QUEUE_CAPACITY {
-            harness
-                .routes
-                .route_frame(&frame(StreamPayloadKind::RawFile, false), &control)
-                .await;
+            harness.routes.route_chunk(frame(false), &control).await;
         }
         let _ = release.send(());
         let result = result(harness.task.await.unwrap());
@@ -681,25 +650,28 @@ mod tests {
         assert!(control_frames.try_recv().is_err());
     }
 
-    /// Verifies protocol corruption aborts staging like a cancellation.
+    /// Verifies a server abort frame discards staging like a cancellation.
     #[tokio::test]
-    async fn protocol_failure_aborts_and_reports_the_error() {
+    async fn server_abort_discards_staging_and_reports_the_error() {
         let mut harness = start();
         harness.frames.recv().await.unwrap();
         let (control, _control_frames) = mpsc::channel(1);
 
         harness
             .routes
-            .route_frame(&frame(StreamPayloadKind::Tar, false), &control)
+            .route_chunk(
+                StreamChunk::error(RequestId::new(5), "body too long"),
+                &control,
+            )
             .await;
         let result = result(harness.task.await.unwrap());
 
-        // A corrupt stream must discard staging exactly like a cancellation.
+        // An aborted stream must discard staging exactly like a cancellation.
         assert_eq!(
             *harness.events.lock().unwrap(),
             vec!["abort routed=false registered=true".to_string()]
         );
-        // The mismatch is reported as invalid input rather than an internal failure.
+        // The abort is reported as invalid input rather than an internal failure.
         assert!(matches!(
             result,
             CommandResult::Error {
@@ -716,10 +688,7 @@ mod tests {
         harness.frames.recv().await.unwrap();
         let (control, _control_frames) = mpsc::channel(1);
 
-        harness
-            .routes
-            .route_frame(&frame(StreamPayloadKind::RawFile, true), &control)
-            .await;
+        harness.routes.route_chunk(frame(true), &control).await;
         let result = result(harness.task.await.unwrap());
 
         // Publication runs while cancel_transfer can still reach the publication gate.
@@ -743,14 +712,10 @@ mod tests {
         let (_guard, mut chunks) = routes.open(RequestId::new(5), "/stalled");
         let (_other_guard, mut other_chunks) = routes.open(RequestId::new(6), "/other");
         for _ in 0..CHUNK_QUEUE_CAPACITY {
-            routes
-                .route_frame(&frame(StreamPayloadKind::RawFile, false), &control)
-                .await;
+            routes.route_chunk(frame(false), &control).await;
         }
         // The queue is full and the worker is stalled; this frame exceeds any honest credit.
-        routes
-            .route_frame(&frame(StreamPayloadKind::RawFile, false), &control)
-            .await;
+        routes.route_chunk(frame(false), &control).await;
         // The violating upload is unrouted so its worker fails instead of the socket stalling.
         assert!(!routes.contains(RequestId::new(5)));
         let mut queued = 0;
@@ -759,9 +724,9 @@ mod tests {
         }
         // Frames accepted before the violation are still delivered, then the queue closes.
         assert_eq!(queued, CHUNK_QUEUE_CAPACITY);
-        let mut other = StreamChunk::from_bytes(&frame(StreamPayloadKind::RawFile, false)).unwrap();
+        let mut other = frame(false);
         other.request_id = RequestId::new(6);
-        routes.route_frame(&other.to_bytes(), &control).await;
+        routes.route_chunk(other, &control).await;
         // An unrelated upload on the same socket keeps receiving frames.
         assert_eq!(
             other_chunks.recv().await.map(|chunk| chunk.request_id),

@@ -4,7 +4,6 @@ pub(crate) mod agent_client;
 mod agent_configuration;
 mod agent_helpers;
 mod agent_logs;
-mod agent_transfers;
 mod agent_ws;
 mod agents;
 mod archive_upload;
