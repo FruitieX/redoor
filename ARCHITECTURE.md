@@ -52,7 +52,7 @@ The contract between all parties, with no runtime dependencies (no tokio).
   - `Command::policy()` is the single table that classifies every command: whether it
     streams bytes and in which direction, whether it is an upload, and how it is cancelled.
     Both the server and the agent read it, so they cannot disagree.
-  - `stream` defines the binary frame (stream id, `FIN`/error flags, up to 64 KiB of payload)
+  - `stream` defines the binary frame (stream id, `FIN` flag, up to 64 KiB of payload)
     and the credit windows. `exec`, `log` and `terminal` hold the feature-specific wire types.
   - `registration` holds `AgentIdentity` and `AgentCapabilities`, which are flattened into
     the `hello` frame.
@@ -245,8 +245,9 @@ flowchart LR
 Each agent keeps exactly one websocket to the server, at `/api/v1/agent/ws`. It carries:
 
 - **Text frames**: JSON control messages (`ServerToAgent` / `AgentToServer`).
-- **Binary frames**: stream data. Each frame is an 8-byte stream id, a flags byte (`FIN`,
-  and an error flag for streams that end with a failure) and up to 64 KiB of payload.
+- **Binary frames**: stream data. Each frame is an 8-byte stream id, a flags byte (only
+  `FIN`, which marks a successful end; failures are reported by the result) and up to 64 KiB
+  of payload. Unknown flags are rejected.
 
 Every stream has a per-connection `u64` id allocated by the server, from the same id space
 as request ids:
@@ -361,9 +362,15 @@ flowchart LR
   JSON is produced in exactly one place.
 - The **command lane** is bounded. When it is full, new work is rejected instead of buffered,
   which is the server's admission control.
+- Every frame that starts work (a command, `terminal_open`, `log_stream_open`) carries a
+  **write ticket**. The writer claims the ticket just before writing the frame, and a cancel
+  first tries to withdraw it. Whichever wins decides: a withdrawn frame is skipped and never
+  reaches the agent, otherwise the cancel is sent after it. So a `cancel` can never overtake
+  its command, and the agent needs no memory of early cancels.
 - The **priority lane** is drained first. Cancels, credit grants and publication decisions
-  never wait behind a backlog of commands or data. Frames that must not be lost fall back to
-  the command lane if the priority lane is momentarily full.
+  never wait behind a backlog of commands or data. A cancel that finds the lane momentarily
+  full waits for capacity in a small task instead of being dropped, and publication
+  decisions fall back to the command lane.
 - The router never awaits. `RouterHandle::send` reports `Full` and `Stopped` separately, and
   async callers use `send_async`, so router messages are never silently dropped.
 
@@ -379,7 +386,7 @@ sequenceDiagram
     C->>H: GET /api/v1/... (e.g. metadata)
     H->>R: AgentCall::command() with deadline
     R->>R: add Command flow to flow table
-    R->>A: command {id, command} (command lane)
+    R->>A: command {id, credit, command} (command lane)
     A->>A: policy() → admit, register cancel, spawn
     A->>R: command_response {id, result}
     R->>H: result (flow removed)
@@ -391,9 +398,41 @@ sequenceDiagram
   command, its deadline and how to extract the typed result. Wrong result types and errors
   become an `ApiError`, which maps to the HTTP status in one place.
 - When the caller gives up (the deadline passes or the HTTP client disconnects), the router
-  drops the flow. If the command can be cancelled on the agent, the router also sends
-  `cancel {id}` on the priority lane. A few commands, such as trash restore, are allowed
-  to run to completion on purpose.
+  drops the flow. If the command can be cancelled on the agent, the router also cancels it
+  (see the request lifecycle below). A few commands, such as trash restore, are allowed to
+  run to completion on purpose.
+
+## Request lifecycle
+
+Every request follows one ordered lifecycle on the connection:
+
+```
+server: command {id, credit, command}
+agent:  binary frames of stream id ... binary frame with FIN     (streaming commands only)
+agent:  command_response {id, result}                            (exactly one, always last)
+```
+
+- **Exactly one result per request, always after its data.** A streaming command's result is
+  queued on the same agent lane as its data, behind `FIN`, so when the server sees the result
+  the consumer already has every byte. Flows therefore settle on the result alone; there is
+  no separate "stream ended" event to reconcile with it. The agent's `ResultLedger` enforces
+  the single result (a second one is a bug: a debug assertion, and dropped in release).
+- **`FIN` means success.** A stream that fails or is cancelled ends without `FIN`, and its
+  error result carries the reason. The server then fails the consumer after the frames it
+  already queued, so an HTTP body aborts visibly instead of looking like a short file.
+- **Initial credit is in the command.** Output streams (downloads, exec) get their first
+  window (`credit: 4`) in the command frame, so output starts without a round trip. Uploads
+  start with `credit: 0`; the agent grants the first window when its worker is ready, and
+  that first grant is the readiness signal.
+- **Cancel.** The server sends `cancel {id}` on the priority lane only for a command that has
+  been written (see write tickets above). A command still in the queue is withdrawn, never
+  written, and answered by the router itself with a `canceled` error result. A written
+  command's cancel is acknowledged by its normal result: kind `canceled` if the cancel
+  stopped it, or the real result if it had already finished. The agent ignores cancels for
+  requests it already answered and keeps no state for them.
+- **Credit violations** are the only data-path event the router hears directly: the
+  connection reader stops routing the stream, and the router fails the flow and cancels the
+  agent's worker. The connection continues.
 
 ## Download, exec output and stream credit
 
@@ -407,23 +446,24 @@ sequenceDiagram
 
     C->>O: GET download
     O->>R: admit Output flow
-    R-->>O: StreamLease (stream slot, cancel token, byte counter)
-    R->>A: command {id} (command lane)
+    R-->>O: StreamLease (stream slot, cancel token, byte counters)
+    R->>A: command {id, credit: 4} (command lane)
     loop while data remains
-        A->>A: wait for credit (initial window: 4 frames)
+        A->>A: wait for credit
         A->>T: binary frame of stream id (bulk lane)
         T->>O: try_send into this stream's slot (never waits)
         O->>C: body bytes
         O->>A: credit {stream, frames} (priority lane)
     end
     A->>T: final frame (FIN, spends no credit)
-    T->>R: terminal event only
+    A->>R: command_response (behind FIN on the same lane)
+    R->>R: settle the flow and its progress row
 ```
 
 - **Payload bypasses the router.** The router admits the stream and hands out a
   `StreamLease`. Frames then go from the session reader straight into that stream's
-  bounded slot, and only the terminal event (done, failed or protocol violation) goes back to
-  the router. Progress is read from the lease's byte counter.
+  bounded slot; the router only sees the result that follows them. Progress is read from the
+  lease's byte counters.
 - **Credit isolates streams.** The agent may have at most the granted number of frames in
   flight per stream (4 × 64 KiB). The server returns credit as the HTTP client drains the
   body. A stalled client therefore stalls only its own stream, while other downloads, exec
@@ -432,10 +472,12 @@ sequenceDiagram
 - An agent that sends beyond its credit fails only that stream, not the connection
   (`tests/stream-credit.test.ts`).
 - **Cancellation.** Dropping the `OutputStream` (the HTTP client went away) cancels the agent
-  side through the lease. Final and error frames never need credit, so a cancel
-  acknowledgement can never get stuck.
-- Exec output uses the same path, and the exec exit result travels separately so it cannot
-  be held up by unread output.
+  side. `FIN` and results never need credit, so a cancel acknowledgement can never get stuck
+  behind unread data.
+- Exec output uses the same path. The exit status is exec's result, ordered after the output
+  `FIN`; the router publishes it on a separate watch channel, so the HTTP body emits it after
+  the last output line. A timeout or cancel stops the process even while output waits for
+  credit, and the result follows at once.
 
 ## Upload
 
@@ -446,14 +488,15 @@ sequenceDiagram
     participant A as Agent UploadDriver
 
     C->>R: PUT upload (admit Upload flow)
-    R->>A: command {id} (command lane)
+    R->>A: command {id, credit: 0} (command lane)
     A->>A: create UploadSink + staging path
-    A->>R: transfer_ready
+    A->>R: credit {stream, frames: 4} (first grant = ready)
     loop request body
         R->>A: binary frame of stream id (bulk lane, spends credit)
         A->>A: write to staging
         A->>R: credit {stream, frames}
     end
+    R->>A: final frame (FIN)
     A->>R: publish_request {id}
     R->>A: publish_decision {id, allowed}
     A->>A: publish (atomic rename into place) or discard staging
@@ -461,7 +504,11 @@ sequenceDiagram
     R->>C: result
 ```
 
-- `transfer_ready` confirms the agent-side worker exists before any body bytes are sent.
+- The agent's first credit grant confirms its worker exists before any body bytes are sent;
+  the session reports it to the router as the upload's readiness.
+- A producer that gives up (body longer than its `Content-Length`, client gone) never sends
+  an error frame. The router cancels the agent's worker, which discards its staging and
+  answers with its result.
 - Content is written to a hidden **staging** path next to the destination. The path is
   reserved atomically and deletes itself if the upload is cancelled, fails or disconnects.
 - **Publication is a separate step decided by the router.** This orders "publish" against a
@@ -480,15 +527,16 @@ sequenceDiagram
     participant F as CopyForwarder
     participant D as Destination agent
 
-    R->>S: download command
-    R->>D: upload command
-    D->>R: transfer_ready
+    R->>D: upload command (credit 0)
+    D->>R: credit (first grant = ready)
+    R->>S: download command (credit 4)
     loop frames
         S->>F: StreamChunk
         F->>D: StreamChunk
         D-->>F: credit (frame accepted)
         F-->>S: credit
     end
+    S->>R: command_response (source finished)
     D->>R: command_response (published)
     opt move
         R->>S: delete source (verified identity)
@@ -500,6 +548,9 @@ sequenceDiagram
   `CopyForwarder` task. Credit is returned to the source only after the destination has
   accepted the frame. A slow destination therefore slows down only this copy, never either
   agent's other streams.
+- The forwarder only relays data and `FIN`. A source that fails sends no `FIN`, and its
+  error result makes the router fail the copy and cancel the destination worker, which
+  discards its staging, so a partial copy is never published.
 - A **move** is a copy followed by deleting the source (`CopyFlow` then
   `CopyPhase::DeletingSource`). The source is deleted only if its identity still matches what
   was copied. Once the source is being deleted, a destination disconnect no longer affects
