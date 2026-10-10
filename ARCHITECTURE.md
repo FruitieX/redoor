@@ -300,6 +300,56 @@ So the worst case per connection is roughly (streams × (window + 1) × 64 KiB),
 message at a time, capped at 32 MiB (a control result such as a git diff batch can be a few
 MiB; data frames are at most 64 KiB).
 
+## Stream credit
+
+Credit is the per-stream flow control that lets many streams share one websocket without a
+slow consumer holding up the others.
+
+**Why it exists.** All of an agent's streams share one socket, and each side reads it with a
+single reader. Without credit, a reader holding a frame for a consumer that is not ready (a
+browser downloading slowly, a copy destination on a slow disk) has two bad choices. It can
+buffer without limit, which breaks the memory bound. Or it can stop reading the socket, which
+freezes every other stream and the control frames behind them. TCP flow control does not help,
+because it applies to the whole connection, not to one stream.
+
+**The rule.** A sender may put a data frame on a stream only when it holds credit for that
+stream. One credit is one frame (up to 64 KiB). The receiver hands credit back with a
+`credit {stream, frames}` control message once its consumer has drained frames.
+
+- **Window**: the most credit a stream can hold. It is 4 frames for transfers and 16 for
+  terminals. Grants beyond the window are clamped, so a misbehaving peer cannot make the other
+  side buffer more.
+- **Batching**: receivers return credit 2 frames at a time, so grants stay rare. The batch is
+  smaller than the smallest window, so a drained receiver never holds back all of the sender's
+  credit.
+- **Grants travel as control frames** (on the server's priority lane and the agent's control
+  lane), so they never wait behind data.
+- **`FIN` is free.** The receive queue keeps one extra slot for it, so a stream can always end,
+  and its result can always follow, even when the consumer has stalled.
+- **Initial credit**: output streams get their full window in the command frame, so they start
+  without a round trip. Uploads start at zero, and the agent's first grant also says that its
+  worker is ready.
+
+**What it buys.**
+
+- The receiver knows the sender can have at most a window of frames outstanding, so the
+  reader drops each frame into that stream's bounded queue with `try_send` and never waits.
+  The socket keeps being read, so control stays responsive.
+- Backpressure goes all the way through. A stalled HTTP client stalls only the agent producer
+  for its own download. A copy returns credit to the source only after the destination has
+  accepted the frame.
+- Memory is bounded per stream at window + 1 frames (see the table above).
+- Sending without credit is a protocol violation for that stream only. The stream fails and
+  the connection keeps going.
+
+**Where it lives.** `redoor-protocol::wire::stream` defines the window and batch constants and
+which frames spend credit. `redoor-core::stream_credit` holds the two primitives. On the sender
+side, `CreditGate` is a semaphore of frames: producers wait on it before each data frame, and
+incoming grants refill it. On the receiver side, `CreditLedger` counts drained frames and
+produces the batched grants. Each side has one place that spends credit: the agent's
+`transfers/stream` writer, and the server's `OutboundStream`, which upload producers, copy
+forwarders and terminal input all send through.
+
 ## Connection setup
 
 ```mermaid
