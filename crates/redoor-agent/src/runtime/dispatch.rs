@@ -31,6 +31,8 @@ pub(crate) struct DispatchLink<'a> {
     pub(crate) control: &'a ControlSender,
     /// Lane for stream data of output commands.
     pub(crate) bulk: &'a ControlSender,
+    /// Initial credit of the command's output stream, from the command frame.
+    pub(crate) credit: u32,
     /// Cancelled when the control connection ends.
     pub(crate) scope: &'a CancellationToken,
 }
@@ -70,15 +72,28 @@ impl Dispatcher {
         link: DispatchLink<'_>,
         sessions: &mut Sessions,
     ) {
-        let canceled_early = sessions.take_pending_cancel(request_id);
         log!(
             Level::Info,
             "Command received: request_id={}, command={}",
             request_id,
             command.summary()
         );
+        if !self.services.results.open(request_id) {
+            // The server allocates unique ids, so this can only be a misbehaving server; a
+            // second answer would break the one-result rule for the running request.
+            log!(
+                Level::Warning,
+                "Ignoring a command whose request id is already running: request_id={}",
+                request_id
+            );
+            return;
+        }
         let policy = command.policy();
-        let responder = Responder::new(link.control.clone(), request_id);
+        let responder = Responder::new(
+            link.control.clone(),
+            self.services.results.clone(),
+            request_id,
+        );
         let is_upload = policy.upload_kind().is_some();
         if !is_upload && !self.command_capacity_available() {
             let _ = responder
@@ -89,25 +104,26 @@ impl Dispatcher {
                 .await;
             return;
         }
-        let (cancel, registration) =
-            match Self::cancellation(&policy, request_id, canceled_early, &link, sessions) {
-                Ok(cancellation) => cancellation,
-                Err(RegisterError::Duplicate | RegisterError::Full) => {
-                    let _ = responder
-                        .respond(CommandResult::error(
-                            CommandErrorKind::AlreadyExists,
-                            format!("Request is already running for request_id={request_id}"),
-                        ))
-                        .await;
-                    return;
-                }
-            };
+        let (cancel, registration) = match Self::cancellation(&policy, request_id, &link, sessions)
+        {
+            Ok(cancellation) => cancellation,
+            Err(RegisterError::Duplicate | RegisterError::Full) => {
+                let _ = responder
+                    .respond(CommandResult::error(
+                        CommandErrorKind::AlreadyExists,
+                        format!("Request is already running for request_id={request_id}"),
+                    ))
+                    .await;
+                return;
+            }
+        };
 
         let ctx = CommandCtx {
             responder,
             cancel,
             registration,
             bulk: Some(link.bulk.clone()),
+            credit: link.credit,
             services: self.services.clone(),
         };
         let task = Self::execute(command, policy, ctx, self.exclusive.clone());
@@ -122,13 +138,12 @@ impl Dispatcher {
     fn cancellation(
         policy: &CommandPolicy,
         request_id: RequestId,
-        canceled_early: bool,
         link: &DispatchLink<'_>,
         sessions: &mut Sessions,
     ) -> Result<(CancellationToken, Option<Registration<RequestId>>), RegisterError> {
         match policy.cancel_scope {
             CancelScope::Request => {
-                let registration = sessions.register_request(request_id, canceled_early)?;
+                let registration = sessions.requests.register(request_id)?;
                 Ok((registration.token().clone(), Some(registration)))
             }
             CancelScope::Connection | CancelScope::Uninterruptible => {
@@ -162,20 +177,17 @@ impl Dispatcher {
         Self::deliver(&responder, reply).await;
     }
 
-    /// Sends the reply on the control lane according to its delivery mode.
+    /// Sends the request's one result on the lane its delivery mode requires.
+    ///
+    /// A streaming result goes on the stream's lane behind its data; when the connection is
+    /// gone that lane is closed and the send returns at once, so teardown can always join.
     async fn deliver(responder: &Responder, reply: Reply) {
         match reply {
             Reply::Result(result) => {
                 let _ = responder.respond(result).await;
             }
-            Reply::Streamed => {}
-            Reply::Fallback { result, abandon } => {
-                tokio::select! {
-                    // Request cancellation does not invalidate an already known outcome; only
-                    // teardown of the connection that would carry it may abandon delivery.
-                    _ = abandon.cancelled() => {}
-                    _ = responder.respond(result) => {}
-                }
+            Reply::Stream { stream, result } => {
+                let _ = responder.respond_on(stream.lane(), result).await;
             }
         }
     }
@@ -267,6 +279,7 @@ mod tests {
             let link = DispatchLink {
                 control: &self.control,
                 bulk: &self.bulk,
+                credit: redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES,
                 scope: &self.scope,
             };
             self.dispatcher
@@ -337,24 +350,49 @@ mod tests {
         assert_eq!(after_send, Some(PostSend::Reexec { path: None }));
     }
 
-    /// Verifies a cancel that overtook its command still stops it.
+    /// Verifies a cancel racing a download's completion still yields exactly one result, and
+    /// that the result follows the stream's frames on the stream's own lane.
     #[tokio::test]
-    async fn early_cancel_stops_the_command_when_it_registers() {
+    async fn cancel_racing_completion_yields_exactly_one_result_after_the_data() {
         let (mut fixture, mut payload) = Fixture::new().await;
+        let file = redoor_core::test_support::TempDir::create();
+        let path = file.path().join("small.txt");
+        tokio::fs::write(&path, b"small").await.unwrap();
 
+        fixture
+            .dispatch(
+                4,
+                Command::RawDownload {
+                    path: path.to_string_lossy().to_string(),
+                    range_start: None,
+                    range_end: None,
+                },
+            )
+            .await;
         fixture.sessions.cancel_request(RequestId::new(4));
-        fixture.dispatch(4, blocking_download()).await;
-        let frame = payload
-            .recv()
-            .await
-            .expect("download reports on its stream");
-        let Some(chunk) = frame.as_stream() else {
-            panic!("downloads use stream frames");
-        };
+        fixture.scope.cancel();
+        fixture.dispatcher.stop().await;
 
-        // The overtaking cancel ends the stream with the cancellation frame.
-        assert!(chunk.is_error);
-        assert_eq!(chunk.data, crate::transfers::stream::CANCELED_MESSAGE);
+        let mut frames = Vec::new();
+        while let Ok(frame) = payload.try_recv() {
+            frames.push(frame);
+        }
+        let results: Vec<_> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| {
+                matches!(
+                    frame.as_message(),
+                    Some(AgentToServer::CommandResponse { .. })
+                )
+            })
+            .collect();
+        // Whichever of completion and cancel wins, the request gets exactly one result.
+        assert_eq!(results.len(), 1);
+        // Nothing of the stream follows its result.
+        assert_eq!(results[0].0, frames.len() - 1);
+        // The control lane carried no second answer.
+        assert!(fixture.frames.try_recv().is_err());
     }
 
     /// Verifies one request id cannot own two cancellation registrations.
@@ -373,16 +411,10 @@ mod tests {
                 },
             )
             .await;
-        let (result, _) = fixture.next_response().await;
 
-        // One request id may own only one cancellation registration.
-        assert!(matches!(
-            result,
-            CommandResult::Error {
-                kind: CommandErrorKind::AlreadyExists,
-                ..
-            }
-        ));
+        // A second command with a running id is ignored: answering it would give the
+        // running request a second result.
+        assert!(fixture.frames.try_recv().is_err());
         // Teardown closes the bulk lane, which releases the blocked download.
         drop(payload);
         fixture.scope.cancel();
@@ -442,46 +474,5 @@ mod tests {
 
         // No command task may outlive the connection that admitted it.
         assert!(fixture.dispatcher.is_idle());
-    }
-
-    /// Verifies retained fallback acknowledgements are released only by teardown.
-    #[tokio::test]
-    async fn fallback_survives_request_cancel_but_not_teardown() {
-        let (responder, mut frames) = Responder::recording(RequestId::new(9), 1);
-        // Occupy the control lane so delivery has to wait.
-        responder.transfer_ready().await.unwrap();
-        let abandon = CancellationToken::new();
-        let delivery = Dispatcher::deliver(
-            &responder,
-            Reply::Fallback {
-                result: CommandResult::RawUpload,
-                abandon: abandon.clone(),
-            },
-        );
-        tokio::pin!(delivery);
-
-        // A blocked control lane retains the acknowledgement.
-        assert!(futures_util::poll!(&mut delivery).is_pending());
-        frames.recv().await.unwrap();
-        delivery.await;
-        // Once capacity frees up, the retained acknowledgement is delivered.
-        assert!(matches!(
-            frames.recv().await.unwrap().as_message(),
-            Some(AgentToServer::CommandResponse { .. })
-        ));
-
-        responder.transfer_ready().await.unwrap();
-        let delivery = Dispatcher::deliver(
-            &responder,
-            Reply::Fallback {
-                result: CommandResult::RawUpload,
-                abandon: abandon.clone(),
-            },
-        );
-        tokio::pin!(delivery);
-        assert!(futures_util::poll!(&mut delivery).is_pending());
-        abandon.cancel();
-        // Teardown of the carrying connection releases the worker without delivering.
-        assert!(futures_util::poll!(&mut delivery).is_ready());
     }
 }

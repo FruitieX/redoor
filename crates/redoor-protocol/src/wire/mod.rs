@@ -48,14 +48,24 @@ pub enum ServerToAgent {
     /// stream, so one slow consumer stalls only its own stream instead of the shared socket.
     Credit { stream: RequestId, frames: u32 },
 
-    /// Starts a request on the agent; `id` correlates its response and any stream frames.
-    Command { id: RequestId, command: Command },
+    /// Starts a request on the agent; `id` correlates its result and is the id of its stream.
+    ///
+    /// `credit` is the initial window of an agent-to-server stream (downloads, exec output),
+    /// so output starts without a round trip; it is zero for every other command.
+    Command {
+        id: RequestId,
+        credit: u32,
+        command: Command,
+    },
 
     /// Orders upload publication against cancellation in the router's authoritative lifecycle.
     PublishDecision { id: RequestId, allowed: bool },
 
     /// Asks the agent to stop a request-cancelable command, a terminal or a log stream; they
     /// share one id space per connection.
+    ///
+    /// Only sent for a command whose frame was already written, so the agent always knows the
+    /// id; a cancel for an id the agent has already answered is ignored.
     Cancel { id: RequestId },
 
     /// Starts a PTY whose output and input travel on stream `stream` of this connection.
@@ -116,10 +126,8 @@ pub enum AgentToServer {
         capabilities: AgentCapabilities,
     },
 
-    /// Confirms that an upload worker exists before bytes cross the transfer socket.
-    TransferReady { id: RequestId },
-
-    /// Final result of one request.
+    /// The one final result of a request; for streaming commands it follows the stream's
+    /// data on the same lane, so the receiver has seen all data when it arrives.
     CommandResponse {
         id: RequestId,
         result: CommandResult,
@@ -141,7 +149,8 @@ pub enum AgentToServer {
 
     /// Returns flow-control credit for one server-to-agent stream (upload, edit, copy
     /// destination or terminal input) as the agent consumes frames, so a slow consumer stalls
-    /// only its own stream.
+    /// only its own stream. Upload streams start with zero credit, so the first grant is also
+    /// the agent's signal that its worker is ready for data.
     Credit { stream: RequestId, frames: u32 },
 
     /// Lifecycle of terminal stream `stream` (ready, exit, setup error).
@@ -160,7 +169,6 @@ impl AgentToServer {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Hello { .. } => "hello",
-            Self::TransferReady { .. } => "transfer_ready",
             Self::CommandResponse { .. } => "command_response",
             Self::TransferProgress { .. } => "transfer_progress",
             Self::PublishRequest { .. } => "publish_request",
@@ -201,9 +209,10 @@ mod tests {
             (
                 ServerToAgent::Command {
                     id: RequestId::new(1),
+                    credit: 0,
                     command: Command::ListTrash,
                 },
-                r#"{"type":"command","id":1,"command":{"type":"ListTrash"}}"#,
+                r#"{"type":"command","id":1,"credit":0,"command":{"type":"ListTrash"}}"#,
             ),
             (
                 ServerToAgent::PublishDecision {
@@ -229,12 +238,6 @@ mod tests {
     #[test]
     fn agent_frames_keep_their_wire_tags() {
         let frames = [
-            (
-                AgentToServer::TransferReady {
-                    id: RequestId::new(1),
-                },
-                r#"{"type":"transfer_ready","id":1}"#,
-            ),
             (
                 AgentToServer::CommandResponse {
                     id: RequestId::new(2),
@@ -299,7 +302,7 @@ mod tests {
     /// Verifies unknown command variants still expose their request id.
     #[test]
     fn unknown_command_frames_still_yield_their_request_id() {
-        let unknown = r#"{"type":"command","id":9,"command":{"type":"FutureCommand"}}"#;
+        let unknown = r#"{"type":"command","id":9,"credit":0,"command":{"type":"FutureCommand"}}"#;
 
         // The variant is unknown to this build, so normal parsing must fail.
         assert!(serde_json::from_str::<ServerToAgent>(unknown).is_err());

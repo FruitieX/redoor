@@ -89,6 +89,8 @@ fn command_status(kind: &CommandErrorKind) -> StatusCode {
         CommandErrorKind::NotFound | CommandErrorKind::NotADirectory => StatusCode::NOT_FOUND,
         CommandErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
         CommandErrorKind::IsDirectory | CommandErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+        // Only the client side cancels, so the request is what ended the work.
+        CommandErrorKind::Canceled => StatusCode::BAD_REQUEST,
         CommandErrorKind::AlreadyExists | CommandErrorKind::Conflict => StatusCode::CONFLICT,
         CommandErrorKind::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         CommandErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,

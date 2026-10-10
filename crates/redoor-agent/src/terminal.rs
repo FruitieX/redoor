@@ -320,7 +320,7 @@ async fn write_input(pty: &mut pty_process::OwnedWritePty, chunk: &StreamChunk) 
     pty.write_all(&chunk.data)
         .await
         .context("failed to write PTY input")?;
-    Ok(!chunk.is_last && !chunk.is_error)
+    Ok(!chunk.is_last)
 }
 
 /// Validates a resize again before invoking the PTY ioctl.

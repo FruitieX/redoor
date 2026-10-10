@@ -219,6 +219,7 @@ mod tests {
     use super::*;
     use crate::commands::ctx::{CommandCtx, Reply};
     use crate::runtime::cancel::CancelRegistry;
+    use crate::runtime::responder::ResultLedger;
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
     use redoor_protocol::wire::{AgentToServer, policy::UploadKind, stream::StreamChunk};
@@ -255,13 +256,14 @@ mod tests {
         // Readiness precedes any chunk.
         assert!(matches!(
             frames.recv().await.unwrap().as_message(),
-            Some(AgentToServer::TransferReady { .. })
+            Some(AgentToServer::Credit { .. })
         ));
         let (control, _control_frames) = tokio::sync::mpsc::channel(1);
         routes
             .route_chunk(
                 StreamChunk::data(request_id, b"replacement".to_vec(), true),
                 &control,
+                &ResultLedger::default(),
             )
             .await;
         // Raw finalization must ask the router before changing the destination.

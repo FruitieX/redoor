@@ -1,8 +1,10 @@
 //! REST uploads, archive uploads and file edits streaming into one agent.
 //!
-//! Body frames go from the HTTP producer straight onto the agent's transfer lane through an
-//! [`OutboundStream`]; the router owns admission, the readiness barrier, the irreversible
-//! commit and publication boundaries, cancellation and the final result.
+//! Body frames go from the HTTP producer straight onto the agent's bulk lane through an
+//! [`OutboundStream`]; the router owns admission, the readiness barrier (the agent's first
+//! credit grant), the irreversible commit and publication boundaries, cancellation and the
+//! final result. A producer that gives up never sends an error frame: the router cancels the
+//! agent's worker, which discards its staging and answers with its result.
 
 use super::super::RouterError;
 use super::super::flows::{CopyPhase, Flow, FlowId, UploadFlow, UploadPhase};
@@ -12,7 +14,7 @@ use super::super::messages::{
 };
 use super::super::progress::UploadStartContext;
 use super::super::state::RouterState;
-use super::super::streams::{OutboundError, OutboundStream, StreamLease};
+use super::super::streams::{OutboundError, OutboundStart, OutboundStream, StreamLease};
 use redoor_core::log;
 use redoor_protocol::wire::command::CommandResult;
 use redoor_protocol::wire::log::Level;
@@ -44,7 +46,7 @@ impl RouterState {
             request_id,
             request.command
         );
-        let Some(connection) = self.agents.by_id.get(&request.agent_id) else {
+        let Some(connection) = self.agents.by_id.get_mut(&request.agent_id) else {
             log!(
                 Level::Warning,
                 "Agent not found for upload command: agent_id={}",
@@ -60,15 +62,14 @@ impl RouterState {
         }
         let stream = OutboundStream::new(
             StreamLease::new(request_id, connection.link(), 0),
-            connection
-                .streams
-                .open_outbound(request_id, STREAM_CREDIT_WINDOW_FRAMES),
+            connection.streams.open_outbound(
+                request_id,
+                STREAM_CREDIT_WINDOW_FRAMES,
+                OutboundStart::AwaitGrant,
+            ),
             false,
         );
-        if !connection.send_message(ServerToAgent::Command {
-            id: request_id,
-            command: request.command,
-        }) {
+        if !connection.send_command(request_id, request.command) {
             connection.streams.close_outbound(request_id);
             let _ = request.reply.send(Err(RouterError::ControlQueueFull {
                 agent_id: request.agent_id.to_string(),
@@ -95,8 +96,8 @@ impl RouterState {
             }),
         );
 
-        // Caller abandoned the RPC after admission; tear down local state and use the
-        // reserved lane so the agent does not retain a temp-file worker.
+        // Caller abandoned the RPC after admission; tear down local state and cancel so the
+        // agent does not retain a temp-file worker.
         if request.reply.send(Ok(stream)).is_err() {
             if let Some(Flow::Upload(flow)) = self.flows.remove(request_id) {
                 self.release_upload(&flow);
@@ -106,9 +107,7 @@ impl RouterState {
                 );
                 self.notify_transfer_refresh();
             }
-            if let Some(connection) = self.agents.by_id.get(&request.agent_id) {
-                connection.send_priority_message(ServerToAgent::Cancel { id: request_id });
-            }
+            let _ = self.cancel_on_agent(&request.agent_id, request_id);
         }
     }
 
@@ -184,7 +183,6 @@ impl RouterState {
         }
         if request.chunk.request_id != request.request_id
             || !request.chunk.is_last
-            || request.chunk.is_error
             || !request.chunk.data.is_empty()
         {
             return Err(RouterError::UnexpectedResponseType {
@@ -293,19 +291,15 @@ impl RouterState {
         if upload.agent_id != failure.agent_id {
             return;
         }
-        match failure.reason {
-            // The error frame already reached the agent, whose final response ends the flow.
-            OutboundFailureReason::ProducerAborted(message) => {
-                self.mark_transfer_errored(failure.request_id.as_transfer_id(), message);
+        let message = match failure.reason {
+            OutboundFailureReason::ProducerAborted(message) => message,
+            OutboundFailureReason::LaneClosed => RouterError::UploadForwardFailed {
+                agent_id: failure.agent_id.to_string(),
+                request_id: failure.request_id.to_string(),
             }
-            OutboundFailureReason::LaneClosed => {
-                let error = RouterError::UploadForwardFailed {
-                    agent_id: failure.agent_id.to_string(),
-                    request_id: failure.request_id.to_string(),
-                };
-                self.abandon_upload(flow_id, error.to_string());
-            }
-        }
+            .to_string(),
+        };
+        self.abandon_upload(flow_id, message);
     }
 
     /// Fails an upload whose bytes can no longer reach the agent and stops its worker.
@@ -320,11 +314,9 @@ impl RouterState {
         upload.stream.lease().stop();
         let (agent_id, request_id) = (upload.agent_id.clone(), upload.request_id);
         self.mark_transfer_errored(request_id.as_transfer_id(), message);
-        if let Some(connection) = self.agents.by_id.get(&agent_id) {
-            connection
-                .lanes
-                .try_priority_or_command(ServerToAgent::Cancel { id: request_id });
-        } else if let Some(Flow::Upload(upload)) = self.flows.remove(flow_id) {
+        if self.cancel_on_agent(&agent_id, request_id).is_err()
+            && let Some(Flow::Upload(upload)) = self.flows.remove(flow_id)
+        {
             // No control owner remains that could acknowledge cancellation.
             self.release_upload(&upload);
             self.notify_transfer_refresh();
@@ -619,11 +611,8 @@ mod tests {
     #[tokio::test]
     async fn commit_validation_accepts_only_live_edit_terminals() {
         let mut state = router_state();
-        let terminal = |request_id| redoor_protocol::wire::stream::StreamChunk {
-            request_id,
-            is_last: true,
-            is_error: false,
-            data: Vec::new(),
+        let terminal = |request_id| {
+            redoor_protocol::wire::stream::StreamChunk::data(request_id, Vec::new(), true)
         };
         let edit_id = RequestId::new(41);
         let _edit_completion = record_upload(&mut state, edit_id, UploadKind::EditFile);

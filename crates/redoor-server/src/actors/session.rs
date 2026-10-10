@@ -1,7 +1,7 @@
 //! Per-agent websocket session actor: requires the `hello`, then bridges the multiplexed
 //! connection to the router and the stream tables through bounded, prioritized lanes.
 
-use crate::actors::lanes::{ControlLaneReceivers, ControlLanes};
+use crate::actors::lanes::{ControlLaneReceivers, ControlLanes, QueuedCommand};
 use crate::actors::router::{
     ConnectionStreams, RegisterAgentRequest, RegistrationRejection, RouteResponse,
     RouteTransferReadyRequest, RouterHandle, RouterMsg, TransferProgressUpdateRequest,
@@ -34,14 +34,25 @@ const REJECTION_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Converts a lane receive result into the next outbound frame while tracking when that lane
 /// has closed.
-fn take_outbound_frame(
-    frame: Option<ServerToAgent>,
-    lane_closed: &mut bool,
-) -> Option<ServerToAgent> {
+fn take_outbound_frame<T>(frame: Option<T>, lane_closed: &mut bool) -> Option<T> {
     if frame.is_none() {
         *lane_closed = true;
     }
     frame
+}
+
+/// Converts a command lane receive result into the next outbound frame, skipping commands a
+/// cancel withdrew before they were written, while tracking when the lane has closed.
+fn take_command(command: Option<QueuedCommand>, lane_closed: &mut bool) -> Option<WsMessage> {
+    let command = take_outbound_frame(command, lane_closed)?;
+    if command
+        .ticket
+        .as_ref()
+        .is_some_and(|ticket| !ticket.mark_written())
+    {
+        return None;
+    }
+    encode_frame(&command.frame)
 }
 
 /// Converts a data lane receive result into the next outbound frame while tracking when that
@@ -264,28 +275,6 @@ impl SessionRuntime {
     async fn handle_agent_frame(&mut self, agent_id: AgentId, message: AgentToServer) {
         match message {
             AgentToServer::Hello { .. } => {}
-            AgentToServer::TransferReady { id } => {
-                // TransferReady is a one-shot gate for uploads/copies. try_send would
-                // permanently drop readiness when the router mailbox is full, leaving
-                // the transfer stuck until client timeout with no cleanup path.
-                if let Err(error) = self
-                    .router_ref
-                    .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
-                        agent_id: agent_id.clone(),
-                        socket_id: self.socket_id.clone(),
-                        request_id: id,
-                    }))
-                    .await
-                {
-                    redoor_core::log_failure!(
-                        Level::Error,
-                        "Failed to queue transfer readiness: agent_id={}, request_id={}, error={}",
-                        agent_id,
-                        id,
-                        error
-                    );
-                }
-            }
             AgentToServer::CommandResponse { id, result } => {
                 // Terminal responses release pending requests and transfer state, so
                 // temporary mailbox pressure must never discard their cleanup signal.
@@ -319,8 +308,20 @@ impl SessionRuntime {
                     .await;
             }
             AgentToServer::Credit { stream, frames } => {
-                if let Some(streams) = &self.streams {
-                    streams.grant_outbound(stream, frames);
+                let first = self
+                    .streams
+                    .as_ref()
+                    .is_some_and(|streams| streams.grant_outbound(stream, frames));
+                // An upload's first grant is the agent's signal that its worker is ready.
+                if first {
+                    let _ = self
+                        .router_ref
+                        .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
+                            agent_id,
+                            socket_id: self.socket_id.clone(),
+                            request_id: stream,
+                        }))
+                        .await;
                 }
             }
             AgentToServer::TerminalEvent { stream, event } => {
@@ -439,10 +440,10 @@ impl SessionRuntime {
                 return SessionStep::Close;
             }
         };
-        if let Some(end) = streams.deliver(chunk)
+        if let Some(violation) = streams.deliver(chunk)
             && self
                 .router_ref
-                .send_async(RouterMsg::InboundStreamEnded(end))
+                .send_async(RouterMsg::CreditViolated(violation))
                 .await
                 .is_err()
         {
@@ -518,7 +519,7 @@ pub async fn handle_websocket(
                     continue;
                 }
                 frame = rx_out_priority.recv(), if !priority_closed => take_outbound_frame(frame, &mut priority_closed).as_ref().and_then(encode_frame),
-                frame = rx_out_commands.recv(), if !commands_closed => take_outbound_frame(frame, &mut commands_closed).as_ref().and_then(encode_frame),
+                frame = rx_out_commands.recv(), if !commands_closed => take_command(frame, &mut commands_closed),
                 frame = rx_out_interactive.recv(), if !interactive_closed => take_data_frame(frame, &mut interactive_closed),
                 frame = rx_out_bulk.recv(), if !bulk_closed => take_data_frame(frame, &mut bulk_closed),
                 // Every bounded lane is closed, so no future frames can be produced.
@@ -677,7 +678,6 @@ mod tests {
                 id: request_id,
                 result: CommandResult::RawUpload,
             },
-            AgentToServer::TransferReady { id: request_id },
             AgentToServer::TransferProgress {
                 id: request_id,
                 transferred_bytes: 1,

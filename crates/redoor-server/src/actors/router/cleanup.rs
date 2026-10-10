@@ -1,8 +1,9 @@
 //! Cancellation of flows and the cleanup that follows losing an agent's connection.
 
 use super::RouterError;
+use super::agents::CancelDelivery;
 use super::flows::{Flow, FlowId, OutputKind, OutputPhase, UploadPhase};
-use super::messages::CancelPublicTransferError;
+use super::messages::{CancelPublicTransferError, RouteResponse};
 use super::state::RouterState;
 use super::transfers::copy::CopyRelease;
 use redoor_core::log;
@@ -10,10 +11,7 @@ use redoor_protocol::wire::log::Level;
 use redoor_protocol::{
     api::transfers::{CancelTransferResponse, CancelTransferStatus, TransferProgressState},
     ids::{AgentId, RequestId, TransferId},
-    wire::{
-        ServerToAgent,
-        command::{CommandErrorKind, CommandResult},
-    },
+    wire::command::{CommandErrorKind, CommandResult},
 };
 
 impl RouterState {
@@ -95,18 +93,49 @@ impl RouterState {
             }
         }
         let (agent_id, request_id) = (upload.agent_id.clone(), upload.request_id);
-        let Some(connection) = self.agents.by_id.get(&agent_id) else {
-            return;
-        };
         log!(
             Level::Info,
             "Sending upload cancel to agent: agent_id={}, request_id={}",
             agent_id,
             request_id
         );
-        if !connection.send_priority_message(ServerToAgent::Cancel { id: request_id }) && explicit {
-            // An accepted user cancel must not be lost to a momentarily full priority lane.
-            connection.send_message(ServerToAgent::Cancel { id: request_id });
+        // A closed lane means the connection is gone, and its teardown settles the upload.
+        let _ = self.cancel_on_agent(&agent_id, request_id);
+    }
+
+    /// Stops request `request_id` on `agent_id`.
+    ///
+    /// A command withdrawn before it was written is answered here with a canceled result,
+    /// since the agent never saw it; it is routed after the current message like an agent's
+    /// result. Otherwise the agent's own result acknowledges the cancel. Returns the task
+    /// retaining a cancel that waits for lane capacity, so the caller can abort it once the
+    /// cancel became pointless.
+    pub(crate) fn cancel_on_agent(
+        &mut self,
+        agent_id: &AgentId,
+        request_id: RequestId,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>, RouterError> {
+        let connection =
+            self.agents
+                .by_id
+                .get_mut(agent_id)
+                .ok_or_else(|| RouterError::AgentNotFound {
+                    agent_id: agent_id.to_string(),
+                })?;
+        match connection.cancel_request(request_id)? {
+            CancelDelivery::Sent(retained) => Ok(retained),
+            CancelDelivery::Withdrawn => {
+                self.local_results.push(RouteResponse {
+                    agent_id: agent_id.clone(),
+                    socket_id: connection.socket_id.clone(),
+                    request_id,
+                    result: CommandResult::error(
+                        CommandErrorKind::Canceled,
+                        "Canceled before it was sent to the agent",
+                    ),
+                });
+                Ok(None)
+            }
         }
     }
 
@@ -284,7 +313,7 @@ impl RouterState {
                 }
             }
             Flow::Copy(copy) => {
-                self.release_copy(&copy, CopyRelease::Fail(reason));
+                self.release_copy(&copy, CopyRelease::Fail);
                 self.settle_lost_transfer(copy.progress_id, reason);
             }
         }

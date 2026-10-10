@@ -19,15 +19,23 @@ use std::task::{Context, Poll, ready};
 use tokio::sync::watch;
 use tokio_util::sync::ReusableBoxFuture;
 
-/// Message for an agent error frame that carried no text.
+/// Message for a failure that carried no text.
 const UNDESCRIBED_FAILURE: &str = "Agent stream failed";
+
+/// Message for a byte stream that stopped before the agent's `FIN`, so a canceled download
+/// never looks like a complete, shorter file.
+const INCOMPLETE_STREAM: &str = "Stream ended before completion";
+
+/// One frame of an output stream, or the reason the stream failed.
+type StreamItem = Result<StreamChunk, AgentStreamError>;
 
 /// The pending receive of an output stream, owning the receiver so polling can resume across
 /// dropped `recv` futures and `Stream` polls alike.
-type ReceiveFuture = ReusableBoxFuture<'static, (OutputReceiver, Option<StreamChunk>)>;
+type ReceiveFuture = ReusableBoxFuture<'static, (OutputReceiver, Option<StreamItem>)>;
 
-/// The agent ended an output stream with an error frame; the text is its (possibly empty) message.
-#[derive(Debug, thiserror::Error)]
+/// The stream failed: the agent's result was an error, or the router failed the stream; the
+/// text is the (possibly empty) reason.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct AgentStreamError(pub(crate) String);
 
@@ -40,8 +48,8 @@ pub(crate) struct AgentStreamError(pub(crate) String);
 pub(crate) struct OutputStream {
     request_id: RequestId,
     receive: ReceiveFuture,
-    /// A frame read ahead by [`OutputStream::peek`], returned before any new frame.
-    peeked: Option<StreamChunk>,
+    /// An item read ahead by [`OutputStream::peek`], returned before any new one.
+    peeked: Option<StreamItem>,
     guard: OutputCancelGuard,
     /// Set once the byte stream yielded its final item.
     finished: bool,
@@ -109,21 +117,21 @@ impl OutputStream {
         self.guard.armed = false;
     }
 
-    /// Receives the next frame, or `None` when the stream ended.
+    /// Receives the next frame or the stream's failure, or `None` when the stream ended.
     ///
     /// Cancel safe: the receive in progress lives in the stream, so a `select!` that drops this
-    /// future loses no frame. A terminal frame disarms cancellation because the agent worker
+    /// future loses no frame. `FIN` or a failure disarms cancellation because the agent worker
     /// already finished.
-    pub(crate) async fn recv(&mut self) -> Option<StreamChunk> {
-        if let Some(chunk) = self.peeked.take() {
-            return Some(chunk);
+    pub(crate) async fn recv(&mut self) -> Option<StreamItem> {
+        if let Some(item) = self.peeked.take() {
+            return Some(item);
         }
         std::future::poll_fn(|cx| self.poll_recv(cx)).await
     }
 
-    /// Reads the first frame without consuming it, so callers can still answer with a JSON
+    /// Reads the first item without consuming it, so callers can still answer with a JSON
     /// error before committing to a streaming response.
-    pub(crate) async fn peek(&mut self) -> Option<&StreamChunk> {
+    pub(crate) async fn peek(&mut self) -> Option<&StreamItem> {
         if self.peeked.is_none() {
             self.peeked = std::future::poll_fn(|cx| self.poll_recv(cx)).await;
         }
@@ -133,19 +141,15 @@ impl OutputStream {
     /// Collects at most `limit` payload bytes into memory.
     ///
     /// Reading stops at the final frame or at the first byte beyond `limit`; dropping the
-    /// stream afterwards cancels an agent that still has more. An agent error frame becomes
-    /// `Err` with its message (possibly empty).
+    /// stream afterwards cancels an agent that still has more. A failed stream becomes `Err`
+    /// with its message (possibly empty).
     pub(crate) async fn read_bounded(
         &mut self,
         limit: usize,
     ) -> Result<BoundedRead, AgentStreamError> {
         let mut data = Vec::with_capacity(limit.min(64 * 1024));
-        while let Some(chunk) = self.recv().await {
-            if chunk.is_error {
-                return Err(AgentStreamError(
-                    String::from_utf8_lossy(&chunk.data).into_owned(),
-                ));
-            }
+        while let Some(item) = self.recv().await {
+            let chunk = item?;
             let room = limit - data.len();
             if chunk.data.len() > room {
                 data.extend_from_slice(&chunk.data[..room]);
@@ -171,24 +175,28 @@ impl OutputStream {
         })
     }
 
-    /// One receive that hands the receiver back with its frame, so it can be restarted.
-    async fn receive(mut receiver: OutputReceiver) -> (OutputReceiver, Option<StreamChunk>) {
-        let chunk = receiver.recv().await;
-        (receiver, chunk)
+    /// One receive that hands the receiver back with its item, so it can be restarted.
+    async fn receive(mut receiver: OutputReceiver) -> (OutputReceiver, Option<StreamItem>) {
+        let item = receiver
+            .recv()
+            .await
+            .map(|item| item.map_err(AgentStreamError));
+        (receiver, item)
     }
 
-    /// Polls the stored receive and immediately re-arms it for the next frame.
-    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamChunk>> {
-        let (receiver, chunk) = ready!(self.receive.poll(cx));
+    /// Polls the stored receive and immediately re-arms it for the next item.
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamItem>> {
+        let (receiver, item) = ready!(self.receive.poll(cx));
         self.receive.set(Self::receive(receiver));
-        if chunk
-            .as_ref()
-            .is_none_or(|chunk| chunk.is_last || chunk.is_error)
-        {
+        let finished = match &item {
+            Some(Ok(chunk)) => chunk.is_last,
+            Some(Err(_)) | None => true,
+        };
+        if finished {
             // The worker finished (or the router ended the stream); nothing is left to cancel.
             self.guard.armed = false;
         }
-        Poll::Ready(chunk)
+        Poll::Ready(item)
     }
 }
 
@@ -205,31 +213,35 @@ pub(crate) struct BoundedRead {
 impl Stream for OutputStream {
     type Item = std::io::Result<Bytes>;
 
-    /// Yields payload bytes; an agent error frame ends the stream with an I/O error so an HTTP
-    /// body fails visibly instead of looking like a complete, truncated file.
+    /// Yields payload bytes; a failed stream, or one that stopped before `FIN`, ends with an
+    /// I/O error so an HTTP body fails visibly instead of looking like a complete, truncated
+    /// file.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
         loop {
             if this.finished {
                 return Poll::Ready(None);
             }
-            let chunk = match this.peeked.take() {
-                Some(chunk) => Some(chunk),
+            let item = match this.peeked.take() {
+                Some(item) => Some(item),
                 None => ready!(this.poll_recv(cx)),
             };
-            let Some(chunk) = chunk else {
-                this.finished = true;
-                return Poll::Ready(None);
+            let chunk = match item {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(AgentStreamError(message))) => {
+                    this.finished = true;
+                    let message = if message.is_empty() {
+                        UNDESCRIBED_FAILURE.to_string()
+                    } else {
+                        message
+                    };
+                    return Poll::Ready(Some(Err(std::io::Error::other(message))));
+                }
+                None => {
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(std::io::Error::other(INCOMPLETE_STREAM))));
+                }
             };
-            if chunk.is_error {
-                this.finished = true;
-                let message = if chunk.data.is_empty() {
-                    UNDESCRIBED_FAILURE.to_string()
-                } else {
-                    String::from_utf8_lossy(&chunk.data).into_owned()
-                };
-                return Poll::Ready(Some(Err(std::io::Error::other(message))));
-            }
             this.finished = chunk.is_last;
             if !chunk.data.is_empty() {
                 return Poll::Ready(Some(Ok(Bytes::from(chunk.data))));
@@ -324,11 +336,10 @@ mod tests {
     }
 
     /// One agent frame of the stream.
-    fn frame(request_id: RequestId, data: &[u8], is_last: bool, is_error: bool) -> StreamChunk {
+    fn frame(request_id: RequestId, data: &[u8], is_last: bool) -> StreamChunk {
         StreamChunk {
             request_id,
             is_last,
-            is_error,
             data: data.to_vec(),
         }
     }
@@ -348,34 +359,65 @@ mod tests {
 
         let mut stream = download(&mut agent).await;
         let id = stream.request_id();
-        agent.deliver(frame(id, b"done", true, false)).await;
+        agent.deliver(frame(id, b"done", true)).await;
         // The terminal frame is still delivered to the consumer.
-        assert!(stream.recv().await.is_some_and(|chunk| chunk.is_last));
+        assert!(
+            stream
+                .recv()
+                .await
+                .is_some_and(|item| item.is_ok_and(|chunk| chunk.is_last))
+        );
         // A worker that already finished has nothing left to cancel.
         assert!(!stream.guard.armed);
     }
 
-    /// The byte stream yields payload, then fails visibly on an agent error frame.
+    /// The byte stream yields payload, then fails visibly when the agent's result is an
+    /// error.
     #[tokio::test]
     async fn byte_stream_ends_with_error_on_agent_failure() {
         let mut agent = FakeAgent::connect().await;
         let mut stream = download(&mut agent).await;
         let id = stream.request_id();
-        let delivery = tokio::spawn({
-            let streams = agent.streams.clone();
-            async move {
-                streams.deliver(frame(id, b"", false, false));
-                streams.deliver(frame(id, b"abc", false, false));
-                streams.deliver(frame(id, b"disk gone", false, true))
-            }
-        });
+        agent.deliver(frame(id, b"", false)).await;
+        agent.deliver(frame(id, b"abc", false)).await;
+        agent
+            .respond(
+                id,
+                redoor_protocol::wire::command::CommandResult::error(
+                    redoor_protocol::wire::command::CommandErrorKind::Internal,
+                    "disk gone",
+                ),
+            )
+            .await;
         // Empty frames carry nothing for the HTTP body and are skipped.
         assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from("abc"));
         let error = stream.next().await.unwrap().unwrap_err();
         // The body aborts with the agent's message instead of ending like a complete file.
         assert_eq!(error.to_string(), "disk gone");
         assert!(stream.next().await.is_none());
-        delivery.await.unwrap();
+    }
+
+    /// A byte stream stopped before `FIN` fails instead of ending like a shorter file.
+    #[tokio::test]
+    async fn byte_stream_stopped_before_fin_fails() {
+        let mut agent = FakeAgent::connect().await;
+        let mut stream = download(&mut agent).await;
+        let id = stream.request_id();
+        agent.deliver(frame(id, b"abc", false)).await;
+        agent
+            .router
+            .send_async(RouterMsg::CancelTransfer {
+                agent_id: agent.agent_id.clone(),
+                request_id: id,
+            })
+            .await
+            .unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from("abc"));
+        // A canceled download must not look complete to the HTTP client.
+        assert_eq!(
+            stream.next().await.unwrap().unwrap_err().to_string(),
+            INCOMPLETE_STREAM
+        );
     }
 
     /// Bounded reads stop at the limit and report that more data exists.
@@ -387,8 +429,8 @@ mod tests {
         let delivery = tokio::spawn({
             let streams = agent.streams.clone();
             async move {
-                streams.deliver(frame(id, b"abcd", false, false));
-                streams.deliver(frame(id, b"efgh", false, false));
+                streams.deliver(frame(id, b"abcd", false));
+                streams.deliver(frame(id, b"efgh", false));
             }
         });
         let read = stream.read_bounded(6).await.unwrap();

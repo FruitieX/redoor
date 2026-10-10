@@ -1,25 +1,21 @@
 //! Agent-to-consumer output streams: file downloads (with transfer history) and exec output.
 //!
 //! The router admits the stream and opens its inbound slot; frames then flow from the
-//! connection reader to the consumer's [`OutputReceiver`](super::streams::OutputReceiver) directly. The
-//! router sees the stream again only for its terminal frame, a control-lane fallback result,
-//! or cancellation.
+//! connection reader to the consumer's [`OutputReceiver`](super::streams::OutputReceiver)
+//! directly. The router sees the stream again only for its result, which the agent sends after
+//! the stream's data, for a credit violation, or for cancellation.
 
 use super::RouterError;
 use super::flows::{Flow, FlowId, OutputFlow, OutputKind, OutputPhase};
 use super::messages::{ExecuteStreamRequest, OutputStreamTracking, RouteResponse};
 use super::progress::DownloadStartContext;
-use super::state::{AgentConnection, RouterState};
-use super::streams::{StreamEnd, StreamLease, StreamOutcome};
-use redoor_core::log;
+use super::state::RouterState;
+use super::streams::StreamLease;
 use redoor_protocol::{
     api::transfers::TransferProgressState,
-    ids::RequestId,
     wire::{
-        ServerToAgent,
-        command::{Command, CommandResult},
+        command::{Command, CommandErrorKind, CommandResult},
         exec::ExecEvent,
-        log::Level,
         policy::CommandLane,
         stream::STREAM_CREDIT_WINDOW_FRAMES,
     },
@@ -29,27 +25,19 @@ use std::sync::atomic::Ordering;
 /// Message shown when an agent sends more frames than its credit allowed.
 const CREDIT_VIOLATION: &str = "Agent exceeded the stream flow-control credit";
 
-impl AgentConnection {
-    /// Queues `cancel_transfer` on the priority lane, retaining it in a task when the lane is
-    /// momentarily full so an admitted cancellation is never lost; a closed lane is an error
-    /// the caller can report and retry.
-    pub(crate) fn queue_priority_cancel(
-        &self,
-        request_id: RequestId,
-    ) -> Result<Option<tokio::task::JoinHandle<()>>, RouterError> {
-        self.lanes
-            .queue_priority(ServerToAgent::Cancel { id: request_id })
-            .map_err(|_| RouterError::ControlQueueFull {
-                agent_id: self.agent_id.to_string(),
-            })
+/// The exec event a result reports; any other result still ends the execution visibly.
+fn exec_event(result: CommandResult) -> ExecEvent {
+    match result {
+        CommandResult::Exec { event } => event,
+        CommandResult::Error {
+            kind: CommandErrorKind::Canceled,
+            ..
+        } => ExecEvent::Canceled,
+        CommandResult::Error { message, .. } => ExecEvent::Error { message },
+        other => ExecEvent::Error {
+            message: format!("Unexpected execution result: {}", other.summary()),
+        },
     }
-}
-
-/// Parses an exec terminal frame; a malformed one still ends the execution visibly.
-fn exec_event(payload: &[u8]) -> ExecEvent {
-    serde_json::from_slice(payload).unwrap_or_else(|error| ExecEvent::Error {
-        message: format!("Invalid execution acknowledgement: {error}"),
-    })
 }
 
 impl RouterState {
@@ -75,7 +63,7 @@ impl RouterState {
             return;
         }
         let id = self.next_id();
-        let Some(connection) = self.agents.by_id.get(&agent_id) else {
+        let Some(connection) = self.agents.by_id.get_mut(&agent_id) else {
             let _ = reply.send(Err(RouterError::AgentNotFound {
                 agent_id: agent_id.to_string(),
             }));
@@ -85,7 +73,7 @@ impl RouterState {
         let receiver = connection
             .streams
             .open_inbound(lease.clone(), STREAM_CREDIT_WINDOW_FRAMES);
-        if !connection.send_message(ServerToAgent::Command { id, command }) {
+        if !connection.send_command(id, command) {
             connection.streams.close_inbound(id);
             let _ = reply.send(Err(RouterError::ControlQueueFull {
                 agent_id: agent_id.to_string(),
@@ -132,96 +120,22 @@ impl RouterState {
         }
     }
 
-    /// Settles an output stream whose terminal frame the transfer reader saw.
-    pub(crate) fn finish_output_stream(&mut self, flow_id: FlowId, end: StreamEnd) {
+    /// Fails an output stream whose agent ignored its credit and stops the agent's worker,
+    /// whose result then only acknowledges the cancel.
+    pub(crate) fn fail_overflowing_output(&mut self, flow_id: FlowId) {
         let Some(Flow::Output(flow)) = self.flows.get(flow_id) else {
             return;
         };
-        if flow.agent_id != end.agent_id {
+        if matches!(flow.phase, OutputPhase::Canceling { .. }) {
             return;
         }
-        let Some(Flow::Output(flow)) = self.flows.remove(flow_id) else {
-            return;
-        };
-        let canceling = matches!(flow.phase, OutputPhase::Canceling { .. });
-        if matches!(end.outcome, StreamOutcome::Overflow) && !canceling {
-            self.fail_overflowing_output(&flow);
-        }
-        match &flow.kind {
-            OutputKind::Execution { terminal } => {
-                // Delivered terminal frames reach the consumer in-band; otherwise (stopped or
-                // violating stream) the independent lane carries the real outcome.
-                if !end.delivered || canceling {
-                    terminal.send_replace(Some(match &end.outcome {
-                        StreamOutcome::Completed { payload } => exec_event(payload),
-                        StreamOutcome::Failed { message } => ExecEvent::Error {
-                            message: message.clone(),
-                        },
-                        StreamOutcome::Overflow => ExecEvent::Error {
-                            message: CREDIT_VIOLATION.to_string(),
-                        },
-                    }));
-                }
-            }
-            OutputKind::Download {
-                progress_id,
-                base_bytes,
-            } => {
-                let progress_id = *progress_id;
-                if canceling {
-                    self.acknowledge_download_cancel(progress_id);
-                } else {
-                    self.settle_download(progress_id, *base_bytes, &end);
-                }
-            }
-        }
-    }
-
-    /// Stops an agent that ignored its credit and reports the violation to the consumer.
-    fn fail_overflowing_output(&mut self, flow: &OutputFlow) {
-        log!(
-            Level::Warning,
-            "Output stream exceeded flow-control credit: agent_id={}, request_id={}",
-            flow.agent_id,
-            flow.request_id
-        );
         flow.lease.fail(CREDIT_VIOLATION.to_string());
-        if let Some(connection) = self.agents.by_id.get(&flow.agent_id) {
-            // The worker may still be producing; it must stop even though its stream is gone.
-            let _ = connection.queue_priority_cancel(flow.request_id);
+        if let OutputKind::Download { progress_id, .. } = flow.kind {
+            self.mark_transfer_errored(progress_id, CREDIT_VIOLATION.to_string());
+            self.notify_transfer_refresh();
         }
-    }
-
-    /// Records a download's outcome from its terminal frame.
-    fn settle_download(
-        &mut self,
-        progress_id: redoor_protocol::ids::TransferId,
-        base_bytes: u64,
-        end: &StreamEnd,
-    ) {
-        match &end.outcome {
-            StreamOutcome::Completed { .. } if end.delivered => {
-                if let Some(entry) = self.progress.entries.get_mut(&progress_id)
-                    && matches!(entry.state, TransferProgressState::Active)
-                {
-                    // Count everything queued for the consumer, not just what it drained yet,
-                    // so unknown-size archives complete with their full size.
-                    entry.transferred_bytes = base_bytes.saturating_add(end.received_bytes);
-                }
-                self.mark_transfer_completed(progress_id);
-            }
-            StreamOutcome::Completed { .. } => {
-                // The consumer vanished before the final frame could be handed over.
-                self.mark_transfer_errored(progress_id, "Download canceled by client".to_string());
-            }
-            StreamOutcome::Failed { message } => {
-                self.mark_transfer_errored(progress_id, message.clone());
-            }
-            StreamOutcome::Overflow => {
-                self.mark_transfer_errored(progress_id, CREDIT_VIOLATION.to_string());
-            }
-        }
-        self.notify_transfer_refresh();
+        // The worker may still be producing although its stream is gone.
+        let _ = self.request_output_cancel(flow_id);
     }
 
     /// Explicit file cancellation becomes terminal only when the agent released its worker.
@@ -241,8 +155,11 @@ impl RouterState {
         }
     }
 
-    /// Settles an output stream from its control-lane result, which the agent sends when the
-    /// terminal frame could not travel in-band (or the command failed before streaming).
+    /// Settles an output stream from its result.
+    ///
+    /// The result follows the stream's data, so the consumer already has every frame: a
+    /// success is final, and an error stops the stream after its queued frames with the
+    /// agent's message. While canceling, the result only acknowledges the cancel.
     pub(crate) fn finish_output_response(&mut self, flow_id: FlowId, response: RouteResponse) {
         let Some(Flow::Output(flow)) = self.flows.get(flow_id) else {
             return;
@@ -250,64 +167,69 @@ impl RouterState {
         if flow.agent_id != response.agent_id {
             return;
         }
-        let terminal_event = match (&flow.kind, &response.result) {
-            (OutputKind::Execution { .. }, CommandResult::Exec { event }) => Some(event.clone()),
-            (_, CommandResult::Error { message, .. }) => Some(ExecEvent::Error {
-                message: message.clone(),
-            }),
-            _ => None,
-        };
-        let Some(event) = terminal_event else {
-            log!(
-                Level::Warning,
-                "Received command response for output stream: request_id={}, result={:?}",
-                response.request_id,
-                response.result
-            );
-            return;
-        };
         let Some(Flow::Output(flow)) = self.flows.remove(flow_id) else {
             return;
         };
         if let Some(connection) = self.agents.by_id.get(&flow.agent_id) {
-            // No terminal frame will follow; the consumer ends after draining queued output.
+            // A failed stream sent no FIN; this ends its consumer after the queued frames.
             connection.streams.close_inbound(flow.request_id);
         }
-        match flow.kind {
-            OutputKind::Execution { ref terminal } => {
-                // The fallback is authoritative even when no terminal payload was forwarded.
-                terminal.send_replace(Some(event));
+        let canceling = matches!(flow.phase, OutputPhase::Canceling { .. });
+        match &flow.kind {
+            OutputKind::Execution { terminal } => {
+                terminal.send_replace(Some(exec_event(response.result)));
+            }
+            OutputKind::Download { progress_id, .. } if canceling => {
+                self.acknowledge_download_cancel(*progress_id);
             }
             OutputKind::Download { progress_id, .. } => {
-                let ExecEvent::Error { message } = event else {
-                    return;
-                };
-                self.mark_transfer_errored(progress_id, message.clone());
+                let progress_id = *progress_id;
+                match response.result {
+                    CommandResult::Error { message, .. } => {
+                        self.mark_transfer_errored(progress_id, message.clone());
+                        flow.lease.fail(message);
+                    }
+                    _ => self.complete_download(&flow, progress_id),
+                }
                 self.notify_transfer_refresh();
-                flow.lease.fail(message);
             }
         }
     }
 
-    /// Admits cancellation of an output stream on the agent's priority lane, then stops its
-    /// data path. Failed admission leaves the stream untouched so the caller can retry.
+    /// Records a download whose agent finished streaming it.
+    fn complete_download(
+        &mut self,
+        flow: &OutputFlow,
+        progress_id: redoor_protocol::ids::TransferId,
+    ) {
+        let OutputKind::Download { base_bytes, .. } = flow.kind else {
+            return;
+        };
+        if let Some(entry) = self.progress.entries.get_mut(&progress_id)
+            && matches!(entry.state, TransferProgressState::Active)
+        {
+            // Count everything queued for the consumer, not just what it drained yet, so
+            // unknown-size archives complete with their full size.
+            entry.transferred_bytes = base_bytes.saturating_add(flow.lease.received());
+        }
+        self.mark_transfer_completed(progress_id);
+    }
+
+    /// Admits cancellation of an output stream on the agent, then stops its data path.
+    /// Failed admission leaves the stream untouched so the caller can retry.
     pub(crate) fn request_output_cancel(&mut self, flow_id: FlowId) -> Result<(), RouterError> {
-        let Some(Flow::Output(flow)) = self.flows.get_mut(flow_id) else {
+        let Some(Flow::Output(flow)) = self.flows.get(flow_id) else {
             return Ok(());
         };
         if matches!(flow.phase, OutputPhase::Canceling { .. }) {
             return Ok(());
         }
-        let connection =
-            self.agents
-                .by_id
-                .get(&flow.agent_id)
-                .ok_or_else(|| RouterError::AgentNotFound {
-                    agent_id: flow.agent_id.to_string(),
-                })?;
-        let retained_delivery = connection.queue_priority_cancel(flow.request_id)?;
-        flow.phase = OutputPhase::Canceling { retained_delivery };
-        flow.lease.stop();
+        let (agent_id, request_id) = (flow.agent_id.clone(), flow.request_id);
+        let retained_delivery = self.cancel_on_agent(&agent_id, request_id)?;
+        if let Some(Flow::Output(flow)) = self.flows.get_mut(flow_id) {
+            flow.phase = OutputPhase::Canceling { retained_delivery };
+            flow.lease.stop();
+        }
         Ok(())
     }
 
@@ -335,18 +257,21 @@ impl RouterState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::RouterMsg;
     use super::super::messages::RegisterAgentRequest;
+    use super::super::state::AgentConnection;
     use super::super::streams::{ConnectionStreams, OutputReceiver};
     use super::*;
-    use crate::actors::lanes::ControlLanes;
-    use redoor_protocol::ids::AgentId;
+    use crate::actors::lanes::{ControlLanes, QueuedCommand};
+    use redoor_protocol::ids::{AgentId, RequestId};
+    use redoor_protocol::wire::ServerToAgent;
     use redoor_protocol::wire::stream::StreamChunk;
     use tokio::sync::{mpsc, oneshot, watch};
 
     /// Keeps lane receivers alive so tests can exercise real admission pressure.
     struct Fixture {
         state: RouterState,
-        commands: mpsc::Receiver<ServerToAgent>,
+        commands: mpsc::Receiver<QueuedCommand>,
         priority: mpsc::Receiver<ServerToAgent>,
         streams: ConnectionStreams,
         agent: AgentId,
@@ -372,8 +297,8 @@ mod tests {
             }
         }
 
-        /// Admits an output stream through the real start path.
-        async fn start(
+        /// Admits an output stream through the real start path, leaving its command queued.
+        async fn admit(
             &mut self,
             command: Command,
             tracking: OutputStreamTracking,
@@ -385,10 +310,37 @@ mod tests {
                 tracking,
                 reply,
             });
-            let result = receiver.await.unwrap();
-            // Drain the admitted command so the single-slot lane is free again.
-            let _ = self.commands.try_recv();
+            receiver.await.unwrap()
+        }
+
+        /// Admits an output stream and lets the writer take its command, as if it reached
+        /// the socket; this also frees the single-slot lane again.
+        async fn start(
+            &mut self,
+            command: Command,
+            tracking: OutputStreamTracking,
+        ) -> Result<OutputReceiver, RouterError> {
+            let result = self.admit(command, tracking).await;
+            if let Ok(QueuedCommand {
+                ticket: Some(ticket),
+                ..
+            }) = self.commands.try_recv()
+            {
+                assert!(ticket.mark_written());
+            }
             result
+        }
+
+        /// The exec command used by every execution test.
+        fn exec_command() -> Command {
+            Command::Exec {
+                request: redoor_protocol::wire::exec::ExecRequest {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                    env: Default::default(),
+                    timeout_ms: None,
+                },
+            }
         }
 
         /// Starts an execution and returns its consumer plus the independent terminal lane.
@@ -396,14 +348,7 @@ mod tests {
             let (terminal, terminal_receiver) = watch::channel(None);
             let receiver = self
                 .start(
-                    Command::Exec {
-                        request: redoor_protocol::wire::exec::ExecRequest {
-                            argv: vec!["true".into()],
-                            cwd: None,
-                            env: Default::default(),
-                            timeout_ms: None,
-                        },
-                    },
+                    Self::exec_command(),
                     OutputStreamTracking::Execution { terminal },
                 )
                 .await
@@ -416,18 +361,26 @@ mod tests {
             self.state.cancel_execution(id, self.agent.clone())
         }
 
-        /// Delivers one agent frame through the transfer reader's routing.
+        /// Delivers one agent frame through the connection reader's routing.
         fn deliver(&mut self, id: RequestId, is_last: bool, data: Vec<u8>) {
-            let end = self.streams.deliver(StreamChunk {
+            if let Some(violation) = self.streams.deliver(StreamChunk {
                 request_id: id,
                 is_last,
-                is_error: false,
                 data,
-            });
-            if let Some(end) = end {
-                let flow_id = self.state.flows.id_for(&self.agent, id).unwrap();
-                self.state.finish_output_stream(flow_id, end);
+            }) {
+                self.state.handle(RouterMsg::CreditViolated(violation));
             }
+        }
+
+        /// Delivers the agent's result for `id` through the router.
+        fn respond(&mut self, id: RequestId, result: CommandResult) {
+            let socket_id = self.state.agents.by_id[&self.agent].socket_id.clone();
+            self.state.handle(RouterMsg::RouteResponse(RouteResponse {
+                agent_id: self.agent.clone(),
+                socket_id,
+                request_id: id,
+                result,
+            }));
         }
     }
 
@@ -456,9 +409,43 @@ mod tests {
         assert!(fixture.priority.try_recv().is_err());
         // The stopped stream ends for the consumer without waiting for more output.
         assert!(output.recv().await.is_none());
-        // The agent's terminal frame confirms cleanup before ownership is released.
-        fixture.deliver(id, true, serde_json::to_vec(&ExecEvent::Canceled).unwrap());
+        // The agent's result confirms cleanup before ownership is released.
+        fixture.respond(
+            id,
+            CommandResult::Exec {
+                event: ExecEvent::Canceled,
+            },
+        );
         assert!(matches!(&*terminal.borrow(), Some(ExecEvent::Canceled)));
+        assert!(fixture.state.flows.id_for(&fixture.agent, id).is_none());
+    }
+
+    /// A cancel must never overtake its command, so a command still in the queue is
+    /// withdrawn: nothing reaches the wire and the router answers it as canceled itself.
+    #[tokio::test]
+    async fn cancel_of_unsent_command_is_withdrawn_without_wire_traffic() {
+        let mut fixture = Fixture::new();
+        let (terminal, terminal_receiver) = watch::channel(None);
+        let output = fixture
+            .admit(
+                Fixture::exec_command(),
+                OutputStreamTracking::Execution { terminal },
+            )
+            .await
+            .unwrap();
+        let id = output.request_id();
+        assert_eq!(fixture.cancel(id), Ok(true));
+        fixture.state.route_local_results();
+        // No cancel frame is queued, because the agent will never know this id.
+        assert!(fixture.priority.try_recv().is_err());
+        let queued = fixture.commands.try_recv().unwrap();
+        // The writer skips the withdrawn command instead of writing it.
+        assert!(!queued.ticket.unwrap().mark_written());
+        // The execution still ends, with a canceled outcome and no flow left behind.
+        assert!(matches!(
+            &*terminal_receiver.borrow(),
+            Some(ExecEvent::Canceled)
+        ));
         assert!(fixture.state.flows.id_for(&fixture.agent, id).is_none());
     }
 
@@ -504,7 +491,7 @@ mod tests {
         fixture.deliver(id, false, b"queued".to_vec());
         assert_eq!(fixture.cancel(id), Ok(true));
         // Accepted output is not discarded by cancellation.
-        assert_eq!(output.recv().await.unwrap().data, b"queued");
+        assert_eq!(output.recv().await.unwrap().unwrap().data, b"queued");
         // Releasing a waiting consumer must not require another agent frame.
         assert!(output.recv().await.is_none());
     }
@@ -515,14 +502,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let result = fixture
             .start(
-                Command::Exec {
-                    request: redoor_protocol::wire::exec::ExecRequest {
-                        argv: vec!["true".into()],
-                        cwd: None,
-                        env: Default::default(),
-                        timeout_ms: None,
-                    },
-                },
+                Fixture::exec_command(),
                 OutputStreamTracking::Download {
                     path: "/fake".into(),
                     total_bytes: 0,
@@ -539,13 +519,14 @@ mod tests {
         assert!(fixture.state.progress.entries.is_empty());
     }
 
-    /// The control-lane fallback carries the actual outcome, not an invented cancellation.
+    /// The result after a cancel carries the actual outcome, not an invented cancellation:
+    /// an exit the agent reached first wins over the cancel.
     #[tokio::test]
-    async fn command_fallback_preserves_actual_terminal_outcome() {
+    async fn result_after_cancel_reports_the_actual_outcome() {
         for event in [
             ExecEvent::Canceled,
             ExecEvent::Exit {
-                code: Some(0),
+                code: Some(7),
                 signal: None,
             },
         ] {
@@ -555,18 +536,13 @@ mod tests {
             // Admission alone is deliberately not termination.
             assert_eq!(fixture.cancel(id), Ok(true));
             assert!(terminal.borrow().is_none());
-            fixture.state.finish_output_response(
+            fixture.respond(
                 id,
-                RouteResponse {
-                    agent_id: fixture.agent.clone(),
-                    socket_id: redoor_protocol::ids::SocketId::new(),
-                    request_id: id,
-                    result: CommandResult::Exec {
-                        event: event.clone(),
-                    },
+                CommandResult::Exec {
+                    event: event.clone(),
                 },
             );
-            // The fallback is authoritative even if no terminal payload was forwarded.
+            // The result is authoritative even though the stopped consumer saw no frames.
             assert_eq!(
                 serde_json::to_value(terminal.borrow().clone()).unwrap(),
                 serde_json::to_value(Some(event)).unwrap()
@@ -575,31 +551,9 @@ mod tests {
         }
     }
 
-    /// An exit already acknowledged by the agent wins over a later cancel request.
-    #[tokio::test]
-    async fn terminal_after_cancel_retains_normal_exit() {
-        let mut fixture = Fixture::new();
-        let (_output, terminal) = fixture.exec().await;
-        let id = _output.request_id();
-        assert_eq!(fixture.cancel(id), Ok(true));
-        let exit = ExecEvent::Exit {
-            code: Some(7),
-            signal: None,
-        };
-        fixture.deliver(id, true, serde_json::to_vec(&exit).unwrap());
-        // The real exit is published even though the stopped consumer never saw the frame.
-        assert!(matches!(
-            &*terminal.borrow(),
-            Some(ExecEvent::Exit { code: Some(7), .. })
-        ));
-    }
-
-    /// Downloads complete with every byte the reader queued, and cancellation of a download
-    /// is not reachable through the execution endpoint.
-    #[tokio::test]
-    async fn download_completion_counts_queued_bytes_and_is_not_an_execution() {
-        let mut fixture = Fixture::new();
-        let output = fixture
+    /// Starts a tar download of `/dir`.
+    async fn tar_download(fixture: &mut Fixture) -> OutputReceiver {
+        fixture
             .start(
                 Command::TarDownload {
                     path: "/dir".into(),
@@ -613,16 +567,54 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Downloads complete on their result with every byte the reader queued, and
+    /// cancellation of a download is not reachable through the execution endpoint.
+    #[tokio::test]
+    async fn download_completion_counts_queued_bytes_and_is_not_an_execution() {
+        let mut fixture = Fixture::new();
+        let output = tar_download(&mut fixture).await;
         let id = output.request_id();
         // File history belongs to downloads only; DELETE /exec must not reach it.
         assert_eq!(fixture.cancel(id), Ok(false));
         fixture.deliver(id, false, vec![1; 10]);
         fixture.deliver(id, true, vec![1; 5]);
         let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
+        // FIN alone is not completion; the result that follows it is.
+        assert!(matches!(entry.state, TransferProgressState::Active));
+        fixture.respond(
+            id,
+            CommandResult::TarDownload {
+                path: "/dir".into(),
+            },
+        );
+        let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
         // Unknown-size archives complete with every queued byte even before they are drained.
         assert!(matches!(entry.state, TransferProgressState::Completed));
         assert_eq!(entry.total_bytes, 15);
+    }
+
+    /// A download that fails mid-stream ends without FIN; its consumer gets the data sent
+    /// before the failure and then the agent's message, never a silently short file.
+    #[tokio::test]
+    async fn failed_download_delivers_data_then_the_error() {
+        let mut fixture = Fixture::new();
+        let mut output = tar_download(&mut fixture).await;
+        let id = output.request_id();
+        fixture.deliver(id, false, b"partial".to_vec());
+        fixture.respond(
+            id,
+            CommandResult::error(CommandErrorKind::Internal, "disk gone"),
+        );
+        assert_eq!(output.recv().await.unwrap().unwrap().data, b"partial");
+        // The failure arrives after the data, as on the wire.
+        assert_eq!(output.recv().await, Some(Err("disk gone".to_string())));
+        let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
+        // The history row carries the agent's reason.
+        assert!(matches!(entry.state, TransferProgressState::Errored));
+        assert_eq!(entry.error.as_deref(), Some("disk gone"));
     }
 
     /// A credit violation fails only the violating stream and stops its agent worker.
@@ -640,7 +632,7 @@ mod tests {
             .lanes = lanes;
         fixture.commands = receivers.commands;
         fixture.priority = receivers.priority;
-        let (mut output, terminal) = fixture.exec().await;
+        let (mut output, _terminal) = fixture.exec().await;
         let id = output.request_id();
         for _ in 0..=redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES + 1 {
             fixture.deliver(id, false, b"x".to_vec());
@@ -650,13 +642,11 @@ mod tests {
             fixture.priority.try_recv(),
             Ok(ServerToAgent::Cancel { id: request_id }) if request_id == id
         ));
-        // The independent terminal lane reports the violation.
-        assert!(matches!(&*terminal.borrow(), Some(ExecEvent::Error { .. })));
         let mut last = None;
-        while let Some(chunk) = output.recv().await {
-            last = Some(chunk);
+        while let Some(item) = output.recv().await {
+            last = Some(item);
         }
         // The consumer ends with an error instead of a silently truncated stream.
-        assert!(last.is_some_and(|chunk| chunk.is_error));
+        assert!(last.is_some_and(|item| item.is_err()));
     }
 }

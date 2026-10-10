@@ -131,16 +131,8 @@ impl AgentUpload {
                 self.total_bytes,
                 self.bytes_written
             );
-            let result = self
-                .forward_result(
-                    self.stream
-                        .send(StreamChunk::error(self.request_id(), &message))
-                        .await,
-                )
-                .await;
             self.cancel_guard.armed = false;
-            result?;
-            // The error frame bypasses the router, so tell it why the transfer failed.
+            // The router records why the transfer failed and cancels the agent's worker.
             let _ = self
                 .router
                 .send_async(RouterMsg::OutboundStreamFailed(OutboundFailure {

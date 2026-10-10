@@ -129,7 +129,7 @@ impl LineAssembler {
 
 /// One thing the log stream produced for the browser.
 enum StreamOutput {
-    Data(Option<redoor_protocol::wire::stream::StreamChunk>),
+    Data(Option<Result<redoor_protocol::wire::stream::StreamChunk, String>>),
     Keepalive,
 }
 
@@ -154,12 +154,9 @@ async fn forward_agent_events(
                     .map_err(|_| ())?;
                 continue;
             }
-            StreamOutput::Data(None) => return close(&mut browser).await,
-            StreamOutput::Data(Some(chunk)) => chunk,
+            StreamOutput::Data(None | Some(Err(_))) => return close(&mut browser).await,
+            StreamOutput::Data(Some(Ok(chunk))) => chunk,
         };
-        if chunk.is_error {
-            return close(&mut browser).await;
-        }
         for line in lines.push(&chunk.data)? {
             forward_line(&mut browser, line).await?;
         }

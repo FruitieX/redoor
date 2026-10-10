@@ -14,32 +14,30 @@ use super::super::messages::{
 };
 use super::super::progress::CopyStartContext;
 use super::super::state::{CopyContentKind, CopyOperation, RouterState};
-use super::super::streams::{
-    OutboundError, OutboundStream, OutputReceiver, StreamEnd, StreamLease, StreamOutcome,
-};
+use super::super::streams::{OutboundStart, OutboundStream, OutputReceiver, StreamLease};
 use redoor_core::log;
 use redoor_protocol::ids::{AgentId, RequestId};
-use redoor_protocol::wire::ServerToAgent;
 use redoor_protocol::wire::log::Level;
-use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk};
+use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
 use redoor_protocol::{
     api::transfers::{TransferDirection, TransferProgressState},
     wire::command::{Command, CommandResult},
 };
 
 /// How a finished copy releases its streams.
-pub(crate) enum CopyRelease<'a> {
+pub(crate) enum CopyRelease {
     /// Completed or fully acknowledged: stop the data path without notifying agents.
     Quiet,
-    /// Failed: abort the destination with this reason and cancel an unfinished source.
-    Fail(&'a str),
+    /// Failed: cancel the destination worker so it discards its staging, and an unfinished
+    /// source so it stops producing.
+    Fail,
 }
 
 /// Moves one remote copy's frames from the source stream to the destination stream.
 ///
-/// Runs outside the router so per-frame work never touches its mailbox. It owns the
-/// destination stream, so it is also the one that sends the destination's abort frame when
-/// the router fails the copy.
+/// Runs outside the router so per-frame work never touches its mailbox. It only forwards
+/// data and `FIN`: a source that fails ends without `FIN`, and the router, which learns that
+/// from the source's result, cancels the destination.
 struct CopyForwarder {
     source: OutputReceiver,
     dest: OutboundStream,
@@ -50,54 +48,22 @@ impl CopyForwarder {
     async fn run(mut self) {
         let stop = self.dest.lease().cancel.clone();
         loop {
-            let chunk = tokio::select! {
+            let item = tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
-                chunk = self.source.recv() => chunk,
+                item = self.source.recv() => item,
             };
-            let Some(chunk) = chunk else {
+            // A failed or stopped source is settled by the router.
+            let Some(Ok(chunk)) = item else {
                 break;
             };
-            if !self.forward(chunk).await {
-                return;
+            let is_last = chunk.is_last;
+            // After FIN nothing follows. A stopped destination was settled by the router, and
+            // a lost destination connection fails the copy when the router sees it go.
+            if self.dest.send_data(&chunk.data, is_last).await.is_err() || is_last {
+                break;
             }
         }
-        self.abort_if_failed().await;
-    }
-
-    /// Forwards one source frame and reports whether more frames should follow.
-    async fn forward(&mut self, chunk: StreamChunk) -> bool {
-        if chunk.is_error {
-            let message = if chunk.data.is_empty() {
-                "Copy download failed on agent".to_string()
-            } else {
-                String::from_utf8_lossy(&chunk.data).into_owned()
-            };
-            self.abort(&message).await;
-            return false;
-        }
-        let is_last = chunk.is_last;
-        match self.dest.send_data(&chunk.data, is_last).await {
-            Ok(()) => !is_last,
-            Err(OutboundError::Stopped) => {
-                self.abort_if_failed().await;
-                false
-            }
-            // The router fails the copy when it processes the lost transfer socket.
-            Err(OutboundError::LaneClosed) => false,
-        }
-    }
-
-    /// Sends the destination's abort frame when the router failed (not merely stopped) it.
-    async fn abort_if_failed(&mut self) {
-        if let Some(reason) = self.dest.fault().map(str::to_string) {
-            self.abort(&reason).await;
-        }
-    }
-
-    /// Ends the destination upload with an error frame so its worker discards staging.
-    async fn abort(&mut self, reason: &str) {
-        self.dest.send_abort(reason).await;
     }
 }
 
@@ -232,13 +198,8 @@ impl RouterState {
         let queued = self
             .agents
             .by_id
-            .get(&request.source_agent_id)
-            .is_some_and(|agent| {
-                agent.send_message(ServerToAgent::Command {
-                    id: request_id,
-                    command,
-                })
-            });
+            .get_mut(&request.source_agent_id)
+            .is_some_and(|agent| agent.send_command(request_id, command));
         (request.source_agent_id.clone(), queued)
     }
 
@@ -252,21 +213,24 @@ impl RouterState {
     ) -> (AgentId, bool) {
         let dest_id = self.next_id();
         let source_id = self.next_id();
-        let (Some(source_agent), Some(dest_agent)) = (
-            self.agents.by_id.get(&request.source_agent_id),
-            self.agents.by_id.get(&request.dest_agent_id),
-        ) else {
+        let Some(source_agent) = self.agents.by_id.get(&request.source_agent_id) else {
             return (request.source_agent_id.clone(), false);
         };
         let source = StreamLease::new(source_id, source_agent.link(), 0);
         let source_receiver = source_agent
             .streams
             .open_inbound(source.clone(), STREAM_CREDIT_WINDOW_FRAMES);
+        let Some(dest_agent) = self.agents.by_id.get_mut(&request.dest_agent_id) else {
+            return (request.dest_agent_id.clone(), false);
+        };
+        // The destination's first credit grant tells the router its worker is ready.
         let dest = OutboundStream::new(
             StreamLease::new(dest_id, dest_agent.link(), 0),
-            dest_agent
-                .streams
-                .open_outbound(dest_id, STREAM_CREDIT_WINDOW_FRAMES),
+            dest_agent.streams.open_outbound(
+                dest_id,
+                STREAM_CREDIT_WINDOW_FRAMES,
+                OutboundStart::AwaitGrant,
+            ),
             false,
         );
         tokio::spawn(
@@ -276,12 +240,12 @@ impl RouterState {
             }
             .run(),
         );
-        let queued = dest_agent.send_message(ServerToAgent::Command {
-            id: dest_id,
-            command: request
+        let queued = dest_agent.send_command(
+            dest_id,
+            request
                 .content_kind
                 .upload_command(request.dest_path.clone(), request.on_existing),
-        });
+        );
         self.flows.insert(
             flow_id,
             Flow::Copy(Box::new(CopyFlow {
@@ -306,37 +270,33 @@ impl RouterState {
     }
 
     /// Stops a copy's data path and forgets its stream state on both agents.
-    pub(crate) fn release_copy(&self, flow: &CopyFlow, release: CopyRelease<'_>) {
+    pub(crate) fn release_copy(&mut self, flow: &CopyFlow, release: CopyRelease) {
         if let CopyPhase::Remote(remote) = &flow.phase {
             self.release_remote_copy(&flow.source_agent_id, &flow.dest_agent_id, remote, release);
         }
     }
 
-    /// Stops both streams of a remote copy; a failure also aborts the destination worker and
-    /// cancels a source that is still producing.
+    /// Stops both streams of a remote copy; a failure also cancels the destination worker,
+    /// which discards its staging, and a source that is still producing.
+    ///
+    /// The agents' results for these cancels find no flow and are dropped, and a cancel for
+    /// a worker that already answered is ignored by its agent.
     pub(crate) fn release_remote_copy(
-        &self,
+        &mut self,
         source_agent_id: &AgentId,
         dest_agent_id: &AgentId,
         remote: &RemoteCopy,
-        release: CopyRelease<'_>,
+        release: CopyRelease,
     ) {
-        if let CopyRelease::Fail(reason) = release {
-            // The forwarder owns the destination's chunk numbering and sends the abort frame.
-            remote.dest.lease().fail(reason.to_string());
-            let source_started = !matches!(remote.stage, RemoteStage::AwaitingDestination { .. });
-            if source_started
-                && !remote.source_finished
-                && let Some(source) = self.agents.by_id.get(source_agent_id)
-            {
-                source.lanes.try_priority_or_command(ServerToAgent::Cancel {
-                    id: remote.source_id(),
-                });
-            }
-        } else {
-            remote.dest.lease().stop();
-        }
+        remote.dest.lease().stop();
         remote.source.stop();
+        if let CopyRelease::Fail = release {
+            let _ = self.cancel_on_agent(dest_agent_id, remote.dest_id());
+            let source_started = !matches!(remote.stage, RemoteStage::AwaitingDestination { .. });
+            if source_started && !remote.source_finished {
+                let _ = self.cancel_on_agent(source_agent_id, remote.source_id());
+            }
+        }
         if let Some(source) = self.agents.by_id.get(source_agent_id) {
             source.streams.close_inbound(remote.source_id());
         }
@@ -352,7 +312,7 @@ impl RouterState {
         };
         match failure {
             Some(message) => {
-                self.release_copy(&flow, CopyRelease::Fail(&message));
+                self.release_copy(&flow, CopyRelease::Fail);
                 self.mark_transfer_errored(flow.progress_id, message);
             }
             None => self.release_copy(&flow, CopyRelease::Quiet),
@@ -389,13 +349,8 @@ impl RouterState {
         let queued = self
             .agents
             .by_id
-            .get(&source_agent_id)
-            .is_some_and(|source| {
-                source.send_message(ServerToAgent::Command {
-                    id: source_id,
-                    command: source_command,
-                })
-            });
+            .get_mut(&source_agent_id)
+            .is_some_and(|source| source.send_command(source_id, source_command));
         if !queued {
             self.end_copy(
                 flow_id,
@@ -404,49 +359,47 @@ impl RouterState {
         }
     }
 
-    /// Settles a copy's source stream from its terminal frame.
-    pub(crate) fn finish_copy_source(&mut self, flow_id: FlowId, end: StreamEnd) {
+    /// Settles a copy's source download from its result.
+    ///
+    /// The result follows the source's data, so a successful source has handed the forwarder
+    /// everything and the destination's result completes the copy. A failed source sent no
+    /// `FIN`; closing its stream ends the forwarder, and the copy fails.
+    fn finish_copy_source(&mut self, flow_id: FlowId, result: CommandResult) {
         let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
             return;
         };
         let CopyPhase::Remote(remote) = &mut flow.phase else {
             return;
         };
-        if flow.source_agent_id != end.agent_id || remote.source_id() != end.request_id {
-            log!(
-                Level::Warning,
-                "Copy source mismatch: request_id={}, expected_agent_id={}, actual_agent_id={}",
-                flow.progress_id,
-                flow.source_agent_id,
-                end.agent_id
-            );
-            return;
-        }
         remote.source_finished = true;
+        let source_id = remote.source_id();
         let canceling = matches!(remote.stage, RemoteStage::Canceling { .. });
-        let failure = match end.outcome {
-            // A finished source download holds nothing to clean up, so while canceling its
-            // completion is its acknowledgement; otherwise the destination's response completes
-            // the copy once it published the bytes.
-            StreamOutcome::Completed { .. } if canceling => {
-                self.acknowledge_copy_cancel(flow_id, end.request_id);
-                return;
-            }
-            StreamOutcome::Completed { .. } => return,
-            StreamOutcome::Failed { message } if message.is_empty() => {
-                "Copy download failed on agent".to_string()
-            }
-            StreamOutcome::Failed { message } => message,
-            StreamOutcome::Overflow => {
-                // The source keeps producing although its stream is gone, so stop it too.
-                remote.source_finished = false;
-                "Copy source exceeded the stream flow-control credit".to_string()
-            }
-        };
+        if let Some(source) = self.agents.by_id.get(&flow.source_agent_id) {
+            source.streams.close_inbound(source_id);
+        }
         if canceling {
-            self.acknowledge_copy_cancel(flow_id, end.request_id);
-        } else {
-            self.end_copy(flow_id, Some(failure));
+            // A finished or failed source holds nothing to clean up, so its result is its
+            // cancel acknowledgement.
+            self.acknowledge_copy_cancel(flow_id, source_id);
+        } else if let CommandResult::Error { message, .. } = result {
+            self.end_copy(flow_id, Some(message));
+        }
+    }
+
+    /// Fails a copy whose source agent ignored its credit; ending the copy also cancels the
+    /// source, which keeps producing although its stream is gone.
+    pub(crate) fn fail_overflowing_copy_source(&mut self, flow_id: FlowId) {
+        let Some(Flow::Copy(flow)) = self.flows.get(flow_id) else {
+            return;
+        };
+        // While canceling the source was already told to stop, and its result acknowledges.
+        if let CopyPhase::Remote(remote) = &flow.phase
+            && !matches!(remote.stage, RemoteStage::Canceling { .. })
+        {
+            self.end_copy(
+                flow_id,
+                Some("Copy source exceeded the stream flow-control credit".to_string()),
+            );
         }
     }
 
@@ -466,21 +419,7 @@ impl RouterState {
             CopyPhase::Remote(remote)
                 if remote.source_id() == request_id && &flow.source_agent_id == agent_id =>
             {
-                // A source that answers on the control lane failed before it could stream.
-                let message = match response.result {
-                    CommandResult::Error { message, .. } => message,
-                    other => format!("Unexpected copy source response: {}", other.summary()),
-                };
-                if let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id)
-                    && let CopyPhase::Remote(remote) = &mut flow.phase
-                {
-                    remote.source_finished = true;
-                    if matches!(remote.stage, RemoteStage::Canceling { .. }) {
-                        self.acknowledge_copy_cancel(flow_id, request_id);
-                        return;
-                    }
-                }
-                self.end_copy(flow_id, Some(message));
+                self.finish_copy_source(flow_id, response.result)
             }
             CopyPhase::Local { request_id: local }
                 if *local == request_id && &flow.source_agent_id == agent_id =>
@@ -682,12 +621,8 @@ impl RouterState {
             }
         };
         for (agent_id, request_id) in targets {
-            if let Some(connection) = self.agents.by_id.get(&agent_id) {
-                // Falling back to the command lane is slower but must not lose cleanup.
-                connection
-                    .lanes
-                    .try_priority_or_command(ServerToAgent::Cancel { id: request_id });
-            }
+            // A lost connection settles its side of the copy through agent-loss cleanup.
+            let _ = self.cancel_on_agent(&agent_id, request_id);
         }
         Ok(())
     }
@@ -721,9 +656,13 @@ impl RouterState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::messages::RegisterAgentRequest;
+    use super::super::super::state::AgentConnection;
     use super::super::super::streams::{AgentLink, ConnectionStreams};
     use super::*;
     use crate::actors::lanes::ControlLanes;
+    use redoor_protocol::wire::ServerToAgent;
+    use redoor_protocol::wire::stream::StreamChunk;
     use tokio::sync::mpsc;
 
     /// Builds one agent connection with an observable bulk lane.
@@ -752,10 +691,14 @@ mod tests {
         let receiver = source_streams.open_inbound(source.clone(), STREAM_CREDIT_WINDOW_FRAMES);
         let dest = OutboundStream::new(
             StreamLease::new(RequestId::new(2), dest_link, 0),
-            dest_streams.open_outbound(RequestId::new(2), STREAM_CREDIT_WINDOW_FRAMES),
+            dest_streams.open_outbound(
+                RequestId::new(2),
+                STREAM_CREDIT_WINDOW_FRAMES,
+                OutboundStart::FullWindow,
+            ),
             false,
         );
-        tokio::spawn(
+        let forwarder = tokio::spawn(
             CopyForwarder {
                 source: receiver,
                 dest: dest.clone(),
@@ -784,13 +727,17 @@ mod tests {
         }
         // Unrelated streams of the source agent are still served by the same reader.
         source_streams.deliver(frame(RequestId::new(3), false));
-        assert_eq!(other.recv().await.unwrap().request_id, RequestId::new(3));
+        assert_eq!(
+            other.recv().await.unwrap().unwrap().request_id,
+            RequestId::new(3)
+        );
         // The destination's credit window bounds what the forwarder pushed to it.
         assert_eq!(forwarded, STREAM_CREDIT_WINDOW_FRAMES as usize);
-        // Failing the copy makes the forwarder abort the destination worker.
-        dest.lease().fail("Agent disconnected: source".to_string());
-        let abort = dest_lane.recv().await.unwrap();
-        assert!(abort.is_error && abort.data == b"Agent disconnected: source");
+        // Stopping the copy releases a forwarder stuck on credit.
+        dest.lease().stop();
+        forwarder.await.unwrap();
+        // The forwarder sends no error frame; the router cancels the destination worker.
+        assert!(dest_lane.try_recv().is_err());
     }
 
     /// The forwarder relays the final frame and stops.
@@ -804,7 +751,11 @@ mod tests {
         );
         let dest = OutboundStream::new(
             StreamLease::new(RequestId::new(2), dest_link, 0),
-            dest_streams.open_outbound(RequestId::new(2), STREAM_CREDIT_WINDOW_FRAMES),
+            dest_streams.open_outbound(
+                RequestId::new(2),
+                STREAM_CREDIT_WINDOW_FRAMES,
+                OutboundStart::FullWindow,
+            ),
             false,
         );
         let forwarder = tokio::spawn(
@@ -815,9 +766,12 @@ mod tests {
             .run(),
         );
         source_streams.deliver(frame(RequestId::new(1), false));
-        let end = source_streams.deliver(frame(RequestId::new(1), true));
-        // The router learns the source finished from the reader, independent of forwarding.
-        assert!(end.is_some_and(|end| end.delivered));
+        // FIN is not a router event: the source's result settles it.
+        assert!(
+            source_streams
+                .deliver(frame(RequestId::new(1), true))
+                .is_none()
+        );
         let frames = [
             dest_lane.recv().await.unwrap(),
             dest_lane.recv().await.unwrap(),
@@ -900,6 +854,84 @@ mod tests {
                 .id_for(&AgentId::from("dest"), dest_id)
                 .is_none()
         );
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// A source that fails ends without FIN; its error result fails the copy and cancels
+    /// the destination worker so it discards its staging instead of publishing a partial file.
+    #[tokio::test]
+    async fn failed_source_cancels_the_destination() {
+        let mut state = RouterState::new(tokio::spawn(async {}));
+        let mut lanes = Vec::new();
+        for name in ["source", "dest"] {
+            let agent = AgentId::from(name);
+            let (agent_lanes, receivers) = ControlLanes::bounded(4, 4);
+            state.agents.by_id.insert(
+                agent.clone(),
+                AgentConnection::from_register_request(RegisterAgentRequest::for_test(
+                    &agent,
+                    agent_lanes,
+                    ConnectionStreams::new(agent.clone()),
+                )),
+            );
+            lanes.push(receivers);
+        }
+        let flow_id = RequestId::new(80);
+        let (dest_id, source_id) = (RequestId::new(81), RequestId::new(82));
+        state.record_copy_start(CopyStartContext {
+            request_id: flow_id.as_transfer_id(),
+            source_agent_id: AgentId::from("source"),
+            source_path: "/source".into(),
+            dest_agent_id: AgentId::from("dest"),
+            dest_path: "/dest".into(),
+            total_bytes: 8,
+            direction: TransferDirection::Copy,
+        });
+        let link = |name: &str| state.agents.by_id[&AgentId::from(name)].link();
+        let (source_link, dest_link) = (link("source"), link("dest"));
+        state.flows.insert(
+            flow_id,
+            Flow::Copy(Box::new(CopyFlow {
+                progress_id: flow_id.as_transfer_id(),
+                source_agent_id: AgentId::from("source"),
+                dest_agent_id: AgentId::from("dest"),
+                content_kind: CopyContentKind::RawFile,
+                then: None,
+                phase: CopyPhase::Remote(Box::new(RemoteCopy {
+                    source: StreamLease::new(source_id, source_link, 0),
+                    dest: OutboundStream::new(
+                        StreamLease::new(dest_id, dest_link, 0),
+                        redoor_core::stream_credit::CreditGate::default(),
+                        false,
+                    ),
+                    stage: RemoteStage::Streaming,
+                    source_finished: false,
+                })),
+            })),
+        );
+        state.finish_copy_response(
+            flow_id,
+            RouteResponse {
+                agent_id: AgentId::from("source"),
+                socket_id: redoor_protocol::ids::SocketId::new(),
+                request_id: source_id,
+                result: CommandResult::error(
+                    redoor_protocol::wire::command::CommandErrorKind::Internal,
+                    "Failed to read file: boom",
+                ),
+            },
+        );
+        // The destination worker is told to stop; its staging must never be published.
+        assert!(matches!(
+            lanes[1].priority.try_recv(),
+            Ok(ServerToAgent::Cancel { id }) if id == dest_id
+        ));
+        // The source already answered, so it is not canceled again.
+        assert!(lanes[0].priority.try_recv().is_err());
+        let entry = &state.progress.entries[&flow_id.as_transfer_id()];
+        // The copy fails with the source's own reason.
+        assert!(matches!(entry.state, TransferProgressState::Errored));
+        assert_eq!(entry.error.as_deref(), Some("Failed to read file: boom"));
         state.ui.refresh_check_task.abort();
     }
 }

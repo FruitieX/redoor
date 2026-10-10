@@ -1,6 +1,6 @@
 //! A scripted agent connected to a real router, for unit tests of the HTTP service layer.
 
-use crate::actors::lanes::ControlLanes;
+use crate::actors::lanes::{ControlLanes, QueuedCommand};
 use crate::actors::router::{
     ConnectionStreams, RegisterAgentRequest, RouteResponse, RouterHandle, RouterMsg, spawn_router,
 };
@@ -17,7 +17,7 @@ pub(crate) struct FakeAgent {
     pub(crate) agent_id: AgentId,
     /// Control session the agent registered on; the router only accepts its frames from it.
     socket_id: SocketId,
-    pub(crate) commands: mpsc::Receiver<ServerToAgent>,
+    pub(crate) commands: mpsc::Receiver<QueuedCommand>,
     pub(crate) priority: mpsc::Receiver<ServerToAgent>,
     /// Kept open so server-to-agent payload frames have somewhere to go.
     _bulk: mpsc::Receiver<StreamChunk>,
@@ -57,11 +57,22 @@ impl FakeAgent {
         lane.recv().await.expect("lane open")
     }
 
-    /// Reads the next command the server sent.
+    /// Reads the next command the server sent, skipping withdrawn ones like the session
+    /// writer does.
     pub(crate) async fn next_command(&mut self) -> (RequestId, Command) {
-        match Self::next(&mut self.commands).await {
-            ServerToAgent::Command { id, command } => (id, command),
-            other => panic!("expected a command, got {other:?}"),
+        loop {
+            let queued = self.commands.recv().await.expect("lane open");
+            if queued
+                .ticket
+                .as_ref()
+                .is_some_and(|ticket| !ticket.mark_written())
+            {
+                continue;
+            }
+            match queued.frame {
+                ServerToAgent::Command { id, command, .. } => return (id, command),
+                other => panic!("expected a command, got {other:?}"),
+            }
         }
     }
 
@@ -91,9 +102,9 @@ impl FakeAgent {
 
     /// Delivers one stream frame through the connection reader's routing.
     pub(crate) async fn deliver(&self, chunk: StreamChunk) {
-        if let Some(end) = self.streams.deliver(chunk) {
+        if let Some(violation) = self.streams.deliver(chunk) {
             self.router
-                .send_async(RouterMsg::InboundStreamEnded(end))
+                .send_async(RouterMsg::CreditViolated(violation))
                 .await
                 .unwrap();
         }

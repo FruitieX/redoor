@@ -4,7 +4,6 @@ use super::super::flows::{CopyPhase, Flow, FlowId};
 use super::super::state::{CopyContentKind, RouterState};
 use super::copy::CopyRelease;
 use redoor_core::log;
-use redoor_protocol::wire::ServerToAgent;
 use redoor_protocol::wire::command::{Command, CommandResult};
 use redoor_protocol::wire::log::Level;
 
@@ -61,13 +60,8 @@ impl RouterState {
         let queued = self
             .agents
             .by_id
-            .get(&source_agent_id)
-            .is_some_and(|source| {
-                source.send_message(ServerToAgent::Command {
-                    id: delete_id,
-                    command,
-                })
-            });
+            .get_mut(&source_agent_id)
+            .is_some_and(|source| source.send_command(delete_id, command));
         if !queued {
             log!(
                 Level::Debug,

@@ -313,7 +313,7 @@ async fn forward_browser_frame(frame: WsMessage, input: &TerminalInput) -> Resul
 /// One thing the agent side produced for the browser.
 enum AgentOutput {
     Event(Option<TerminalServerMessage>),
-    Output(Option<StreamChunk>),
+    Output(Option<Result<StreamChunk, String>>),
     Keepalive,
 }
 
@@ -336,7 +336,10 @@ async fn forward_agent_to_browser(
             _ = keepalive.tick() => AgentOutput::Keepalive,
         };
         match next {
-            AgentOutput::Output(Some(chunk)) if chunk.is_last => {
+            AgentOutput::Output(Some(Err(message))) => {
+                return finish(&mut browser, &TerminalServerMessage::Error { message }).await;
+            }
+            AgentOutput::Output(Some(Ok(chunk))) if chunk.is_last => {
                 send_output(&mut browser, chunk).await?;
                 // The exit event precedes FIN on the wire, so it is already queued if it exists.
                 let event = events.try_recv().unwrap_or(TerminalServerMessage::Exit {
@@ -345,7 +348,7 @@ async fn forward_agent_to_browser(
                 });
                 return finish(&mut browser, &event).await;
             }
-            AgentOutput::Output(Some(chunk)) => send_output(&mut browser, chunk).await?,
+            AgentOutput::Output(Some(Ok(chunk))) => send_output(&mut browser, chunk).await?,
             AgentOutput::Output(None) | AgentOutput::Event(None) => {
                 return finish(
                     &mut browser,
@@ -369,15 +372,11 @@ async fn forward_agent_to_browser(
     }
 }
 
-/// Forwards one PTY output frame, or reports a stream the router failed.
+/// Forwards one PTY output frame.
 async fn send_output(
     browser: &mut SplitSink<WebSocket, WsMessage>,
     chunk: StreamChunk,
 ) -> Result<(), ()> {
-    if chunk.is_error {
-        let message = String::from_utf8_lossy(&chunk.data).into_owned();
-        return finish(browser, &TerminalServerMessage::Error { message }).await;
-    }
     if chunk.data.is_empty() {
         return Ok(());
     }

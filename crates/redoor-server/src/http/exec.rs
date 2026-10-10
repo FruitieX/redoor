@@ -59,52 +59,41 @@ fn ndjson_line(event: &ExecEvent) -> bytes::Bytes {
     bytes::Bytes::from(data)
 }
 
-/// Drains already accepted payload before fallback completion so timeouts cannot erase trailing output.
+/// Streams the output events, then the exit event from the terminal lane.
+///
+/// The agent sends the exit status as its result after the output, so the body reads the
+/// output to its end (`FIN`, or a cancel that stopped it) without losing trailing events and
+/// then waits for the status, which arrives independently of how fast the body is read.
 fn execution_body(
     mut output: OutputStream,
-    mut terminal_receiver: tokio::sync::watch::Receiver<Option<ExecEvent>>,
+    mut terminal: tokio::sync::watch::Receiver<Option<ExecEvent>>,
 ) -> Body {
     let stream = async_stream::stream! {
-        let mut terminal_open = true;
-        loop {
-            let chunk = tokio::select! {
-                biased;
-                chunk = output.recv() => Ok(chunk),
-                result = terminal_receiver.changed(), if terminal_open => Err(result.is_ok()),
-            };
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(false) => { terminal_open = false; continue; }
-                Err(true) => {
-                    let event = terminal_receiver.borrow_and_update().clone();
-                    let Some(event) = event else { break; };
-                    // Only agent terminal acknowledgements can describe process termination.
-                    output.disarm();
-                    yield Ok(ndjson_line(&event));
-                    break;
+        while let Some(item) = output.recv().await {
+            match item {
+                Ok(chunk) => yield Ok(bytes::Bytes::from(chunk.data)),
+                Err(error) => {
+                    yield Err(std::io::Error::other(error.0));
+                    return;
                 }
-            };
-            let Some(chunk) = chunk else {
-                // Accepted cancellation drops the payload sink to release backpressure,
-                // but termination is still pending on the independent acknowledgement lane.
-                if terminal_open && terminal_receiver.borrow().is_none() {
-                    let _ = terminal_receiver.changed().await;
-                }
-                let event = terminal_receiver.borrow_and_update().clone();
-                if let Some(event) = event {
-                    output.disarm();
-                    yield Ok(ndjson_line(&event));
-                } else {
-                    yield Err(std::io::Error::other("Execution stream ended before completion"));
-                }
-                break;
-            };
-            if chunk.is_error {
-                yield Err(std::io::Error::other(String::from_utf8_lossy(&chunk.data).to_string()));
-                break;
             }
-            yield Ok(bytes::Bytes::from(chunk.data));
-            if chunk.is_last { break; }
+        }
+        let event = loop {
+            let current = terminal.borrow_and_update().clone();
+            if current.is_some() {
+                break current;
+            }
+            // A closed lane means the router dropped the execution without a result.
+            if terminal.changed().await.is_err() {
+                break None;
+            }
+        };
+        match event {
+            Some(event) => {
+                output.disarm();
+                yield Ok(ndjson_line(&event));
+            }
+            None => yield Err(std::io::Error::other("Execution stream ended before completion")),
         }
     };
     Body::from_stream(stream)
@@ -116,9 +105,9 @@ mod tests {
     use crate::actors::router::{ConnectionStreams, spawn_router};
     use redoor_protocol::wire::{exec::ExecEvent, stream::StreamChunk};
 
-    /// A slow HTTP consumer can have buffered output when the independent fallback arrives.
+    /// A slow HTTP consumer can have buffered output when the exit status arrives.
     #[tokio::test]
-    async fn fallback_drains_buffered_output_before_single_terminal_event() {
+    async fn buffered_output_precedes_single_terminal_event() {
         let streams = ConnectionStreams::new(AgentId::from("test"));
         let receiver = streams.open_detached(RequestId::new(1));
         let output = ExecEvent::Stdout {
@@ -126,16 +115,10 @@ mod tests {
         };
         let mut data = serde_json::to_vec(&output).unwrap();
         data.push(b'\n');
-        streams.deliver(StreamChunk {
-            request_id: RequestId::new(1),
-            is_last: false,
-            is_error: false,
-            data,
-        });
+        streams.deliver(StreamChunk::data(RequestId::new(1), data, false));
+        streams.deliver(StreamChunk::data(RequestId::new(1), Vec::new(), true));
         let (terminal, terminal_receiver) = tokio::sync::watch::channel(None);
         terminal.send_replace(Some(ExecEvent::TimedOut));
-        // The router's fallback closes the stream without a terminal frame.
-        streams.close_inbound(RequestId::new(1));
         let (router, task) = spawn_router();
         let output = OutputStream::detached(router, AgentId::from("test"), receiver);
         let bytes = axum::body::to_bytes(execution_body(output, terminal_receiver), 4096)
@@ -146,7 +129,7 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        // Independent completion must not skip accepted stdout or emit a duplicate terminal record.
+        // The status must not skip accepted stdout or be emitted twice.
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ExecEvent::Stdout { data } if data == b"trailing output"));
         assert!(matches!(&events[1], ExecEvent::TimedOut));

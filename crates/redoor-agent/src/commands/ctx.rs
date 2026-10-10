@@ -2,7 +2,7 @@
 
 use crate::errors::AgentCommandError;
 use crate::runtime::cancel::Registration;
-use crate::runtime::responder::{ControlSender, Responder};
+use crate::runtime::responder::{ControlSender, Responder, ResultLedger};
 use crate::terminal::TerminalInputs;
 use crate::transfers::{
     copy::CopyContext,
@@ -39,6 +39,8 @@ pub(crate) struct AgentServices {
     pub(crate) terminal_inputs: TerminalInputs,
     /// Routes server credit grants to the output stream writers waiting for them.
     pub(crate) output_credits: OutputCredits,
+    /// Requests of the current connection that still owe their one result.
+    pub(crate) results: ResultLedger,
     /// TOML file this process loaded, reported by `GetAgentDetails`; empty for CLI/env-only runs.
     pub(crate) loaded_config_path: Arc<str>,
 }
@@ -52,6 +54,7 @@ impl AgentServices {
             upload_routes: UploadRoutes::default(),
             terminal_inputs: TerminalInputs::default(),
             output_credits: OutputCredits::default(),
+            results: ResultLedger::default(),
             loaded_config_path: loaded_config_path
                 .map(|path| path.display().to_string())
                 .unwrap_or_default()
@@ -74,7 +77,9 @@ impl AgentServices {
             }
         };
         if let Some(chunk) = self.terminal_inputs.deliver(chunk) {
-            self.upload_routes.route_chunk(chunk, control).await;
+            self.upload_routes
+                .route_chunk(chunk, control, &self.results)
+                .await;
         }
     }
 }
@@ -94,6 +99,8 @@ pub(crate) struct CommandCtx {
     /// Bulk lane of the connection for commands that stream output; absent in unit tests of
     /// control-only commands.
     pub(crate) bulk: Option<ControlSender>,
+    /// Initial credit the server granted the command's output stream.
+    pub(crate) credit: u32,
     /// Shared long-lived facilities.
     pub(crate) services: AgentServices,
 }
@@ -118,7 +125,9 @@ impl CommandCtx {
                 let stream = StreamWriter::new(
                     bulk,
                     request_id,
-                    self.services.output_credits.register(request_id),
+                    self.services
+                        .output_credits
+                        .register_with_window(request_id, self.credit),
                 );
                 Ok(OutputLane {
                     stream,
@@ -148,6 +157,7 @@ impl CommandCtx {
                 cancel: CancellationToken::new(),
                 registration: None,
                 bulk: None,
+                credit: 0,
                 services: AgentServices::new(Trash::unsupported(), None),
             },
             frames,
@@ -164,15 +174,13 @@ pub(crate) struct OutputLane {
 
 /// How a finished command reports its outcome.
 pub(crate) enum Reply {
-    /// Send this terminal result on the control lane.
+    /// Send this result on the control lane.
     Result(CommandResult),
-    /// The outcome already travelled in-band as the final or error frame of the output stream.
-    Streamed,
-    /// In-band delivery failed: send this result on the control lane, but give up if the
-    /// connection generation that would carry it is torn down first.
-    Fallback {
+    /// Send this result on the stream's own lane, after the data already queued there, so
+    /// the server has seen the whole stream when the result arrives.
+    Stream {
+        stream: StreamWriter,
         result: CommandResult,
-        abandon: CancellationToken,
     },
 }
 

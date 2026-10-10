@@ -3,6 +3,9 @@
 //! Every binary websocket message is one frame of one stream: an 8-byte stream id, a flags
 //! byte and up to 64 KiB of payload. Request streams use the request id as their stream id;
 //! terminals and log streams get their own ids from the same per-connection id space.
+//!
+//! A stream that completes ends with a `FIN` frame. A request stream that fails simply stops:
+//! its result, which always follows the stream's data, carries the error.
 
 use crate::ids::RequestId;
 use anyhow::{Result, bail};
@@ -18,10 +21,8 @@ pub const MAX_TRANSFER_FRAME_PAYLOAD_BYTES: usize = 64 * 1024;
 /// Largest binary message either side accepts.
 pub const MAX_STREAM_MESSAGE_BYTES: usize = HEADER_SIZE + MAX_TRANSFER_FRAME_PAYLOAD_BYTES;
 
-/// Flag bit marking the final frame of a stream.
+/// Flag bit marking the final frame of a completed stream.
 const FLAG_FIN: u8 = 0x01;
-/// Flag bit marking a final frame whose payload is an error message instead of data.
-const FLAG_ERROR: u8 = 0x02;
 
 /// Non-terminal frames a receiver initially allows in flight per request or log stream.
 ///
@@ -40,8 +41,7 @@ pub const TERMINAL_CREDIT_WINDOW_FRAMES: u32 = 16;
 pub const STREAM_CREDIT_BATCH_FRAMES: u32 = 2;
 
 /// Receive queue depth of a stream with `window` frames of credit: the full window plus the
-/// one terminal frame, which is exempt from credit so cancellation and completion can never
-/// wait for a grant.
+/// `FIN` frame, which is exempt from credit so completion can never wait for a grant.
 pub const fn receive_queue_frames(window: u32) -> usize {
     window as usize + 1
 }
@@ -51,10 +51,8 @@ pub const fn receive_queue_frames(window: u32) -> usize {
 pub struct StreamChunk {
     /// Stream the frame belongs to (the request id for request streams).
     pub request_id: RequestId,
-    /// FIN of a successful stream: no frame of this stream follows.
+    /// FIN: the stream completed and no frame of it follows.
     pub is_last: bool,
-    /// The payload is an error message that ends the stream instead of data.
-    pub is_error: bool,
     pub data: Vec<u8>,
 }
 
@@ -64,45 +62,23 @@ impl StreamChunk {
         Self {
             request_id,
             is_last,
-            is_error: false,
-            data,
-        }
-    }
-
-    /// A terminal error frame carrying `message`; it ends the stream like FIN, but is not a
-    /// successful end, so `is_last` stays false.
-    pub fn error(request_id: RequestId, message: &str) -> Self {
-        let mut data = message.as_bytes().to_vec();
-        data.truncate(MAX_TRANSFER_FRAME_PAYLOAD_BYTES);
-        Self {
-            request_id,
-            is_last: false,
-            is_error: true,
             data,
         }
     }
 
     /// Whether sending this frame spends one frame of per-stream credit.
     ///
-    /// Terminal frames (the last data frame or an error) are exempt: each stream has at most
-    /// one, the receive queue reserves a slot for it, and requiring credit for it would let a
-    /// stalled consumer block cancellation acknowledgements.
+    /// `FIN` frames are exempt: each stream has at most one, the receive queue reserves a slot
+    /// for it, and requiring credit for it would let a stalled consumer block completion.
     pub fn consumes_credit(&self) -> bool {
-        !self.is_last && !self.is_error
+        !self.is_last
     }
 
     /// Serializes the frame into its binary wire form for one websocket message.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(HEADER_SIZE + self.data.len());
         bytes.extend_from_slice(&self.request_id.to_le_bytes());
-        let mut flags = 0;
-        if self.is_last || self.is_error {
-            flags |= FLAG_FIN;
-        }
-        if self.is_error {
-            flags |= FLAG_ERROR;
-        }
-        bytes.push(flags);
+        bytes.push(if self.is_last { FLAG_FIN } else { 0 });
         bytes.extend_from_slice(&self.data);
         bytes
     }
@@ -124,17 +100,12 @@ impl StreamChunk {
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
         let flags = bytes[8];
-        if flags & !(FLAG_FIN | FLAG_ERROR) != 0 {
+        if flags & !FLAG_FIN != 0 {
             bail!("Unknown frame flags: 0x{flags:02x}");
-        }
-        let is_error = flags & FLAG_ERROR != 0;
-        if is_error && flags & FLAG_FIN == 0 {
-            bail!("Error frame without FIN");
         }
         Ok(Self {
             request_id,
-            is_last: flags & FLAG_FIN != 0 && !is_error,
-            is_error,
+            is_last: flags & FLAG_FIN != 0,
             data: bytes[HEADER_SIZE..].to_vec(),
         })
     }
@@ -166,13 +137,12 @@ impl StreamChunk {
 mod tests {
     use super::*;
 
-    /// Verifies data, FIN and error frames survive the round trip.
+    /// Verifies data and FIN frames survive the round trip.
     #[test]
     fn frames_round_trip() {
         for frame in [
             StreamChunk::data(RequestId::new(123), vec![1, 2, 3], false),
             StreamChunk::data(RequestId::new(u64::MAX), Vec::new(), true),
-            StreamChunk::error(RequestId::new(7), "disk gone"),
         ] {
             // Both sides must decode exactly what the other side encoded.
             assert_eq!(StreamChunk::from_bytes(&frame.to_bytes()).unwrap(), frame);
@@ -185,9 +155,6 @@ mod tests {
         let bytes = StreamChunk::data(RequestId::new(0x0102), vec![9], true).to_bytes();
         // Little-endian stream id, then FIN, then the payload.
         assert_eq!(bytes, vec![0x02, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 9]);
-        let error = StreamChunk::error(RequestId::new(1), "x").to_bytes();
-        // Error frames always carry FIN as well.
-        assert_eq!(error[8], 0x03);
     }
 
     /// Verifies malformed frames are rejected instead of misread.
@@ -195,11 +162,8 @@ mod tests {
     fn malformed_frames_are_rejected() {
         // Shorter than the header.
         assert!(StreamChunk::from_bytes(&[0; 8]).is_err());
-        // An unknown flag bit means a newer or corrupt sender.
+        // An unknown flag bit means a corrupt sender; failures travel in results instead.
         let mut bytes = vec![0; HEADER_SIZE];
-        bytes[8] = 0x80;
-        assert!(StreamChunk::from_bytes(&bytes).is_err());
-        // An error frame must end its stream.
         bytes[8] = 0x02;
         assert!(StreamChunk::from_bytes(&bytes).is_err());
         // Oversized payloads would defeat the per-frame memory bound.

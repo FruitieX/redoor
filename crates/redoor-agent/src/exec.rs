@@ -136,42 +136,20 @@ impl ExecWorker {
         let _ = child.wait().await;
         event
     }
-
-    /// Preserves normal completion under backpressure without retaining workers during teardown.
-    async fn terminal(
-        &mut self,
-        event: ExecEvent,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<()> {
-        if matches!(event, ExecEvent::Canceled | ExecEvent::TimedOut) {
-            // These paths must finish so generation shutdown can join the worker even with a full lane.
-            return tokio::time::timeout(std::time::Duration::from_secs(5), self.send(event, true))
-                .await?;
-        }
-        anyhow::ensure!(
-            !cancel.is_cancelled(),
-            "Execution canceled before terminal delivery"
-        );
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => anyhow::bail!("Execution canceled during terminal delivery"),
-            result = self.send(event, true) => result,
-        }
-    }
 }
 
-/// Emits a terminal event even for spawn failures; generation teardown drops the process guard.
+/// Runs one process, streams its output events and returns the exit event as the result.
 ///
-/// When the payload lane cannot deliver completion, the reply asks the dispatcher to close
-/// server ownership on the control lane instead, retained until the registry generation (and
-/// with it the connection that would carry it) is torn down.
+/// The output stream ends with `FIN` once the process is done, and the exit status follows it
+/// as the command's result on the same lane, so the server has all output when it learns the
+/// status. The result spends no credit, so only output the server never reads can delay it,
+/// and a cancel still stops the process and produces the result.
 pub(crate) async fn run(
     request: ExecRequest,
     stream: StreamWriter,
     registration: Registration<RequestId>,
 ) -> Reply {
     let cancel = registration.token().clone();
-    let abandon = registration.revoked().clone();
     let mut worker = ExecWorker { stream };
     let event = worker
         .execute(request, &cancel)
@@ -179,15 +157,11 @@ pub(crate) async fn run(
         .unwrap_or_else(|error| ExecEvent::Error {
             message: error.to_string(),
         });
-    let delivered = worker.terminal(event.clone(), &cancel).await.is_ok();
     drop(registration);
-    if delivered {
-        Reply::Streamed
-    } else {
-        Reply::Fallback {
-            result: CommandResult::Exec { event },
-            abandon,
-        }
+    worker.stream.send(&[], true).await;
+    Reply::Stream {
+        stream: worker.stream,
+        result: CommandResult::Exec { event },
     }
 }
 
@@ -196,199 +170,106 @@ mod tests {
     use super::*;
     use crate::runtime::cancel::CancelRegistry;
     use crate::runtime::responder::OutboundFrame;
-    use crate::runtime::responder::Responder;
-    use futures_util::poll;
-    use redoor_protocol::wire::command::CommandErrorKind;
-    use std::time::Duration;
     use tokio::sync::mpsc;
 
-    /// Uses a real nonzero exit so delivery cannot accidentally substitute a local success or failure.
-    fn exit_request() -> ExecRequest {
+    /// Builds an exec request for `script` run by `sh`.
+    fn shell(script: &str) -> ExecRequest {
         ExecRequest {
-            argv: vec!["sh".into(), "-c".into(), "exit 37".into()],
+            argv: vec!["sh".into(), "-c".into(), script.into()],
             cwd: None,
             env: Default::default(),
             timeout_ms: None,
         }
     }
 
-    /// Saturates the actual framed-payload sender without involving socket buffer sizes or wall time.
-    async fn blocked_stream() -> (StreamWriter, mpsc::Receiver<OutboundFrame>) {
-        let (write, receiver) = mpsc::channel(1);
-        write
-            .send(OutboundFrame::raw_text("occupied".to_string()))
-            .await
-            .unwrap();
-        (StreamWriter::for_test(write, RequestId::new(41)), receiver)
-    }
-
-    /// A completed and reaped process must retain its remote status for arbitrarily slow consumers.
-    #[tokio::test]
-    async fn normal_exit_waits_beyond_five_seconds_and_preserves_control_lane() {
-        let (stream, mut payload) = blocked_stream().await;
-        let mut worker = ExecWorker { stream };
-        let cancel = CancellationToken::new();
-        let event = worker.execute(exit_request(), &cancel).await.unwrap();
-        // This also synchronizes with child reaping before testing terminal-only backpressure.
-        assert!(matches!(
-            event,
-            ExecEvent::Exit {
-                code: Some(37),
-                signal: None
-            }
-        ));
-        tokio::time::pause();
-        let terminal = worker.terminal(event, &cancel);
-        tokio::pin!(terminal);
-        // Polling installs the blocked enqueue before advancing virtual time.
-        assert!(poll!(&mut terminal).is_pending());
-        tokio::time::advance(Duration::from_secs(60)).await;
-        // Normal completion has no five-second fallback (or other delivery deadline).
-        assert!(poll!(&mut terminal).is_pending());
-
-        let (responder, mut responses) = Responder::recording(RequestId::new(42), 1);
-        responder
-            .respond(CommandResult::error(
-                CommandErrorKind::ServiceUnavailable,
-                "independent response",
-            ))
-            .await
-            .unwrap();
-        // Control delivery remains independent while the shared binary lane is full.
-        assert!(responses.try_recv().is_ok());
-        payload.recv().await.unwrap();
-        terminal.await.unwrap();
-        let frame = payload.recv().await.unwrap();
-        let Some(chunk) = frame.as_stream() else {
-            panic!("Expected framed terminal event");
-        };
-        // Resuming the consumer must deliver the last frame and the actual nonzero remote exit.
-        assert!(chunk.is_last);
-        assert!(matches!(
-            serde_json::from_slice::<ExecEvent>(&chunk.data).unwrap(),
-            ExecEvent::Exit {
-                code: Some(37),
-                signal: None
-            }
-        ));
-    }
-
-    /// Cancellation, teardown and transfer disconnection must release a normal terminal enqueue.
-    #[tokio::test(start_paused = true)]
-    async fn blocked_normal_terminal_observes_cancel_and_disconnect() {
-        for mode in 0..3 {
-            let (stream, payload) = blocked_stream().await;
-            let mut worker = ExecWorker { stream };
-            let registry = CancelRegistry::new(None);
-            let registration = registry.register(RequestId::new(41)).unwrap();
-            let cancel = registration.token().clone();
-            let terminal = worker.terminal(
-                ExecEvent::Exit {
-                    code: Some(37),
-                    signal: None,
-                },
-                &cancel,
-            );
-            tokio::pin!(terminal);
-            // All cases start blocked on the same saturated lane.
-            assert!(poll!(&mut terminal).is_pending());
-            match mode {
-                0 => registration.cancel(),
-                1 => registry.revoke_all(), // Generation teardown revokes every registration.
-                _ => drop(payload),         // Transfer disconnection closes the payload sender.
-            }
-            // No clock advancement is needed to release cancellation/disconnection.
-            assert!(matches!(
-                poll!(&mut terminal),
-                std::task::Poll::Ready(Err(_))
-            ));
-        }
-    }
-
-    /// An already-cancelled token must not be lost when execute hands ownership back to run.
-    #[tokio::test(start_paused = true)]
-    async fn observed_cancel_releases_terminal() {
-        let (stream, _payload) = blocked_stream().await;
-        let mut worker = ExecWorker { stream };
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        // The already cancelled state still cancels delivery.
-        assert!(
-            worker
-                .terminal(
-                    ExecEvent::Exit {
-                        code: Some(37),
-                        signal: None
-                    },
-                    &cancel
-                )
-                .await
-                .is_err()
-        );
-    }
-
-    /// A closed payload lane must hand the real terminal outcome to the control fallback.
-    #[tokio::test]
-    async fn closed_payload_lane_falls_back_with_the_actual_error() {
-        let (write, payload) = mpsc::channel(1);
-        drop(payload);
+    /// Runs one execution over a recording lane and returns its frames and reply.
+    async fn run_recorded(request: ExecRequest, cancel_first: bool) -> (Vec<OutboundFrame>, Reply) {
+        let (lane, mut frames) = mpsc::channel(64);
         let registry = CancelRegistry::new(None);
         let registration = registry.register(RequestId::new(41)).unwrap();
-        let invalid = ExecRequest {
-            argv: vec![],
-            cwd: None,
-            env: Default::default(),
-            timeout_ms: None,
+        if cancel_first {
+            registration.cancel();
+        }
+        let reply = run(
+            request,
+            StreamWriter::for_test(lane, RequestId::new(41)),
+            registration,
+        )
+        .await;
+        let mut recorded = Vec::new();
+        while let Ok(frame) = frames.try_recv() {
+            recorded.push(frame);
+        }
+        (recorded, reply)
+    }
+
+    /// Extracts the exec event of a streamed reply.
+    fn exit_event(reply: Reply) -> ExecEvent {
+        let Reply::Stream {
+            result: CommandResult::Exec { event },
+            ..
+        } = reply
+        else {
+            panic!("exec results follow their stream");
         };
+        event
+    }
+
+    /// Verifies output, then FIN, with the real exit status carried by the result.
+    #[tokio::test]
+    async fn output_ends_with_fin_and_the_result_carries_the_exit_status() {
+        let (frames, reply) = run_recorded(shell("printf hi; exit 37"), false).await;
+
+        let last = frames.last().and_then(OutboundFrame::as_stream).unwrap();
+        // FIN is the last frame of the stream, after every output event.
+        assert!(last.is_last && last.data.is_empty());
+        let output: Vec<u8> = frames[..frames.len() - 1]
+            .iter()
+            .filter_map(OutboundFrame::as_stream)
+            .flat_map(|chunk| chunk.data.clone())
+            .collect();
+        // The output events precede FIN on the same lane.
+        assert!(String::from_utf8_lossy(&output).contains("stdout"));
+        // The nonzero status reaches the server as the result, not as stream data.
+        assert!(matches!(
+            exit_event(reply),
+            ExecEvent::Exit {
+                code: Some(37),
+                signal: None
+            }
+        ));
+    }
+
+    /// Verifies a canceled execution still reports one result.
+    #[tokio::test]
+    async fn canceled_execution_reports_canceled() {
+        let (_frames, reply) = run_recorded(shell("sleep 60"), true).await;
+
+        // The cancel is acknowledged by the command's own result.
+        assert!(matches!(exit_event(reply), ExecEvent::Canceled));
+    }
+
+    /// Verifies a lost connection does not change the reported outcome.
+    #[tokio::test]
+    async fn closed_lane_keeps_the_actual_error() {
+        let (lane, frames) = mpsc::channel(1);
+        drop(frames);
+        let registry = CancelRegistry::new(None);
+        let registration = registry.register(RequestId::new(41)).unwrap();
 
         let reply = run(
-            invalid,
-            StreamWriter::for_test(write, RequestId::new(41)),
+            ExecRequest {
+                argv: vec![],
+                cwd: None,
+                env: Default::default(),
+                timeout_ms: None,
+            },
+            StreamWriter::for_test(lane, RequestId::new(41)),
             registration,
         )
         .await;
 
-        let Reply::Fallback { result, abandon } = reply else {
-            panic!("undeliverable completion must fall back to the control lane");
-        };
-        // Preserve the real validation failure rather than losing completion or inventing Canceled.
-        assert!(matches!(
-            result,
-            CommandResult::Exec {
-                event: ExecEvent::Error { .. }
-            }
-        ));
-        // Only teardown of the generation may abandon the retained acknowledgement.
-        assert!(!abandon.is_cancelled());
-        registry.revoke_all();
-        assert!(abandon.is_cancelled());
-    }
-
-    /// A canceled request with a blocked payload lane is bounded and then falls back.
-    #[tokio::test(start_paused = true)]
-    async fn canceled_terminal_is_bounded_before_falling_back() {
-        let (stream, _payload) = blocked_stream().await;
-        let registry = CancelRegistry::new(None);
-        let registration = registry.register(RequestId::new(41)).unwrap();
-        registration.cancel();
-        let task = run(exit_request(), stream, registration);
-        tokio::pin!(task);
-
-        // An already canceled request takes the bounded terminal path without spawning a process.
-        assert!(poll!(&mut task).is_pending());
-        tokio::time::advance(Duration::from_secs(6)).await;
-        let std::task::Poll::Ready(reply) = poll!(&mut task) else {
-            panic!("canceled terminal delivery must be bounded");
-        };
-        // The fallback must name the cancellation so the router can close ownership.
-        assert!(matches!(
-            reply,
-            Reply::Fallback {
-                result: CommandResult::Exec {
-                    event: ExecEvent::Canceled
-                },
-                ..
-            }
-        ));
+        // Validation failures are reported as an error event rather than invented success.
+        assert!(matches!(exit_event(reply), ExecEvent::Error { .. }));
     }
 }

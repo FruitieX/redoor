@@ -333,6 +333,7 @@ mod tests {
     use super::*;
     use crate::commands::ctx::{CommandCtx, Reply};
     use crate::runtime::cancel::CancelRegistry;
+    use crate::runtime::responder::ResultLedger;
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
     use redoor_protocol::wire::{policy::UploadKind, stream::StreamChunk};
@@ -630,7 +631,11 @@ mod tests {
         let (control, _control_frames) = tokio::sync::mpsc::channel(1);
         for (data, is_last) in [(b"replacement".to_vec(), false), (Vec::new(), true)] {
             routes
-                .route_chunk(StreamChunk::data(request_id, data, is_last), &control)
+                .route_chunk(
+                    StreamChunk::data(request_id, data, is_last),
+                    &control,
+                    &ResultLedger::default(),
+                )
                 .await;
         }
 

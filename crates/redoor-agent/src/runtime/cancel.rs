@@ -103,7 +103,6 @@ impl<K: Eq + Hash + Clone> CancelRegistry<K> {
             key,
             serial,
             token,
-            revoked: state.generation.clone(),
             registry: Arc::downgrade(&self.shared),
         })
     }
@@ -155,8 +154,6 @@ pub(crate) struct Registration<K: Eq + Hash> {
     serial: u64,
     /// Cancelled by an explicit cancel, a revocation or connection loss.
     token: CancellationToken,
-    /// Cancelled only when the whole generation is revoked, not by a per-key cancel.
-    revoked: CancellationToken,
     /// Weak so a registration outliving its registry cannot keep the map alive.
     registry: Weak<Mutex<RegistryState<K>>>,
 }
@@ -167,15 +164,8 @@ impl<K: Eq + Hash> Registration<K> {
         &self.token
     }
 
-    /// Token cancelled only when the registry generation is torn down.
-    ///
-    /// Lets a worker distinguish "the user canceled this request" (it may still owe a final
-    /// acknowledgement) from "the connection that would carry the acknowledgement is gone".
-    pub(crate) fn revoked(&self) -> &CancellationToken {
-        &self.revoked
-    }
-
-    /// Cancels this registration, e.g. when a cancel overtook the command on the priority lane.
+    /// Cancels this registration directly, for tests that model a cancel arriving.
+    #[cfg(test)]
     pub(crate) fn cancel(&self) {
         self.token.cancel();
     }
@@ -235,8 +225,6 @@ mod tests {
         assert!(registry.cancel(&1));
         // The selected worker observes its own cancellation.
         assert!(first.token().is_cancelled());
-        // Request cancellation is not a generation teardown.
-        assert!(!first.revoked().is_cancelled());
         // Unrelated workers keep running.
         assert!(!second.token().is_cancelled());
     }
@@ -264,8 +252,6 @@ mod tests {
 
         // Every worker of the torn-down generation must stop.
         assert!(first.token().is_cancelled() && second.token().is_cancelled());
-        // Workers can tell teardown apart from a per-request cancel.
-        assert!(first.revoked().is_cancelled());
         // Capacity is released immediately rather than when tasks finish.
         assert_eq!(registry.len(), 0);
         // A new generation starts uncancelled.
@@ -300,6 +286,5 @@ mod tests {
 
         // Connection loss alone must stop workers even before the registry is revoked.
         assert!(registration.token().is_cancelled());
-        assert!(registration.revoked().is_cancelled());
     }
 }

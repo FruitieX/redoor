@@ -6,7 +6,48 @@
 //! receive as values instead of parsing text.
 
 use redoor_protocol::wire::{ServerToAgent, stream::StreamChunk};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::mpsc;
+
+/// The command is still in the outbound queue.
+const QUEUED: u8 = 0;
+/// The writer took the command and is writing it (or wrote it).
+const WRITTEN: u8 = 1;
+/// The command was canceled before the writer took it; it is never sent.
+const WITHDRAWN: u8 = 2;
+
+/// Tracks whether one queued command has reached the socket.
+///
+/// A cancel must never arrive before its command. The writer marks a command written before
+/// writing it, and a cancel first tries to withdraw it: whichever wins decides whether the
+/// command is skipped (no wire traffic at all) or a `cancel` frame is sent after it. Since the
+/// writer writes the command before it can look at the cancel, the agent always knows the id.
+#[derive(Clone, Debug, Default)]
+pub struct CommandTicket(Arc<AtomicU8>);
+
+impl CommandTicket {
+    /// Claims the command for writing; `false` when it was withdrawn and must be skipped.
+    pub fn mark_written(&self) -> bool {
+        self.0
+            .compare_exchange(QUEUED, WRITTEN, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Withdraws a command that is still queued; `false` once the writer has taken it.
+    pub fn withdraw(&self) -> bool {
+        self.0
+            .compare_exchange(QUEUED, WITHDRAWN, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+/// One frame of the command lane, with the ticket of a command that can be withdrawn.
+#[derive(Debug)]
+pub struct QueuedCommand {
+    pub frame: ServerToAgent,
+    pub ticket: Option<CommandTicket>,
+}
 
 /// Queue depth of the interactive (terminal input) lane.
 const INTERACTIVE_QUEUE_CAPACITY: usize = 8;
@@ -26,7 +67,7 @@ const BULK_QUEUE_CAPACITY: usize = 1;
 /// waits behind more than one of them.
 #[derive(Clone, Debug)]
 pub struct ControlLanes {
-    commands: mpsc::Sender<ServerToAgent>,
+    commands: mpsc::Sender<QueuedCommand>,
     priority: mpsc::Sender<ServerToAgent>,
     interactive: mpsc::Sender<StreamChunk>,
     bulk: mpsc::Sender<StreamChunk>,
@@ -34,7 +75,7 @@ pub struct ControlLanes {
 
 /// Receiving ends of [`ControlLanes`], owned by the session writer.
 pub struct ControlLaneReceivers {
-    pub commands: mpsc::Receiver<ServerToAgent>,
+    pub commands: mpsc::Receiver<QueuedCommand>,
     pub priority: mpsc::Receiver<ServerToAgent>,
     pub interactive: mpsc::Receiver<StreamChunk>,
     pub bulk: mpsc::Receiver<StreamChunk>,
@@ -79,7 +120,25 @@ impl ControlLanes {
 
     /// Admits one ordinary frame without waiting; `false` when the lane is full or closed.
     pub fn try_command(&self, frame: ServerToAgent) -> bool {
-        self.commands.try_send(frame).is_ok()
+        self.commands
+            .try_send(QueuedCommand {
+                frame,
+                ticket: None,
+            })
+            .is_ok()
+    }
+
+    /// Admits one command that a later cancel may withdraw; `None` when the lane is full or
+    /// closed.
+    pub fn try_tracked_command(&self, frame: ServerToAgent) -> Option<CommandTicket> {
+        let ticket = CommandTicket::default();
+        self.commands
+            .try_send(QueuedCommand {
+                frame,
+                ticket: Some(ticket.clone()),
+            })
+            .ok()
+            .map(|()| ticket)
     }
 
     /// Admits one priority frame without waiting; `false` when the lane is full or closed.
@@ -95,7 +154,7 @@ impl ControlLanes {
             Ok(()) => true,
             Err(
                 mpsc::error::TrySendError::Full(frame) | mpsc::error::TrySendError::Closed(frame),
-            ) => self.commands.try_send(frame).is_ok(),
+            ) => self.try_command(frame),
         }
     }
 
@@ -181,7 +240,34 @@ mod tests {
         // The second still reached the agent through the command lane.
         assert!(matches!(
             receivers.commands.try_recv(),
-            Ok(ServerToAgent::Cancel { id: request_id }) if request_id == RequestId::new(2)
+            Ok(QueuedCommand { frame: ServerToAgent::Cancel { id: request_id }, .. })
+                if request_id == RequestId::new(2)
         ));
+    }
+
+    /// A withdrawn command is skipped by the writer, and a written one cannot be withdrawn.
+    #[test]
+    fn tickets_decide_between_withdrawing_and_writing() {
+        let (lanes, mut receivers) = ControlLanes::bounded(4, 1);
+        let withdrawn = lanes
+            .try_tracked_command(ServerToAgent::Cancel {
+                id: RequestId::new(1),
+            })
+            .unwrap();
+        let written = lanes
+            .try_tracked_command(ServerToAgent::Cancel {
+                id: RequestId::new(2),
+            })
+            .unwrap();
+        // A cancel before the writer took the command removes it without wire traffic.
+        assert!(withdrawn.withdraw());
+        let first = receivers.commands.try_recv().unwrap();
+        // The writer then finds the withdrawn command and skips it.
+        assert!(!first.ticket.unwrap().mark_written());
+        let second = receivers.commands.try_recv().unwrap();
+        // The writer claims a command that is still queued.
+        assert!(second.ticket.unwrap().mark_written());
+        // After that a cancel must be sent as a frame, which then follows the command.
+        assert!(!written.withdraw());
     }
 }

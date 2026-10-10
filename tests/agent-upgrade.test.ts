@@ -307,7 +307,8 @@ describe("connected external agent upgrade", () => {
 
                 earlyAgent.respond(id, { type: "GetAgentDetails", ...details });
             } else if (command.type === "RawUpload") {
-                // Finishing before transfer_ready means the agent never received the binary.
+                // Finishing before granting upload credit means the agent never received the
+                // binary.
                 earlyAgent.respond(id, { type: "RawUpload" });
             }
         });

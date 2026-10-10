@@ -469,6 +469,9 @@ async fn run_command(
 }
 
 /// Drains output under backpressure even after the retention quota is exhausted.
+///
+/// The agent sends the exit status as its result after the output, so the output is read to
+/// its end first and the status is then taken from the terminal lane.
 async fn drain_execution(
     operations: super::operations::OperationRegistry,
     record: std::sync::Arc<tokio::sync::Mutex<super::operations::OperationRecord>>,
@@ -476,52 +479,32 @@ async fn drain_execution(
     mut terminal: tokio::sync::watch::Receiver<Option<ExecEvent>>,
     limit: usize,
 ) {
-    let mut terminal_open = true;
-    loop {
-        tokio::select! {
-            chunk = output.recv() => match chunk {
-                Some(chunk) => {
-                    let terminal_event = if chunk.is_last {
-                        serde_json::from_slice::<ExecEvent>(&chunk.data).ok()
-                    } else {
-                        None
-                    };
-                    if operations.append_output(&record, &chunk.data, limit).await.is_err() {
-                        record.lock().await.state = "failed".to_string();
-                    }
-                    if chunk.is_error { record.lock().await.state = "failed".to_string(); }
-                    if let Some(event) = terminal_event {
-                        finish_execution(&operations, &record, event).await;
-                        output.disarm();
-                        return;
-                    }
-                }
-                None => {
-                    if terminal_open && terminal.borrow().is_none() {
-                        let _ = terminal.changed().await;
-                    }
-                    let event = { terminal.borrow_and_update().clone() };
-                    if let Some(event) = event {
-                        finish_execution(&operations, &record, event).await;
-                        output.disarm();
-                        return;
-                    }
-                    break;
-                }
-            },
-            changed = terminal.changed(), if terminal_open => {
-                if changed.is_err() {
-                    terminal_open = false;
-                    continue;
-                }
-                let event = { terminal.borrow_and_update().clone() };
-                if let Some(event) = event {
-                    finish_execution(&operations, &record, event).await;
-                    output.disarm();
-                    return;
-                }
-            }
+    while let Some(item) = output.recv().await {
+        let failed = match item {
+            Ok(chunk) => operations
+                .append_output(&record, &chunk.data, limit)
+                .await
+                .is_err(),
+            Err(_) => true,
+        };
+        if failed {
+            record.lock().await.state = "failed".to_string();
         }
+    }
+    let event = loop {
+        let current = terminal.borrow_and_update().clone();
+        if current.is_some() {
+            break current;
+        }
+        // A closed lane means the router dropped the execution without a result.
+        if terminal.changed().await.is_err() {
+            break None;
+        }
+    };
+    if let Some(event) = event {
+        finish_execution(&operations, &record, event).await;
+        output.disarm();
+        return;
     }
     let mut current = record.lock().await;
     if current.terminal.is_none() {

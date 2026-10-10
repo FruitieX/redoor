@@ -12,9 +12,6 @@ use redoor_protocol::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Message sent as the terminal error frame when the server cancels an output stream.
-pub(crate) const CANCELED_MESSAGE: &[u8] = b"Download canceled by server";
-
 /// Credit gates of the output streams currently writing, keyed by request id.
 ///
 /// The server returns credit as control frames while the writer runs in its own task, so
@@ -150,13 +147,9 @@ impl StreamWriter {
         true
     }
 
-    /// Sends the terminal error frame the server maps to a failed transfer.
-    pub(crate) async fn send_error(&mut self, message: &[u8]) -> bool {
-        self.send_chunk(StreamChunk::error(
-            self.request_id,
-            &String::from_utf8_lossy(message),
-        ))
-        .await
+    /// The lane this stream's frames use, so its result can follow its data.
+    pub(crate) fn lane(&self) -> &ControlSender {
+        &self.lane
     }
 
     /// Sends one control message on this stream's lane, so it is written after the stream's
@@ -232,10 +225,10 @@ mod tests {
         // The grant releases exactly the waiting frame.
         assert!(sent);
         assert_eq!(drain(&mut receiver).len(), 1);
-        // Error frames are terminal and must go out without any credit left.
-        assert!(writer.send_error(b"canceled").await);
+        // FIN is terminal and must go out without any credit left.
+        assert!(writer.send(b"", true).await);
         let terminal = drain(&mut receiver);
-        assert!(terminal.len() == 1 && terminal[0].is_error);
+        assert!(terminal.len() == 1 && terminal[0].is_last);
         drop(writer);
         // Dropping the writer unregisters its gate so late grants are ignored.
         assert!(!credits.contains(request_id));

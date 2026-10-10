@@ -10,11 +10,13 @@ use super::messages::{
     UnregisterManagedAgentRequest,
 };
 use super::state::{AgentConnection, KnownAgent, RouterState};
-use super::streams::{AgentLink, OutboundStream, StreamLease};
+use super::streams::{AgentLink, OutboundStart, OutboundStream, StreamLease};
 use redoor_core::log;
+use redoor_protocol::wire::command::Command;
 use redoor_protocol::wire::handshake::RejectReason;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::CancelScope;
+use redoor_protocol::wire::policy::CommandLane;
 use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, TERMINAL_CREDIT_WINDOW_FRAMES};
 use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
 use redoor_protocol::{
@@ -42,6 +44,7 @@ impl AgentConnection {
             streams: request.streams,
             terminals: Default::default(),
             log_streams: Default::default(),
+            tickets: Default::default(),
         }
     }
 
@@ -50,9 +53,62 @@ impl AgentConnection {
         AgentLink::new(self.lanes.clone())
     }
 
-    /// Admits one ordinary command or bootstrap onto the bounded command lane.
-    pub(crate) fn send_message(&self, message: ServerToAgent) -> bool {
-        self.report_admission(self.lanes.try_command(message))
+    /// Admits a command onto the bounded command lane.
+    ///
+    /// Output streams get their initial credit in the command frame so output starts without
+    /// a round trip; uploads start with none and wait for the agent's first grant, which
+    /// tells the router the agent's worker is ready.
+    pub(crate) fn send_command(&mut self, id: RequestId, command: Command) -> bool {
+        let credit = if command.policy().lane == CommandLane::Output {
+            STREAM_CREDIT_WINDOW_FRAMES
+        } else {
+            0
+        };
+        self.send_request(
+            id,
+            ServerToAgent::Command {
+                id,
+                credit,
+                command,
+            },
+        )
+    }
+
+    /// Admits a frame that starts work under `id` (a command or a stream open) and keeps its
+    /// ticket, so a cancel can still withdraw it while it waits in the queue.
+    pub(crate) fn send_request(&mut self, id: RequestId, frame: ServerToAgent) -> bool {
+        let ticket = self.lanes.try_tracked_command(frame);
+        let admitted = ticket.is_some();
+        if let Some(ticket) = ticket {
+            self.tickets.insert(id, ticket);
+        }
+        self.report_admission(admitted)
+    }
+
+    /// Stops work `id` on the agent.
+    ///
+    /// A cancel may never overtake its command, because the agent would not know the id and
+    /// the command would then run uncanceled. So a command still in the queue is withdrawn
+    /// and never written, and only a written one gets a `cancel` frame (on the priority lane,
+    /// retained in a task when the lane is momentarily full so an admitted cancel is never
+    /// lost). A closed lane is an error the caller can report and retry.
+    pub(crate) fn cancel_request(&mut self, id: RequestId) -> Result<CancelDelivery, RouterError> {
+        if let Some(ticket) = self.tickets.remove(&id)
+            && ticket.withdraw()
+        {
+            return Ok(CancelDelivery::Withdrawn);
+        }
+        self.lanes
+            .queue_priority(ServerToAgent::Cancel { id })
+            .map(CancelDelivery::Sent)
+            .map_err(|_| RouterError::ControlQueueFull {
+                agent_id: self.agent_id.to_string(),
+            })
+    }
+
+    /// Forgets the ticket of work the agent answered or that ended otherwise.
+    pub(crate) fn settle_request(&mut self, id: RequestId) {
+        self.tickets.remove(&id);
     }
 
     /// Queues lifecycle or cancellation traffic independently of command admission.
@@ -71,6 +127,17 @@ impl AgentConnection {
         }
         admitted
     }
+}
+
+/// How a cancel reached (or did not need to reach) the agent.
+#[derive(Debug)]
+pub(crate) enum CancelDelivery {
+    /// The command was still queued and will never be written, so the agent never sees it
+    /// and the router answers it locally.
+    Withdrawn,
+    /// A `cancel` frame was queued, possibly through a task waiting for lane capacity (to be
+    /// aborted once the cancel became pointless); the agent's result acknowledges it.
+    Sent(Option<tokio::task::JoinHandle<()>>),
 }
 
 /// Current wall-clock second, used for inventory timestamps.
@@ -410,7 +477,7 @@ impl RouterState {
             request_id,
             request.command
         );
-        let Some(agent_connection) = self.agents.by_id.get(&request.agent_id) else {
+        let Some(agent_connection) = self.agents.by_id.get_mut(&request.agent_id) else {
             let _ = request.reply.send(CommandResult::error(
                 redoor_protocol::wire::command::CommandErrorKind::NotFound,
                 format!("Agent not found: {}", request.agent_id),
@@ -418,10 +485,7 @@ impl RouterState {
             return;
         };
         let cancelable = request.command.policy().cancel_scope == CancelScope::Request;
-        if !agent_connection.send_message(ServerToAgent::Command {
-            id: request_id,
-            command: request.command,
-        }) {
+        if !agent_connection.send_command(request_id, request.command) {
             let _ = request.reply.send(CommandResult::error(
                 redoor_protocol::wire::command::CommandErrorKind::ServiceUnavailable,
                 format!("Agent control queue is full: {}", request.agent_id),
@@ -459,7 +523,7 @@ impl RouterState {
     /// Stops an already removed, abandoned command on its agent when the agent registered it
     /// for cancellation. Shared by explicit abandonment and the tick's pruning of closed
     /// replies, so whichever notices the departed caller first still stops the work.
-    pub(crate) fn cancel_abandoned(&self, command: &CommandFlow) {
+    pub(crate) fn cancel_abandoned(&mut self, command: &CommandFlow) {
         log!(
             Level::Debug,
             "Abandoned command: agent_id={}, request_id={}, cancelable={}",
@@ -467,12 +531,11 @@ impl RouterState {
             command.request_id,
             command.cancelable
         );
-        if command.cancelable
-            && let Some(connection) = self.agents.by_id.get(&command.agent_id)
-        {
-            // A retained delivery task finishes on its own; a closed lane means the
-            // connection is gone and its teardown already stops the command.
-            let _ = connection.queue_priority_cancel(command.request_id);
+        if command.cancelable {
+            // A retained delivery task finishes on its own, a withdrawn command's local
+            // result finds no flow, and a closed lane means the connection is gone and its
+            // teardown already stopped the command.
+            let _ = self.cancel_on_agent(&command.agent_id, command.request_id);
         }
     }
 
@@ -518,9 +581,11 @@ impl RouterState {
                 );
                 let input = OutboundStream::new(
                     StreamLease::new(stream, link, 0),
-                    connection
-                        .streams
-                        .open_outbound(stream, TERMINAL_CREDIT_WINDOW_FRAMES),
+                    connection.streams.open_outbound(
+                        stream,
+                        TERMINAL_CREDIT_WINDOW_FRAMES,
+                        OutboundStart::FullWindow,
+                    ),
                     true,
                 );
                 let events = connection.streams.open_terminal_events(stream);
@@ -599,7 +664,7 @@ impl RouterState {
         stream: RequestId,
         open: ServerToAgent,
     ) -> Result<(), RouterError> {
-        if connection.send_message(open) {
+        if connection.send_request(stream, open) {
             return Ok(());
         }
         connection.streams.close(stream);
@@ -620,10 +685,9 @@ impl RouterState {
             return;
         }
         connection.streams.close(stream);
-        // The agent may still be producing; a full priority lane falls back to commands.
-        connection
-            .lanes
-            .try_priority_or_command(ServerToAgent::Cancel { id: stream });
+        // The agent may still be producing. A stream whose open frame is still queued is
+        // withdrawn and needs nothing else, since terminals and log streams have no result.
+        let _ = connection.cancel_request(stream);
     }
 }
 
@@ -923,11 +987,14 @@ mod tests {
             let terminal = open(&mut state).await.unwrap().unwrap();
             streams.push(terminal.stream);
         }
-        // The agent learns each terminal's stream id from its open frame.
+        // The agent learns each terminal's stream id from its open frame, which the writer
+        // claims before writing it.
+        let first = receivers.commands.try_recv().unwrap();
         assert!(matches!(
-            receivers.commands.try_recv(),
-            Ok(ServerToAgent::TerminalOpen { stream, .. }) if stream == streams[0]
+            first.frame,
+            ServerToAgent::TerminalOpen { stream, .. } if stream == streams[0]
         ));
+        assert!(first.ticket.unwrap().mark_written());
         // One more would exceed the agent's own limit, so the server refuses it first.
         assert!(matches!(
             open(&mut state).await.unwrap(),
@@ -942,6 +1009,12 @@ mod tests {
                 .iter()
                 .any(|frame| matches!(frame, ServerToAgent::Cancel { id } if *id == streams[0]))
         );
+        state.close_stream(&agent_id, streams[1]);
+        // A terminal whose open frame was never written is withdrawn: a cancel could
+        // overtake the open frame and leave the PTY running.
+        assert!(receivers.priority.try_recv().is_err());
+        let second = receivers.commands.try_recv().unwrap();
+        assert!(!second.ticket.unwrap().mark_written());
         // The freed slot admits a new terminal.
         assert!(open(&mut state).await.unwrap().is_ok());
         state.ui.refresh_check_task.abort();
@@ -1008,7 +1081,7 @@ mod tests {
         ));
         // The ordinary queue remains bounded to its single admitted frame.
         assert!(matches!(
-            receivers.commands.recv().await,
+            receivers.commands.recv().await.map(|queued| queued.frame),
             Some(ServerToAgent::Command {
                 command: redoor_protocol::wire::command::Command::GetAgentDetails,
                 ..

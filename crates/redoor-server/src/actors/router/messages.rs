@@ -2,7 +2,7 @@
 
 use super::RouterError;
 use super::state::CopyContentKind;
-use super::streams::{ConnectionStreams, OutboundStream, OutputReceiver, StreamEnd};
+use super::streams::{ConnectionStreams, CreditViolation, OutboundStream, OutputReceiver};
 use crate::actors::lanes::ControlLanes;
 use crate::watchdog::WatchdogSnapshot;
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
@@ -186,7 +186,8 @@ pub struct ApplyManagedLifecycleRequest {
     pub reply: Option<RouterReply<()>>,
 }
 
-/// Confirms destination upload setup before payload producers are allowed to run.
+/// Confirms destination upload setup before payload producers are allowed to run; the agent
+/// signals it with the stream's first credit grant.
 pub struct RouteTransferReadyRequest {
     /// Agent that registered the destination-side upload worker.
     pub agent_id: AgentId,
@@ -264,7 +265,7 @@ pub enum OutputStreamTracking {
 /// Outcome of waiting for an upload destination to become ready.
 ///
 /// The request id is returned immediately from start so HTTP can arm cancellation
-/// before this barrier. Init failures finish before `TransferReady`, so readiness
+/// before this barrier. Init failures finish before the first credit grant, so readiness
 /// must still carry the same completion payload the HTTP handler maps to status
 /// codes (permission denied -> 403, missing path -> 404, etc.).
 #[derive(Debug)]
@@ -356,8 +357,8 @@ pub struct TransferProgressUpdateRequest {
 pub enum OutboundFailureReason {
     /// The agent's connection closed while frames were still being sent.
     LaneClosed,
-    /// The producer aborted the stream with an error frame (for example a body that exceeded
-    /// its declared length).
+    /// The producer gave up on the stream (for example a body that exceeded its declared
+    /// length); the router cancels the agent's worker so it discards the partial upload.
     ProducerAborted(String),
 }
 
@@ -428,8 +429,9 @@ pub enum RouterMsg {
         subscriber_id: String,
     },
     ExecuteCommandRest(ExecuteCommandRequest),
-    /// The connection reader saw an inbound stream's terminal frame (or a credit violation).
-    InboundStreamEnded(StreamEnd),
+    /// An agent sent more frames than a stream's credit allowed; the stream is no longer
+    /// routed and its flow fails.
+    CreditViolated(CreditViolation),
     /// A producer could not finish a server-to-agent stream.
     OutboundStreamFailed(OutboundFailure),
     ExecuteStreamCommandRest(ExecuteStreamRequest),

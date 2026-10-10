@@ -29,6 +29,15 @@ impl Default for CreditGate {
 }
 
 impl CreditGate {
+    /// A gate whose stream may hold up to `window` frames but starts with none, for streams
+    /// whose receiver grants the first credit once it is ready (uploads).
+    pub fn awaiting_grant(window: u32) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(0)),
+            window: window as usize,
+        }
+    }
+
     /// A gate whose stream starts with, and may never hold more than, `window` frames.
     pub fn with_window(window: u32) -> Self {
         Self {

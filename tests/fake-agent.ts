@@ -13,11 +13,8 @@ export const AGENT_WS_PATH = "/api/v1/agent/ws";
 /** Fixed header length of one binary stream frame: stream id (8) and flags (1). */
 const STREAM_HEADER_SIZE = 9;
 
-/** Flag bit marking the final frame of a stream. */
+/** Flag bit marking the final frame of a successful stream; failures are reported by the result. */
 const FLAG_FIN = 0x01;
-
-/** Flag bit marking a final frame that carries an error message. */
-const FLAG_ERROR = 0x02;
 
 /** Every control frame is a JSON object tagged by `type`. */
 const controlFrameSchema = z
@@ -31,6 +28,8 @@ export type ControlFrame = z.infer<typeof controlFrameSchema>;
 const commandFrameSchema = z.object({
     type: z.literal("command"),
     id: z.number(),
+    /** Initial credit of the command's output stream, in frames. */
+    credit: z.number(),
     command: z.object({ type: z.string() }).catchall(z.unknown()),
 });
 
@@ -363,9 +362,15 @@ export class FakeAgent {
     sendStreamFrame(
         stream: number,
         data: Buffer,
-        flags: { last?: boolean; error?: boolean } = {},
+        flags: { last?: boolean } = {},
     ): void {
         this.control.send(encodeStreamFrame(stream, data, flags));
+    }
+
+    /** Grants the server `frames` more frames of stream `stream`; the first grant of an
+     * upload tells the server the worker is ready. */
+    grantCredit(stream: number, frames: number): void {
+        this.send({ type: "credit", stream, frames });
     }
 
     /** Calls `handler` for every binary stream frame the server sends from now on. */
@@ -383,7 +388,6 @@ export class FakeAgent {
 export type StreamFrame = {
     stream: number;
     last: boolean;
-    error: boolean;
     data: Buffer;
 };
 
@@ -391,14 +395,12 @@ export type StreamFrame = {
 export function encodeStreamFrame(
     stream: number,
     data: Buffer,
-    flags: { last?: boolean; error?: boolean } = {},
+    flags: { last?: boolean } = {},
 ): Buffer {
     const header = Buffer.alloc(STREAM_HEADER_SIZE);
-    const error = flags.error === true;
-    const fin = error || flags.last === true;
 
     header.writeBigUInt64LE(BigInt(stream), 0);
-    header.writeUInt8((fin ? FLAG_FIN : 0) | (error ? FLAG_ERROR : 0), 8);
+    header.writeUInt8(flags.last === true ? FLAG_FIN : 0, 8);
 
     return Buffer.concat([header, data]);
 }
@@ -406,12 +408,10 @@ export function encodeStreamFrame(
 /** Decodes one binary stream frame the server sent. */
 export function decodeStreamFrame(bytes: Buffer): StreamFrame {
     const flags = bytes.readUInt8(8);
-    const error = (flags & FLAG_ERROR) !== 0;
 
     return {
         stream: Number(bytes.readBigUInt64LE(0)),
-        last: (flags & FLAG_FIN) !== 0 && !error,
-        error,
+        last: (flags & FLAG_FIN) !== 0,
         data: bytes.subarray(STREAM_HEADER_SIZE),
     };
 }

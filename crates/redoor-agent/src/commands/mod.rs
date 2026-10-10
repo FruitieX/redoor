@@ -236,7 +236,7 @@ mod tests {
         let (ctx, _frames) = CommandCtx::detached(RequestId::new(1));
         match command.run(ctx).await {
             Reply::Result(result) => result,
-            Reply::Streamed | Reply::Fallback { .. } => panic!("control commands answer directly"),
+            Reply::Stream { .. } => panic!("control commands answer directly"),
         }
     }
 

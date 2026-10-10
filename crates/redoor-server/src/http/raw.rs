@@ -18,7 +18,7 @@ use super::{
     agent_client::Metadata,
     agent_helpers::{AgentFilePath, absolute_path_from_url},
     error::ApiError,
-    services::output::OutputStream,
+    services::output::{AgentStreamError, OutputStream},
     state::ServerState,
 };
 use crate::actors::router::OutputStreamTracking;
@@ -297,13 +297,13 @@ async fn ensure_download_started(output: &mut OutputStream, path: &str) -> Resul
         .peek()
         .await
         .ok_or_else(|| ApiError::internal("No data received"))?;
-    if !first.is_error {
+    let Err(AgentStreamError(message)) = first else {
         return Ok(());
-    }
-    let message = if first.data.is_empty() {
+    };
+    let message = if message.is_empty() {
         format!("File error: {path}")
     } else {
-        String::from_utf8_lossy(&first.data).into_owned()
+        message.clone()
     };
     // Download workers report I/O failures as text, so classify the common cases by message.
     let status = if message.contains("No such file") || message.contains("not found") {
@@ -379,7 +379,6 @@ mod tests {
                 streams.deliver(StreamChunk {
                     request_id,
                     is_last: false,
-                    is_error: false,
                     data: vec![b'a'],
                 })
             }

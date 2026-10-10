@@ -1,8 +1,9 @@
 //! Router-owned state: live agent connections, retained agent inventory and flow tables.
 
 use super::flows::FlowTable;
+use super::messages::RouteResponse;
 use super::streams::ConnectionStreams;
-use crate::actors::lanes::ControlLanes;
+use crate::actors::lanes::{CommandTicket, ControlLanes};
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
 use redoor_protocol::wire::policy::UploadKind;
 use redoor_protocol::{
@@ -39,6 +40,9 @@ pub struct AgentConnection {
     pub terminals: HashSet<RequestId>,
     /// Open log streams, bounded per connection.
     pub log_streams: HashSet<RequestId>,
+    /// Write tickets of queued commands and stream opens, so a cancel can withdraw work the
+    /// agent has not seen instead of sending a `cancel` that could overtake it.
+    pub(crate) tickets: HashMap<RequestId, CommandTicket>,
 }
 
 /// Retained UI inventory record for an agent seen during this server process.
@@ -246,6 +250,10 @@ pub struct RouterState {
     pub(crate) ui: UiState,
     /// Monotonic counter used to allocate the next internal request id.
     pub(crate) next_request_id: RequestId,
+    /// Canceled results of commands withdrawn before they were written. They are routed
+    /// after the current message, like a result from the agent would be, so no handler sees
+    /// its flow settle in the middle of its own cancel.
+    pub(crate) local_results: Vec<RouteResponse>,
 }
 
 impl RouterState {
@@ -262,6 +270,7 @@ impl RouterState {
                 refresh_check_task: ui_refresh_check_task,
             },
             next_request_id: RequestId::new(1),
+            local_results: Vec::new(),
         }
     }
 

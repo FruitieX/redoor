@@ -436,6 +436,8 @@ pub enum CommandErrorKind {
     Conflict,
     InvalidInput,
     ServiceUnavailable,
+    /// The server canceled the request before it finished.
+    Canceled,
     Internal,
 }
 

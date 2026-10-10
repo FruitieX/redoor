@@ -36,7 +36,7 @@ use redoor_core::log;
 use redoor_protocol::ids::{AgentId, SocketId, UnixTimestampSeconds};
 use redoor_protocol::wire::log::Level;
 use state::RouterState;
-use streams::StreamEnd;
+use streams::CreditViolation;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
@@ -214,10 +214,18 @@ impl RouterState {
     }
 
     /// Routes an agent's final command response to the flow that owns its request id.
+    ///
+    /// The result is always the last frame of a request and follows its stream data on the
+    /// connection, so flows settle on it alone: by now the consumer has every byte.
     fn route_response(&mut self, response: RouteResponse) {
+        if let Some(connection) = self.agents.by_id.get_mut(&response.agent_id) {
+            connection.settle_request(response.request_id);
+        }
         let Some(flow_id) = self.flows.id_for(&response.agent_id, response.request_id) else {
+            // Expected for results of work the router already settled, such as a copy source
+            // finishing after its destination or a worker canceled by a failed copy.
             log!(
-                Level::Warning,
+                Level::Debug,
                 "No pending response found for request_id={}",
                 response.request_id
             );
@@ -239,16 +247,31 @@ impl RouterState {
         }
     }
 
-    /// Settles an inbound stream whose terminal frame the transfer reader saw.
-    fn route_stream_end(&mut self, end: StreamEnd) {
-        let Some(flow_id) = self.flows.id_for(&end.agent_id, end.request_id) else {
+    /// Fails the flow of a stream whose agent ignored its credit; the connection reader
+    /// already stopped routing the stream.
+    fn route_credit_violation(&mut self, violation: CreditViolation) {
+        let Some(flow_id) = self.flows.id_for(&violation.agent_id, violation.request_id) else {
             return;
         };
+        log!(
+            Level::Warning,
+            "Agent stream exceeded flow-control credit: agent_id={}, request_id={}",
+            violation.agent_id,
+            violation.request_id
+        );
         self.sync_progress();
         match self.flows.get(flow_id) {
-            Some(Flow::Output(_)) => self.finish_output_stream(flow_id, end),
-            Some(Flow::Copy(_)) => self.finish_copy_source(flow_id, end),
+            Some(Flow::Output(_)) => self.fail_overflowing_output(flow_id),
+            Some(Flow::Copy(_)) => self.fail_overflowing_copy_source(flow_id),
             Some(Flow::Command(_) | Flow::Upload(_)) | None => {}
+        }
+    }
+
+    /// Routes the canceled results of commands withdrawn before they were written, including
+    /// any that settling them withdrew in turn.
+    fn route_local_results(&mut self) {
+        while let Some(response) = self.local_results.pop() {
+            self.route_response(response);
         }
     }
 
@@ -289,6 +312,12 @@ impl RouterState {
 
     /// Handles one message; every handler is synchronous so the mailbox never waits on a peer.
     fn handle(&mut self, message: RouterMsg) {
+        self.dispatch(message);
+        self.route_local_results();
+    }
+
+    /// Runs the handler of one message.
+    fn dispatch(&mut self, message: RouterMsg) {
         match message {
             RouterMsg::RegisterAgent(request) => self.register_agent(request),
             RouterMsg::RegisterManagedAgent(request) => self.register_managed(request),
@@ -320,7 +349,7 @@ impl RouterState {
                 self.unregister_subscriber(&subscriber_id)
             }
             RouterMsg::ExecuteCommandRest(request) => self.execute_command_rest(request),
-            RouterMsg::InboundStreamEnded(end) => self.route_stream_end(end),
+            RouterMsg::CreditViolated(violation) => self.route_credit_violation(violation),
             RouterMsg::OutboundStreamFailed(failure) => self.fail_outbound_stream(failure),
             RouterMsg::ExecuteStreamCommandRest(request) => self.start_output(request),
             RouterMsg::StartUploadStreamRest(request) => self.start_upload(request),
@@ -383,7 +412,7 @@ mod tests {
     use crate::actors::router::messages::AgentListEntry;
     use redoor_protocol::ids::{AgentId, RequestId};
     use redoor_protocol::wire::command::{Command, CommandResult};
-    use redoor_protocol::wire::exec::{ExecEvent, ExecRequest};
+    use redoor_protocol::wire::exec::ExecRequest;
     use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk};
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::{Duration, timeout};
@@ -421,14 +450,20 @@ mod tests {
         lane.recv().await.expect("control frame queued")
     }
 
+    /// Reads the next command the writer would send, claiming its write ticket.
+    async fn next_command(
+        lane: &mut mpsc::Receiver<crate::actors::lanes::QueuedCommand>,
+    ) -> redoor_protocol::wire::ServerToAgent {
+        let queued = lane.recv().await.expect("command queued");
+        if let Some(ticket) = queued.ticket {
+            assert!(ticket.mark_written());
+        }
+        queued.frame
+    }
+
     /// Builds one agent frame for an inbound stream.
     fn agent_frame(request_id: RequestId, is_last: bool, data: Vec<u8>) -> StreamChunk {
-        StreamChunk {
-            request_id,
-            is_last,
-            is_error: false,
-            data,
-        }
+        StreamChunk::data(request_id, data, is_last)
     }
 
     #[tokio::test]
@@ -474,7 +509,7 @@ mod tests {
                 })
                 .await
         });
-        let request_id = match next_control(&mut text_rx).await {
+        let request_id = match next_command(&mut text_rx).await {
             redoor_protocol::wire::ServerToAgent::Command { id, .. } => id,
             other => panic!("unexpected control message: {other:?}"),
         };
@@ -485,6 +520,8 @@ mod tests {
             .expect("upload start accepted");
         // Request id is available before readiness so cancel can be armed early.
         assert_eq!(upload.request_id(), request_id);
+        // The agent's first credit grant is its readiness, which the session reports.
+        assert!(streams.grant_outbound(request_id, STREAM_CREDIT_WINDOW_FRAMES));
         router_ref
             .send_async(RouterMsg::RouteTransferReady(RouteTransferReadyRequest {
                 agent_id: agent_id.clone(),
@@ -585,7 +622,7 @@ mod tests {
             .await
             .expect("download admission rpc succeeded")
             .expect("download admitted");
-        let download_id = match next_control(&mut text_rx).await {
+        let download_id = match next_command(&mut text_rx).await {
             redoor_protocol::wire::ServerToAgent::Command { id, .. } => id,
             other => panic!("unexpected control message: {other:?}"),
         };
@@ -609,24 +646,26 @@ mod tests {
             .await
             .expect("exec admission rpc succeeded")
             .expect("exec admitted");
-        let _ = next_control(&mut text_rx).await;
+        let _ = next_command(&mut text_rx).await;
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
             // The transfer reader hands frames to the stalled download without waiting.
             // Delivery is synchronous, so a stalled consumer can never block the reader.
             let routed = streams.deliver(agent_frame(download_id, false, vec![0; 1024]));
             assert!(routed.is_none());
         }
-        let exec_event = serde_json::to_vec(&ExecEvent::Exit {
-            code: Some(0),
-            signal: None,
-        })
-        .unwrap();
         // Exec output is not queued behind the stalled download.
-        streams
-            .deliver(agent_frame(exec_output.request_id(), true, exec_event))
-            .expect("exec terminal frame is reported to the router");
+        assert!(
+            streams
+                .deliver(agent_frame(exec_output.request_id(), true, Vec::new()))
+                .is_none()
+        );
         // The exec consumer receives its output although the download consumer never read.
-        assert!(exec_output.recv().await.is_some_and(|chunk| chunk.is_last));
+        assert!(
+            exec_output
+                .recv()
+                .await
+                .is_some_and(|item| item.is_ok_and(|chunk| chunk.is_last))
+        );
 
         let first_frame = binary_rx.recv().await.expect("first binary frame queued");
         assert_eq!(
@@ -649,12 +688,7 @@ mod tests {
             .send_async(RouterMsg::CommitDirectUpload(CommitDirectUploadRequest {
                 agent_id: agent_id.clone(),
                 request_id,
-                chunk: StreamChunk {
-                    request_id,
-                    is_last: true,
-                    is_error: false,
-                    data: Vec::new(),
-                },
+                chunk: StreamChunk::data(request_id, Vec::new(), true),
                 reply: commit_reply,
             }))
             .await

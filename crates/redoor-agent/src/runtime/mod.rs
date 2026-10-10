@@ -263,6 +263,8 @@ impl AgentRuntime {
         self.control.invalidate();
         self.sessions.invalidate();
         self.dispatcher.stop().await;
+        // Results of the old connection can never be delivered; a reconnect starts clean.
+        self.dispatcher.services().results.clear();
     }
 
     /// Handles one agent control message and returns how the event loop ends, if it should.
@@ -355,7 +357,11 @@ impl AgentRuntime {
                 ) else {
                     return;
                 };
-                let _ = Responder::new(control.clone(), request_id)
+                let results = self.dispatcher.services().results.clone();
+                if !results.open(request_id) {
+                    return;
+                }
+                let _ = Responder::new(control.clone(), results, request_id)
                     .respond(CommandResult::error(
                         CommandErrorKind::InvalidInput,
                         format!("Agent could not parse command: {error}"),
@@ -396,13 +402,18 @@ impl AgentRuntime {
                 .services()
                 .output_credits
                 .grant(stream, frames),
-            ServerToAgent::Command { id, command } => {
+            ServerToAgent::Command {
+                id,
+                credit,
+                command,
+            } => {
                 let Some(lanes) = self.control.lanes() else {
                     return;
                 };
                 let link = DispatchLink {
                     control: &lanes.control,
                     bulk: &lanes.bulk,
+                    credit,
                     scope: self.control.scope(),
                 };
                 self.dispatcher
@@ -911,6 +922,7 @@ mod tests {
                 handle.clone(),
                 ServerToAgent::Command {
                     id: redoor_protocol::ids::RequestId::new(1),
+                    credit: 4,
                     command: redoor_protocol::wire::command::Command::RawDownload {
                         path: "/dev/zero".to_string(),
                         range_start: None,

@@ -80,13 +80,16 @@ describe("per-stream credit on the multiplexed connection", () => {
         const honestResponse = await startExec(agentId, ["honest"]);
         const honest = await fake.nextCommand("Exec");
         const stdout = JSON.stringify({ type: "stdout", data: [104, 105] });
-        const exit = JSON.stringify({ type: "exit", code: 0, signal: null });
+        const exit = { type: "exit", code: 0, signal: null };
 
+        // Output streams start with the credit the command frame grants.
+        expect(honest.credit).toBeGreaterThan(0);
         fake.sendStreamFrame(honest.id, Buffer.from(`${stdout}\n`));
-        fake.sendStreamFrame(honest.id, Buffer.from(`${exit}\n`), { last: true });
+        fake.sendStreamFrame(honest.id, Buffer.alloc(0), { last: true });
+        fake.respond(honest.id, { type: "Exec", event: exit });
 
         // Another stream of the same connection still completes normally after the violation.
-        expect(await honestResponse.text()).toBe(`${stdout}\n${exit}\n`);
+        expect(await honestResponse.text()).toBe(`${stdout}\n${JSON.stringify(exit)}\n`);
         await floodResponse.body?.cancel();
     });
 });

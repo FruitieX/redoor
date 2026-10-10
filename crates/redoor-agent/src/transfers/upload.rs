@@ -6,7 +6,7 @@
 
 use crate::commands::ctx::{CommandCtx, Reply};
 use crate::errors::AgentCommandError;
-use crate::runtime::responder::{ControlSender, Responder};
+use crate::runtime::responder::{ControlSender, Responder, ResultLedger};
 use redoor_core::log;
 use redoor_core::stream_credit::CreditLedger;
 use redoor_protocol::{
@@ -15,7 +15,7 @@ use redoor_protocol::{
         command::{CommandErrorKind, CommandResult},
         log::Level,
         policy::UploadKind,
-        stream::StreamChunk,
+        stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk},
     },
 };
 use std::collections::HashMap;
@@ -185,8 +185,13 @@ impl UploadDriver {
         };
         let request_id = self.ctx.responder.request_id();
         let (route, mut chunks) = self.ctx.services.upload_routes.open(request_id, &self.path);
-        // Readiness is sent only after the route exists so no chunk can arrive unroutable.
-        let _ = self.ctx.responder.transfer_ready().await;
+        // The first credit grant is the readiness signal: it is sent only after the route
+        // exists, so no chunk can arrive unroutable.
+        let _ = self
+            .ctx
+            .responder
+            .stream_credit(STREAM_CREDIT_WINDOW_FRAMES)
+            .await;
 
         let mut bytes_written = 0_u64;
         let mut ledger = CreditLedger::default();
@@ -201,9 +206,6 @@ impl UploadDriver {
                     ));
                 }
             };
-            if let Err(error) = self.validate(&chunk) {
-                break UploadStop::Failed(error);
-            }
             let is_last = chunk.is_last;
             let consumed_credit = chunk.consumes_credit();
             let length = chunk.data.len() as u64;
@@ -250,7 +252,7 @@ impl UploadDriver {
                     self.path
                 );
                 CommandResult::error(
-                    CommandErrorKind::InvalidInput,
+                    CommandErrorKind::Canceled,
                     format!("{} canceled by server", self.subject()),
                 )
             }
@@ -284,29 +286,6 @@ impl UploadDriver {
                 _ = cancel.cancelled() => UploadEvent::Canceled,
             }
         }
-    }
-
-    /// Rejects frames that indicate a server-side abort.
-    fn validate(&self, chunk: &StreamChunk) -> Result<(), AgentCommandError> {
-        if chunk.is_error {
-            let message = if chunk.data.is_empty() {
-                format!("{} aborted by server", self.subject())
-            } else {
-                String::from_utf8_lossy(&chunk.data).to_string()
-            };
-            log!(
-                Level::Warning,
-                "Upload aborted: request_id={}, path={}, error={}",
-                chunk.request_id,
-                self.path,
-                message
-            );
-            return Err(AgentCommandError::new(
-                CommandErrorKind::InvalidInput,
-                message,
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -379,7 +358,12 @@ impl UploadRoutes {
     /// Routes are filled with `try_send`: the server never has more than the window plus the
     /// terminal frame outstanding, so a full queue is a protocol violation that fails only
     /// this upload while the reader keeps serving every other stream.
-    pub(crate) async fn route_chunk(&self, chunk: StreamChunk, control: &ControlSender) {
+    pub(crate) async fn route_chunk(
+        &self,
+        chunk: StreamChunk,
+        control: &ControlSender,
+        results: &ResultLedger,
+    ) {
         let request_id = chunk.request_id;
         let route = self
             .table()
@@ -415,7 +399,7 @@ impl UploadRoutes {
             request_id,
             path
         );
-        let _ = Responder::new(control.clone(), request_id)
+        let _ = Responder::new(control.clone(), results.clone(), request_id)
             .respond(CommandResult::error(
                 CommandErrorKind::Internal,
                 "Upload worker is no longer available",
@@ -594,7 +578,7 @@ mod tests {
     fn result(reply: Reply) -> CommandResult {
         match reply {
             Reply::Result(result) => result,
-            Reply::Streamed | Reply::Fallback { .. } => panic!("uploads answer on control"),
+            Reply::Stream { .. } => panic!("uploads answer on control"),
         }
     }
 
@@ -603,10 +587,10 @@ mod tests {
     async fn cancel_aborts_before_unregistering_and_answering() {
         let mut harness = start();
         let ready = harness.frames.recv().await.unwrap();
-        // Readiness is announced only once the route exists.
+        // The first credit grant (readiness) is sent only once the route exists.
         assert!(matches!(
             ready.as_message(),
-            Some(redoor_protocol::wire::AgentToServer::TransferReady { .. })
+            Some(redoor_protocol::wire::AgentToServer::Credit { .. })
         ));
 
         harness.registry.cancel(&RequestId::new(5));
@@ -623,7 +607,7 @@ mod tests {
         // Cancellation keeps its established user-facing classification.
         assert!(matches!(
             result,
-            CommandResult::Error { kind: CommandErrorKind::InvalidInput, message } if message == "Upload canceled by server"
+            CommandResult::Error { kind: CommandErrorKind::Canceled, message } if message == "Upload canceled by server"
         ));
     }
 
@@ -641,44 +625,16 @@ mod tests {
         // More frames than the queue holds: with the route still registered the reader would
         // report a credit violation for a worker that is busy aborting.
         for _ in 0..=CHUNK_QUEUE_CAPACITY {
-            harness.routes.route_chunk(frame(false), &control).await;
+            harness
+                .routes
+                .route_chunk(frame(false), &control, &ResultLedger::default())
+                .await;
         }
         let _ = release.send(());
         let result = result(harness.task.await.unwrap());
         // The worker's own cancellation result is the only answer.
         assert!(matches!(result, CommandResult::Error { .. }));
         assert!(control_frames.try_recv().is_err());
-    }
-
-    /// Verifies a server abort frame discards staging like a cancellation.
-    #[tokio::test]
-    async fn server_abort_discards_staging_and_reports_the_error() {
-        let mut harness = start();
-        harness.frames.recv().await.unwrap();
-        let (control, _control_frames) = mpsc::channel(1);
-
-        harness
-            .routes
-            .route_chunk(
-                StreamChunk::error(RequestId::new(5), "body too long"),
-                &control,
-            )
-            .await;
-        let result = result(harness.task.await.unwrap());
-
-        // An aborted stream must discard staging exactly like a cancellation.
-        assert_eq!(
-            *harness.events.lock().unwrap(),
-            vec!["abort routed=false registered=true".to_string()]
-        );
-        // The abort is reported as invalid input rather than an internal failure.
-        assert!(matches!(
-            result,
-            CommandResult::Error {
-                kind: CommandErrorKind::InvalidInput,
-                ..
-            }
-        ));
     }
 
     /// Verifies publication runs while cancel_transfer can still reach the gate.
@@ -688,7 +644,10 @@ mod tests {
         harness.frames.recv().await.unwrap();
         let (control, _control_frames) = mpsc::channel(1);
 
-        harness.routes.route_chunk(frame(true), &control).await;
+        harness
+            .routes
+            .route_chunk(frame(true), &control, &ResultLedger::default())
+            .await;
         let result = result(harness.task.await.unwrap());
 
         // Publication runs while cancel_transfer can still reach the publication gate.
@@ -712,10 +671,14 @@ mod tests {
         let (_guard, mut chunks) = routes.open(RequestId::new(5), "/stalled");
         let (_other_guard, mut other_chunks) = routes.open(RequestId::new(6), "/other");
         for _ in 0..CHUNK_QUEUE_CAPACITY {
-            routes.route_chunk(frame(false), &control).await;
+            routes
+                .route_chunk(frame(false), &control, &ResultLedger::default())
+                .await;
         }
         // The queue is full and the worker is stalled; this frame exceeds any honest credit.
-        routes.route_chunk(frame(false), &control).await;
+        routes
+            .route_chunk(frame(false), &control, &ResultLedger::default())
+            .await;
         // The violating upload is unrouted so its worker fails instead of the socket stalling.
         assert!(!routes.contains(RequestId::new(5)));
         let mut queued = 0;
@@ -726,7 +689,9 @@ mod tests {
         assert_eq!(queued, CHUNK_QUEUE_CAPACITY);
         let mut other = frame(false);
         other.request_id = RequestId::new(6);
-        routes.route_chunk(other, &control).await;
+        routes
+            .route_chunk(other, &control, &ResultLedger::default())
+            .await;
         // An unrelated upload on the same socket keeps receiving frames.
         assert_eq!(
             other_chunks.recv().await.map(|chunk| chunk.request_id),
