@@ -28,7 +28,7 @@ function bookmark(agentId: string, name: string): Bookmark {
 
 test("old and malformed documents fall back without dropping other defaults", () => {
     const missing = userStateSchema.parse({ showHiddenFiles: false });
-    // Older accounts have no device order and must not be rewritten on load.
+    // A document without a device order keeps the empty default instead of failing to load.
     expect(missing.deviceOrder).toEqual([]);
     expect(missing.showHiddenFiles).toBe(false);
     expect(missing.theme).toBe(defaultUserState.theme);
