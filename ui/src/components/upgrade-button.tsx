@@ -29,9 +29,7 @@ function upgradeErrorMessage(cause: unknown): string {
 }
 
 /** Explains a client-known condition that prevents the server from starting an upgrade. */
-function upgradeUnavailableReason(props: {
-    exePath: string;
-}): string | null {
+function upgradeUnavailableReason(props: { exePath: string }): string | null {
     if (props.exePath === "unknown" || !props.exePath.startsWith("/")) {
         return `The agent reported an unusable executable path (${props.exePath}), so Redoor cannot safely replace its binary.`;
     }

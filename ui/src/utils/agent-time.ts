@@ -100,16 +100,12 @@ export function provisioningStepElapsedMs(options: {
     const previous = options.messages[options.index - 1];
 
     if (previous !== undefined) {
-        return Math.max(
-            0,
-            current.at - previous.at,
-        );
+        return Math.max(0, current.at - previous.at);
     }
 
     const next = options.messages[options.index + 1];
 
-    const endMs =
-        next === undefined ? options.nowMs : next.at;
+    const endMs = next === undefined ? options.nowMs : next.at;
 
     return Math.max(0, endMs - current.at);
 }

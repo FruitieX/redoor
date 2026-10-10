@@ -342,7 +342,6 @@ export class Agent {
         return this.info.binary;
     }
 
-
     /** Reports whether this session can launch paths in its graphical desktop. */
     get supportsNativeOpen(): boolean {
         return this.info.supports_native_open;

@@ -18,8 +18,8 @@ use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchRespons
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
 use crate::wire::command::{
-    Command, CommandErrorKind, EchoResult, LsDirectoryResult, LsFileResult,
-    MoveMetadataResult, MoveSourceIdentity,
+    Command, CommandErrorKind, EchoResult, LsDirectoryResult, LsFileResult, MoveMetadataResult,
+    MoveSourceIdentity,
 };
 use crate::wire::exec::{ExecEvent, ExecRequest};
 use crate::wire::log::Level;
