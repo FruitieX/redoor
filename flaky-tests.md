@@ -11,6 +11,12 @@
 
 ## Failure history
 
+- 2026-10-10 `pn test` Playwright (resumable transfers): `server-home.spec.ts > shows a measuring badge until a directory archive total arrives` hit the previously recorded tooltip visibility flake at line 219. All integration tests and 224 browser tests passed; the unchanged browser case and its three log-test dependencies passed immediately in isolation (4 passed, 8.7 seconds).
+
+- 2026-10-10 `pn test` integration (resumable transfers): `resumes after toxiproxy interrupts the destination connection` exceeded its default 10-second timeout under full-suite load. The unchanged case passed immediately in isolation in 9.20 seconds; logs showed the expected three-second agent reconnect backoff. Network recovery now gets the same 30-second timeout as process restart tests, while continuing to poll state without sleeps.
+
+- 2026-10-10 resumable transfer integration: `resumable-transfers.test.ts` intermittently failed in `rediscovers a partial after both destination and server restarts` because destination inventory appeared before the source reconnected (one run exceeded the 10-second timeout; another reported `Agent not found: resume-source`). The fixture now waits for both endpoints and allows 30 seconds for restart cases. All 14 focused tests passed on the next run.
+
 - 2026-10-10 `pn test` integration (wire protocol v2, phase 5 review fixes): `create-ssh-agent.test.ts` failed 8 of 9 tests with `ECONNREFUSED` right after the first test's `restartServer()` succeeded, so the restarted server was briefly unreachable under full-suite load. The file passed four immediate isolated reruns (9 passed each).
 
 - 2026-10-10 `pn test` integration (wire protocol v2, phase 3): `mcp.test.ts` failed in `bounds retained output, cancels background execution, and keeps searches independent` because `waitForOperation` got `404 Operation not found` for the canceled background command at line 749. The agent acknowledged the cancel within 40 ms, so the record most likely passed its 2-second test retention before the first poll under full-suite load. The whole file passed on immediate isolated rerun (19 passed).
