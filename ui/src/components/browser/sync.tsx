@@ -23,6 +23,7 @@ import {
     getPathLoadError,
 } from "#ui/components/browser/utils";
 import { transfersQueryOptions } from "#ui/queries";
+import { holdRouteInvalidation } from "#ui/refresh-listener";
 import { formatSize } from "#ui/utils/path";
 
 /** Reuses the agent and path controls for cross-agent file operations. */
@@ -259,6 +260,21 @@ function useSyncTransferProgress(api: ApiClient, requestId: number | null) {
     });
 }
 
+/**
+ * Holds UI-event route reloads while `active`. A move can remove the file this page shows,
+ * and the route reload the server announces when it completes would replace the Sync view
+ * before its outcome could be read; leaving the view releases the hold.
+ */
+function useRouteHoldWhile(active: boolean) {
+    React.useEffect(() => {
+        if (!active) {
+            return undefined;
+        }
+
+        return holdRouteInvalidation();
+    }, [active]);
+}
+
 /** Keeps destination lookup, transfer polling, and diff out of the page render. */
 function useSyncWorkspace(props: {
     api: ApiClient;
@@ -388,6 +404,11 @@ function useSyncWorkspace(props: {
         transfer?.state !== "completed" &&
         transfer?.state !== "errored" &&
         !transferQuery.isError;
+
+    useRouteHoldWhile(
+        transferOperation === "move" &&
+            (transferMutation.isPending || transferMutation.isSuccess),
+    );
 
     const preparingOperation = prepareTransferMutation.isPending
         ? prepareTransferMutation.variables

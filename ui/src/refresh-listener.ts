@@ -16,8 +16,9 @@ const uiEventSchema: z.ZodType<UiEvent> = z.object({
 let routeInvalidationHoldCount = 0;
 
 /**
- * Blocks UI-event route reloads while a save is replacing the current agent
- * identity, so the stale edit URL cannot redirect to /agents mid-request.
+ * Blocks UI-event route reloads while a view must outlive a server-side change to the data
+ * it shows: a save replacing the current agent identity (so the stale edit URL cannot
+ * redirect to /agents mid-request), or a move removing the file the Sync view reports on.
  */
 export function holdRouteInvalidation(): () => void {
     routeInvalidationHoldCount += 1;
