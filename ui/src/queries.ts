@@ -42,6 +42,8 @@ export const queryKeys = {
     agents: () => [...queryKeys.all, "agents"] as const,
     transfers: () => [...queryKeys.all, "transfers"] as const,
     serverInfo: () => [...queryKeys.all, "server-info"] as const,
+    protocolMismatches: () =>
+        [...queryKeys.all, "protocol-mismatches"] as const,
     userState: () => [...queryKeys.all, "user-state"] as const,
     mcpTokens: () => [...queryKeys.all, "mcp-tokens"] as const,
     serverLoggingLevel: () =>
@@ -141,6 +143,21 @@ export function transfersQueryOptions(api: ApiClient) {
         queryKey: queryKeys.transfers(),
         queryFn: () => api.getTransferProgress(),
         staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/** How often the device list rechecks for refused agents, which push no UI events. */
+const PROTOCOL_MISMATCH_POLL_MS = 10_000;
+
+/**
+ * Polls refused agent connections: a mismatched agent never registers, so no refresh event
+ * announces it and the list has to be fetched periodically while the page is open.
+ */
+export function protocolMismatchesQueryOptions(api: ApiClient) {
+    return queryOptions({
+        queryKey: queryKeys.protocolMismatches(),
+        queryFn: () => api.listProtocolMismatches(),
+        refetchInterval: PROTOCOL_MISMATCH_POLL_MS,
     });
 }
 

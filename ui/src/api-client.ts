@@ -1,4 +1,5 @@
 import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
+import type { ProtocolMismatchListResponse } from "#bindings/ProtocolMismatchListResponse";
 import type { LsFileResponse } from "#bindings/LsFileResponse";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
@@ -1178,6 +1179,15 @@ export class ApiClient {
     async getServerInfo(): Promise<ServerInfoResponse> {
         return apiRequest<ServerInfoResponse>(
             `${this.baseUrl}/api/v1/server`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Lists recent agent connections refused because they speak another protocol version. */
+    async listProtocolMismatches(): Promise<ProtocolMismatchListResponse> {
+        return apiRequest<ProtocolMismatchListResponse>(
+            `${this.baseUrl}/api/v1/protocol-mismatches`,
             undefined,
             this.requestContext(),
         );

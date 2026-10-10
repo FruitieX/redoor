@@ -1,10 +1,11 @@
 import * as React from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
 import { useSetAtom } from "jotai";
 import { MoreHorizontal, Pencil, Play, Power, FolderOpen } from "lucide-react";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import type { Agent, BinaryIdentity } from "#ui/api-client";
+import type { ProtocolMismatchAttempt } from "#bindings/ProtocolMismatchAttempt";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import {
     fieldMatchTone,
@@ -13,7 +14,10 @@ import {
 } from "#ui/components/binary-identity";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { RestartButton, waitForRestart } from "#ui/components/restart-button";
-import { agentsQueryOptions } from "#ui/queries";
+import {
+    agentsQueryOptions,
+    protocolMismatchesQueryOptions,
+} from "#ui/queries";
 import { formatAgentRecency, useNow } from "#ui/utils/agent-time";
 import { Route as RootRoute } from "./__root";
 
@@ -50,6 +54,7 @@ function AgentManagement() {
     );
 
     const now = useNow();
+    const protocolMismatches = useQuery(protocolMismatchesQueryOptions(api));
     const [mutations, setMutations] = React.useState<MutationState>({});
 
     const [shutdownAgent, setShutdownAgent] = React.useState<Agent | null>(
@@ -148,6 +153,14 @@ function AgentManagement() {
                     onStart={start}
                     onShutdown={setShutdownAgent}
                 />
+                {protocolMismatches.data &&
+                protocolMismatches.data.attempts.length > 0 ? (
+                    <ProtocolMismatchList
+                        attempts={protocolMismatches.data.attempts}
+                        serverProtocol={protocolMismatches.data.server_protocol}
+                        serverVersion={serverInfo.version}
+                    />
+                ) : null}
             </div>
             <ConfirmationDialog
                 isOpen={shutdownAgent !== null}
@@ -387,6 +400,65 @@ function AgentActionsMenu(props: {
                 </>
             )}
         </ActionMenu>
+    );
+}
+
+/**
+ * Lists agents the server refused because they speak another protocol version. Such agents
+ * never register, so without this list they would only be visible in the server log.
+ */
+function ProtocolMismatchList(props: {
+    attempts: ProtocolMismatchAttempt[];
+    serverProtocol: string;
+    serverVersion: string;
+}) {
+    return (
+        <section
+            aria-label="Refused agent connections"
+            className="mt-8 rounded-lg border border-amber-700/60 bg-amber-950/20 p-4"
+        >
+            <h2 className="text-lg font-semibold text-amber-200">
+                Refused agent connections
+            </h2>
+            <p className="mt-1 text-sm text-slate-300">
+                These agents speak a different protocol than this server (
+                {props.serverProtocol}). Upgrade them to the server&apos;s
+                version {props.serverVersion} to connect them.
+            </p>
+            <table className="mt-4 w-full text-left text-sm">
+                <thead className="text-slate-400">
+                    <tr>
+                        <th className="py-2 pr-4">When</th>
+                        <th className="py-2 pr-4">Address</th>
+                        <th className="py-2 pr-4">Agent version</th>
+                        <th className="py-2 pr-4">Offered protocol</th>
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800 text-slate-200">
+                    {props.attempts.map((attempt) => (
+                        <tr
+                            key={`${attempt.remote_address}-${attempt.agent_version ?? ""}`}
+                            aria-label={`Refused agent at ${attempt.remote_address}`}
+                        >
+                            <td className="py-2 pr-4">
+                                {new Date(attempt.at).toLocaleString()}
+                            </td>
+                            <td className="py-2 pr-4 font-mono">
+                                {attempt.remote_address}
+                            </td>
+                            <td className="py-2 pr-4">
+                                {attempt.agent_version ?? "unknown"}
+                            </td>
+                            <td className="py-2 pr-4">
+                                {attempt.offered_protocols.length > 0
+                                    ? attempt.offered_protocols.join(", ")
+                                    : "none"}
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+        </section>
     );
 }
 
