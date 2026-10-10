@@ -48,7 +48,9 @@ The contract between all parties, with no runtime dependencies (no tokio).
   - `ServerToAgent` and `AgentToServer` are the JSON control envelopes, one per direction,
     so each side's `match` is exhaustive. No frame except `hello` carries an agent id: the
     authenticated connection is the identity.
-  - `Command` and `CommandResult` are the request and response payloads.
+  - `Command` is the request payload. Its variants wrap the per-command structs in
+    `request`, and each struct names its response type through the `AgentRequest` trait, so
+    a command can only be answered (and decoded) as its own response.
   - `Command::policy()` is the single table that classifies every command: whether it
     streams bytes and in which direction, whether it is an upload, and how it is cancelled.
     Both the server and the agent read it, so they cannot disagree.
@@ -106,7 +108,8 @@ The agent runtime and the implementation of every command.
 ### `redoor-server`
 
 - `http/`: Axum routes, auth (sessions, PAM, machine and MCP tokens), the UI assets and MCP.
-  - `agent_client`: typed `AgentCall`s with per-call deadlines defined in one place.
+  - `agent_client`: `AgentClient::call` for any protocol request that is also an
+    `AgentCall`, which adds its deadline; all deadlines are defined in one place.
   - `error.rs`: `ApiError`, which owns all HTTP status mapping.
   - `services/`: `TransferService` (copy and move), `OutputStream` (downloads, diffs, exec)
     and `AgentUpload`. REST and MCP handlers are thin adapters over these.
@@ -384,19 +387,21 @@ sequenceDiagram
     participant A as Agent dispatcher
 
     C->>H: GET /api/v1/... (e.g. metadata)
-    H->>R: AgentCall::command() with deadline
+    H->>R: request.into() command, with the call's deadline
     R->>R: add Command flow to flow table
     R->>A: command {id, credit, command} (command lane)
     A->>A: policy() → admit, register cancel, spawn
-    A->>R: command_response {id, result}
-    R->>H: result (flow removed)
-    H->>H: AgentCall::extract() → typed output or ApiError
+    A->>R: result {id, ok | error}
+    R->>H: outcome (flow removed)
+    H->>H: Request::decode() → its typed response or ApiError
     H->>C: JSON response
 ```
 
-- `AgentClient::call` is the only way handlers talk to agents. Each `AgentCall` defines its
-  command, its deadline and how to extract the typed result. Wrong result types and errors
-  become an `ApiError`, which maps to the HTTP status in one place.
+- `AgentClient::call` is the only way handlers talk to agents. The request type decides
+  the response type: the agent encodes its answer with `Reply::of::<R>`, and the server
+  decodes it with `R::decode`, so there are no "unexpected result type" branches. An agent
+  error becomes an `ApiError` with the status of its `CommandErrorKind`; a payload that is
+  not the request's response type is a protocol fault (500).
 - When the caller gives up (the deadline passes or the HTTP client disconnects), the router
   drops the flow. If the command can be cancelled on the agent, the router also cancels it
   (see the request lifecycle below). A few commands, such as trash restore, are allowed to
@@ -409,7 +414,7 @@ Every request follows one ordered lifecycle on the connection:
 ```
 server: command {id, credit, command}
 agent:  binary frames of stream id ... binary frame with FIN     (streaming commands only)
-agent:  command_response {id, result}                            (exactly one, always last)
+agent:  result {id, ok: <response>} or result {id, error: {kind, message}}   (exactly one, last)
 ```
 
 - **Exactly one result per request, always after its data.** A streaming command's result is
@@ -456,7 +461,7 @@ sequenceDiagram
         O->>A: credit {stream, frames} (priority lane)
     end
     A->>T: final frame (FIN, spends no credit)
-    A->>R: command_response (behind FIN on the same lane)
+    A->>R: result (behind FIN on the same lane)
     R->>R: settle the flow and its progress row
 ```
 
@@ -500,7 +505,7 @@ sequenceDiagram
     A->>R: publish_request {id}
     R->>A: publish_decision {id, allowed}
     A->>A: publish (atomic rename into place) or discard staging
-    A->>R: command_response
+    A->>R: result
     R->>C: result
 ```
 
@@ -536,11 +541,11 @@ sequenceDiagram
         D-->>F: credit (frame accepted)
         F-->>S: credit
     end
-    S->>R: command_response (source finished)
-    D->>R: command_response (published)
+    S->>R: result (source finished)
+    D->>R: result (published)
     opt move
         R->>S: delete source (verified identity)
-        S->>R: command_response
+        S->>R: result
     end
 ```
 
