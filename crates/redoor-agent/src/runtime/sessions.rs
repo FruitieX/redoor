@@ -54,10 +54,12 @@ impl Sessions {
     ///
     /// The server only cancels commands it has already written, and the connection is
     /// ordered, so the command is always known here; a cancel for an id that already finished
-    /// is simply ignored, with no state kept.
+    /// is simply ignored, with no state kept. Terminals and log streams give up their slot at
+    /// once, because the server frees its own slot when it sends the cancel and may open a
+    /// replacement right away.
     pub(crate) fn cancel_request(&mut self, request_id: RequestId) {
-        if self.terminals.cancel(&request_id)
-            || self.log_streams.cancel(&request_id)
+        if self.terminals.revoke(&request_id)
+            || self.log_streams.revoke(&request_id)
             || self.requests.cancel(&request_id)
         {
             log!(

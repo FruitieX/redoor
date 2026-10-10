@@ -9,6 +9,7 @@ use super::responder::{ControlSender, PostSend, Responder};
 use super::sessions::Sessions;
 use crate::commands::RunCommand;
 use crate::commands::ctx::{AgentServices, CommandCtx, Reply};
+use futures_util::FutureExt;
 use redoor_core::{log, log_error};
 use redoor_protocol::{
     ids::RequestId,
@@ -16,7 +17,7 @@ use redoor_protocol::{
         command::{Command, CommandErrorKind},
         log::Level,
         policy::{CancelScope, CommandPolicy},
-        request::CommandOutcome,
+        request::{CommandError, CommandOutcome},
     },
 };
 use std::sync::Arc;
@@ -167,15 +168,35 @@ impl Dispatcher {
         } else {
             None
         };
+        let run = Self::answer_panics(command.run(ctx));
         let reply = match abort_on {
             // Abortable commands are dropped mid-flight when their connection ends.
-            Some(token) => match token.run_until_cancelled(command.run(ctx)).await {
+            Some(token) => match token.run_until_cancelled(run).await {
                 Some(reply) => reply,
                 None => return,
             },
-            None => command.run(ctx).await,
+            None => run.await,
         };
         Self::deliver(&responder, reply).await;
+    }
+
+    /// Turns a panicking command into an internal-error reply.
+    ///
+    /// Every request owes exactly one result; a panic would otherwise end the task without
+    /// one and leave the server's caller waiting until its deadline. The failure goes on the
+    /// control lane, so for a streaming command it may overtake data still queued for the
+    /// stream; the server then fails the stream, which is the outcome a panic deserves.
+    async fn answer_panics(run: impl Future<Output = Reply>) -> Reply {
+        match std::panic::AssertUnwindSafe(run).catch_unwind().await {
+            Ok(reply) => reply,
+            Err(_) => {
+                log!(Level::Warning, "Agent command panicked");
+                Reply::failure(CommandError::new(
+                    CommandErrorKind::Internal,
+                    "Agent command failed unexpectedly",
+                ))
+            }
+        }
     }
 
     /// Sends the request's one result on the lane its delivery mode requires.
@@ -403,6 +424,20 @@ mod tests {
         assert_eq!(results[0].0, frames.len() - 1);
         // The control lane carried no second answer.
         assert!(fixture.frames.try_recv().is_err());
+    }
+
+    /// A panicking command still answers its request instead of leaving the server waiting.
+    #[tokio::test]
+    async fn panicking_command_answers_with_an_internal_error() {
+        let reply = Dispatcher::answer_panics(async { panic!("command bug") }).await;
+        let Reply::Result(outcome) = reply else {
+            panic!("a panic is answered on the control lane");
+        };
+        // The caller gets a typed internal failure, which REST maps to a 500.
+        assert_eq!(
+            outcome.failure().map(|error| &error.kind),
+            Some(&CommandErrorKind::Internal)
+        );
     }
 
     /// Verifies one request id cannot own two cancellation registrations.

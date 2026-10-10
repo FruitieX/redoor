@@ -26,14 +26,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Bounded per-upload chunk queue between the connection reader and the worker.
-const CHUNK_QUEUE_CAPACITY: usize = 8;
-// A credited sender may have the full window plus the terminal frame queued at once.
-const _: () = assert!(
-    CHUNK_QUEUE_CAPACITY
-        >= redoor_protocol::wire::stream::receive_queue_frames(
-            redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES
-        )
+/// Bounded per-upload chunk queue between the connection reader and the worker: exactly the
+/// credit window plus the terminal frame, so an honest server never fills it and the first
+/// frame beyond its credit is detected as a violation.
+const CHUNK_QUEUE_CAPACITY: usize = redoor_protocol::wire::stream::receive_queue_frames(
+    redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES,
 );
 /// Upper bound on waiting for the router's publication decision.
 const PUBLICATION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -219,7 +216,7 @@ impl UploadDriver {
                 Err(SinkError::Failed(error)) => break UploadStop::Failed(error),
             }
             // Credit returns only after staging, so a slow destination throttles just this
-            // upload's sender instead of the shared transfer socket.
+            // upload's sender instead of the shared connection.
             if let Some(frames) = ledger.drained(consumed_credit) {
                 let _ = self.ctx.responder.stream_credit(frames).await;
             }
@@ -329,7 +326,7 @@ impl UploadRoutes {
     /// Registers a chunk route for `request_id`; the guard removes it on drop.
     ///
     /// The route relies on the server honoring per-stream credit, which is what lets the
-    /// transfer reader enqueue without ever waiting on this worker.
+    /// connection reader enqueue without ever waiting on this worker.
     pub(crate) fn open(
         &self,
         request_id: RequestId,
@@ -444,7 +441,7 @@ impl UploadRoutes {
         }
     }
 
-    /// Detaches every route when the transfer socket is lost; workers observe closed queues.
+    /// Detaches every route when the connection is lost; workers observe closed queues.
     pub(crate) fn clear(&self) {
         let mut table = self.table();
         table.routes.clear();
@@ -604,7 +601,7 @@ mod tests {
         ));
     }
 
-    /// A slow abort must not stall the transfer reader on this worker's full queue, and the
+    /// A slow abort must not stall the connection reader on this worker's full queue, and the
     /// reader must not answer for a worker that answers itself.
     #[tokio::test]
     async fn slow_abort_neither_blocks_the_reader_nor_double_answers() {
@@ -630,7 +627,7 @@ mod tests {
         assert!(control_frames.try_recv().is_err());
     }
 
-    /// Verifies publication runs while cancel_transfer can still reach the gate.
+    /// Verifies publication runs while a `cancel` can still reach the gate.
     #[tokio::test]
     async fn terminal_chunk_commits_while_still_registered() {
         let mut harness = start();
@@ -643,7 +640,7 @@ mod tests {
             .await;
         let result = harness.task.await.unwrap();
 
-        // Publication runs while cancel_transfer can still reach the publication gate.
+        // Publication runs while a `cancel` can still reach the publication gate.
         assert_eq!(
             *harness.events.lock().unwrap(),
             vec![

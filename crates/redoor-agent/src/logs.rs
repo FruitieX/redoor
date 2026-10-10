@@ -14,8 +14,8 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Streams the snapshot and then live entries until the server cancels the stream, the
-/// connection ends or the logger lags; the stream ends with FIN in every case but
-/// cancellation, after which the server no longer listens.
+/// connection ends, the logger lags or fails; the stream ends with FIN in every case but
+/// cancellation and a closed lane, so the server's viewer never waits for nothing.
 pub(crate) async fn run(
     stream: RequestId,
     mut writer: StreamWriter,
@@ -24,18 +24,24 @@ pub(crate) async fn run(
     let subscription = tokio::select! {
         _ = cancel.cancelled() => return Ok(()),
         result = logging::subscribe() => result,
-    }
-    .context("logger is unavailable")?;
+    };
+    let subscription = match subscription {
+        Ok(subscription) => subscription,
+        Err(error) => {
+            writer.send(&[], true).await;
+            return Err(error).context("logger is unavailable");
+        }
+    };
     log!(Level::Info, "Agent log stream started: stream={}", stream);
     let finished = tokio::select! {
-        _ = cancel.cancelled() => false,
-        result = forward(&mut writer, subscription) => result?,
+        _ = cancel.cancelled() => Ok(false),
+        result = forward(&mut writer, subscription) => result,
     };
-    if finished {
+    if !matches!(finished, Ok(false)) {
         writer.send(&[], true).await;
     }
     log!(Level::Info, "Agent log stream stopped: stream={}", stream);
-    Ok(())
+    finished.map(|_| ())
 }
 
 /// Sends the snapshot and live entries; returns whether the stream should be ended with FIN.

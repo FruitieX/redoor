@@ -19,8 +19,9 @@ pub(crate) const BULK_QUEUE_CAPACITY: usize = 1;
 
 /// The three outbound classes of one connection, drained by one writer in strict order.
 ///
-/// Control frames (results, credit, progress) go first, then interactive terminal frames,
-/// then bulk stream data. Within a lane frames keep their order, so a frame queued after a
+/// Control frames (results of non-streaming commands, credit, progress) go first, then
+/// interactive terminal frames, then bulk stream data; a streaming command's result rides its
+/// stream's lane instead, behind the data. Within a lane frames keep their order, so a frame queued after a
 /// stream's data on the same lane is always written after that data.
 #[derive(Clone)]
 pub(crate) struct ConnectionLanes {

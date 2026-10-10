@@ -1,5 +1,4 @@
-//! Server address and TLS settings shared by the control socket and every dedicated
-//! data-plane socket the agent opens.
+//! Server address, TLS settings and the authenticated upgrade of the agent's one connection.
 
 use std::sync::Arc;
 

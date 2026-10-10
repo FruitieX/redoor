@@ -118,6 +118,23 @@ impl<K: Eq + Hash + Clone> CancelRegistry<K> {
         }
     }
 
+    /// Cancels one live worker and frees its key at once, before the worker has finished;
+    /// returns `false` when no worker owns `key`.
+    ///
+    /// For streams the server has already forgotten (closed terminals and log streams), so a
+    /// new stream can take the slot while the old one is still tearing down, exactly as the
+    /// server's own slot accounting expects. The old worker's guard finds a different (or no)
+    /// entry and leaves it alone.
+    pub(crate) fn revoke(&self, key: &K) -> bool {
+        match self.state().entries.remove(key) {
+            Some(entry) => {
+                entry.token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Cancels every current worker and forgets them so a new generation starts empty.
     pub(crate) fn revoke_all(&self) {
         let mut state = self.state();
@@ -286,5 +303,23 @@ mod tests {
 
         // Connection loss alone must stop workers even before the registry is revoked.
         assert!(registration.token().is_cancelled());
+    }
+
+    /// Revoking frees the key at once, and the revoked worker's guard leaves a newer
+    /// registration of the same key alone.
+    #[test]
+    fn revoke_frees_the_key_before_the_worker_finishes() {
+        let registry = CancelRegistry::new(Some(1));
+        let old = registry.register(1).unwrap();
+        assert!(registry.revoke(&1));
+        // The revoked worker is told to stop.
+        assert!(old.token().is_cancelled());
+        // The slot is free for a replacement while the old worker is still tearing down.
+        let new = registry.register(1).unwrap();
+        drop(old);
+        // The old guard does not remove the replacement.
+        assert!(registry.contains(&1));
+        drop(new);
+        assert!(!registry.contains(&1));
     }
 }

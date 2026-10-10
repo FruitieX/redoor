@@ -54,27 +54,44 @@ struct TerminalRoute {
 /// never passes through the runtime mailbox.
 #[derive(Clone, Default)]
 pub(crate) struct TerminalInputs {
-    routes: Arc<Mutex<HashMap<RequestId, TerminalRoute>>>,
+    routes: Arc<Mutex<RouteTable>>,
+}
+
+/// The routes plus a serial per route, so a terminal that is still tearing down can never
+/// unroute a newer terminal that reuses its stream id.
+#[derive(Default)]
+struct RouteTable {
+    routes: HashMap<RequestId, (u64, TerminalRoute)>,
+    next_serial: u64,
 }
 
 /// Input of one terminal; dropping it unroutes the stream.
 pub(crate) struct TerminalInput {
     inputs: TerminalInputs,
     stream: RequestId,
+    serial: u64,
     pub(crate) frames: mpsc::Receiver<StreamChunk>,
     pub(crate) resizes: mpsc::Receiver<TerminalSize>,
 }
 
 impl Drop for TerminalInput {
-    /// Unroutes the stream so late frames are dropped instead of queued for nobody.
+    /// Unroutes the stream so late frames are dropped instead of queued for nobody, unless a
+    /// newer terminal already owns the stream id.
     fn drop(&mut self) {
-        self.inputs.table().remove(&self.stream);
+        let mut table = self.inputs.table();
+        if table
+            .routes
+            .get(&self.stream)
+            .is_some_and(|(serial, _)| *serial == self.serial)
+        {
+            table.routes.remove(&self.stream);
+        }
     }
 }
 
 impl TerminalInputs {
     /// Locks the table, tolerating poison because every operation leaves it consistent.
-    fn table(&self) -> std::sync::MutexGuard<'_, HashMap<RequestId, TerminalRoute>> {
+    fn table(&self) -> std::sync::MutexGuard<'_, RouteTable> {
         self.routes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -82,10 +99,17 @@ impl TerminalInputs {
     pub(crate) fn open(&self, stream: RequestId) -> TerminalInput {
         let (input, frames) = mpsc::channel(receive_queue_frames(TERMINAL_CREDIT_WINDOW_FRAMES));
         let (resize, resizes) = mpsc::channel(RESIZE_QUEUE_SIZE);
-        self.table().insert(stream, TerminalRoute { input, resize });
+        let mut table = self.table();
+        table.next_serial = table.next_serial.wrapping_add(1);
+        let serial = table.next_serial;
+        table
+            .routes
+            .insert(stream, (serial, TerminalRoute { input, resize }));
+        drop(table);
         TerminalInput {
             inputs: self.clone(),
             stream,
+            serial,
             frames,
             resizes,
         }
@@ -97,7 +121,7 @@ impl TerminalInputs {
     /// it unroutes only that terminal, whose session then ends.
     pub(crate) fn deliver(&self, chunk: StreamChunk) -> Option<StreamChunk> {
         let mut table = self.table();
-        let Some(route) = table.get(&chunk.request_id) else {
+        let Some((_, route)) = table.routes.get(&chunk.request_id) else {
             return Some(chunk);
         };
         let stream = chunk.request_id;
@@ -107,14 +131,14 @@ impl TerminalInputs {
                 "Terminal input exceeded its flow-control credit: stream={}",
                 stream
             );
-            table.remove(&stream);
+            table.routes.remove(&stream);
         }
         None
     }
 
     /// Queues a resize for terminal `stream`; resizes for unknown terminals are ignored.
     pub(crate) fn resize(&self, stream: RequestId, size: TerminalSize) {
-        if let Some(route) = self.table().get(&stream) {
+        if let Some((_, route)) = self.table().routes.get(&stream) {
             let _ = route.resize.try_send(size);
         }
     }
@@ -150,8 +174,6 @@ pub(crate) async fn run(
     cwd: String,
     cancel: CancellationToken,
 ) -> Result<()> {
-    size.validate()
-        .map_err(|error| anyhow!(error.to_string()))?;
     let TerminalLink {
         stream,
         interactive,
@@ -164,7 +186,11 @@ pub(crate) async fn run(
         stream,
         credits.register_with_window(stream, TERMINAL_CREDIT_WINDOW_FRAMES),
     );
-    let (reader, pty_writer, mut child, process_group_id) = match start_pty(size, &cwd) {
+    let started = size
+        .validate()
+        .map_err(|error| anyhow!(error.to_string()))
+        .and_then(|()| start_pty(size, &cwd));
+    let (reader, pty_writer, mut child, process_group_id) = match started {
         Ok(started) => started,
         Err(error) => {
             send_event(
@@ -187,7 +213,8 @@ pub(crate) async fn run(
     );
     send_event(&mut writer, stream, TerminalServerMessage::Ready).await;
 
-    let mut output = tokio::spawn(forward_output(reader, writer));
+    let stop_output = CancellationToken::new();
+    let mut output = tokio::spawn(forward_output(reader, writer, stop_output.clone()));
     let mut input_task = tokio::spawn(apply_input(input, pty_writer, control, stream));
     let end = wait_for_end(&mut child, &cancel, &mut output, &mut input_task).await;
 
@@ -207,13 +234,18 @@ pub(crate) async fn run(
     teardown_process_group(&mut child, process_group_id).await;
     input_task.abort();
     // The PTY closes with the shell, so the output task drains the remaining output and
-    // hands the writer back; the exit status then follows that output on the same lane.
+    // hands the writer back; the exit status then follows that output on the same lane. An
+    // output task still waiting for credit after the grace period is told to stop, so the
+    // writer always comes back and the stream can still end with FIN.
     let writer = match finished_writer {
         Some(writer) => writer,
-        None => timeout(PROCESS_EXIT_GRACE, &mut output)
-            .await
-            .ok()
-            .and_then(Result::ok),
+        None => match timeout(PROCESS_EXIT_GRACE, &mut output).await {
+            Ok(writer) => writer.ok(),
+            Err(_) => {
+                stop_output.cancel();
+                output.await.ok()
+            }
+        },
     };
     if let Some(mut writer) = writer {
         if let Some(status) = status.filter(|_| !cancel.is_cancelled()) {
@@ -228,8 +260,6 @@ pub(crate) async fn run(
             .await;
         }
         writer.send(&[], true).await;
-    } else {
-        output.abort();
     }
     log!(Level::Info, "Terminal destroyed: stream={}", stream);
     result
@@ -262,21 +292,56 @@ async fn send_event(writer: &mut StreamWriter, stream: RequestId, event: Termina
         .await;
 }
 
-/// Copies PTY output into credited stream frames until EOF or a closed lane, then returns
-/// the writer so the session can end the stream after the last output.
+/// Copies PTY output into credited stream frames until EOF, a closed lane or `stop`, then
+/// returns the writer so the session can end the stream after the last output.
 async fn forward_output(
     mut reader: pty_process::OwnedReadPty,
     mut writer: StreamWriter,
+    stop: CancellationToken,
 ) -> StreamWriter {
     let mut buffer = vec![0; PTY_BUFFER_SIZE];
     loop {
-        let read = match reader.read(&mut buffer).await {
-            Ok(0) | Err(_) => return writer,
-            Ok(read) => read,
+        let read = tokio::select! {
+            _ = stop.cancelled() => None,
+            read = reader.read(&mut buffer) => read.ok().filter(|read| *read > 0),
         };
-        if !writer.send(&buffer[..read], false).await {
+        let Some(read) = read else {
+            return writer;
+        };
+        let sent = tokio::select! {
+            _ = stop.cancelled() => false,
+            sent = writer.send(&buffer[..read], false) => sent,
+        };
+        if !sent {
             return writer;
         }
+    }
+}
+
+/// Answers a `terminal_open` the agent cannot honor with an error event and FIN, so the
+/// browser shows the reason instead of waiting for a ready event that never comes.
+///
+/// Both frames are exempt from credit, so no credit registration is needed for a stream that
+/// never started.
+pub(crate) async fn refuse(interactive: ControlSender, stream: RequestId, message: &str) {
+    let event = AgentToServer::TerminalEvent {
+        stream,
+        event: TerminalServerMessage::Error {
+            message: message.to_string(),
+        },
+    };
+    if interactive
+        .send(OutboundFrame::message(event))
+        .await
+        .is_ok()
+    {
+        let _ = interactive
+            .send(OutboundFrame::stream(StreamChunk::data(
+                stream,
+                Vec::new(),
+                true,
+            )))
+            .await;
     }
 }
 
@@ -439,5 +504,44 @@ mod tests {
 
         // The sixth proc stat field identifies every process belonging to the PTY session.
         assert_eq!(process_session_id(stat), Some(456));
+    }
+
+    /// A terminal still tearing down must not unroute a newer terminal with the same id.
+    #[test]
+    fn stale_input_drop_keeps_the_newer_route() {
+        let inputs = super::TerminalInputs::default();
+        let stream = redoor_protocol::ids::RequestId::new(3);
+        let old = inputs.open(stream);
+        let mut new = inputs.open(stream);
+        drop(old);
+        let chunk = redoor_protocol::wire::stream::StreamChunk::data(stream, b"k".to_vec(), false);
+        // The newer terminal still receives its input after the old one went away.
+        assert!(inputs.deliver(chunk).is_none());
+        assert!(new.frames.try_recv().is_ok());
+    }
+
+    /// A refused terminal tells the browser why and ends its stream.
+    #[tokio::test]
+    async fn refused_terminal_sends_an_error_then_fin() {
+        let (lane, mut frames) = tokio::sync::mpsc::channel(4);
+        let stream = redoor_protocol::ids::RequestId::new(9);
+        super::refuse(lane, stream, "full").await;
+        // The error event comes first so the bridge reports the reason.
+        assert!(matches!(
+            frames.recv().await.unwrap().as_message(),
+            Some(redoor_protocol::wire::AgentToServer::TerminalEvent {
+                event: redoor_protocol::wire::terminal::TerminalServerMessage::Error { .. },
+                ..
+            })
+        ));
+        // FIN then tells the server no frame of the stream follows.
+        assert!(
+            frames
+                .recv()
+                .await
+                .unwrap()
+                .as_stream()
+                .is_some_and(|chunk| chunk.is_last)
+        );
     }
 }

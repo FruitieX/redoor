@@ -12,6 +12,7 @@ use crate::platform::identity::HostIdentity;
 use crate::terminal::TerminalLink;
 use crate::transfers::stream::StreamWriter;
 use crate::ws::{LaneReceivers, spawn_read_task, spawn_stdin_task, spawn_write_task};
+use cancel::RegisterError;
 use dispatch::{DispatchLink, Dispatcher};
 use futures_util::StreamExt;
 use links::{
@@ -24,7 +25,7 @@ use redoor_protocol::{
     ids::{AgentId, RequestId},
     wire::{
         AgentToServer, ServerToAgent, command::CommandErrorKind, log::Level,
-        request::CommandOutcome, terminal::TerminalSize,
+        request::CommandOutcome, stream::StreamChunk, terminal::TerminalSize,
     },
 };
 use responder::{OutboundFrame, Responder};
@@ -370,6 +371,15 @@ impl AgentRuntime {
     }
 
     /// Handles one typed server frame; the match is exhaustive so new frames cannot be dropped.
+    /// Queues the fatal exit without ever losing it: a dropped exit would make a rejected or
+    /// evicted agent reconnect, and waiting here would deadlock on the runtime's own mailbox,
+    /// so a task waits for capacity instead.
+    fn request_exit(handle: AgentHandle) {
+        tokio::spawn(async move {
+            let _ = handle.send(AgentMsg::ExitWithError).await;
+        });
+    }
+
     async fn handle_server_frame(&mut self, handle: AgentHandle, frame: ServerToAgent) {
         match frame {
             ServerToAgent::Welcome { connection_id } => {
@@ -386,14 +396,14 @@ impl AgentRuntime {
                     anyhow::anyhow!("{message} ({reason:?})"),
                     "Server rejected the agent"
                 );
-                let _ = handle.try_send(AgentMsg::ExitWithError);
+                Self::request_exit(handle);
             }
             ServerToAgent::Evicted { message } => {
                 log_error!(
                     anyhow::Error::msg(message),
                     "Server ended this agent's connection"
                 );
-                let _ = handle.try_send(AgentMsg::ExitWithError);
+                Self::request_exit(handle);
             }
             ServerToAgent::Credit { stream, frames } => self
                 .dispatcher
@@ -452,6 +462,14 @@ impl AgentRuntime {
                     error.reason(),
                     stream
                 );
+                if error == RegisterError::Full {
+                    // The browser would otherwise wait for a ready event that never comes.
+                    tokio::spawn(crate::terminal::refuse(
+                        lanes.interactive,
+                        stream,
+                        "Too many terminals are open on this agent",
+                    ));
+                }
                 return;
             }
         };
@@ -491,6 +509,19 @@ impl AgentRuntime {
                     error.reason(),
                     stream
                 );
+                if error == RegisterError::Full {
+                    // FIN closes the server's viewer instead of leaving it waiting forever.
+                    let bulk = lanes.bulk.clone();
+                    tokio::spawn(async move {
+                        let _ = bulk
+                            .send(OutboundFrame::stream(StreamChunk::data(
+                                stream,
+                                Vec::new(),
+                                true,
+                            )))
+                            .await;
+                    });
+                }
                 return;
             }
         };

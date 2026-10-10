@@ -95,7 +95,7 @@ pub(crate) struct CommandCtx {
     /// Cooperative cancellation: the request registration for request-scoped commands,
     /// otherwise a child of the control connection.
     pub(crate) cancel: CancellationToken,
-    /// Request-id registration; dropping it unregisters the request from `cancel_transfer`.
+    /// Request-id registration; dropping it unregisters the request from `cancel`.
     pub(crate) registration: Option<Registration<RequestId>>,
     /// Bulk lane of the connection for commands that stream output; absent in unit tests of
     /// control-only commands.
