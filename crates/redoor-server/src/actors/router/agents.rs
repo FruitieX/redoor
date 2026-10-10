@@ -602,7 +602,10 @@ impl RouterState {
                     events,
                 })
             });
-        let _ = request.reply.send(result);
+        if request.reply.send(result).is_err() {
+            // The bridge gave up waiting; nobody will ever close the stream it would have got.
+            self.close_stream(&request.agent_id, stream);
+        }
     }
 
     /// Opens a live log stream as one stream of the agent's connection.
@@ -618,7 +621,10 @@ impl RouterState {
                 Self::admit_stream(connection, stream, ServerToAgent::LogStreamOpen { stream })?;
                 Ok(LogStream { stream, output })
             });
-        let _ = request.reply.send(result);
+        if request.reply.send(result).is_err() {
+            // The bridge gave up waiting; nobody will ever close the stream it would have got.
+            self.close_stream(&request.agent_id, stream);
+        }
     }
 
     /// Reserves a terminal or log stream slot on the agent's connection, within its cap.

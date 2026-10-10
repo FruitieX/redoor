@@ -26,6 +26,13 @@ use redoor_protocol::{
     wire::ServerToAgent,
 };
 
+/// Uploads (including edits and copy destinations) one connection may receive at once.
+///
+/// Each one holds a staging file, a worker and its credit window on the agent, and the agent
+/// relies on the server for this bound, so excess uploads are refused with 503 instead of
+/// piling up.
+pub(crate) const MAX_UPLOADS_PER_CONNECTION: usize = 32;
+
 impl RouterState {
     /// Admits an upload and returns its producer immediately.
     ///
@@ -58,6 +65,13 @@ impl RouterState {
             return;
         };
         if request.reply.is_closed() {
+            return;
+        }
+        if self.flows.uploads_into(&request.agent_id) >= MAX_UPLOADS_PER_CONNECTION {
+            let _ = request.reply.send(Err(RouterError::StreamLimitReached {
+                agent_id: request.agent_id.to_string(),
+                kind: "uploads",
+            }));
             return;
         }
         let stream = OutboundStream::new(
@@ -266,6 +280,9 @@ impl RouterState {
     }
 
     /// Sends a publication grant only after cancellation became unavailable in the same turn.
+    ///
+    /// The decision must never be lost: the agent's worker waits for it, and a granted
+    /// publication is already non-cancelable, so a full priority lane retains it in a task.
     pub(crate) fn begin_upload_publication(&mut self, agent_id: AgentId, request_id: RequestId) {
         let allowed = self.authorize_publication(&agent_id, request_id);
         if let Some(connection) = self.agents.by_id.get(&agent_id) {
@@ -273,7 +290,8 @@ impl RouterState {
                 id: request_id,
                 allowed,
             };
-            connection.lanes.try_priority_or_command(decision);
+            // A closed lane means the connection is gone and teardown settles the upload.
+            let _ = connection.lanes.queue_priority(decision);
         }
         if allowed {
             self.notify_transfer_refresh_immediately();
@@ -473,6 +491,52 @@ mod tests {
             }),
         );
         completion_receiver
+    }
+
+    /// One connection receives at most `MAX_UPLOADS_PER_CONNECTION` uploads at once; more
+    /// are refused instead of piling up staging files and workers on the agent.
+    #[tokio::test]
+    async fn uploads_beyond_the_per_connection_cap_are_refused() {
+        let mut state = router_state();
+        let agent = AgentId::from("agent-1");
+        let (lanes, _receivers) = crate::actors::lanes::ControlLanes::bounded(64, 16);
+        state.agents.by_id.insert(
+            agent.clone(),
+            super::super::super::state::AgentConnection::from_register_request(
+                super::super::super::messages::RegisterAgentRequest::for_test(
+                    &agent,
+                    lanes,
+                    super::super::super::streams::ConnectionStreams::new(agent.clone()),
+                ),
+            ),
+        );
+        let _receivers: Vec<_> = (0..MAX_UPLOADS_PER_CONNECTION as u64)
+            .map(|id| record_upload(&mut state, RequestId::new(1000 + id), UploadKind::RawUpload))
+            .collect();
+        let (reply, reply_receiver) = oneshot::channel();
+        state.start_upload(StartUploadRequest {
+            agent_id: agent,
+            command: request::RawUpload {
+                path: "/tmp/one-too-many".to_string(),
+                on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
+                ownership: Default::default(),
+            }
+            .into(),
+            path: "/tmp/one-too-many".to_string(),
+            total_bytes: 1,
+            completion_sender: oneshot::channel().0,
+            ready_sender: oneshot::channel().0,
+            reply,
+        });
+        // The extra upload is refused with a 503-mapped limit error, not queued.
+        assert!(matches!(
+            reply_receiver.await.unwrap(),
+            Err(RouterError::StreamLimitReached {
+                kind: "uploads",
+                ..
+            })
+        ));
+        state.ui.refresh_check_task.abort();
     }
 
     /// Remote copy/move destinations must reserve the public copy's lifecycle boundary.

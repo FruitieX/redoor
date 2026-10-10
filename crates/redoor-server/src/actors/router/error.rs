@@ -16,7 +16,7 @@ pub enum RouterError {
         agent_id: String,
         kind: &'static str,
     },
-    /// The agent control socket is not draining commands quickly enough to admit more work.
+    /// The agent connection is not draining commands quickly enough to admit more work.
     #[error("Agent control queue is full: agent_id={agent_id}")]
     ControlQueueFull { agent_id: String },
     /// The requested upload or copy stream no longer exists in router state.

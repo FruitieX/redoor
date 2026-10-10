@@ -142,7 +142,7 @@ async fn run_terminal(
     } = terminal;
     let input = TerminalInput {
         stream,
-        lanes: input_lanes(&input),
+        lanes: input.lease().link.lanes().clone(),
         input,
     };
     match wait_for_ready(&mut browser, &mut events).await {
@@ -162,11 +162,6 @@ async fn run_terminal(
         Setup::Failed(message) => send_terminal_error(&mut browser, &message).await,
         Setup::BrowserGone => {}
     }
-}
-
-/// The connection lanes the terminal's input stream writes to.
-fn input_lanes(input: &OutboundStream) -> ControlLanes {
-    input.lease().link.lanes().clone()
 }
 
 /// Waits for the PTY while buffering early browser input and detecting a departing browser.

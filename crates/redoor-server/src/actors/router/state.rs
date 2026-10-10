@@ -16,8 +16,10 @@ use redoor_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-#[derive(Clone, Debug)]
 /// Registration metadata and the connection handle of one connected agent.
+///
+/// Not `Clone`: it owns the write tickets of its queued commands, and a copy would split them.
+#[derive(Debug)]
 pub struct AgentConnection {
     /// Stable identity used in transfer readiness errors and routing logs.
     pub agent_id: AgentId,

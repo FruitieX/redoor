@@ -650,7 +650,7 @@ mod tests {
             .expect("exec admitted");
         let _ = next_command(&mut text_rx).await;
         for _ in 0..STREAM_CREDIT_WINDOW_FRAMES {
-            // The transfer reader hands frames to the stalled download without waiting.
+            // The connection reader hands frames to the stalled download without waiting.
             // Delivery is synchronous, so a stalled consumer can never block the reader.
             let routed = streams.deliver(agent_frame(download_id, false, vec![0; 1024]));
             assert!(routed.is_none());

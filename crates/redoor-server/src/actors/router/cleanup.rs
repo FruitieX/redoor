@@ -181,9 +181,16 @@ impl RouterState {
                     OutputKind::Execution { .. } => None,
                 },
             ),
+            // Past the commit or publication boundary the agent finishes regardless, and its
+            // result records the real outcome; a departed client must not mark it failed.
             Some(Flow::Upload(flow)) => (
                 flow.agent_id.clone(),
-                matches!(flow.phase, UploadPhase::Canceling { .. }),
+                matches!(
+                    flow.phase,
+                    UploadPhase::Canceling { .. }
+                        | UploadPhase::Publishing
+                        | UploadPhase::Committing
+                ),
                 Some(request_id.as_transfer_id()),
             ),
             Some(Flow::Command(_)) => {

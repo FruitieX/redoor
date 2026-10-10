@@ -8,14 +8,18 @@ use crate::actors::router::{
 };
 use crate::watchdog::{WatchdogHandle, WatchdogRegistry};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use redoor_core::log;
+use redoor_core::websocket::WebSocketTimeouts;
 use redoor_protocol::wire::handshake::RejectReason;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
     ids::{AgentId, SocketId},
-    wire::{AgentToServer, ServerToAgent, stream::StreamChunk},
+    wire::{
+        AgentToServer, ServerToAgent, command::CommandErrorKind, request::CommandOutcome,
+        stream::StreamChunk,
+    },
 };
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -24,6 +28,9 @@ use tokio::sync::oneshot;
 pub(crate) const CONTROL_COMMAND_QUEUE_CAPACITY: usize = 64;
 /// Lifecycle and cancellation traffic has independent capacity from ordinary commands.
 const CONTROL_PRIORITY_QUEUE_CAPACITY: usize = 16;
+/// How much of an unparsable agent frame is logged; results can be large and carry file
+/// contents, and the start of the frame is enough to diagnose it.
+const MALFORMED_FRAME_LOG_CHARS: usize = 512;
 /// How long an authenticated socket may stay silent before its `hello`.
 ///
 /// The token was already checked during the upgrade, so this only bounds how long a stuck or
@@ -399,19 +406,93 @@ impl SessionRuntime {
                     );
                     SessionStep::Close
                 }
-                Err(error) => {
-                    redoor_core::log_failure!(
-                        Level::Error,
-                        "Failed to deserialize WebSocket message: {1}, raw text: {0}",
-                        text,
-                        error
-                    );
-                    SessionStep::Continue
-                }
+                Err(error) => self.handle_malformed_frame(&text, error).await,
             },
             WsMessage::Binary(bytes) => self.handle_stream_frame(&bytes).await,
             _ => SessionStep::Continue,
         }
+    }
+
+    /// Decides on a periodic check whether the socket must close: a socket that never said
+    /// `hello`, or one that has been silent past the stale timeout (a half-open connection,
+    /// e.g. a dead SSH tunnel). Managed agents also ask their watchdog for a restart.
+    fn should_close(
+        &self,
+        opened_at: Instant,
+        last_seen: Instant,
+        timeouts: &WebSocketTimeouts,
+    ) -> bool {
+        if self.agent_id.is_none() && opened_at.elapsed() > HELLO_TIMEOUT {
+            log!(
+                Level::Warning,
+                "Closing agent socket that sent no hello: socket_id={}",
+                self.socket_id
+            );
+            return true;
+        }
+        if last_seen.elapsed() <= timeouts.stale_timeout {
+            return false;
+        }
+        if let Some(watchdog) = self.watchdog.as_ref() {
+            log!(
+                Level::Warning,
+                "WebSocket stale for {:?}, requesting restart: agent_name={}, socket_id={}",
+                last_seen.elapsed(),
+                watchdog.key(),
+                self.socket_id
+            );
+            watchdog.signal_stale(self.socket_id.clone());
+        } else {
+            log!(
+                Level::Warning,
+                "Unmanaged WebSocket stale for {:?}, closing session: socket_id={}",
+                last_seen.elapsed(),
+                self.socket_id
+            );
+        }
+        true
+    }
+
+    /// Logs a frame that did not parse and fails the request it belongs to, if it is a result.
+    ///
+    /// The flow would otherwise wait forever for a result that already came. Only a prefix of
+    /// the frame is logged, because results can be large and carry file contents.
+    async fn handle_malformed_frame(
+        &mut self,
+        text: &str,
+        error: serde_json::Error,
+    ) -> SessionStep {
+        let prefix: String = text.chars().take(MALFORMED_FRAME_LOG_CHARS).collect();
+        redoor_core::log_failure!(
+            Level::Error,
+            "Failed to deserialize agent frame: {1}, text prefix: {0}",
+            prefix,
+            error
+        );
+        let (Some(agent_id), Some(request_id)) = (
+            self.agent_id.clone(),
+            AgentToServer::unparsed_result_request_id(text),
+        ) else {
+            return SessionStep::Continue;
+        };
+        let response = RouteResponse {
+            agent_id,
+            socket_id: self.socket_id.clone(),
+            request_id,
+            result: CommandOutcome::error(
+                CommandErrorKind::Internal,
+                format!("Agent sent a malformed result: {error}"),
+            ),
+        };
+        if self
+            .router_ref
+            .send_async(RouterMsg::RouteResponse(response))
+            .await
+            .is_err()
+        {
+            return SessionStep::Close;
+        }
+        SessionStep::Continue
     }
 
     /// Hands one binary frame straight to its stream's consumer.
@@ -451,6 +532,15 @@ impl SessionRuntime {
         }
         SessionStep::Continue
     }
+}
+
+/// Sends one keepalive ping; a ping forces a write, so a dead connection fails here and the
+/// session can tear down instead of lingering. Returns whether the ping was written.
+async fn send_ping(sender: &mut SplitSink<WebSocket, WsMessage>, timeout: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(timeout, sender.send(WsMessage::Ping(bytes::Bytes::new()))).await,
+        Ok(Ok(()))
+    )
 }
 
 /// Entry point for a new, already authenticated agent connection. Splits the socket into
@@ -504,16 +594,7 @@ pub async fn handle_websocket(
             let next_message = tokio::select! {
                 biased;
                 _ = ping_interval.tick() => {
-                    // A ping forces a write; if the connection is dead the send
-                    // fails and the session can tear down instead of lingering.
-                    if !matches!(
-                        tokio::time::timeout(
-                            timeouts.stale_timeout,
-                            sender.send(WsMessage::Ping(bytes::Bytes::new())),
-                        )
-                        .await,
-                        Ok(Ok(()))
-                    ) {
+                    if !send_ping(&mut sender, timeouts.stale_timeout).await {
                         break;
                     }
                     continue;
@@ -565,34 +646,9 @@ pub async fn handle_websocket(
             biased;
             _ = &mut writer_done_rx => break,
             _ = stale_check.tick() => {
-                if runtime.agent_id.is_none() && opened_at.elapsed() > HELLO_TIMEOUT {
-                    log!(
-                        Level::Warning,
-                        "Closing agent socket that sent no hello: socket_id={}",
-                        socket_id
-                    );
-                    break;
-                }
-                if last_seen.elapsed() > timeouts.stale_timeout {
-                    if let Some(watchdog) = runtime.watchdog.as_ref() {
-                        log!(
-                            Level::Warning,
-                            "WebSocket stale for {:?}, requesting restart: agent_name={}, socket_id={}",
-                            last_seen.elapsed(),
-                            watchdog.key(),
-                            socket_id
-                        );
-                        watchdog.signal_stale(socket_id.clone());
-                    } else {
-                        log!(
-                            Level::Warning,
-                            "Unmanaged WebSocket stale for {:?}, closing session: socket_id={}",
-                            last_seen.elapsed(),
-                            socket_id
-                        );
-                    }
-                    // Break out of the read loop; `runtime.shutdown()`
-                    // below unregisters the agent and closes the writer lane.
+                // Breaking out lets `runtime.shutdown()` below unregister the agent and close
+                // the writer lane.
+                if runtime.should_close(opened_at, last_seen, &timeouts) {
                     break;
                 }
             }
@@ -635,7 +691,6 @@ pub async fn handle_websocket(
 mod tests {
     use super::*;
     use redoor_protocol::ids::RequestId;
-    use redoor_protocol::wire::request::CommandOutcome;
     use tokio::sync::mpsc;
 
     /// The writer's encoding is the wire format the agent parses.
@@ -664,6 +719,31 @@ mod tests {
             streams: None,
         };
         (runtime, receiver)
+    }
+
+    /// A result frame that does not parse still fails its request, so the caller does not
+    /// wait forever for a result that already came.
+    #[tokio::test]
+    async fn malformed_result_fails_its_request() {
+        let agent_id = AgentId::from("agent");
+        let (mut runtime, mut receiver) = capture_session(Some(agent_id.clone()));
+        let step = runtime
+            .handle_ws_message(
+                WsMessage::Text(r#"{"type":"result","id":4}"#.into()),
+                &WatchdogRegistry::new(),
+            )
+            .await;
+        // A malformed frame is not a reason to drop the whole connection.
+        assert_eq!(step, SessionStep::Continue);
+        // The request it names is failed with an internal error.
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(RouterMsg::RouteResponse(RouteResponse {
+                request_id,
+                result: CommandOutcome::Error(_),
+                ..
+            })) if request_id == RequestId::new(4)
+        ));
     }
 
     /// A socket that has not said hello must not reach the router with agent frames, and the

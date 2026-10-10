@@ -3,7 +3,7 @@
 //! A cross-agent copy is a source download and a destination upload joined by a
 //! [`CopyForwarder`] task that moves frames directly between the two streams. A slow
 //! destination therefore stalls only this copy's forwarder and, through credit, its source
-//! stream, never the source agent's transfer reader or other streams of either agent.
+//! stream, never the source agent's connection reader or other streams of either agent.
 
 use super::super::RouterError;
 use super::super::flows::{
@@ -104,6 +104,17 @@ impl RouterState {
             }
         };
 
+        if remote
+            && self.flows.uploads_into(&request.dest_agent_id)
+                >= super::upload::MAX_UPLOADS_PER_CONNECTION
+        {
+            // The destination side is an upload and counts against the same cap.
+            let _ = request.reply.send(Err(RouterError::StreamLimitReached {
+                agent_id: request.dest_agent_id.to_string(),
+                kind: "uploads",
+            }));
+            return;
+        }
         let flow_id = self.next_id();
         let progress_id = flow_id.as_transfer_id();
         self.record_copy_start(CopyStartContext {

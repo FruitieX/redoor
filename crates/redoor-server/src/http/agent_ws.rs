@@ -23,6 +23,11 @@ use subtle::ConstantTimeEq;
 
 use super::state::ServerState;
 
+/// Largest websocket message an agent may send. Stream data frames are at most 64 KiB, but a
+/// control result can carry a bounded git diff batch (8 MiB of patch text, more once escaped
+/// as JSON) or a large listing; anything beyond this is refused before it is buffered, so one
+/// misbehaving agent cannot make the server hold an arbitrarily large message.
+const MAX_AGENT_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 /// Constant-time string equality so invalid tokens do not leak length via timing.
 fn constant_time_eq(left: &str, right: &str) -> bool {
     let left_digest = Sha256::digest(left.as_bytes());
@@ -77,7 +82,9 @@ fn protocol_mismatch(state: &ServerState, remote: SocketAddr, headers: &HeaderMa
     );
     state
         .protocol_mismatches
-        .record(remote.to_string(), version, offered);
+        // The IP, not the address: every retry comes from a new ephemeral port, and one agent's
+        // reconnect loop must keep replacing its own entry.
+        .record(remote.ip().to_string(), version, offered);
     let server_version = redoor_core::identity::current_binary_identity().version;
     (
         StatusCode::UPGRADE_REQUIRED,
@@ -121,6 +128,8 @@ pub(crate) async fn agent_websocket_handler(
     let watchdog_registry = state.watchdog_registry;
     let timeouts = state.runtime.ws_timeouts;
     ws.protocols([PROTOCOL])
+        .max_message_size(MAX_AGENT_MESSAGE_SIZE)
+        .max_frame_size(MAX_AGENT_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
             actors::session::handle_websocket(
                 socket,
@@ -137,7 +146,10 @@ pub(crate) async fn agent_websocket_handler(
 ///
 /// Such agents authenticate inside the socket, which this server no longer supports, so every
 /// attempt is refused with `426` and listed as a mismatch; otherwise outdated agents would
-/// only appear as an endless stream of failed requests in their own logs.
+/// only appear as an endless stream of failed requests in their own logs. Because they send
+/// no token at upgrade, these entries are unauthenticated: anyone reaching the server can add
+/// one, but the list is bounded and keeps one entry per host and version, so this can only
+/// add noise to the warning, never grow memory.
 pub(crate) async fn legacy_agent_websocket_handler(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     headers: HeaderMap,

@@ -42,7 +42,7 @@ pub(crate) enum Flow {
 pub(crate) struct CommandFlow {
     pub(crate) request_id: RequestId,
     pub(crate) agent_id: AgentId,
-    /// Whether the agent registers the command for `cancel_transfer` (request cancel scope),
+    /// Whether the agent registers the command for `cancel` (request cancel scope),
     /// so an abandoned caller's cancel can actually stop its work.
     pub(crate) cancelable: bool,
     pub(crate) reply: RouterReply<CommandOutcome>,
@@ -200,13 +200,16 @@ impl CopyFlow {
 
     /// Whether the copy's current phase still depends on `agent_id`.
     ///
-    /// Only a remote stream needs both agents. A local copy runs entirely on the source
-    /// agent, and once a move published its destination only the source deletion is left,
-    /// so losing the destination agent then must not mark a successful move as errored.
+    /// Only a remote stream needs both agents, and only until the source has answered: after
+    /// that the destination holds every byte, so losing the source agent must not fail a copy
+    /// the destination can still publish. A local copy runs entirely on the source agent, and
+    /// once a move published its destination only the source deletion is left, so losing the
+    /// destination agent then must not mark a successful move as errored.
     fn involves(&self, agent_id: &AgentId) -> bool {
-        match self.phase {
-            CopyPhase::Remote(_) => {
-                &self.source_agent_id == agent_id || &self.dest_agent_id == agent_id
+        match &self.phase {
+            CopyPhase::Remote(remote) => {
+                (&self.source_agent_id == agent_id && !remote.source_finished)
+                    || &self.dest_agent_id == agent_id
             }
             CopyPhase::Local { .. } | CopyPhase::DeletingSource { .. } => {
                 &self.source_agent_id == agent_id
@@ -404,6 +407,21 @@ impl FlowTable {
     /// Current data-path byte counts of every flow that still owns its progress row.
     pub(crate) fn live_progress(&self) -> impl Iterator<Item = (TransferId, u64)> + '_ {
         self.flows.values().filter_map(Flow::live_progress)
+    }
+
+    /// Server-to-agent byte streams currently open into `agent_id`: uploads, edits and copy
+    /// destinations, which the per-connection upload cap counts.
+    pub(crate) fn uploads_into(&self, agent_id: &AgentId) -> usize {
+        self.flows
+            .values()
+            .filter(|flow| match flow {
+                Flow::Upload(upload) => &upload.agent_id == agent_id,
+                Flow::Copy(copy) => {
+                    matches!(copy.phase, CopyPhase::Remote(_)) && &copy.dest_agent_id == agent_id
+                }
+                Flow::Command(_) | Flow::Output(_) => false,
+            })
+            .count()
     }
 
     /// Number of flows, for tests.

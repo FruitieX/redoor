@@ -22,8 +22,8 @@ pub(crate) struct ProtocolMismatches {
 impl ProtocolMismatches {
     /// Records one rejected attempt.
     ///
-    /// A repeat from the same address and version replaces the older entry, so one agent's
-    /// retry loop does not push every other agent out of the list.
+    /// A repeat from the same host (IP address) and version replaces the older entry, so one
+    /// agent's retry loop does not push every other agent out of the list.
     pub(crate) fn record(
         &self,
         remote_address: String,

@@ -94,20 +94,26 @@ impl ServerToAgent {
     /// typed error lets the waiting REST caller fail immediately instead of timing out. Other
     /// frame types are not answered because they have no command response to correlate.
     pub fn unparsed_command_request_id(text: &str) -> Option<RequestId> {
-        /// Minimal view of a frame that only needs its tag and correlation id.
-        #[derive(Deserialize)]
-        struct CommandProbe {
-            #[serde(rename = "type")]
-            frame_type: String,
-            id: Option<RequestId>,
-        }
+        probe_request_id(text, "command")
+    }
+}
 
-        let probe: CommandProbe = serde_json::from_str(text).ok()?;
-        if probe.frame_type == "command" {
-            probe.id
-        } else {
-            None
-        }
+/// Reads the `id` of a frame of type `frame_type` whose body did not parse, so the receiver
+/// can still fail the one request it belongs to.
+fn probe_request_id(text: &str, frame_type: &str) -> Option<RequestId> {
+    /// Minimal view of a frame that only needs its tag and correlation id.
+    #[derive(Deserialize)]
+    struct Probe {
+        #[serde(rename = "type")]
+        frame_type: String,
+        id: Option<RequestId>,
+    }
+
+    let probe: Probe = serde_json::from_str(text).ok()?;
+    if probe.frame_type == frame_type {
+        probe.id
+    } else {
+        None
     }
 }
 
@@ -169,6 +175,12 @@ pub enum AgentToServer {
 }
 
 impl AgentToServer {
+    /// Recovers the request id of a `result` frame whose body did not parse, so the server
+    /// can fail that request instead of leaving its caller waiting.
+    pub fn unparsed_result_request_id(text: &str) -> Option<RequestId> {
+        probe_request_id(text, "result")
+    }
+
     /// Wire tag of the frame, for logs that must not echo payloads (results can carry file
     /// contents).
     pub fn kind(&self) -> &'static str {
