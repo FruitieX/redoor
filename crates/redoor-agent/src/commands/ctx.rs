@@ -14,8 +14,9 @@ use redoor_core::log;
 use redoor_protocol::{
     ids::RequestId,
     wire::{
-        command::{CommandErrorKind, CommandResult},
+        command::CommandErrorKind,
         log::Level,
+        request::{AgentRequest, CommandError, CommandOutcome},
         stream::StreamChunk,
     },
 };
@@ -174,19 +175,43 @@ pub(crate) struct OutputLane {
 
 /// How a finished command reports its outcome.
 pub(crate) enum Reply {
-    /// Send this result on the control lane.
-    Result(CommandResult),
-    /// Send this result on the stream's own lane, after the data already queued there, so
+    /// Send this outcome on the control lane.
+    Result(CommandOutcome),
+    /// Send this outcome on the control lane, then replace the process. Restart and upgrade
+    /// must answer before the process goes away, or the server would see a dropped connection
+    /// instead of a successful response.
+    Reexec {
+        outcome: CommandOutcome,
+        path: Option<std::path::PathBuf>,
+    },
+    /// Send this outcome on the stream's own lane, after the data already queued there, so
     /// the server has seen the whole stream when the result arrives.
     Stream {
         stream: StreamWriter,
-        result: CommandResult,
+        outcome: CommandOutcome,
     },
 }
 
-impl From<CommandResult> for Reply {
-    /// Most commands simply answer with their result.
-    fn from(result: CommandResult) -> Self {
-        Self::Result(result)
+impl Reply {
+    /// Answers request `R` with its typed response or failure; the type parameter makes the
+    /// compiler check that a command answers with its own response type.
+    pub(crate) fn of<R: AgentRequest>(result: Result<R::Response, CommandError>) -> Self {
+        Self::Result(R::encode(result))
+    }
+
+    /// Answers request `R` on its stream's lane, behind the stream's data.
+    pub(crate) fn stream<R: AgentRequest>(
+        stream: StreamWriter,
+        result: Result<R::Response, CommandError>,
+    ) -> Self {
+        Self::Stream {
+            stream,
+            outcome: R::encode(result),
+        }
+    }
+
+    /// Answers with a failure, which has the same shape for every request.
+    pub(crate) fn failure(error: impl Into<CommandError>) -> Self {
+        Self::Result(CommandOutcome::Error(error.into()))
     }
 }

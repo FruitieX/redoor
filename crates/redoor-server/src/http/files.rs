@@ -16,7 +16,7 @@ use serde::Deserialize;
 use std::path::Path as FilePath;
 
 use super::{
-    agent_client::{CreateDirectory, DeletePath, RenamePath},
+    agent_client::{CreateDirectory, RawDelete, RenamePath, Trash},
     agent_helpers::{AgentFilePath, absolute_path_from_url, require_absolute_path},
     error::ApiError,
     state::ServerState,
@@ -41,11 +41,17 @@ pub(crate) async fn raw_agent_delete_handler(
     if query.trash {
         require_move_to_trash_support(&state, &agent_id).await?;
     }
-    let call = DeletePath {
-        path: path.clone(),
-        to_trash: query.trash,
-    };
-    state.agents.call(&agent_id, call).await?;
+    if query.trash {
+        state
+            .agents
+            .call(&agent_id, Trash { path: path.clone() })
+            .await?;
+    } else {
+        state
+            .agents
+            .call(&agent_id, RawDelete { path: path.clone() })
+            .await?;
+    }
     Ok(Json(RawDeleteResponse { path }))
 }
 

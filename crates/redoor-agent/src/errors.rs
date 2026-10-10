@@ -1,7 +1,7 @@
 //! The error type every command failure is converted through before it crosses the wire.
 
 use crate::transfers::{copy::LocalCopyError, r#move::LocalMoveError};
-use redoor_protocol::wire::command::{CommandErrorKind, CommandResult};
+use redoor_protocol::wire::{command::CommandErrorKind, request::CommandError};
 use thiserror::Error;
 
 /// Wraps subsystem-specific command failures behind one protocol boundary type.
@@ -38,9 +38,9 @@ impl AgentCommandError {
     }
 }
 
-impl From<AgentCommandError> for CommandResult {
-    /// Converts a failure into the wire error result with its stable kind.
+impl From<AgentCommandError> for CommandError {
+    /// Converts a failure into the wire error with its stable kind.
     fn from(error: AgentCommandError) -> Self {
-        CommandResult::error(error.kind(), error.to_string())
+        CommandError::new(error.kind(), error.to_string())
     }
 }

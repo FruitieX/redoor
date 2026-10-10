@@ -143,7 +143,7 @@ impl SessionRuntime {
                     Hello {
                         agent_id,
                         agent_name,
-                        identity,
+                        identity: *identity,
                         capabilities,
                     },
                     watchdog_registry,
@@ -220,7 +220,7 @@ impl SessionRuntime {
         let decision = self
             .router_ref
             .request(move |reply| {
-                RouterMsg::RegisterAgent(RegisterAgentRequest {
+                RouterMsg::RegisterAgent(Box::new(RegisterAgentRequest {
                     agent_id: hello.agent_id,
                     agent_name: hello.agent_name,
                     socket_id,
@@ -231,7 +231,7 @@ impl SessionRuntime {
                     watchdog_attempt_generation,
                     streams: registered_streams,
                     reply: Some(reply),
-                })
+                }))
             })
             .await;
         match decision {
@@ -275,7 +275,7 @@ impl SessionRuntime {
     async fn handle_agent_frame(&mut self, agent_id: AgentId, message: AgentToServer) {
         match message {
             AgentToServer::Hello { .. } => {}
-            AgentToServer::CommandResponse { id, result } => {
+            AgentToServer::Result { id, outcome } => {
                 // Terminal responses release pending requests and transfer state, so
                 // temporary mailbox pressure must never discard their cleanup signal.
                 if let Err(error) = self
@@ -284,7 +284,7 @@ impl SessionRuntime {
                         agent_id: agent_id.clone(),
                         socket_id: self.socket_id.clone(),
                         request_id: id,
-                        result,
+                        result: outcome,
                     }))
                     .await
                 {
@@ -635,7 +635,7 @@ pub async fn handle_websocket(
 mod tests {
     use super::*;
     use redoor_protocol::ids::RequestId;
-    use redoor_protocol::wire::command::CommandResult;
+    use redoor_protocol::wire::request::CommandOutcome;
     use tokio::sync::mpsc;
 
     /// The writer's encoding is the wire format the agent parses.
@@ -674,9 +674,9 @@ mod tests {
         let watchdog_registry = WatchdogRegistry::new();
         let request_id = RequestId::new(1);
         for frame in [
-            AgentToServer::CommandResponse {
+            AgentToServer::Result {
                 id: request_id,
-                result: CommandResult::RawUpload,
+                outcome: CommandOutcome::Ok(serde_json::Value::Null),
             },
             AgentToServer::TransferProgress {
                 id: request_id,
@@ -708,9 +708,9 @@ mod tests {
         let socket_id = runtime.socket_id.clone();
         runtime
             .handle_control_message(
-                AgentToServer::CommandResponse {
+                AgentToServer::Result {
                     id: RequestId::new(3),
-                    result: CommandResult::RawUpload,
+                    outcome: CommandOutcome::Ok(serde_json::Value::Null),
                 },
                 &WatchdogRegistry::new(),
             )
@@ -760,9 +760,9 @@ mod tests {
         };
         let watchdog_registry = WatchdogRegistry::new();
         let response = runtime.handle_control_message(
-            AgentToServer::CommandResponse {
+            AgentToServer::Result {
                 id: request_id,
-                result: CommandResult::RawUpload,
+                outcome: CommandOutcome::Ok(serde_json::Value::Null),
             },
             &watchdog_registry,
         );
@@ -783,7 +783,7 @@ mod tests {
                 agent_id: received_agent_id,
                 request_id: received_request_id,
                 socket_id: _,
-                result: CommandResult::RawUpload,
+                result: CommandOutcome::Ok(serde_json::Value::Null),
             })) if received_agent_id == agent_id && received_request_id == request_id
         ));
     }

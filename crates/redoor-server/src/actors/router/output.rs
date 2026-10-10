@@ -11,10 +11,13 @@ use super::messages::{ExecuteStreamRequest, OutputStreamTracking, RouteResponse}
 use super::progress::DownloadStartContext;
 use super::state::RouterState;
 use super::streams::StreamLease;
+use redoor_protocol::wire::request::{
+    self, AgentRequest, CommandError, CommandOutcome, DecodeError,
+};
 use redoor_protocol::{
     api::transfers::TransferProgressState,
     wire::{
-        command::{Command, CommandErrorKind, CommandResult},
+        command::{Command, CommandErrorKind},
         exec::ExecEvent,
         policy::CommandLane,
         stream::STREAM_CREDIT_WINDOW_FRAMES,
@@ -25,17 +28,17 @@ use std::sync::atomic::Ordering;
 /// Message shown when an agent sends more frames than its credit allowed.
 const CREDIT_VIOLATION: &str = "Agent exceeded the stream flow-control credit";
 
-/// The exec event a result reports; any other result still ends the execution visibly.
-fn exec_event(result: CommandResult) -> ExecEvent {
-    match result {
-        CommandResult::Exec { event } => event,
-        CommandResult::Error {
+/// The exec event a result reports; a failure still ends the execution visibly.
+fn exec_event(result: CommandOutcome) -> ExecEvent {
+    match request::Exec::decode(result) {
+        Ok(event) => event,
+        Err(DecodeError::Failed(CommandError {
             kind: CommandErrorKind::Canceled,
             ..
-        } => ExecEvent::Canceled,
-        CommandResult::Error { message, .. } => ExecEvent::Error { message },
-        other => ExecEvent::Error {
-            message: format!("Unexpected execution result: {}", other.summary()),
+        })) => ExecEvent::Canceled,
+        Err(DecodeError::Failed(CommandError { message, .. })) => ExecEvent::Error { message },
+        Err(DecodeError::Malformed(error)) => ExecEvent::Error {
+            message: format!("Malformed execution result: {error}"),
         },
     }
 }
@@ -53,7 +56,7 @@ impl RouterState {
             tracking,
             reply,
         } = request;
-        let is_exec = matches!(command, Command::Exec { .. });
+        let is_exec = matches!(command, Command::Exec(request::Exec { .. }));
         if command.policy().lane != CommandLane::Output
             || is_exec != matches!(tracking, OutputStreamTracking::Execution { .. })
         {
@@ -185,7 +188,7 @@ impl RouterState {
             OutputKind::Download { progress_id, .. } => {
                 let progress_id = *progress_id;
                 match response.result {
-                    CommandResult::Error { message, .. } => {
+                    CommandOutcome::Error(CommandError { message, .. }) => {
                         self.mark_transfer_errored(progress_id, message.clone());
                         flow.lease.fail(message);
                     }
@@ -333,14 +336,14 @@ mod tests {
 
         /// The exec command used by every execution test.
         fn exec_command() -> Command {
-            Command::Exec {
+            Command::Exec(request::Exec {
                 request: redoor_protocol::wire::exec::ExecRequest {
                     argv: vec!["true".into()],
                     cwd: None,
                     env: Default::default(),
                     timeout_ms: None,
                 },
-            }
+            })
         }
 
         /// Starts an execution and returns its consumer plus the independent terminal lane.
@@ -373,7 +376,7 @@ mod tests {
         }
 
         /// Delivers the agent's result for `id` through the router.
-        fn respond(&mut self, id: RequestId, result: CommandResult) {
+        fn respond(&mut self, id: RequestId, result: CommandOutcome) {
             let socket_id = self.state.agents.by_id[&self.agent].socket_id.clone();
             self.state.handle(RouterMsg::RouteResponse(RouteResponse {
                 agent_id: self.agent.clone(),
@@ -410,12 +413,7 @@ mod tests {
         // The stopped stream ends for the consumer without waiting for more output.
         assert!(output.recv().await.is_none());
         // The agent's result confirms cleanup before ownership is released.
-        fixture.respond(
-            id,
-            CommandResult::Exec {
-                event: ExecEvent::Canceled,
-            },
-        );
+        fixture.respond(id, request::Exec::encode(Ok(ExecEvent::Canceled)));
         assert!(matches!(&*terminal.borrow(), Some(ExecEvent::Canceled)));
         assert!(fixture.state.flows.id_for(&fixture.agent, id).is_none());
     }
@@ -536,12 +534,7 @@ mod tests {
             // Admission alone is deliberately not termination.
             assert_eq!(fixture.cancel(id), Ok(true));
             assert!(terminal.borrow().is_none());
-            fixture.respond(
-                id,
-                CommandResult::Exec {
-                    event: event.clone(),
-                },
-            );
+            fixture.respond(id, request::Exec::encode(Ok(event.clone())));
             // The result is authoritative even though the stopped consumer saw no frames.
             assert_eq!(
                 serde_json::to_value(terminal.borrow().clone()).unwrap(),
@@ -555,10 +548,10 @@ mod tests {
     async fn tar_download(fixture: &mut Fixture) -> OutputReceiver {
         fixture
             .start(
-                Command::TarDownload {
+                Command::TarDownload(request::TarDownload {
                     path: "/dir".into(),
                     include_root: true,
-                },
+                }),
                 OutputStreamTracking::Download {
                     path: "/dir".into(),
                     total_bytes: 0,
@@ -584,12 +577,7 @@ mod tests {
         let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
         // FIN alone is not completion; the result that follows it is.
         assert!(matches!(entry.state, TransferProgressState::Active));
-        fixture.respond(
-            id,
-            CommandResult::TarDownload {
-                path: "/dir".into(),
-            },
-        );
+        fixture.respond(id, CommandOutcome::Ok(serde_json::Value::Null));
         let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
         // Unknown-size archives complete with every queued byte even before they are drained.
         assert!(matches!(entry.state, TransferProgressState::Completed));
@@ -606,7 +594,7 @@ mod tests {
         fixture.deliver(id, false, b"partial".to_vec());
         fixture.respond(
             id,
-            CommandResult::error(CommandErrorKind::Internal, "disk gone"),
+            CommandOutcome::error(CommandErrorKind::Internal, "disk gone"),
         );
         assert_eq!(output.recv().await.unwrap().unwrap().data, b"partial");
         // The failure arrives after the data, as on the wire.

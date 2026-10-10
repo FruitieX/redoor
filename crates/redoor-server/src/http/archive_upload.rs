@@ -12,6 +12,7 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
+use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::transfers::{ArchiveUploadResponse, CopyExistingMode},
     ids::AgentId,
@@ -37,10 +38,10 @@ pub(crate) async fn upload_handler(
 ) -> Result<Json<ArchiveUploadResponse>, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
     let request_guard = state.upload_requests.reserve(&headers)?;
-    let command = Command::TarUpload {
+    let command = Command::TarUpload(request::TarUpload {
         path: path.clone(),
         on_existing: query.on_existing,
-    };
+    });
     let upload = AgentUpload::start(
         &state.router_ref,
         AgentId::from(agent),

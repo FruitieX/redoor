@@ -15,7 +15,7 @@ pub(crate) async fn accounts_handler(
 ) -> Result<Json<AgentAccountsResponse>, ApiError> {
     let accounts = state
         .agents
-        .call(&AgentId::from(agent), ListAccounts)
+        .call(&AgentId::from(agent), ListAccounts {})
         .await?;
     Ok(Json(accounts))
 }

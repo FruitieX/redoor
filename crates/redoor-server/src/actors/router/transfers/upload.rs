@@ -16,9 +16,9 @@ use super::super::progress::UploadStartContext;
 use super::super::state::RouterState;
 use super::super::streams::{OutboundError, OutboundStart, OutboundStream, StreamLease};
 use redoor_core::log;
-use redoor_protocol::wire::command::CommandResult;
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::UploadKind;
+use redoor_protocol::wire::request::{CommandError, CommandOutcome};
 use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
 use redoor_protocol::{
     api::transfers::TransferProgressState,
@@ -357,9 +357,9 @@ impl RouterState {
                 "Received canceled upload ack from agent: agent_id={}, request_id={}, is_error={}",
                 response.agent_id,
                 request_id,
-                matches!(result, CommandResult::Error { .. })
+                matches!(result, CommandOutcome::Error(_))
             );
-            if explicit && upload.kind.completion_matches(&result) {
+            if explicit && result.failure().is_none() {
                 // A publication acknowledged before cancel processing remains completed.
                 self.mark_transfer_completed(transfer_id);
             } else if explicit {
@@ -375,19 +375,18 @@ impl RouterState {
             return;
         }
 
-        let completion_result = match &result {
-            completion if upload.kind.completion_matches(completion) => {
+        // The result can only be this upload's own, so any success means it was published.
+        match &result {
+            CommandOutcome::Ok(_) => {
                 self.mark_transfer_completed(transfer_id);
                 log!(
                     Level::Info,
-                    "Routing upload completion response: agent_id={}, request_id={}, result={:?}",
+                    "Routing upload completion response: agent_id={}, request_id={}",
                     response.agent_id,
-                    request_id,
-                    completion
+                    request_id
                 );
-                Ok(result)
             }
-            CommandResult::Error { message, .. } => {
+            CommandOutcome::Error(CommandError { message, .. }) => {
                 self.mark_transfer_errored(transfer_id, message.clone());
                 log!(
                     Level::Info,
@@ -396,29 +395,13 @@ impl RouterState {
                     request_id,
                     message
                 );
-                Ok(result)
             }
-            _ => {
-                self.mark_transfer_errored(
-                    transfer_id,
-                    "Unexpected upload response type".to_string(),
-                );
-                log!(
-                    Level::Warning,
-                    "Unexpected upload response type: agent_id={}, request_id={}, result={:?}",
-                    response.agent_id,
-                    request_id,
-                    result
-                );
-                Err(RouterError::UnexpectedResponseType {
-                    operation: "handling upload completion response",
-                })
-            }
-        };
+        }
+        let completion_result = Ok(result);
         self.notify_transfer_refresh();
 
         if let Some(sender) = ready {
-            // HTTP is still blocked on readiness when setup fails before TransferReady.
+            // HTTP is still blocked on readiness when setup fails before the first credit grant.
             // Deliver the real completion so permission/missing-path errors keep their
             // established status mapping instead of becoming a generic 500.
             let _ = sender.send(Ok(UploadStartOutcome::Finished(Box::new(
@@ -437,6 +420,7 @@ mod tests {
     use super::super::super::state::CopyContentKind;
     use super::super::super::streams::AgentLink;
     use super::*;
+    use redoor_protocol::wire::request;
     use redoor_protocol::{
         api::transfers::{TransferDirection, TransferProgressState},
         ids::TransferId,
@@ -463,7 +447,7 @@ mod tests {
         state: &mut RouterState,
         request_id: RequestId,
         kind: UploadKind,
-    ) -> oneshot::Receiver<Result<CommandResult, RouterError>> {
+    ) -> oneshot::Receiver<Result<CommandOutcome, RouterError>> {
         let (completion, completion_receiver) = oneshot::channel();
         state.record_upload_start(UploadStartContext {
             request_id,
@@ -594,19 +578,6 @@ mod tests {
         }
     }
 
-    /// Upload kinds accept only their own success result.
-    #[test]
-    fn direct_write_kinds_accept_only_their_own_success_result() {
-        // Raw uploads must accept only replacement-upload completion.
-        assert!(UploadKind::RawUpload.completion_matches(&CommandResult::RawUpload));
-        // Tar uploads must not accept an editor completion on their shared transport.
-        assert!(!UploadKind::TarUpload.completion_matches(&CommandResult::EditFile));
-        // File edits must accept only the dedicated inode-rewrite completion.
-        assert!(UploadKind::EditFile.completion_matches(&CommandResult::EditFile));
-        // File edits must reject raw-upload success so the endpoint cannot report false success.
-        assert!(!UploadKind::EditFile.completion_matches(&CommandResult::RawUpload));
-    }
-
     /// Only a matching empty terminal of a live edit may cross the commit boundary.
     #[tokio::test]
     async fn commit_validation_accepts_only_live_edit_terminals() {
@@ -643,9 +614,10 @@ mod tests {
         state.ui.refresh_check_task.abort();
     }
 
-    /// A mismatched completion errors both the transfer and the REST request.
+    /// An edit's result completes the transfer and is handed to the REST request, which
+    /// decodes it as the edit's own response.
     #[tokio::test]
-    async fn mismatched_edit_completion_errors_the_transfer_and_rest_request() {
+    async fn edit_result_completes_the_transfer_and_reaches_the_rest_request() {
         let mut state = router_state();
         let request_id = RequestId::new(43);
         let completion_receiver = record_upload(&mut state, request_id, UploadKind::EditFile);
@@ -655,20 +627,20 @@ mod tests {
                 agent_id: AgentId::from("agent-1"),
                 socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id,
-                result: CommandResult::RawUpload,
+                result: CommandOutcome::Ok(serde_json::Value::Null),
             },
         );
-        // A raw-upload response cannot satisfy the dedicated editor REST request.
+        // The REST request receives the agent's outcome unchanged.
         assert!(matches!(
             completion_receiver.await.unwrap(),
-            Err(RouterError::UnexpectedResponseType { .. })
+            Ok(CommandOutcome::Ok(serde_json::Value::Null))
         ));
-        // Protocol mismatches remain visible in transfer history as errors.
+        // A result can only be this upload's own, so success completes its history row.
         assert!(matches!(
             state.progress.entries[&TransferId::new(43)].state,
-            TransferProgressState::Errored
+            TransferProgressState::Completed
         ));
-        // Terminal mismatch handling must release the flow.
+        // Settling the result releases the flow.
         assert!(
             state
                 .flows
@@ -681,9 +653,9 @@ mod tests {
     /// Edit commands select edit progress semantics.
     #[test]
     fn edit_commands_select_edit_progress_semantics() {
-        let command = Command::EditFile {
+        let command = Command::EditFile(request::EditFile {
             path: "/tmp/file.txt".to_string(),
-        };
+        });
         let kind = command.policy().upload_kind().unwrap();
         // The wire command must retain edit identity throughout shared upload transport.
         assert_eq!(kind, UploadKind::EditFile);

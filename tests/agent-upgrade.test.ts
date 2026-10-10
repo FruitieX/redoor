@@ -305,11 +305,11 @@ describe("connected external agent upgrade", () => {
                     is_root: false,
                 };
 
-                earlyAgent.respond(id, { type: "GetAgentDetails", ...details });
+                earlyAgent.respond(id, details);
             } else if (command.type === "RawUpload") {
                 // Finishing before granting upload credit means the agent never received the
                 // binary.
-                earlyAgent.respond(id, { type: "RawUpload" });
+                earlyAgent.respond(id, null);
             }
         });
 

@@ -11,10 +11,7 @@ use redoor_core::staging::{StagingKind, StagingPath};
 use redoor_protocol::{
     api::transfers::CopyExistingMode,
     ids::RequestId,
-    wire::{
-        command::{CommandErrorKind, CommandResult},
-        log::Level,
-    },
+    wire::{command::CommandErrorKind, log::Level},
 };
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -331,10 +328,7 @@ impl UploadSink for TarDirectorySink {
     }
 
     /// Joins extraction, then publishes the tree only after router authorization.
-    async fn commit(
-        mut self,
-        gate: PublicationGate<'_>,
-    ) -> Result<CommandResult, AgentCommandError> {
+    async fn commit(mut self, gate: PublicationGate<'_>) -> Result<(), AgentCommandError> {
         let unpack_result = self.join_unpacker().await;
         // The extractor owned the tree until joined. A cancel received meanwhile must discard
         // it, never publish it over the destination.
@@ -368,7 +362,7 @@ impl UploadSink for TarDirectorySink {
             return Err(TarUploadError::from(error).into());
         }
         self.staging.keep();
-        Ok(CommandResult::TarUpload)
+        Ok(())
     }
 
     /// Stops and joins the extractor before removing the tree it was writing.

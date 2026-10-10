@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use headers::{HeaderMap, HeaderMapExt, Range as RangeHeader};
+use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::files::CreateOneTimeTokenResponse, ids::AgentId, wire::command::Command,
 };
@@ -171,11 +172,11 @@ pub(crate) async fn raw_agent_handler(
     let mut output = OutputStream::open(
         &state.router_ref,
         agent_id.clone(),
-        Command::RawDownload {
+        Command::RawDownload(request::RawDownload {
             path: path.clone(),
             range_start,
             range_end,
-        },
+        }),
         OutputStreamTracking::Download {
             path: path.clone(),
             total_bytes: content_length,
@@ -246,10 +247,10 @@ async fn stream_directory_archive(
     let mut output = OutputStream::open(
         &state.router_ref,
         agent_id,
-        Command::TarDownload {
+        Command::TarDownload(request::TarDownload {
             path: path.clone(),
             include_root: true,
-        },
+        }),
         OutputStreamTracking::Download {
             path: path.clone(),
             // Archive length is unknown at start so the body can begin immediately without
@@ -353,11 +354,11 @@ mod tests {
         let mut body = OutputStream::open(
             &agent.router,
             agent.agent_id.clone(),
-            Command::RawDownload {
+            Command::RawDownload(request::RawDownload {
                 path: path.clone(),
                 range_start: None,
                 range_end: None,
-            },
+            }),
             OutputStreamTracking::Download {
                 path: path.clone(),
                 total_bytes: 2,

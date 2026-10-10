@@ -23,10 +23,8 @@ use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
     ids::{AgentId, RequestId},
     wire::{
-        AgentToServer, ServerToAgent,
-        command::{CommandErrorKind, CommandResult},
-        log::Level,
-        terminal::TerminalSize,
+        AgentToServer, ServerToAgent, command::CommandErrorKind, log::Level,
+        request::CommandOutcome, terminal::TerminalSize,
     },
 };
 use responder::{OutboundFrame, Responder};
@@ -362,7 +360,7 @@ impl AgentRuntime {
                     return;
                 }
                 let _ = Responder::new(control.clone(), results, request_id)
-                    .respond(CommandResult::error(
+                    .respond(CommandOutcome::error(
                         CommandErrorKind::InvalidInput,
                         format!("Agent could not parse command: {error}"),
                     ))
@@ -685,7 +683,7 @@ impl AgentRuntime {
         let hello = AgentToServer::Hello {
             agent_id: self.profile.agent_id.clone(),
             agent_name: self.profile.agent_name.clone(),
-            identity: AgentIdentity {
+            identity: Box::new(AgentIdentity {
                 os: host.os,
                 arch: host.arch,
                 hostname: host.hostname,
@@ -695,7 +693,7 @@ impl AgentRuntime {
                 binary: redoor_core::identity::current_binary_identity(),
                 uid: Some(host.uid),
                 is_root: host.is_root,
-            },
+            }),
             capabilities: AgentCapabilities {
                 // Upgrade safety depends on the server knowing this command is implemented.
                 supports_self_exec: true,
@@ -727,6 +725,8 @@ impl AgentRuntime {
 mod tests {
     use super::*;
     use crate::trash::Trash;
+    use redoor_protocol::wire::request;
+    use redoor_protocol::wire::request::CommandError;
 
     /// Builds a runtime without network side effects for state-transition tests.
     fn runtime() -> AgentRuntime {
@@ -904,9 +904,12 @@ mod tests {
         // The waiting REST caller receives a typed invalid-input error for its request id.
         assert!(matches!(
             frame.as_message(),
-            Some(AgentToServer::CommandResponse {
+            Some(AgentToServer::Result {
                 id,
-                result: CommandResult::Error { kind: CommandErrorKind::InvalidInput, .. },
+                outcome: CommandOutcome::Error(CommandError {
+                    kind: CommandErrorKind::InvalidInput,
+                    ..
+                }),
             }) if id.0 == 11
         ));
     }
@@ -923,11 +926,13 @@ mod tests {
                 ServerToAgent::Command {
                     id: redoor_protocol::ids::RequestId::new(1),
                     credit: 4,
-                    command: redoor_protocol::wire::command::Command::RawDownload {
-                        path: "/dev/zero".to_string(),
-                        range_start: None,
-                        range_end: None,
-                    },
+                    command: redoor_protocol::wire::command::Command::RawDownload(
+                        request::RawDownload {
+                            path: "/dev/zero".to_string(),
+                            range_start: None,
+                            range_end: None,
+                        },
+                    ),
                 },
             )
             .await;

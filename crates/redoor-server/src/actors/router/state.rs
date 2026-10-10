@@ -5,11 +5,11 @@ use super::messages::RouteResponse;
 use super::streams::ConnectionStreams;
 use crate::actors::lanes::{CommandTicket, ControlLanes};
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
-use redoor_protocol::wire::policy::UploadKind;
+use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::{agents::AgentConnectionStatus, transfers::TransferProgressEntry},
     wire::{
-        command::{Command, CommandResult},
+        command::Command,
         registration::{AgentCapabilities, AgentIdentity},
     },
 };
@@ -141,42 +141,29 @@ impl CopyContentKind {
         on_existing: redoor_protocol::api::transfers::CopyExistingMode,
     ) -> Command {
         match self {
-            Self::RawFile => Command::RawUpload {
+            Self::RawFile => Command::RawUpload(request::RawUpload {
                 path,
                 on_existing,
                 ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),
-            },
-            Self::TarDirectory => Command::TarUpload { path, on_existing },
+            }),
+            Self::TarDirectory => Command::TarUpload(request::TarUpload { path, on_existing }),
         }
     }
 
     /// Builds the source-side download command for this copy mode.
     pub(crate) fn download_command(self, path: String) -> Command {
         match self {
-            Self::RawFile => Command::RawDownload {
+            Self::RawFile => Command::RawDownload(request::RawDownload {
                 path,
                 range_start: None,
                 range_end: None,
-            },
+            }),
             // Copies extract directly into the requested destination, so they must not add
             // the source directory name as another destination path component.
-            Self::TarDirectory => Command::TarDownload {
+            Self::TarDirectory => Command::TarDownload(request::TarDownload {
                 path,
                 include_root: false,
-            },
-        }
-    }
-
-    /// Checks whether a final command result matches this copy mode.
-    pub(crate) fn completion_matches(self, result: &CommandResult) -> bool {
-        self.upload_kind().completion_matches(result)
-    }
-
-    /// Upload semantics of the destination side of a remote copy.
-    pub(crate) fn upload_kind(self) -> UploadKind {
-        match self {
-            Self::RawFile => UploadKind::RawUpload,
-            Self::TarDirectory => UploadKind::TarUpload,
+            }),
         }
     }
 }

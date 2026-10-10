@@ -1311,7 +1311,7 @@ describe("Agents API", () => {
 
         // Request ids are scoped to one connection, so the attacker's answer with the same
         // (sequential) id names a request that does not exist on its own connection.
-        attacker.respond(id, { type: "Echo", message: "forged" });
+        attacker.respond(id, { message: "forged" });
 
         // The attacker's connection keeps working, so its frame really was processed first.
         const attackerListed = await waitForValue({
@@ -1326,17 +1326,14 @@ describe("Agents API", () => {
 
         attacker.onCommand((command) => {
             if (command.command.type === "Echo") {
-                attacker.respond(command.id, {
-                    type: "Echo",
-                    message: "attacker echo",
-                });
+                attacker.respond(command.id, { message: "attacker echo" });
             }
         });
         expect((await attackerListed.echo("probe")).message).toBe(
             "attacker echo",
         );
 
-        target.respond(id, { type: "Echo", message: "genuine" });
+        target.respond(id, { message: "genuine" });
 
         // Only the agent the request was sent to may resolve the pending REST request.
         expect((await echo).message).toBe("genuine");

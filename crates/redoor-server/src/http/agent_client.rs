@@ -1,9 +1,10 @@
 //! Typed request/response calls to connected agents.
 //!
-//! Every one-shot agent command goes through [`AgentClient::call`] with an [`AgentCall`] value
-//! that knows its wire command, its deadline and which result variant it expects. Handlers
-//! therefore never build router messages, pick timeouts or match "unexpected result" arms
-//! themselves, and a caller that gives up always tells the agent to stop.
+//! Every one-shot agent command goes through [`AgentClient::call`] with a protocol request
+//! that is also an [`AgentCall`]: the request type fixes the response type it decodes to, and
+//! the call adds its deadline. Handlers therefore never build router messages, pick timeouts
+//! or match result variants themselves, and a caller that gives up always tells the agent to
+//! stop.
 
 mod calls;
 
@@ -15,21 +16,21 @@ use crate::actors::router::{
 };
 use redoor_core::log;
 use redoor_protocol::{
-    api::agents::AgentDetailsResponse,
+    api::agents::{AgentDetailsResponse, MountPoint},
     ids::{AgentId, RequestId},
     wire::{
-        command::{Command, CommandResult},
+        command::Command,
         log::Level,
+        request::{AgentRequest, CommandError, CommandOutcome, DecodeError},
     },
 };
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-/// One typed agent command: what to send, how long to wait and how to read the answer.
-pub(crate) trait AgentCall {
-    /// Successful result of the call.
-    type Output;
-    /// Operator-facing description used when the agent answers with the wrong result.
+/// One typed agent request plus what the server decides about it: how long to wait and
+/// whether it may be abandoned.
+pub(crate) trait AgentCall: AgentRequest {
+    /// Operator-facing description used when the agent answers with a malformed response.
     const OPERATION: &'static str;
 
     /// Whether the command must finish even when its caller goes away. Such a call is not
@@ -41,12 +42,6 @@ pub(crate) trait AgentCall {
     fn timeout(&self) -> Option<Duration> {
         Some(STANDARD_TIMEOUT)
     }
-
-    /// Builds the wire command.
-    fn command(self) -> Command;
-
-    /// Reads the successful result; typed agent failures are mapped before this is called.
-    fn extract(result: CommandResult) -> Result<Self::Output, ApiError>;
 }
 
 /// Sends typed commands to agents through the router.
@@ -70,10 +65,10 @@ impl AgentClient {
         &self,
         agent_id: &AgentId,
         call: C,
-    ) -> Result<C::Output, ApiError> {
+    ) -> Result<C::Response, ApiError> {
         let timeout = call.timeout();
-        let command = call.command();
-        let result = if C::RUNS_TO_COMPLETION {
+        let command: Command = call.into();
+        let outcome = if C::RUNS_TO_COMPLETION {
             // The detached task owns the reply port and the abandonment guard, so a dropped
             // HTTP future neither cancels the agent nor lets the router prune the command.
             let client = self.clone();
@@ -84,10 +79,12 @@ impl AgentClient {
         } else {
             self.execute(agent_id, command, timeout).await?
         };
-        match result {
-            CommandResult::Error { kind, message } => Err(ApiError::Command { kind, message }),
-            result => C::extract(result),
-        }
+        C::decode(outcome).map_err(|error| match error {
+            DecodeError::Failed(CommandError { kind, message }) => {
+                ApiError::Command { kind, message }
+            }
+            DecodeError::Malformed(_) => ApiError::Unexpected(C::OPERATION),
+        })
     }
 
     /// Agent-reported runtime details with the registration-owned fields (name, directory,
@@ -96,7 +93,9 @@ impl AgentClient {
         &self,
         agent_id: &AgentId,
     ) -> Result<AgentDetailsResponse, ApiError> {
-        let mut details = self.call(agent_id, GetAgentDetails).await?;
+        let mut details = self.call(agent_id, GetAgentDetails {}).await?;
+        // Pseudo filesystems are noise in capacity views, so only real mounts are shown.
+        details.mount_points.retain(MountPoint::is_visible);
         let entry = self
             .inventory()
             .await?
@@ -137,7 +136,7 @@ impl AgentClient {
         agent_id: &AgentId,
         command: Command,
         timeout: Option<Duration>,
-    ) -> Result<CommandResult, ApiError> {
+    ) -> Result<CommandOutcome, ApiError> {
         let (admitted, admitted_receiver) = oneshot::channel();
         let (reply, result) = oneshot::channel();
         self.router
@@ -222,53 +221,59 @@ mod tests {
     /// A restore (request cancel scope) with a test-sized deadline.
     struct QuickRestore;
 
-    impl AgentCall for QuickRestore {
-        type Output = String;
-        const OPERATION: &'static str = "restoring a test item";
-
-        fn timeout(&self) -> Option<Duration> {
-            Some(Duration::from_millis(50))
-        }
-
-        fn command(self) -> Command {
-            Command::RestoreTrash {
+    impl From<QuickRestore> for Command {
+        /// Sends an ordinary restore; only the deadline differs.
+        fn from(_: QuickRestore) -> Self {
+            RestoreTrash {
                 location_id: "l".to_string(),
                 item_id: "i".to_string(),
                 destination_path: "/tmp/restored".to_string(),
             }
+            .into()
         }
+    }
 
-        fn extract(result: CommandResult) -> Result<String, ApiError> {
-            RestoreTrash::extract(result)
+    impl AgentRequest for QuickRestore {
+        type Response = <RestoreTrash as AgentRequest>::Response;
+    }
+
+    impl AgentCall for QuickRestore {
+        const OPERATION: &'static str = "restoring a test item";
+
+        fn timeout(&self) -> Option<Duration> {
+            Some(Duration::from_millis(50))
         }
     }
 
     /// An echo (connection cancel scope) with a test-sized deadline.
     struct QuickEcho;
 
-    impl AgentCall for QuickEcho {
-        type Output = ();
-        const OPERATION: &'static str = "echoing";
-
-        fn timeout(&self) -> Option<Duration> {
-            Some(Duration::from_millis(50))
-        }
-
-        fn command(self) -> Command {
-            Command::Echo {
+    impl From<QuickEcho> for Command {
+        /// Sends an ordinary echo; only the deadline differs.
+        fn from(_: QuickEcho) -> Self {
+            Echo {
                 request: redoor_protocol::api::agents::EchoRequest {
                     message: "hi".to_string(),
                     random_sleep: false,
                 },
             }
-        }
-
-        fn extract(_result: CommandResult) -> Result<(), ApiError> {
-            Ok(())
+            .into()
         }
     }
 
-    /// Typed agent failures and wrong result variants become the matching API errors.
+    impl AgentRequest for QuickEcho {
+        type Response = <Echo as AgentRequest>::Response;
+    }
+
+    impl AgentCall for QuickEcho {
+        const OPERATION: &'static str = "echoing";
+
+        fn timeout(&self) -> Option<Duration> {
+            Some(Duration::from_millis(50))
+        }
+    }
+
+    /// Typed agent failures and malformed responses become the matching API errors.
     #[tokio::test]
     async fn extract_maps_agent_failures_and_protocol_mismatches() {
         let mut agent = FakeAgent::connect().await;
@@ -285,7 +290,7 @@ mod tests {
                 .await
         });
         agent
-            .answer(CommandResult::error(
+            .answer(CommandOutcome::error(
                 CommandErrorKind::NotFound,
                 "No such file",
             ))
@@ -307,9 +312,11 @@ mod tests {
                 )
                 .await
         });
-        agent.answer(CommandResult::RawUpload).await;
+        agent
+            .answer(CommandOutcome::Ok(serde_json::json!(null)))
+            .await;
         let error = call.await.unwrap().unwrap_err();
-        // A result for a different command is a protocol mismatch, reported once, as a 500.
+        // A response of another type is a protocol mismatch, reported once, as a 500.
         assert!(
             matches!(error, ApiError::Unexpected(operation) if operation == Metadata::OPERATION)
         );
@@ -361,12 +368,12 @@ mod tests {
         // A later command and its answer prove the router has processed any abandonment.
         let client = AgentClient::new(agent.router.clone());
         let id = agent.agent_id.clone();
-        let follow_up = tokio::spawn(async move { client.call(&id, ListAccounts).await });
+        let follow_up = tokio::spawn(async move { client.call(&id, ListAccounts {}).await });
         let (follow_up_id, _) = agent.next_command().await;
         agent
             .respond(
                 follow_up_id,
-                CommandResult::error(CommandErrorKind::Internal, "done"),
+                CommandOutcome::error(CommandErrorKind::Internal, "done"),
             )
             .await;
         assert!(follow_up.await.unwrap().is_err());
@@ -375,9 +382,7 @@ mod tests {
         agent
             .respond(
                 request_id,
-                CommandResult::RestoreTrash {
-                    path: "/tmp/restored".to_string(),
-                },
+                CommandOutcome::Ok(serde_json::json!({"path": "/tmp/restored"})),
             )
             .await;
     }
@@ -392,10 +397,10 @@ mod tests {
         assert!(matches!(error, ApiError::Timeout(_)));
         // A follow-up command proves the router processed the abandonment first.
         let id = agent.agent_id.clone();
-        let follow_up = tokio::spawn(async move { client.call(&id, ListAccounts).await });
+        let follow_up = tokio::spawn(async move { client.call(&id, ListAccounts {}).await });
         let _echo = agent.next_command().await;
         agent
-            .answer(CommandResult::error(CommandErrorKind::Internal, "done"))
+            .answer(CommandOutcome::error(CommandErrorKind::Internal, "done"))
             .await;
         assert!(follow_up.await.unwrap().is_err());
         // The echo was abandoned without a cancel frame on the priority lane.

@@ -66,7 +66,7 @@ describe("request lifecycle on the multiplexed connection", () => {
             one_time_tokens: [],
         };
 
-        fake.respond(command.id, { type: "Metadata", ...metadata });
+        fake.respond(command.id, metadata);
     }
 
     it("sends upload data only after the agent's credit grant and never publishes a canceled upload", async () => {
@@ -140,11 +140,7 @@ describe("request lifecycle on the multiplexed connection", () => {
         // A canceled upload must never replace its destination.
         expect(decision.allowed).toBe(false);
 
-        fake.respond(command.id, {
-            type: "Error",
-            kind: "canceled",
-            message: "Upload canceled by server",
-        });
+        fake.fail(command.id, "canceled", "Upload canceled by server");
 
         const settled = await waitForValue({
             description: "canceled upload to settle",
@@ -183,7 +179,7 @@ describe("request lifecycle on the multiplexed connection", () => {
         // FIN ends the body successfully even before the result arrives.
         expect(await download.text()).toBe("first second");
 
-        fake.respond(command.id, { type: "RawDownload", path });
+        fake.respond(command.id, null);
 
         const settled = await waitForValue({
             description: "download to complete on its result",
@@ -212,11 +208,7 @@ describe("request lifecycle on the multiplexed connection", () => {
 
         fake.sendStreamFrame(command.id, Buffer.from("partial"));
         // A failed stream ends without FIN; the result carries the failure.
-        fake.respond(command.id, {
-            type: "Error",
-            kind: "internal",
-            message: "Failed to read file: disk gone",
-        });
+        fake.fail(command.id, "internal", "Failed to read file: disk gone");
 
         // The client must not mistake the partial body for a complete file; the connection
         // may abort before or after the headers were flushed.

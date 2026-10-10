@@ -162,4 +162,42 @@ mod tests {
             "Server router is unavailable: router has stopped"
         );
     }
+
+    /// Every agent error kind keeps its status after it crossed the typed `result` frame.
+    #[test]
+    fn decoded_agent_errors_keep_their_statuses() {
+        use redoor_protocol::wire::request::{AgentRequest, CommandOutcome, DecodeError, Metadata};
+        let expected = [
+            (CommandErrorKind::NotFound, StatusCode::NOT_FOUND),
+            (CommandErrorKind::NotADirectory, StatusCode::NOT_FOUND),
+            (CommandErrorKind::PermissionDenied, StatusCode::FORBIDDEN),
+            (CommandErrorKind::IsDirectory, StatusCode::BAD_REQUEST),
+            (CommandErrorKind::InvalidInput, StatusCode::BAD_REQUEST),
+            (CommandErrorKind::Canceled, StatusCode::BAD_REQUEST),
+            (CommandErrorKind::AlreadyExists, StatusCode::CONFLICT),
+            (CommandErrorKind::Conflict, StatusCode::CONFLICT),
+            (
+                CommandErrorKind::ServiceUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                CommandErrorKind::Internal,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (kind, status) in expected {
+            let wire = serde_json::to_string(&CommandOutcome::error(kind.clone(), "m")).unwrap();
+            let Err(DecodeError::Failed(error)) =
+                Metadata::decode(serde_json::from_str(&wire).unwrap())
+            else {
+                panic!("an error outcome decodes as a failure");
+            };
+            let api = ApiError::Command {
+                kind: error.kind,
+                message: error.message,
+            };
+            // Clients rely on these statuses, so the typed results must not change them.
+            assert_eq!(api.status_code(), status, "{kind:?}");
+        }
+    }
 }

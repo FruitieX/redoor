@@ -8,7 +8,7 @@
 use redoor_core::log;
 use redoor_protocol::{
     ids::RequestId,
-    wire::{AgentToServer, command::CommandResult, log::Level, stream::StreamChunk},
+    wire::{AgentToServer, log::Level, request::CommandOutcome, stream::StreamChunk},
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -27,20 +27,6 @@ pub(crate) enum PostSend {
 }
 
 impl PostSend {
-    /// Derives the post-send action implied by a command result.
-    ///
-    /// Restart and self-exec must answer before the process is replaced, otherwise the router
-    /// would see a dropped connection instead of a successful response.
-    pub(crate) fn for_result(result: &CommandResult) -> Option<Self> {
-        match result {
-            CommandResult::Restart => Some(Self::Reexec { path: None }),
-            CommandResult::SelfExec { path } => Some(Self::Reexec {
-                path: Some(PathBuf::from(path)),
-            }),
-            _ => None,
-        }
-    }
-
     /// Performs the action; re-exec replaces the process (failure exits it), so this does not
     /// return in practice.
     pub(crate) fn run(self) {
@@ -207,6 +193,11 @@ impl Responder {
         self.request_id
     }
 
+    /// The control lane, for results that must carry a post-send action.
+    pub(crate) fn control(&self) -> &ControlSender {
+        &self.control
+    }
+
     /// Whether the control connection that would carry responses has gone away.
     pub(crate) fn is_closed(&self) -> bool {
         self.control.is_closed()
@@ -218,11 +209,11 @@ impl Responder {
     }
 
     /// Sends the request's one result on the control lane.
-    pub(crate) async fn respond(&self, result: CommandResult) -> Result<(), ControlClosed> {
-        self.respond_on(&self.control, result).await
+    pub(crate) async fn respond(&self, outcome: CommandOutcome) -> Result<(), ControlClosed> {
+        self.respond_on(&self.control, outcome, None).await
     }
 
-    /// Sends the request's one result on `lane`.
+    /// Sends the request's one result on `lane`, running `after_send` once it was written.
     ///
     /// Streaming commands pass their stream's lane, so the result is written after all of the
     /// stream's data. A second result for the same request is a bug: it trips a debug
@@ -230,20 +221,21 @@ impl Responder {
     pub(crate) async fn respond_on(
         &self,
         lane: &ControlSender,
-        result: CommandResult,
+        outcome: CommandOutcome,
+        after_send: Option<PostSend>,
     ) -> Result<(), ControlClosed> {
         if !self.results.close(self.request_id) {
             debug_assert!(
                 false,
                 "second result for request {}: {}",
                 self.request_id,
-                result.summary()
+                outcome.summary()
             );
             log!(
                 Level::Warning,
                 "Dropping a second result for request_id={}: result={}",
                 self.request_id,
-                result.summary()
+                outcome.summary()
             );
             return Ok(());
         }
@@ -251,13 +243,12 @@ impl Responder {
             Level::Info,
             "Command complete: request_id={}, result={}",
             self.request_id,
-            result.summary()
+            outcome.summary()
         );
-        let after_send = PostSend::for_result(&result);
         lane.send(OutboundFrame {
-            frame: ControlFrame::Message(Box::new(AgentToServer::CommandResponse {
+            frame: ControlFrame::Message(Box::new(AgentToServer::Result {
                 id: self.request_id,
-                result,
+                outcome,
             })),
             after_send,
         })
@@ -314,34 +305,20 @@ impl Responder {
 mod tests {
     use super::*;
 
-    /// Verifies only process-replacing results produce a post-send action.
-    #[test]
-    fn restart_results_carry_a_reexec_action() {
-        // Restart must replace the current binary only after its response is written.
-        assert_eq!(
-            PostSend::for_result(&CommandResult::Restart),
-            Some(PostSend::Reexec { path: None })
-        );
-        // Self-exec carries the validated replacement path to the writer.
-        assert_eq!(
-            PostSend::for_result(&CommandResult::SelfExec {
-                path: "/opt/redoor".to_string()
-            }),
-            Some(PostSend::Reexec {
-                path: Some(PathBuf::from("/opt/redoor"))
-            })
-        );
-        // Ordinary results never replace the process.
-        assert_eq!(PostSend::for_result(&CommandResult::RawUpload), None);
-    }
-
     /// Verifies the responder queues typed frames with their post-send action.
     #[tokio::test]
     async fn responder_queues_typed_frames() {
         let (responder, mut frames) = Responder::recording(RequestId::new(7), 4);
 
         responder.stream_credit(4).await.unwrap();
-        responder.respond(CommandResult::Restart).await.unwrap();
+        responder
+            .respond_on(
+                &responder.control,
+                CommandOutcome::Ok(serde_json::Value::Null),
+                Some(PostSend::Reexec { path: None }),
+            )
+            .await
+            .unwrap();
 
         let grant = frames.recv().await.unwrap();
         // The first credit grant names the request so the server can start its producer.
@@ -350,11 +327,11 @@ mod tests {
             Some(AgentToServer::Credit { stream, frames: 4 }) if *stream == RequestId::new(7)
         ));
         let response = frames.recv().await.unwrap();
-        // The terminal response is typed, so tests and the writer need no JSON parsing.
+        // The result is typed, so tests and the writer need no JSON parsing.
         assert!(matches!(
             response.as_message(),
-            Some(AgentToServer::CommandResponse {
-                result: CommandResult::Restart,
+            Some(AgentToServer::Result {
+                outcome: CommandOutcome::Ok(serde_json::Value::Null),
                 ..
             })
         ));
@@ -381,7 +358,8 @@ mod tests {
     #[should_panic(expected = "second result for request 9")]
     async fn second_result_is_a_bug() {
         let (responder, _frames) = Responder::recording(RequestId::new(9), 4);
-        responder.respond(CommandResult::RawUpload).await.unwrap();
-        let _ = responder.respond(CommandResult::RawUpload).await;
+        let ok = || CommandOutcome::Ok(serde_json::Value::Null);
+        responder.respond(ok()).await.unwrap();
+        let _ = responder.respond(ok()).await;
     }
 }

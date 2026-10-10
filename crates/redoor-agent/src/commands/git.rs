@@ -1,6 +1,7 @@
 //! Git status, context and diff commands, bounded so large repositories cannot exhaust
 //! agent memory or the control frame size.
 
+use redoor_protocol::wire::request::CommandError;
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
@@ -20,7 +21,7 @@ use redoor_protocol::{
         GitDiffResponse, GitDiffResult, GitEntryType, GitFileDiff, GitStatusEntry,
         GitStatusEntryKind, GitStatusResponse, GitTrackingState,
     },
-    wire::command::{CommandErrorKind, CommandResult},
+    wire::command::CommandErrorKind,
 };
 
 /// Matches the editor's existing per-file safety policy for both sides of a diff.
@@ -48,9 +49,9 @@ impl GitFailure {
         }
     }
 
-    /// Converts one blocking-domain failure into the shared wire result.
-    fn into_command_result(self) -> CommandResult {
-        CommandResult::error(self.kind, self.message)
+    /// Converts one blocking-domain failure into the shared wire error.
+    fn into_command_error(self) -> CommandError {
+        CommandError::new(self.kind, self.message)
     }
 }
 
@@ -137,45 +138,49 @@ impl Default for StatusAccumulator {
 }
 
 /// Runs repository context inspection away from Tokio workers.
-pub(crate) async fn context(path: String) -> CommandResult {
+pub(crate) async fn context(path: String) -> Result<GitContextResponse, CommandError> {
     run_blocking(move |interrupt| context_blocking(path, interrupt)).await
 }
 
 /// Runs a bounded full-repository status walk away from Tokio workers.
-pub(crate) async fn status(path: String) -> CommandResult {
+pub(crate) async fn status(path: String) -> Result<GitStatusResponse, CommandError> {
     run_blocking(move |interrupt| status_blocking(path, interrupt)).await
 }
 
 /// Runs ordered object reads, worktree reads, and text diffing away from Tokio workers.
-pub(crate) async fn diff(files: Vec<String>, mode: GitDiffMode) -> CommandResult {
+pub(crate) async fn diff(
+    files: Vec<String>,
+    mode: GitDiffMode,
+) -> Result<GitDiffResponse, CommandError> {
     run_blocking(move |interrupt| diff_blocking(files, mode, interrupt)).await
 }
 
 /// Joins one complete gix operation and preserves panics as structured internal errors.
-async fn run_blocking(
-    operation: impl FnOnce(Arc<AtomicBool>) -> Result<CommandResult, GitFailure> + Send + 'static,
-) -> CommandResult {
+async fn run_blocking<T: Send + 'static>(
+    operation: impl FnOnce(Arc<AtomicBool>) -> Result<T, GitFailure> + Send + 'static,
+) -> Result<T, CommandError> {
     let interrupt = Arc::new(AtomicBool::new(false));
     let guard = CancellationGuard(interrupt.clone());
     let result = tokio::task::spawn_blocking(move || operation(interrupt)).await;
     drop(guard);
     match result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => error.into_command_result(),
-        Err(error) => CommandResult::error(
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(error.into_command_error()),
+        Err(error) => Err(CommandError::new(
             CommandErrorKind::Internal,
             format!("Git inspection task failed: {error}"),
-        ),
+        )),
     }
 }
 
 /// Discovers repository context and classifies the exact requested path.
-fn context_blocking(path: String, interrupt: Arc<AtomicBool>) -> Result<CommandResult, GitFailure> {
+fn context_blocking(
+    path: String,
+    interrupt: Arc<AtomicBool>,
+) -> Result<GitContextResponse, GitFailure> {
     let requested = validate_absolute_path(&path)?;
     let Some(repository) = discover_repository(requested.clone())? else {
-        return Ok(CommandResult::GitContext(
-            GitContextResponse::OutsideWorktree,
-        ));
+        return Ok(GitContextResponse::OutsideWorktree);
     };
 
     let entry_type = entry_type(&requested)?;
@@ -189,18 +194,19 @@ fn context_blocking(path: String, interrupt: Arc<AtomicBool>) -> Result<CommandR
             interrupt,
         )?)
     };
-    Ok(CommandResult::GitContext(
-        GitContextResponse::InsideWorktree {
-            entry_type,
-            tracking_state,
-            repository_root: repository.root.display().to_string(),
-            repository_relative_path: relative,
-        },
-    ))
+    Ok(GitContextResponse::InsideWorktree {
+        entry_type,
+        tracking_state,
+        repository_root: repository.root.display().to_string(),
+        repository_relative_path: relative,
+    })
 }
 
 /// Produces deterministic merged status while retaining non-UTF-8 omission accounting.
-fn status_blocking(path: String, interrupt: Arc<AtomicBool>) -> Result<CommandResult, GitFailure> {
+fn status_blocking(
+    path: String,
+    interrupt: Arc<AtomicBool>,
+) -> Result<GitStatusResponse, GitFailure> {
     let requested = validate_absolute_path(&path)?;
     let metadata =
         std::fs::metadata(&requested).map_err(|error| io_failure("read Git status path", error))?;
@@ -290,7 +296,7 @@ fn status_blocking(path: String, interrupt: Arc<AtomicBool>) -> Result<CommandRe
         .then(|| head.id().map(|id| id.to_string()))
         .flatten();
 
-    Ok(CommandResult::GitStatus(GitStatusResponse {
+    Ok(GitStatusResponse {
         path: requested.display().to_string(),
         repository_root: repository.root.display().to_string(),
         branch_name,
@@ -302,7 +308,7 @@ fn status_blocking(path: String, interrupt: Arc<AtomicBool>) -> Result<CommandRe
         entries,
         truncated,
         omitted_non_utf8_entries,
-    }))
+    })
 }
 
 /// Produces bounded comparisons in request order so directory views remain stable.
@@ -310,7 +316,7 @@ fn diff_blocking(
     files: Vec<String>,
     mode: GitDiffMode,
     interrupt: Arc<AtomicBool>,
-) -> Result<CommandResult, GitFailure> {
+) -> Result<GitDiffResponse, GitFailure> {
     // Agent-side validation also protects commands sent outside the REST API.
     let mut request = GitDiffRequest { files, mode };
     request
@@ -325,7 +331,7 @@ fn diff_blocking(
         }
         diffs.push(diff);
     }
-    Ok(CommandResult::GitDiff(GitDiffResponse { diffs }))
+    Ok(GitDiffResponse { diffs })
 }
 
 /// Compares one requested path while retaining explicit non-text outcomes per file.

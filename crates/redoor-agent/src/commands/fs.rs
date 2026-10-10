@@ -7,9 +7,9 @@ use redoor_protocol::{
     },
     ids::UnixTimestampSeconds,
     wire::command::{
-        CommandErrorKind, CommandResult, LsDirectoryResult, LsFileResult, MoveMetadataResult,
-        MoveSourceIdentity,
+        CommandErrorKind, LsDirectoryResult, LsFileResult, MoveMetadataResult, MoveSourceIdentity,
     },
+    wire::request::{CommandError, LsResponse},
 };
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +27,7 @@ static MOVE_SOURCE_CLEANUP_PERMITS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_MOVE_SOURCE_CLEANUPS);
 
 /// Returns directory entries or file metadata from the requested path.
-pub(super) async fn ls(path: Option<String>) -> CommandResult {
+pub(super) async fn ls(path: Option<String>) -> Result<LsResponse, CommandError> {
     use nix::unistd::{Group, User};
     use std::os::unix::fs::MetadataExt;
 
@@ -85,7 +85,7 @@ pub(super) async fn ls(path: Option<String>) -> CommandResult {
                             .flatten()
                             .map(|group| group.name);
 
-                        CommandResult::LsDirectory(LsDirectoryResult {
+                        Ok(LsResponse::Directory(LsDirectoryResult {
                             files,
                             path,
                             owner,
@@ -93,12 +93,12 @@ pub(super) async fn ls(path: Option<String>) -> CommandResult {
                             uid,
                             gid,
                             permissions: metadata.mode() & 0o777,
-                        })
+                        }))
                     }
-                    Err(error) => CommandResult::io_error(
+                    Err(error) => Err(CommandError::io(
                         &format!("Failed to read directory {path:?}"),
                         error,
-                    ),
+                    )),
                 }
             } else {
                 let size = metadata.size();
@@ -116,7 +116,7 @@ pub(super) async fn ls(path: Option<String>) -> CommandResult {
                     .flatten()
                     .map(|g| g.name);
 
-                CommandResult::LsFile(LsFileResult {
+                Ok(LsResponse::File(LsFileResult {
                     size,
                     path,
                     owner,
@@ -124,17 +124,18 @@ pub(super) async fn ls(path: Option<String>) -> CommandResult {
                     uid,
                     gid,
                     permissions,
-                })
+                }))
             }
         }
-        Err(error) => {
-            CommandResult::io_error(&format!("Failed to get metadata for path {path:?}"), error)
-        }
+        Err(error) => Err(CommandError::io(
+            &format!("Failed to get metadata for path {path:?}"),
+            error,
+        )),
     }
 }
 
 /// Keeps direct REST-backed deletion within its short control-command deadline.
-pub(super) async fn raw_delete(path: String) -> CommandResult {
+pub(super) async fn raw_delete(path: String) -> Result<(), CommandError> {
     match tokio::fs::metadata(&path).await {
         Ok(metadata) => {
             let delete_result = if metadata.is_dir() {
@@ -158,11 +159,14 @@ pub(super) async fn raw_delete(path: String) -> CommandResult {
             };
 
             match delete_result {
-                Ok(()) => CommandResult::RawDelete,
-                Err(error) => CommandResult::io_error("Failed to delete path", error),
+                Ok(()) => Ok(()),
+                Err(error) => Err(CommandError::io("Failed to delete path", error)),
             }
         }
-        Err(error) => CommandResult::io_error("Failed to access path for deletion", error),
+        Err(error) => Err(CommandError::io(
+            "Failed to access path for deletion",
+            error,
+        )),
     }
 }
 
@@ -170,56 +174,56 @@ pub(super) async fn raw_delete(path: String) -> CommandResult {
 pub(super) async fn create_directory(
     path: String,
     ownership: redoor_protocol::api::files::CreationOwnershipOptions,
-) -> CommandResult {
+) -> Result<(), CommandError> {
     let already_exists = match tokio::fs::symlink_metadata(&path).await {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return CommandResult::io_error("Failed to inspect directory", error),
+        Err(error) => return Err(CommandError::io("Failed to inspect directory", error)),
     };
     let ownership_plan = match crate::ownership::OwnershipPlan::resolve(ownership, None).await {
         Ok(plan) => plan,
-        Err(error) => return CommandResult::error(error.kind(), error.to_string()),
+        Err(error) => return Err(CommandError::new(error.kind(), error.to_string())),
     };
     if let Err(error) = tokio::fs::create_dir_all(&path).await {
-        return CommandResult::io_error("Failed to create directory", error);
+        return Err(CommandError::io("Failed to create directory", error));
     }
     if already_exists {
-        return CommandResult::CreateDirectory;
+        return Ok(());
     }
     let parent = std::path::Path::new(&path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let resolved_ownership = match ownership_plan.for_parent(parent).await {
         Ok(ownership) => ownership,
-        Err(error) => return CommandResult::error(error.kind(), error.to_string()),
+        Err(error) => return Err(CommandError::new(error.kind(), error.to_string())),
     };
     match resolved_ownership.apply(std::path::Path::new(&path)).await {
-        Ok(()) => CommandResult::CreateDirectory,
-        Err(error) => CommandResult::error(error.kind(), error.to_string()),
+        Ok(()) => Ok(()),
+        Err(error) => Err(CommandError::new(error.kind(), error.to_string())),
     }
 }
 
 /// Derives both paths from one directory so rename cannot become a cross-directory move.
-pub(super) async fn rename_path(dir: String, old: String, new: String) -> CommandResult {
+pub(super) async fn rename_path(dir: String, old: String, new: String) -> Result<(), CommandError> {
     let directory = std::path::Path::new(&dir);
     if !directory.is_absolute() {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             "Rename directory must be absolute",
-        );
+        ));
     }
     if !is_filename(&old) || !is_filename(&new) {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             "Rename names must each be a single filename",
-        );
+        ));
     }
 
     let source_path = directory.join(old);
     let dest_path = directory.join(new);
     match tokio::fs::rename(&source_path, &dest_path).await {
-        Ok(()) => CommandResult::RenamePath,
-        Err(error) => CommandResult::io_error("Failed to rename path", error),
+        Ok(()) => Ok(()),
+        Err(error) => Err(CommandError::io("Failed to rename path", error)),
     }
 }
 
@@ -228,20 +232,23 @@ pub(super) async fn chown_path(
     path: String,
     owner: Option<String>,
     group: Option<String>,
-) -> CommandResult {
+) -> Result<ChownPathResponse, CommandError> {
     if !nix::unistd::Uid::effective().is_root() {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::PermissionDenied,
             "Only a root agent can change ownership",
-        );
+        ));
     }
     if owner.is_none() && group.is_none() {
-        return CommandResult::error(CommandErrorKind::InvalidInput, "Owner or group is required");
+        return Err(CommandError::new(
+            CommandErrorKind::InvalidInput,
+            "Owner or group is required",
+        ));
     }
     let ownership_plan =
         match crate::ownership::OwnershipPlan::for_existing_entry(owner, group).await {
             Ok(plan) => plan,
-            Err(error) => return CommandResult::error(error.kind(), error.to_string()),
+            Err(error) => return Err(CommandError::new(error.kind(), error.to_string())),
         };
     match ownership_plan
         .resolved()
@@ -249,51 +256,54 @@ pub(super) async fn chown_path(
         .await
     {
         Ok(()) => {}
-        Err(error) => return CommandResult::error(error.kind(), error.to_string()),
+        Err(error) => return Err(CommandError::new(error.kind(), error.to_string())),
     }
     match followed_ownership(&path).await {
-        Ok((owner, group, uid, gid)) => CommandResult::ChownPath(ChownPathResponse {
+        Ok((owner, group, uid, gid)) => Ok(ChownPathResponse {
             path,
             owner,
             group,
             uid,
             gid,
         }),
-        Err(error) => CommandResult::io_error(
+        Err(error) => Err(CommandError::io(
             &format!("Failed to read ownership after chown for path {path:?}"),
             error,
-        ),
+        )),
     }
 }
 
 /// Replaces only the nine rwx bits so toggling the grid cannot clear setuid/setgid/sticky.
-pub(super) async fn chmod_path(path: String, permissions: u32) -> CommandResult {
+pub(super) async fn chmod_path(
+    path: String,
+    permissions: u32,
+) -> Result<ChmodPathResponse, CommandError> {
     if permissions > 0o777 {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             format!("Permissions must be between 0 and 0o777, got {permissions:#o}"),
-        );
+        ));
     }
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = match tokio::fs::metadata(&path).await {
         Ok(metadata) => metadata,
         Err(error) => {
-            return CommandResult::io_error(
+            return Err(CommandError::io(
                 &format!("Failed to read metadata for path {path:?}"),
                 error,
-            );
+            ));
         }
     };
     let next_mode = (metadata.mode() & !0o777) | (permissions & 0o777);
     let mut next_permissions = metadata.permissions();
     next_permissions.set_mode(next_mode);
     if let Err(error) = tokio::fs::set_permissions(&path, next_permissions).await {
-        return CommandResult::io_error(
+        return Err(CommandError::io(
             &format!("Failed to change permissions for path {path:?}"),
             error,
-        );
+        ));
     }
-    CommandResult::ChmodPath(ChmodPathResponse { path, permissions })
+    Ok(ChmodPathResponse { path, permissions })
 }
 
 /// Bounds recursive metadata traversal so one very large tree cannot occupy a command slot indefinitely.
@@ -301,20 +311,20 @@ pub(super) async fn directory_size(
     path: String,
     timeout_seconds: u64,
     cancel: &CancellationToken,
-) -> CommandResult {
+) -> Result<DirectorySizeResponse, CommandError> {
     match tokio::fs::metadata(&path).await {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => {
-            return CommandResult::error(
+            return Err(CommandError::new(
                 CommandErrorKind::NotADirectory,
                 format!("Path is not a directory: {path}"),
-            );
+            ));
         }
         Err(error) => {
-            return CommandResult::io_error(
+            return Err(CommandError::io(
                 &format!("Failed to read directory metadata for path {path:?}"),
                 error,
-            );
+            ));
         }
     }
 
@@ -324,7 +334,7 @@ pub(super) async fn directory_size(
     )
     .await
     {
-        Ok(Ok(Some(measurement))) => CommandResult::DirectorySize(DirectorySizeResponse {
+        Ok(Ok(Some(measurement))) => Ok(DirectorySizeResponse {
             path,
             size: measurement.content_bytes,
             errors: measurement
@@ -336,23 +346,23 @@ pub(super) async fn directory_size(
                 })
                 .collect(),
         }),
-        Ok(Ok(None)) => CommandResult::error(
+        Ok(Ok(None)) => Err(CommandError::new(
             CommandErrorKind::ServiceUnavailable,
             "Directory size calculation was canceled",
-        ),
-        Ok(Err(error)) => CommandResult::error(
+        )),
+        Ok(Err(error)) => Err(CommandError::new(
             CommandErrorKind::Internal,
             format!("Failed to calculate directory size for {path:?}: {error}"),
-        ),
-        Err(_) => CommandResult::error(
+        )),
+        Err(_) => Err(CommandError::new(
             CommandErrorKind::ServiceUnavailable,
             format!("Directory size calculation timed out after {timeout_seconds} seconds"),
-        ),
+        )),
     }
 }
 
 /// Captures the source identity before a move starts so later deletion is conditional.
-pub(super) async fn move_metadata(path: String) -> CommandResult {
+pub(super) async fn move_metadata(path: String) -> Result<MoveMetadataResult, CommandError> {
     match tokio::fs::metadata(&path).await {
         Ok(metadata) => {
             let identity = MoveSourceIdentity::from_metadata(&metadata);
@@ -365,7 +375,7 @@ pub(super) async fn move_metadata(path: String) -> CommandResult {
                 metadata.len(),
                 identity
             );
-            CommandResult::MoveMetadata(MoveMetadataResult {
+            Ok(MoveMetadataResult {
                 file_size: metadata.len(),
                 is_file: metadata.is_file(),
                 is_dir: metadata.is_dir(),
@@ -379,10 +389,10 @@ pub(super) async fn move_metadata(path: String) -> CommandResult {
                 path,
                 error
             );
-            CommandResult::io_error(
+            Err(CommandError::io(
                 &format!("Failed to get move source metadata for path {path:?}"),
                 error,
-            )
+            ))
         }
     }
 }
@@ -391,7 +401,7 @@ pub(super) async fn move_metadata(path: String) -> CommandResult {
 pub(super) async fn delete_move_source(
     path: String,
     expected_identity: MoveSourceIdentity,
-) -> CommandResult {
+) -> Result<(), CommandError> {
     delete_move_source_with_cleanup(
         path,
         expected_identity,
@@ -407,7 +417,7 @@ async fn delete_move_source_with_cleanup<C, F>(
     expected_identity: MoveSourceIdentity,
     cleanup_permits: &'static tokio::sync::Semaphore,
     cleanup: C,
-) -> CommandResult
+) -> Result<(), CommandError>
 where
     C: FnOnce(std::path::PathBuf) -> F,
     F: Future<Output = std::io::Result<()>> + Send + 'static,
@@ -427,10 +437,10 @@ where
                 path,
                 error
             );
-            return CommandResult::io_error(
+            return Err(CommandError::io(
                 &format!("Failed to verify move source path {path:?}"),
                 error,
-            );
+            ));
         }
     };
     let actual_identity = MoveSourceIdentity::from_metadata(&metadata);
@@ -442,10 +452,10 @@ where
             expected_identity,
             actual_identity
         );
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             "Move source changed while it was being copied; refusing to delete it",
-        );
+        ));
     }
     if !metadata.is_dir() {
         redoor_core::log!(
@@ -455,7 +465,7 @@ where
             actual_identity
         );
         return match tokio::fs::remove_file(&path).await {
-            Ok(()) => CommandResult::RawDelete,
+            Ok(()) => Ok(()),
             Err(error) => {
                 redoor_core::log!(
                     Level::Debug,
@@ -463,12 +473,15 @@ where
                     path,
                     error
                 );
-                CommandResult::io_error("Failed to delete move source", error)
+                Err(CommandError::io("Failed to delete move source", error))
             }
         };
     }
     if let Err(error) = redoor_core::safe_fs::validate_recursive_remove(&path).await {
-        return CommandResult::io_error("Failed to validate move source deletion", error);
+        return Err(CommandError::io(
+            "Failed to validate move source deletion",
+            error,
+        ));
     }
 
     redoor_core::log!(
@@ -486,7 +499,7 @@ where
                 path,
                 error
             );
-            return CommandResult::io_error("Failed to quarantine move source", error);
+            return Err(CommandError::io("Failed to quarantine move source", error));
         }
     };
     match cleanup_permits.try_acquire() {
@@ -513,7 +526,7 @@ where
             );
         }
     }
-    CommandResult::RawDelete
+    Ok(())
 }
 
 /// Re-reads followed metadata so the chown response matches the inode the details view already shows.
@@ -662,7 +675,7 @@ mod tests {
 
         // The router must receive success without waiting for recursive cleanup.
         assert!(
-            matches!(result, CommandResult::RawDelete),
+            matches!(result, Ok(())),
             "directory quarantine should preserve the move deletion response"
         );
         // Atomic quarantine publication removes the user-visible source name first.
@@ -736,7 +749,7 @@ mod tests {
 
         // Cleanup timeout occurs after publication and therefore cannot fail the logical move.
         assert!(
-            matches!(result, CommandResult::RawDelete),
+            matches!(result, Ok(())),
             "cleanup timeout should not alter the successful command response"
         );
         // The original source remains absent even when best-effort cleanup leaves quarantine behind.
@@ -788,7 +801,7 @@ mod tests {
 
         // Capacity exhaustion happens after publication and cannot delay or fail the move.
         assert!(
-            matches!(result, CommandResult::RawDelete),
+            matches!(result, Ok(())),
             "saturated cleanup admission should retain move success"
         );
         // Nonblocking admission must not create cleanup work that would wait for a permit.
@@ -867,7 +880,7 @@ mod tests {
 
         // A source at NAME_MAX must still publish successfully under an independent short name.
         assert!(
-            matches!(result, CommandResult::RawDelete),
+            matches!(result, Ok(())),
             "maximum-length source should quarantine successfully"
         );
         let quarantine_name = quarantine_path
@@ -914,7 +927,7 @@ mod tests {
 
         // The router completes source-deletion state only for the established RawDelete result.
         assert!(
-            matches!(result, CommandResult::RawDelete),
+            matches!(result, Ok(())),
             "move source deletion should preserve its wire response"
         );
         // A successful response must mean the identity-verified source pathname is gone.
@@ -951,10 +964,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                CommandResult::Error {
+                Err(CommandError {
                     kind: CommandErrorKind::InvalidInput,
                     ..
-                }
+                })
             ),
             "conditional move deletion should reject a replacement source"
         );

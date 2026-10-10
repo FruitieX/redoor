@@ -6,9 +6,10 @@ use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
+use redoor_protocol::wire::request::CommandError;
 use redoor_protocol::{
     api::search::{CaseSensitivity, FileSearchEntry, FileSearchResponse},
-    wire::command::{CommandErrorKind, CommandResult},
+    wire::command::CommandErrorKind,
 };
 use std::{
     collections::HashSet,
@@ -145,7 +146,7 @@ pub(super) fn directory_identity(metadata: &std::fs::Metadata) -> DirectoryIdent
 pub(crate) async fn execute(
     request: FileSearchRequest,
     cancel: &CancellationToken,
-) -> CommandResult {
+) -> Result<FileSearchResponse, CommandError> {
     let FileSearchRequest {
         path,
         query,
@@ -155,10 +156,10 @@ pub(crate) async fn execute(
         case_sensitivity,
     } = request;
     if query.trim().is_empty() {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             "File search query must not be empty",
-        );
+        ));
     }
 
     let started_at = Instant::now();
@@ -186,7 +187,7 @@ pub(crate) async fn execute(
     let timed_out = match result {
         Some(Ok(())) => false,
         Some(Err(error)) => {
-            return CommandResult::io_error("Failed to search directory", error);
+            return Err(CommandError::io("Failed to search directory", error));
         }
         None => true,
     };
@@ -198,7 +199,7 @@ pub(crate) async fn execute(
             .then_with(|| left.entry.path.cmp(&right.entry.path))
     });
 
-    CommandResult::FileSearch(FileSearchResponse {
+    Ok(FileSearchResponse {
         results: matches.into_iter().map(|entry| entry.entry).collect(),
         timed_out,
         duration_ms: u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -454,7 +455,7 @@ mod tests {
         include_hidden: bool,
         respect_gitignore: bool,
         case_sensitivity: CaseSensitivity,
-    ) -> CommandResult {
+    ) -> Result<FileSearchResponse, CommandError> {
         execute(
             FileSearchRequest {
                 path,
@@ -491,7 +492,7 @@ mod tests {
         )
         .await;
 
-        let CommandResult::FileSearch(response) = result else {
+        let Ok(response) = result else {
             panic!("cancellation should return a file search response");
         };
         // No traversal work should occur after the cancellation signal is already visible.
@@ -535,7 +536,7 @@ mod tests {
         tokio::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o700))
             .await
             .expect("test directory permissions should be restored");
-        let CommandResult::FileSearch(response) = result else {
+        let Ok(response) = result else {
             panic!("an unreadable child should not fail the search");
         };
         // A failure opening one child must not discard entries from the parent directory.
@@ -572,7 +573,7 @@ mod tests {
         )
         .await;
 
-        let CommandResult::FileSearch(response) = result else {
+        let Ok(response) = result else {
             panic!("a non-UTF-8 child path should not fail the search");
         };
         // Lossy conversion keeps arbitrary Unix paths representable by the string-based API.
@@ -622,7 +623,7 @@ mod tests {
         )
         .await;
 
-        let CommandResult::FileSearch(response) = result else {
+        let Ok(response) = result else {
             panic!("a linked storage directory should not fail the search");
         };
         // Both aliases remain searchable even though they resolve to one filesystem directory.
@@ -690,7 +691,7 @@ mod tests {
         )
         .await;
 
-        let CommandResult::FileSearch(excluded_response) = excluded_result else {
+        let Ok(excluded_response) = excluded_result else {
             panic!("an exclusion search should succeed");
         };
         // The matching file outside the excluded directory must remain discoverable.
@@ -700,7 +701,7 @@ mod tests {
             excluded_response.results[0].path,
             included.to_string_lossy()
         );
-        let CommandResult::FileSearch(quoted_response) = quoted_result else {
+        let Ok(quoted_response) = quoted_result else {
             panic!("a quoted leading-minus search should succeed");
         };
         // Quotes override exclusion syntax and make the leading minus part of the fuzzy term.
@@ -744,13 +745,13 @@ mod tests {
         )
         .await;
 
-        let CommandResult::FileSearch(default_response) = default_result else {
+        let Ok(default_response) = default_result else {
             panic!("a default hidden-directory search should succeed");
         };
         // Dotfiles remain searchable because only traversal into hidden directories is disabled.
         assert_eq!(default_response.results.len(), 1);
         assert_eq!(default_response.results[0].path, dotfile.to_string_lossy());
-        let CommandResult::FileSearch(included_response) = included_result else {
+        let Ok(included_response) = included_result else {
             panic!("an opted-in hidden-directory search should succeed");
         };
         // Opting in exposes both the dotfile and the descendant of the hidden directory.
@@ -809,7 +810,7 @@ mod tests {
         )
         .await;
 
-        let CommandResult::FileSearch(respected_response) = respected else {
+        let Ok(respected_response) = respected else {
             panic!("a gitignore-aware search should succeed");
         };
         // The nested negation takes precedence over the matching root rule.
@@ -821,7 +822,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![nested_reincluded.to_string_lossy().as_ref()]
         );
-        let CommandResult::FileSearch(disabled_response) = disabled else {
+        let Ok(disabled_response) = disabled else {
             panic!("a search with gitignore disabled should succeed");
         };
         // Disabling ignore checks exposes every otherwise matching path.
@@ -857,7 +858,7 @@ mod tests {
             CaseSensitivity::Smart,
         )
         .await;
-        let CommandResult::FileSearch(response) = result else {
+        let Ok(response) = result else {
             panic!("a search after an oversized ignore rule should succeed");
         };
         // The valid rule after the skipped physical line still excludes its target.

@@ -7,10 +7,8 @@ use redoor_core::destination::{
 };
 use redoor_core::log;
 use redoor_core::staging::{StagingKind, StagingPath};
-use redoor_protocol::{
-    api::transfers::CopyExistingMode,
-    wire::{command::CommandResult, log::Level},
-};
+use redoor_protocol::wire::request::CommandError;
+use redoor_protocol::{api::transfers::CopyExistingMode, wire::log::Level};
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -440,7 +438,7 @@ impl CopyContext<'_> {
         dest_path: String,
         on_existing: CopyExistingMode,
         directory: bool,
-    ) -> CommandResult {
+    ) -> Result<(), CommandError> {
         let label = if directory {
             "Local copy directory"
         } else {
@@ -464,14 +462,8 @@ impl CopyContext<'_> {
         };
         match result {
             Ok(result) => {
-                log!(
-                    Level::Info,
-                    "{} complete: request_id={}, result={}",
-                    label,
-                    request_id,
-                    result.summary()
-                );
-                result
+                log!(Level::Info, "{} complete: request_id={}", label, request_id);
+                Ok(result)
             }
             Err(error) => {
                 log!(
@@ -481,7 +473,7 @@ impl CopyContext<'_> {
                     request_id,
                     error
                 );
-                AgentCommandError::from(error).into()
+                Err(AgentCommandError::from(error).into())
             }
         }
     }
@@ -492,7 +484,7 @@ impl CopyContext<'_> {
         source_path: PathBuf,
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
-    ) -> Result<CommandResult, LocalCopyError> {
+    ) -> Result<(), LocalCopyError> {
         let source_metadata = tokio::fs::metadata(&source_path)
             .await
             .map_err(LocalCopyError::AccessSourceFile)?;
@@ -528,7 +520,7 @@ impl CopyContext<'_> {
             place_temp_at_destination(staging.path(), &dest_path, on_existing, false)
                 .await
                 .map_err(LocalCopyError::from)?;
-            Ok(CommandResult::LocalCopyFile)
+            Ok(())
         }
         .await;
         match result {
@@ -546,7 +538,7 @@ impl CopyContext<'_> {
         source_path: PathBuf,
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
-    ) -> Result<CommandResult, LocalCopyError> {
+    ) -> Result<(), LocalCopyError> {
         let source_metadata = tokio::fs::symlink_metadata(&source_path)
             .await
             .map_err(LocalCopyError::AccessSourceFile)?;
@@ -577,7 +569,7 @@ impl CopyContext<'_> {
             place_temp_at_destination(staging.path(), &dest_path, on_existing, false)
                 .await
                 .map_err(LocalCopyError::from)?;
-            Ok(CommandResult::LocalCopyFile)
+            Ok(())
         }
         .await;
         match result {
@@ -595,7 +587,7 @@ impl CopyContext<'_> {
         source_path: PathBuf,
         dest_path: PathBuf,
         on_existing: CopyExistingMode,
-    ) -> Result<CommandResult, LocalCopyError> {
+    ) -> Result<(), LocalCopyError> {
         let source_metadata = tokio::fs::metadata(&source_path)
             .await
             .map_err(LocalCopyError::AccessSourceDirectory)?;
@@ -628,7 +620,7 @@ impl CopyContext<'_> {
             place_temp_at_destination(staging.path(), &dest_path, on_existing, true)
                 .await
                 .map_err(LocalCopyError::from)?;
-            Ok(CommandResult::LocalCopyDirectory)
+            Ok(())
         }
         .await;
         match result {
@@ -648,7 +640,7 @@ mod tests {
     use redoor_core::test_support::TempDir;
     use redoor_protocol::ids::RequestId;
 
-    use redoor_protocol::wire::command::{CommandErrorKind, CommandResult};
+    use redoor_protocol::wire::command::CommandErrorKind;
 
     #[tokio::test]
     async fn local_copy_file_fails_when_progress_channel_is_closed() {
@@ -668,7 +660,7 @@ mod tests {
         drop(frames);
         let cancel = CancellationToken::new();
 
-        CopyContext {
+        let result = CopyContext {
             responder: &responder,
             cancel: &cancel,
         }
@@ -680,6 +672,8 @@ mod tests {
         )
         .await;
 
+        // A copy that cannot report progress fails instead of claiming success.
+        assert!(result.is_err());
         assert!(
             !tokio::fs::try_exists(&dest_path)
                 .await
@@ -727,11 +721,11 @@ mod tests {
             CommandErrorKind::Internal,
             "the surfaced protocol error kind should stay stable for router-side handling"
         );
-        let command_result: CommandResult = AgentCommandError::from(error).into();
+        let command_error = CommandError::from(AgentCommandError::from(error));
         assert!(
             matches!(
-                command_result,
-                CommandResult::Error {
+                command_error,
+                CommandError {
                     kind: CommandErrorKind::Internal,
                     ..
                 }
@@ -751,16 +745,13 @@ mod tests {
         let (responder, _frames) = Responder::recording(RequestId::new(44), 1);
         let cancel = CancellationToken::new();
 
-        let result = CopyContext {
+        CopyContext {
             responder: &responder,
             cancel: &cancel,
         }
         .copy_symlink(source_path, dest_path.clone(), CopyExistingMode::Error)
         .await
         .expect("symbolic link transfer should succeed without reading its target");
-
-        // Reusing the file result keeps the existing transfer protocol stable for link entries.
-        assert!(matches!(result, CommandResult::LocalCopyFile));
         // A broken relative target proves the transfer copied link metadata rather than target bytes.
         assert_eq!(
             tokio::fs::read_link(&dest_path)

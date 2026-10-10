@@ -221,6 +221,6 @@ pub(crate) async fn restart_agent_handler(
     Path(agent): Path<String>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<RestartResponse>, ApiError> {
-    state.agents.call(&AgentId::from(agent), Restart).await?;
+    state.agents.call(&AgentId::from(agent), Restart {}).await?;
     Ok(Json(RestartResponse { restarting: true }))
 }

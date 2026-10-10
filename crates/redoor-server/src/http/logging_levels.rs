@@ -40,7 +40,7 @@ pub(crate) async fn get_agent_logging_level_handler(
 ) -> Result<Json<LoggingLevelResponse>, ApiError> {
     let level = state
         .agents
-        .call(&AgentId::from(agent), GetLoggingLevel)
+        .call(&AgentId::from(agent), GetLoggingLevel {})
         .await?;
     Ok(Json(LoggingLevelResponse { level }))
 }

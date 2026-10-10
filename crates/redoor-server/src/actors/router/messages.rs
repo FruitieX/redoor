@@ -6,6 +6,7 @@ use super::streams::{ConnectionStreams, CreditViolation, OutboundStream, OutputR
 use crate::actors::lanes::ControlLanes;
 use crate::watchdog::WatchdogSnapshot;
 use redoor_protocol::ids::{AgentId, RequestId, SocketId, TransferId, UnixTimestampSeconds};
+use redoor_protocol::wire::request::CommandOutcome;
 use redoor_protocol::wire::terminal::{TerminalServerMessage, TerminalSize};
 use redoor_protocol::{
     api::{
@@ -14,7 +15,7 @@ use redoor_protocol::{
         ui_events::UiEvent,
     },
     wire::{
-        command::{Command, CommandResult},
+        command::Command,
         registration::{AgentCapabilities, AgentIdentity},
     },
 };
@@ -208,7 +209,7 @@ pub struct RouteResponse {
     /// Internal request id used to correlate the response.
     pub request_id: RequestId,
     /// Final command result returned by the agent.
-    pub result: CommandResult,
+    pub result: CommandOutcome,
 }
 
 /// Registers one UI event stream that should receive router refresh events.
@@ -230,7 +231,7 @@ pub struct ExecuteCommandRequest {
     /// caller already left and the router abandons the command right away.
     pub admitted: RouterReply<RequestId>,
     /// Reply port that receives the final command result.
-    pub reply: RouterReply<CommandResult>,
+    pub reply: RouterReply<CommandOutcome>,
 }
 
 /// Starts agent-to-REST output transport with explicit resource-specific tracking.
@@ -273,7 +274,7 @@ pub enum UploadStartOutcome {
     /// Destination worker exists; HTTP may begin forwarding the request body.
     Ready,
     /// Transfer ended before readiness; boxed so the ready path stays small.
-    Finished(Box<Result<CommandResult, RouterError>>),
+    Finished(Box<Result<CommandOutcome, RouterError>>),
 }
 
 /// Starts a direct upload stream and returns the allocated internal request id.
@@ -287,7 +288,7 @@ pub struct StartUploadRequest {
     /// Expected total byte count used for progress reporting.
     pub total_bytes: u64,
     /// Completion channel for the final upload result.
-    pub completion_sender: tokio::sync::oneshot::Sender<Result<CommandResult, RouterError>>,
+    pub completion_sender: tokio::sync::oneshot::Sender<Result<CommandOutcome, RouterError>>,
     /// Released once the destination worker is ready, or with early setup failure.
     ///
     /// Kept separate from `reply` so HTTP can arm cancel with the request id
@@ -405,7 +406,8 @@ pub struct LogStream {
 
 /// Enumerates router work so live streams and lifecycle controls share explicit lanes.
 pub enum RouterMsg {
-    RegisterAgent(RegisterAgentRequest),
+    /// Boxed: registration carries the agent's identity and dwarfs every other message.
+    RegisterAgent(Box<RegisterAgentRequest>),
     RegisterManagedAgent(RegisterManagedAgentRequest),
     UnregisterManagedAgent(UnregisterManagedAgentRequest),
     ApplyManagedLifecycle(ApplyManagedLifecycleRequest),

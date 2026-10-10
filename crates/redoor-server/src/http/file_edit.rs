@@ -6,6 +6,7 @@ use axum::{
     extract::{Path, State as AxumState},
 };
 use headers::HeaderMap;
+use redoor_protocol::wire::request;
 use redoor_protocol::{api::files::FileEditResponse, ids::AgentId, wire::command::Command};
 
 use super::{
@@ -28,7 +29,7 @@ pub(crate) async fn file_edit_handler(
     let upload = AgentUpload::start(
         &state.router_ref,
         AgentId::from(agent),
-        Command::EditFile { path: path.clone() },
+        Command::EditFile(request::EditFile { path: path.clone() }),
         path.clone(),
         total_bytes,
     )

@@ -3,28 +3,29 @@
 
 use crate::platform::identity::HostIdentity;
 use redoor_core::identity::{current_binary_identity, current_exe_path, external_ip};
+use redoor_protocol::wire::request::CommandError;
 use redoor_protocol::{
-    api::agents::{AgentDetailsResponse, EchoRequest},
+    api::agents::{AgentAccountsResponse, AgentDetailsResponse, EchoRequest},
     ids::{AgentId, UnixTimestampSeconds},
     wire::{
-        command::{AgentInfoResult, CommandErrorKind, CommandResult, EchoResult},
+        command::{AgentInfoResult, CommandErrorKind, EchoResult},
         log::Level,
     },
 };
 
 /// Echoes request content after the optional test-only randomized delay.
-pub(super) async fn echo(request: EchoRequest) -> CommandResult {
+pub(super) async fn echo(request: EchoRequest) -> Result<EchoResult, CommandError> {
     if request.random_sleep {
         let sleep_ms = fastrand::u64(10..500);
         tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
     }
-    CommandResult::Echo(EchoResult {
+    Ok(EchoResult {
         message: request.message,
     })
 }
 
 /// Reports lightweight process and host load information to legacy callers.
-pub(super) async fn agent_info() -> CommandResult {
+pub(super) async fn agent_info() -> Result<AgentInfoResult, CommandError> {
     use std::env;
     use sysinfo::System;
 
@@ -39,7 +40,7 @@ pub(super) async fn agent_info() -> CommandResult {
     let load_average = (load_avg.one, load_avg.five, load_avg.fifteen);
     let system_uptime = System::uptime();
 
-    CommandResult::AgentInfo(AgentInfoResult {
+    Ok(AgentInfoResult {
         pid,
         cwd,
         load_average,
@@ -48,7 +49,9 @@ pub(super) async fn agent_info() -> CommandResult {
 }
 
 /// Collects process identity and host details used by the connected-agent view.
-pub(super) async fn get_agent_details(loaded_config_path: &str) -> CommandResult {
+pub(super) async fn get_agent_details(
+    loaded_config_path: &str,
+) -> Result<AgentDetailsResponse, CommandError> {
     use sysinfo::System;
 
     let pid = std::process::id();
@@ -67,10 +70,10 @@ pub(super) async fn get_agent_details(loaded_config_path: &str) -> CommandResult
     let host = HostIdentity::current();
     let mount_points = match crate::platform::mounts::capacities().await {
         Ok(mount_points) => mount_points,
-        Err(message) => return CommandResult::error(CommandErrorKind::Internal, message),
+        Err(message) => return Err(CommandError::new(CommandErrorKind::Internal, message)),
     };
 
-    CommandResult::GetAgentDetails(Box::new(AgentDetailsResponse {
+    Ok(AgentDetailsResponse {
         id: AgentId::from(""),
         name: String::new(),
         pid,
@@ -92,45 +95,49 @@ pub(super) async fn get_agent_details(loaded_config_path: &str) -> CommandResult
         mount_points,
         uid: host.uid,
         is_root: host.is_root,
-    }))
+    })
 }
 
 /// Loads the user/group catalog only when a root details view needs owner/group selects.
-pub(super) async fn list_accounts() -> CommandResult {
+pub(super) async fn list_accounts() -> Result<AgentAccountsResponse, CommandError> {
     match crate::platform::accounts::list().await {
-        Ok(response) => CommandResult::ListAccounts(response),
-        Err(message) => CommandResult::error(CommandErrorKind::Internal, message),
+        Ok(response) => Ok(response),
+        Err(message) => Err(CommandError::new(CommandErrorKind::Internal, message)),
     }
 }
 
 /// Opens a path in the agent's graphical desktop session.
-pub(super) async fn open_path(path: String) -> CommandResult {
+pub(super) async fn open_path(path: String) -> Result<(), CommandError> {
     match redoor_core::desktop::open_with_desktop(&path).await {
-        Ok(()) => CommandResult::OpenPath,
+        Ok(()) => Ok(()),
         // Agent-facing wording: operators care that this host cannot open paths, not the launcher probe.
-        Err(redoor_core::desktop::OpenError::NoDesktop) => CommandResult::error(
+        Err(redoor_core::desktop::OpenError::NoDesktop) => Err(CommandError::new(
             CommandErrorKind::Internal,
             "Agent does not have access to a graphical desktop".to_string(),
-        ),
-        Err(error) => CommandResult::error(CommandErrorKind::Internal, error.to_string()),
+        )),
+        Err(error) => Err(CommandError::new(
+            CommandErrorKind::Internal,
+            error.to_string(),
+        )),
     }
 }
 
 /// Changes logging admission for subsequent events in this agent process.
-pub(super) fn set_logging_level(level: Level) -> CommandResult {
+pub(super) fn set_logging_level(level: Level) -> Result<Level, CommandError> {
     redoor_core::logging::set_level(level);
-    CommandResult::LoggingLevel(level)
+    Ok(level)
 }
 
-/// Validates a replacement binary path; the re-exec itself runs after the response is sent.
-pub(super) fn self_exec(path: String) -> CommandResult {
+/// Validates a replacement binary path and returns it; the re-exec itself runs after the
+/// response is sent.
+pub(super) fn self_exec(path: String) -> Result<std::path::PathBuf, CommandError> {
     if std::path::Path::new(&path).is_absolute() {
-        CommandResult::SelfExec { path }
+        Ok(std::path::PathBuf::from(path))
     } else {
-        CommandResult::error(
+        Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             "Self-exec path must be absolute",
-        )
+        ))
     }
 }
 
@@ -144,10 +151,10 @@ mod tests {
         // A relative replacement path could resolve differently after an agent restart.
         assert!(matches!(
             self_exec("relative-agent".to_string()),
-            CommandResult::Error {
+            Err(CommandError {
                 kind: CommandErrorKind::InvalidInput,
                 ..
-            }
+            })
         ));
     }
 }

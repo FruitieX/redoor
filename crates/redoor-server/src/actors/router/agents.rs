@@ -18,7 +18,7 @@ use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::CancelScope;
 use redoor_protocol::wire::policy::CommandLane;
 use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, TERMINAL_CREDIT_WINDOW_FRAMES};
-use redoor_protocol::{api::agents::AgentConnectionStatus, wire::command::CommandResult};
+use redoor_protocol::{api::agents::AgentConnectionStatus, wire::request::CommandOutcome};
 use redoor_protocol::{
     ids::{AgentId, RequestId, SocketId, UnixTimestampSeconds},
     wire::ServerToAgent,
@@ -478,7 +478,7 @@ impl RouterState {
             request.command
         );
         let Some(agent_connection) = self.agents.by_id.get_mut(&request.agent_id) else {
-            let _ = request.reply.send(CommandResult::error(
+            let _ = request.reply.send(CommandOutcome::error(
                 redoor_protocol::wire::command::CommandErrorKind::NotFound,
                 format!("Agent not found: {}", request.agent_id),
             ));
@@ -486,7 +486,7 @@ impl RouterState {
         };
         let cancelable = request.command.policy().cancel_scope == CancelScope::Request;
         if !agent_connection.send_command(request_id, request.command) {
-            let _ = request.reply.send(CommandResult::error(
+            let _ = request.reply.send(CommandOutcome::error(
                 redoor_protocol::wire::command::CommandErrorKind::ServiceUnavailable,
                 format!("Agent control queue is full: {}", request.agent_id),
             ));
@@ -696,6 +696,7 @@ mod tests {
     use super::*;
     use crate::actors::lanes::ControlLanes;
     use crate::actors::router::state::RouterState;
+    use redoor_protocol::wire::request;
     use tokio::sync::oneshot;
 
     /// Builds isolated router state without starting a router mailbox task.
@@ -722,7 +723,7 @@ mod tests {
         state: &mut RouterState,
         id: u64,
         agent_id: &str,
-    ) -> oneshot::Receiver<CommandResult> {
+    ) -> oneshot::Receiver<CommandOutcome> {
         let (reply, receiver) = oneshot::channel();
         let request_id = redoor_protocol::ids::RequestId::new(id);
         state.flows.insert(
@@ -743,7 +744,7 @@ mod tests {
             agent_id: AgentId::from(agent_id),
             socket_id,
             request_id: redoor_protocol::ids::RequestId::new(id),
-            result: CommandResult::RawUpload,
+            result: CommandOutcome::Ok(serde_json::Value::Null),
         })
     }
 
@@ -776,7 +777,10 @@ mod tests {
         );
         // The flow survives both attempts, so the real answer still reaches the caller.
         state.handle(response_message("owner", owner_socket, 7));
-        assert!(matches!(reply.try_recv(), Ok(CommandResult::RawUpload)));
+        assert!(matches!(
+            reply.try_recv(),
+            Ok(CommandOutcome::Ok(serde_json::Value::Null))
+        ));
         state.ui.refresh_check_task.abort();
     }
 
@@ -1041,7 +1045,9 @@ mod tests {
         let (first_admitted, _first_admitted) = oneshot::channel();
         state.execute_command_rest(ExecuteCommandRequest {
             agent_id: agent_id.clone(),
-            command: redoor_protocol::wire::command::Command::GetAgentDetails,
+            command: redoor_protocol::wire::command::Command::GetAgentDetails(
+                request::GetAgentDetails {},
+            ),
             admitted: first_admitted,
             reply: first_reply,
         });
@@ -1053,7 +1059,9 @@ mod tests {
         let (overload_admitted, _overload_admitted) = oneshot::channel();
         state.execute_command_rest(ExecuteCommandRequest {
             agent_id: agent_id.clone(),
-            command: redoor_protocol::wire::command::Command::GetAgentDetails,
+            command: redoor_protocol::wire::command::Command::GetAgentDetails(
+                request::GetAgentDetails {},
+            ),
             admitted: overload_admitted,
             reply: overload_reply,
         });
@@ -1064,10 +1072,10 @@ mod tests {
         assert_eq!(state.flows.len(), 0);
         assert!(matches!(
             overload_receiver.await.expect("overload reply delivered"),
-            CommandResult::Error {
+            CommandOutcome::Error(redoor_protocol::wire::request::CommandError {
                 kind: redoor_protocol::wire::command::CommandErrorKind::ServiceUnavailable,
                 ..
-            }
+            })
         ));
 
         let connection = &state.agents.by_id[&agent_id];
@@ -1083,7 +1091,9 @@ mod tests {
         assert!(matches!(
             receivers.commands.recv().await.map(|queued| queued.frame),
             Some(ServerToAgent::Command {
-                command: redoor_protocol::wire::command::Command::GetAgentDetails,
+                command: redoor_protocol::wire::command::Command::GetAgentDetails(
+                    request::GetAgentDetails {}
+                ),
                 ..
             })
         ));

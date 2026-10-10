@@ -6,6 +6,7 @@ use crate::actors::router::{
 use crate::http::error::ApiError;
 use bytes::Bytes;
 use futures_util::Stream;
+use redoor_protocol::wire::request;
 use redoor_protocol::{
     ids::{AgentId, RequestId},
     wire::{
@@ -99,7 +100,7 @@ impl OutputStream {
         let stream = Self::open(
             router,
             agent_id,
-            Command::Exec { request },
+            Command::Exec(request::Exec { request }),
             OutputStreamTracking::Execution { terminal },
         )
         .await?;
@@ -315,11 +316,11 @@ mod tests {
         let stream = OutputStream::open(
             &agent.router,
             agent.agent_id.clone(),
-            Command::RawDownload {
+            Command::RawDownload(request::RawDownload {
                 path: "/tmp/file".to_string(),
                 range_start: None,
                 range_end: None,
-            },
+            }),
             OutputStreamTracking::Download {
                 path: "/tmp/file".to_string(),
                 total_bytes: 8,
@@ -383,7 +384,7 @@ mod tests {
         agent
             .respond(
                 id,
-                redoor_protocol::wire::command::CommandResult::error(
+                redoor_protocol::wire::request::CommandOutcome::error(
                     redoor_protocol::wire::command::CommandErrorKind::Internal,
                     "disk gone",
                 ),

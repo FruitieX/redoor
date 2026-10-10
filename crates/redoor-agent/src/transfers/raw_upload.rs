@@ -9,10 +9,7 @@ use redoor_core::staging::{StagingKind, StagingPath};
 use redoor_protocol::{
     api::{files::CreationOwnershipOptions, transfers::CopyExistingMode},
     ids::RequestId,
-    wire::{
-        command::{CommandErrorKind, CommandResult},
-        log::Level,
-    },
+    wire::{command::CommandErrorKind, log::Level},
 };
 use std::path::Path;
 use tokio::{
@@ -153,10 +150,7 @@ impl UploadSink for RawFileSink {
     }
 
     /// Applies ownership and permissions to staging, waits for router authorization, then places.
-    async fn commit(
-        mut self,
-        gate: PublicationGate<'_>,
-    ) -> Result<CommandResult, AgentCommandError> {
+    async fn commit(mut self, gate: PublicationGate<'_>) -> Result<(), AgentCommandError> {
         if let Err(error) = self.file.flush().await {
             let kind = CommandErrorKind::from_io_error(&error);
             return Err(self
@@ -204,7 +198,7 @@ impl UploadSink for RawFileSink {
                 .await);
         }
         self.staging.keep();
-        Ok(CommandResult::RawUpload)
+        Ok(())
     }
 
     /// Closes and removes the staging file.
@@ -217,11 +211,12 @@ impl UploadSink for RawFileSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::ctx::{CommandCtx, Reply};
+    use crate::commands::ctx::CommandCtx;
     use crate::runtime::cancel::CancelRegistry;
     use crate::runtime::responder::ResultLedger;
     use crate::transfers::upload::UploadDriver;
     use redoor_core::test_support::TempDir;
+    use redoor_protocol::wire::request::CommandError;
     use redoor_protocol::wire::{AgentToServer, policy::UploadKind, stream::StreamChunk};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -274,12 +269,10 @@ mod tests {
 
         // The post-body worker must retain cancellation ownership.
         assert!(registry.cancel(&request_id));
-        let Reply::Result(result) = task.await.unwrap() else {
-            panic!("uploads answer on the control lane");
-        };
+        let result = task.await.unwrap();
 
         // Canceling a publication wait must produce failure rather than success.
-        assert!(matches!(result, CommandResult::Error { .. }));
+        assert!(matches!(result, Err(CommandError { .. })));
         // Post-body cancellation must never overwrite the existing file.
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"original");
         let mut entries = tokio::fs::read_dir(temp.path()).await.unwrap();

@@ -2,6 +2,7 @@
 
 use crate::actors::router::OutputStreamTracking;
 use axum::{Json, extract::State as AxumState};
+use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::{
         diffs::{DiffEndpoint, DiffFilesRequest, DiffFilesResponse},
@@ -77,11 +78,11 @@ async fn download_editable_file(
     let mut stream = OutputStream::open(
         &state.router_ref,
         endpoint.agent.clone(),
-        Command::RawDownload {
+        Command::RawDownload(request::RawDownload {
             path: endpoint.path.clone(),
             range_start: None,
             range_end: None,
-        },
+        }),
         OutputStreamTracking::Download {
             path: endpoint.path.clone(),
             total_bytes: expected_size,

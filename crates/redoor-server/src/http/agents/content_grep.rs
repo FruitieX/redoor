@@ -1,7 +1,7 @@
 //! REST endpoint for bounded content search below an agent directory.
 
 use crate::http::{
-    agent_client::ContentGrep,
+    agent_client::content_grep,
     agent_helpers::{AgentFilePath, absolute_path_from_url},
     error::ApiError,
     state::ServerState,
@@ -34,10 +34,7 @@ pub(crate) async fn content_grep_handler(
         )));
     }
     let context_requested = search.before_context > 0 || search.after_context > 0;
-    let call = ContentGrep {
-        path: absolute_path_from_url(path.unwrap_or_default()),
-        request: search,
-    };
+    let call = content_grep(absolute_path_from_url(path.unwrap_or_default()), search);
     let result = state.agents.call(&AgentId::from(agent), call).await?;
     if context_requested && !result.context_supported {
         return Err(ApiError::conflict(

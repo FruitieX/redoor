@@ -4,15 +4,16 @@
 //! staged and published. Their lifecycle (readiness, payload validation, cancellation, abort,
 //! unregistration and the terminal response) lives here once so the three cannot drift apart.
 
-use crate::commands::ctx::{CommandCtx, Reply};
+use crate::commands::ctx::CommandCtx;
 use crate::errors::AgentCommandError;
 use crate::runtime::responder::{ControlSender, Responder, ResultLedger};
 use redoor_core::log;
 use redoor_core::stream_credit::CreditLedger;
+use redoor_protocol::wire::request::{CommandError, CommandOutcome};
 use redoor_protocol::{
     ids::RequestId,
     wire::{
-        command::{CommandErrorKind, CommandResult},
+        command::CommandErrorKind,
         log::Level,
         policy::UploadKind,
         stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk},
@@ -58,7 +59,7 @@ pub(crate) trait UploadSink: Send + Sized {
     fn commit(
         self,
         gate: PublicationGate<'_>,
-    ) -> impl Future<Output = Result<CommandResult, AgentCommandError>> + Send;
+    ) -> impl Future<Output = Result<(), AgentCommandError>> + Send;
 
     /// Discards staged output after cancellation or failure.
     fn abort(self) -> impl Future<Output = ()> + Send;
@@ -178,10 +179,13 @@ impl UploadDriver {
     /// Owns the ordering every upload must follow on cancellation or failure: stop staging,
     /// unroute chunks, discard staging output, unregister the request, and only then let the
     /// dispatcher send the terminal response.
-    pub(crate) async fn run<S: UploadSink>(self, prepared: Result<S, AgentCommandError>) -> Reply {
+    pub(crate) async fn run<S: UploadSink>(
+        self,
+        prepared: Result<S, AgentCommandError>,
+    ) -> Result<(), CommandError> {
         let mut sink = match prepared {
             Ok(sink) => sink,
-            Err(error) => return Reply::Result(error.into()),
+            Err(error) => return Err(error.into()),
         };
         let request_id = self.ctx.responder.request_id();
         let (route, mut chunks) = self.ctx.services.upload_routes.open(request_id, &self.path);
@@ -238,7 +242,7 @@ impl UploadDriver {
                 }
                 drop(route);
                 drop(self.ctx);
-                return Reply::Result(result.unwrap_or_else(CommandResult::from));
+                return result.map_err(CommandError::from);
             }
         };
 
@@ -251,12 +255,12 @@ impl UploadDriver {
                     request_id,
                     self.path
                 );
-                CommandResult::error(
+                Err(CommandError::new(
                     CommandErrorKind::Canceled,
                     format!("{} canceled by server", self.subject()),
-                )
+                ))
             }
-            UploadStop::Failed(error) => error.into(),
+            UploadStop::Failed(error) => Err(error.into()),
         };
         // Unroute before the possibly slow abort so the reader drops late frames instead of
         // queueing them for a worker that stopped reading. Late frames for an unrouted request
@@ -265,7 +269,7 @@ impl UploadDriver {
         drop(chunks);
         sink.abort().await;
         drop(self.ctx);
-        Reply::Result(result)
+        result
     }
 
     /// Waits for the next chunk or cancellation, preferring an already queued terminal frame
@@ -400,7 +404,7 @@ impl UploadRoutes {
             path
         );
         let _ = Responder::new(control.clone(), results.clone(), request_id)
-            .respond(CommandResult::error(
+            .respond(CommandOutcome::error(
                 CommandErrorKind::Internal,
                 "Upload worker is no longer available",
             ))
@@ -508,12 +512,9 @@ mod tests {
         }
 
         /// Records publication and reports success.
-        async fn commit(
-            self,
-            _gate: PublicationGate<'_>,
-        ) -> Result<CommandResult, AgentCommandError> {
+        async fn commit(self, _gate: PublicationGate<'_>) -> Result<(), AgentCommandError> {
             self.record("commit");
-            Ok(CommandResult::RawUpload)
+            Ok(())
         }
 
         /// Records staging cleanup, optionally stalling until the test releases it.
@@ -532,7 +533,7 @@ mod tests {
         registry: CancelRegistry<RequestId>,
         routes: UploadRoutes,
         frames: mpsc::Receiver<crate::runtime::responder::OutboundFrame>,
-        task: tokio::task::JoinHandle<Reply>,
+        task: tokio::task::JoinHandle<Result<(), CommandError>>,
     }
 
     /// Starts a raw-upload driver over a recording sink.
@@ -574,14 +575,6 @@ mod tests {
         StreamChunk::data(RequestId::new(5), b"bytes".to_vec(), is_last)
     }
 
-    /// Extracts the terminal result from a driver reply.
-    fn result(reply: Reply) -> CommandResult {
-        match reply {
-            Reply::Result(result) => result,
-            Reply::Stream { .. } => panic!("uploads answer on control"),
-        }
-    }
-
     /// Verifies the cancel ordering: abort staging, unregister, then answer.
     #[tokio::test]
     async fn cancel_aborts_before_unregistering_and_answering() {
@@ -594,7 +587,7 @@ mod tests {
         ));
 
         harness.registry.cancel(&RequestId::new(5));
-        let result = result(harness.task.await.unwrap());
+        let result = harness.task.await.unwrap();
 
         // Staging is discarded after unrouting but while the request is still cancelable.
         assert_eq!(
@@ -607,7 +600,7 @@ mod tests {
         // Cancellation keeps its established user-facing classification.
         assert!(matches!(
             result,
-            CommandResult::Error { kind: CommandErrorKind::Canceled, message } if message == "Upload canceled by server"
+            Err(CommandError { kind: CommandErrorKind::Canceled, message }) if message == "Upload canceled by server"
         ));
     }
 
@@ -631,9 +624,9 @@ mod tests {
                 .await;
         }
         let _ = release.send(());
-        let result = result(harness.task.await.unwrap());
+        let result = harness.task.await.unwrap();
         // The worker's own cancellation result is the only answer.
-        assert!(matches!(result, CommandResult::Error { .. }));
+        assert!(matches!(result, Err(CommandError { .. })));
         assert!(control_frames.try_recv().is_err());
     }
 
@@ -648,7 +641,7 @@ mod tests {
             .routes
             .route_chunk(frame(true), &control, &ResultLedger::default())
             .await;
-        let result = result(harness.task.await.unwrap());
+        let result = harness.task.await.unwrap();
 
         // Publication runs while cancel_transfer can still reach the publication gate.
         assert_eq!(
@@ -660,7 +653,7 @@ mod tests {
         );
         // Success releases both registrations before the response is sent.
         assert!(!harness.registry.contains(&RequestId::new(5)));
-        assert!(matches!(result, CommandResult::RawUpload));
+        assert!(matches!(result, Ok(())));
     }
 
     /// A route never makes the reader wait: overflow unroutes only that upload.

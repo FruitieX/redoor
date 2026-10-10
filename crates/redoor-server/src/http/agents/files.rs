@@ -1,7 +1,7 @@
 //! REST endpoints for listing, path search, metadata and echo on an agent.
 
 use crate::http::{
-    agent_client::{Echo, FileSearch, ListPath, Listing, Metadata},
+    agent_client::{Echo, Ls, Metadata, file_search},
     agent_helpers::{AgentFilePath, absolute_path_from_url},
     error::ApiError,
     state::ServerState,
@@ -18,6 +18,7 @@ use redoor_protocol::{
         search::{FileSearchResponse, FindRequest},
     },
     ids::AgentId,
+    wire::request::LsResponse,
 };
 
 /// Route: `GET /api/v1/agents/{agent}/ls/{*path}`
@@ -25,12 +26,12 @@ pub(crate) async fn ls_agent_handler(
     Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Response, ApiError> {
-    let call = ListPath {
-        path: absolute_path_from_url(path.unwrap_or_default()),
+    let call = Ls {
+        path: Some(absolute_path_from_url(path.unwrap_or_default())),
     };
     Ok(
         match state.agents.call(&AgentId::from(agent), call).await? {
-            Listing::Directory(listing) => Json(LsDirectoryResponse {
+            LsResponse::Directory(listing) => Json(LsDirectoryResponse {
                 files: listing.files,
                 path: listing.path,
                 owner: listing.owner,
@@ -40,7 +41,7 @@ pub(crate) async fn ls_agent_handler(
                 permissions: listing.permissions,
             })
             .into_response(),
-            Listing::File(file) => Json(LsFileResponse {
+            LsResponse::File(file) => Json(LsFileResponse {
                 size: file.size,
                 path: file.path,
                 owner: file.owner,
@@ -65,10 +66,7 @@ pub(crate) async fn file_search_agent_handler(
             "File search timeout must be between 1 and 60 seconds",
         ));
     }
-    let call = FileSearch {
-        path: absolute_path_from_url(path.unwrap_or_default()),
-        request: search,
-    };
+    let call = file_search(absolute_path_from_url(path.unwrap_or_default()), search);
     Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
 }
 

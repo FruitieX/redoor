@@ -13,12 +13,10 @@ mod macos;
 use crate::transfers::copy::CopyContext;
 use futures_util::future::BoxFuture;
 use redoor_core::log;
+use redoor_protocol::wire::request::{CommandError, EmptyTrashResponse, RestoreTrashResponse};
 use redoor_protocol::{
     api::trash::TrashListResponse,
-    wire::{
-        command::{CommandErrorKind, CommandResult},
-        log::Level,
-    },
+    wire::{command::CommandErrorKind, log::Level},
 };
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
@@ -58,10 +56,10 @@ impl TrashError {
     }
 }
 
-impl From<TrashError> for CommandResult {
+impl From<TrashError> for CommandError {
     /// Trash failures cross the protocol boundary with their stable kind.
     fn from(error: TrashError) -> Self {
-        CommandResult::error(error.kind.clone(), error.to_string())
+        CommandError::new(error.kind.clone(), error.to_string())
     }
 }
 
@@ -171,12 +169,12 @@ impl Trash {
     }
 
     /// Runs the `Trash` command, logging the request and outcome for operators and tests.
-    pub(crate) async fn move_to_trash(&self, path: String) -> CommandResult {
+    pub(crate) async fn move_to_trash(&self, path: String) -> Result<(), CommandError> {
         log!(Level::Debug, "Trash operation requested: path={}", path);
         match self.provider.trash(PathBuf::from(&path)).await {
             Ok(()) => {
                 log!(Level::Debug, "Trash operation completed: path={}", path);
-                CommandResult::Trash
+                Ok(())
             }
             Err(error) => {
                 log!(
@@ -186,27 +184,20 @@ impl Trash {
                     error.kind,
                     error
                 );
-                error.into()
+                Err(error.into())
             }
         }
     }
 
     /// Runs the `ListTrash` command.
-    pub(crate) async fn list(&self) -> CommandResult {
-        self.provider
-            .list()
-            .await
-            .map_or_else(CommandResult::from, CommandResult::TrashList)
+    pub(crate) async fn list(&self) -> Result<TrashListResponse, CommandError> {
+        Ok(self.provider.list().await?)
     }
 
     /// Runs the `EmptyTrash` command.
-    pub(crate) async fn empty(&self) -> CommandResult {
-        self.provider
-            .empty()
-            .await
-            .map_or_else(CommandResult::from, |deleted_items| {
-                CommandResult::EmptyTrash { deleted_items }
-            })
+    pub(crate) async fn empty(&self) -> Result<EmptyTrashResponse, CommandError> {
+        let deleted_items = self.provider.empty().await?;
+        Ok(EmptyTrashResponse { deleted_items })
     }
 
     /// Runs the `RestoreTrash` command and reports the restored path.
@@ -216,20 +207,20 @@ impl Trash {
         item_id: &str,
         destination_path: String,
         copy: CopyContext<'_>,
-    ) -> CommandResult {
+    ) -> Result<RestoreTrashResponse, CommandError> {
         match self
             .provider
             .restore(location_id, item_id, PathBuf::from(destination_path), copy)
             .await
         {
             Ok(path) => match path.into_os_string().into_string() {
-                Ok(path) => CommandResult::RestoreTrash { path },
-                Err(_) => CommandResult::error(
+                Ok(path) => Ok(RestoreTrashResponse { path }),
+                Err(_) => Err(CommandError::new(
                     CommandErrorKind::InvalidInput,
                     "Restored path is not valid UTF-8",
-                ),
+                )),
             },
-            Err(error) => error.into(),
+            Err(error) => Err(error.into()),
         }
     }
 }
@@ -248,13 +239,13 @@ mod tests {
         // Mutations fail with the stable invalid-input kind instead of panicking.
         assert!(matches!(
             trash.move_to_trash("/tmp/x".to_string()).await,
-            CommandResult::Error {
+            Err(CommandError {
                 kind: CommandErrorKind::InvalidInput,
                 ..
-            }
+            })
         ));
         // Inventory reads are equally rejected.
-        assert!(matches!(trash.list().await, CommandResult::Error { .. }));
-        assert!(matches!(trash.empty().await, CommandResult::Error { .. }));
+        assert!(matches!(trash.list().await, Err(CommandError { .. })));
+        assert!(matches!(trash.empty().await, Err(CommandError { .. })));
     }
 }

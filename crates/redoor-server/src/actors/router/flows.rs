@@ -12,10 +12,11 @@ use super::RouterError;
 use super::messages::{RouterReply, UploadStartOutcome};
 use super::state::CopyContentKind;
 use super::streams::{OutboundStream, StreamLease};
+use redoor_protocol::wire::request::CommandOutcome;
 use redoor_protocol::{
     ids::{AgentId, RequestId, TransferId},
     wire::{
-        command::{Command, CommandResult, MoveSourceIdentity},
+        command::{Command, MoveSourceIdentity},
         exec::ExecEvent,
         policy::UploadKind,
     },
@@ -44,7 +45,7 @@ pub(crate) struct CommandFlow {
     /// Whether the agent registers the command for `cancel_transfer` (request cancel scope),
     /// so an abandoned caller's cancel can actually stop its work.
     pub(crate) cancelable: bool,
-    pub(crate) reply: RouterReply<CommandResult>,
+    pub(crate) reply: RouterReply<CommandOutcome>,
 }
 
 /// An agent-to-consumer stream: file download or process output.
@@ -102,7 +103,7 @@ pub(crate) struct UploadFlow {
     pub(crate) kind: UploadKind,
     pub(crate) phase: UploadPhase,
     /// Final result for the HTTP producer.
-    pub(crate) completion: Option<RouterReply<Result<CommandResult, RouterError>>>,
+    pub(crate) completion: Option<RouterReply<Result<CommandOutcome, RouterError>>>,
     /// Releases the HTTP producer once the agent worker exists, or reports early failure.
     pub(crate) ready: Option<RouterReply<Result<UploadStartOutcome, RouterError>>>,
     /// The router's handle on the data path, used for cancellation and router-owned terminals.
@@ -427,7 +428,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     /// Builds a command flow owned by `agent`.
-    fn command(id: u64, agent: &str) -> (Flow, oneshot::Receiver<CommandResult>) {
+    fn command(id: u64, agent: &str) -> (Flow, oneshot::Receiver<CommandOutcome>) {
         let (reply, receiver) = oneshot::channel();
         (
             Flow::Command(CommandFlow {

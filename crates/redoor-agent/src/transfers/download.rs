@@ -13,13 +13,10 @@ use crate::runtime::cancel::Registration;
 use crate::runtime::responder::Responder;
 use anyhow::{Context, Result, bail};
 use redoor_core::{log, log_error};
+use redoor_protocol::wire::request::{self, CommandError};
 use redoor_protocol::{
     ids::RequestId,
-    wire::{
-        command::{CommandErrorKind, CommandResult},
-        log::Level,
-        stream,
-    },
+    wire::{command::CommandErrorKind, log::Level, stream},
 };
 use std::future::Future;
 use std::io::Write;
@@ -57,26 +54,27 @@ pub(crate) struct DownloadDriver {
     path: String,
     stream: StreamWriter,
     registration: Registration<RequestId>,
-    /// Result reported when every byte and the `FIN` frame went out.
-    success: CommandResult,
+}
+
+/// How a download ended, with the stream its result must follow.
+pub(crate) struct DownloadOutcome {
+    pub(crate) stream: StreamWriter,
+    pub(crate) result: Result<(), CommandError>,
 }
 
 impl DownloadDriver {
-    /// Binds the driver to the request's stream writer, cancellation registration and the
-    /// result it reports on success.
+    /// Binds the driver to the request's stream writer and cancellation registration.
     pub(crate) fn new(
         label: &'static str,
         path: String,
         stream: StreamWriter,
         registration: Registration<RequestId>,
-        success: CommandResult,
     ) -> Self {
         Self {
             label,
             path,
             stream,
             registration,
-            success,
         }
     }
 
@@ -87,7 +85,7 @@ impl DownloadDriver {
     /// order is: stop reading, shut the producer down, unregister the request, then report.
     /// A successful stream keeps its registration until `FIN` is written so a late cancel
     /// still reaches it.
-    pub(crate) async fn run<S: ByteSource>(mut self, opened: Result<S, String>) -> Reply {
+    pub(crate) async fn run<S: ByteSource>(mut self, opened: Result<S, String>) -> DownloadOutcome {
         let mut source = match opened {
             Ok(source) => source,
             Err(message) => return self.fail(message),
@@ -141,7 +139,11 @@ impl DownloadDriver {
     }
 
     /// Writes the final frame, still honoring a cancel that arrives while it is blocked.
-    async fn complete(mut self, final_block: Vec<u8>, cancel: &CancellationToken) -> Reply {
+    async fn complete(
+        mut self,
+        final_block: Vec<u8>,
+        cancel: &CancellationToken,
+    ) -> DownloadOutcome {
         let canceled = tokio::select! {
             _ = self.stream.send(&final_block, true) => false,
             _ = cancel.cancelled() => true,
@@ -158,14 +160,14 @@ impl DownloadDriver {
             self.stream.frames_sent()
         );
         drop(self.registration);
-        Reply::Stream {
+        DownloadOutcome {
             stream: self.stream,
-            result: self.success,
+            result: Ok(()),
         }
     }
 
     /// Unregisters and reports the cancellation.
-    fn cancel(self) -> Reply {
+    fn cancel(self) -> DownloadOutcome {
         log!(
             Level::Info,
             "Stopping {} after cancel: request_id={}, path={}",
@@ -174,18 +176,18 @@ impl DownloadDriver {
             self.path
         );
         let message = format!("{} canceled by server", self.label);
-        self.finish_with(CommandResult::error(CommandErrorKind::Canceled, message))
+        self.finish_with(Err(CommandError::new(CommandErrorKind::Canceled, message)))
     }
 
     /// Unregisters and reports the failure; the stream ends without `FIN`.
-    fn fail(self, message: String) -> Reply {
-        self.finish_with(CommandResult::error(CommandErrorKind::Internal, message))
+    fn fail(self, message: String) -> DownloadOutcome {
+        self.finish_with(Err(CommandError::new(CommandErrorKind::Internal, message)))
     }
 
     /// Unregisters before the result can go out, so a late cancel finds nothing to stop.
-    fn finish_with(self, result: CommandResult) -> Reply {
+    fn finish_with(self, result: Result<(), CommandError>) -> DownloadOutcome {
         drop(self.registration);
-        Reply::Stream {
+        DownloadOutcome {
             stream: self.stream,
             result,
         }
@@ -210,19 +212,13 @@ pub(crate) async fn download_file(
     );
     let output = match ctx.into_output() {
         Ok(output) => output,
-        Err(error) => return CommandResult::from(error).into(),
+        Err(error) => return Reply::failure(error),
     };
     let opened = FileRangeSource::open(&path, range_start, range_end).await;
-    let success = CommandResult::RawDownload { path: path.clone() };
-    DownloadDriver::new(
-        "Raw download",
-        path,
-        output.stream,
-        output.registration,
-        success,
-    )
-    .run(opened)
-    .await
+    let outcome = DownloadDriver::new("Raw download", path, output.stream, output.registration)
+        .run(opened)
+        .await;
+    Reply::stream::<request::RawDownload>(outcome.stream, outcome.result)
 }
 
 /// Runs the `TarDownload` command for one directory archive.
@@ -235,20 +231,19 @@ pub(crate) async fn download_directory(path: String, include_root: bool, ctx: Co
     );
     let output = match ctx.into_output() {
         Ok(output) => output,
-        Err(error) => return CommandResult::from(error).into(),
+        Err(error) => return Reply::failure(error),
     };
     let cancel = output.registration.token().clone();
     let opened = TarDirectorySource::open(&path, include_root, output.responder, cancel).await;
-    let success = CommandResult::TarDownload { path: path.clone() };
-    DownloadDriver::new(
+    let outcome = DownloadDriver::new(
         "Tar directory download",
         path,
         output.stream,
         output.registration,
-        success,
     )
     .run(opened)
-    .await
+    .await;
+    Reply::stream::<request::TarDownload>(outcome.stream, outcome.result)
 }
 
 /// Byte range of one regular file.
@@ -697,18 +692,10 @@ mod tests {
     /// What one scripted download produced.
     struct Driven {
         frames: Vec<StreamChunk>,
-        result: CommandResult,
+        result: Result<(), CommandError>,
         finished: bool,
         registered_at_finish: bool,
         registered_after: bool,
-    }
-
-    /// Extracts the result of a download reply.
-    fn reply_result(reply: Reply) -> CommandResult {
-        let Reply::Stream { result, .. } = reply else {
-            panic!("download results follow their stream");
-        };
-        result
     }
 
     /// Runs a driver over scripted blocks and returns the decoded frames plus lifecycle flags.
@@ -727,14 +714,11 @@ mod tests {
             registry: registry.clone(),
             registered_at_finish: registered_at_finish.clone(),
         };
-        let reply = DownloadDriver::new(
+        let outcome = DownloadDriver::new(
             "Raw download",
             "/tmp/file".to_string(),
             StreamWriter::for_test(transfer, RequestId::new(9)),
             registration,
-            CommandResult::RawDownload {
-                path: "/tmp/file".to_string(),
-            },
         )
         .run(Ok(source))
         .await;
@@ -747,7 +731,7 @@ mod tests {
         }
         Driven {
             frames: decoded,
-            result: reply_result(reply),
+            result: outcome.result,
             finished: finished.load(std::sync::atomic::Ordering::SeqCst),
             registered_at_finish: registered_at_finish.load(std::sync::atomic::Ordering::SeqCst),
             registered_after: registry.contains(&RequestId::new(9)),
@@ -773,7 +757,7 @@ mod tests {
             vec![(b"a".to_vec(), false), (b"b".to_vec(), true)]
         );
         // The success result follows the data.
-        assert!(matches!(driven.result, CommandResult::RawDownload { .. }));
+        assert!(driven.result.is_ok());
         // Producers are always joined before the stream ends.
         assert!(driven.finished);
         // Completion releases the request id.
@@ -794,10 +778,10 @@ mod tests {
         // The result names the cancellation.
         assert!(matches!(
             driven.result,
-            CommandResult::Error {
+            Err(CommandError {
                 kind: CommandErrorKind::Canceled,
                 ..
-            }
+            })
         ));
     }
 
@@ -820,7 +804,7 @@ mod tests {
         // The source's own message becomes the error result.
         assert!(matches!(
             driven.result,
-            CommandResult::Error { message, .. } if message == "Failed to read file: boom"
+            Err(CommandError { message, .. }) if message == "Failed to read file: boom"
         ));
     }
 
@@ -876,14 +860,11 @@ mod tests {
         )
         .await;
 
-        let reply = DownloadDriver::new(
+        let outcome = DownloadDriver::new(
             "Raw download",
             "Cargo.toml".to_string(),
             StreamWriter::for_test(transfer, RequestId::new(1)),
             registration,
-            CommandResult::RawDownload {
-                path: "Cargo.toml".to_string(),
-            },
         )
         .run(opened)
         .await;
@@ -894,8 +875,8 @@ mod tests {
         assert!(frames.try_recv().is_err());
         // Check the failing seek branch, rather than merely any early worker exit.
         assert!(matches!(
-            reply_result(reply),
-            CommandResult::Error { message, .. } if message.starts_with("Failed to seek file:")
+            outcome.result,
+            Err(CommandError { message, .. }) if message.starts_with("Failed to seek file:")
         ));
     }
 }

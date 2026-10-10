@@ -5,7 +5,7 @@
 //! exhaustive match instead of several hand-maintained `matches!` lists that can drift.
 
 use crate::api::transfers::TransferDirection;
-use crate::wire::command::{Command, CommandResult};
+use crate::wire::command::Command;
 
 /// Socket lanes a command occupies while it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,16 +36,6 @@ impl UploadKind {
             Self::RawUpload | Self::TarUpload => TransferDirection::Upload,
             Self::EditFile => TransferDirection::Edit,
         }
-    }
-
-    /// Ensures one stream cannot be completed by another write operation's response.
-    pub fn completion_matches(self, result: &CommandResult) -> bool {
-        matches!(
-            (self, result),
-            (Self::RawUpload, CommandResult::RawUpload)
-                | (Self::TarUpload, CommandResult::TarUpload)
-                | (Self::EditFile, CommandResult::EditFile)
-        )
     }
 }
 
@@ -139,7 +129,7 @@ impl Command {
             Self::LocalCopyFile { .. }
             | Self::LocalCopyDirectory { .. }
             | Self::LocalMove { .. } => CommandPolicy::LOCAL_TRANSFER,
-            Self::Trash { .. } | Self::EmptyTrash => {
+            Self::Trash { .. } | Self::EmptyTrash(_) => {
                 CommandPolicy::trash_mutation(CancelScope::Uninterruptible)
             }
             // Restore is a move that reports progress and owns staging, so it stays cancelable.
@@ -148,12 +138,12 @@ impl Command {
             | Self::FileSearch { .. }
             | Self::ContentGrep { .. }
             | Self::RawDelete { .. }
-            | Self::ListTrash
+            | Self::ListTrash(_)
             | Self::CreateDirectory { .. }
             | Self::RenamePath { .. }
             | Self::ChownPath { .. }
             | Self::ChmodPath { .. }
-            | Self::ListAccounts
+            | Self::ListAccounts(_)
             | Self::Metadata { .. }
             | Self::DirectorySize { .. }
             | Self::GitContext { .. }
@@ -163,11 +153,11 @@ impl Command {
             | Self::DeleteMoveSource { .. }
             | Self::OpenPath { .. }
             | Self::Echo { .. }
-            | Self::AgentInfo
-            | Self::GetAgentDetails
-            | Self::GetLoggingLevel
+            | Self::AgentInfo(_)
+            | Self::GetAgentDetails(_)
+            | Self::GetLoggingLevel(_)
             | Self::SetLoggingLevel { .. }
-            | Self::Restart
+            | Self::Restart(_)
             | Self::SelfExec { .. } => CommandPolicy::CONTROL,
         }
     }
@@ -184,48 +174,49 @@ mod tests {
     use crate::wire::command::MoveSourceIdentity;
     use crate::wire::exec::ExecRequest;
     use crate::wire::log::Level;
+    use crate::wire::request;
 
     /// Maps every variant to a dense index; adding a variant fails to compile here first, and
     /// the coverage assertion below then forces a matching sample.
     fn variant_index(command: &Command) -> usize {
         match command {
-            Command::Exec { .. } => 0,
-            Command::Ls { .. } => 1,
-            Command::FileSearch { .. } => 2,
-            Command::ContentGrep { .. } => 3,
-            Command::RawDownload { .. } => 4,
-            Command::TarDownload { .. } => 5,
-            Command::RawUpload { .. } => 6,
-            Command::EditFile { .. } => 7,
-            Command::TarUpload { .. } => 8,
-            Command::LocalCopyFile { .. } => 9,
-            Command::LocalCopyDirectory { .. } => 10,
-            Command::LocalMove { .. } => 11,
-            Command::RawDelete { .. } => 12,
-            Command::Trash { .. } => 13,
-            Command::ListTrash => 14,
-            Command::EmptyTrash => 15,
-            Command::RestoreTrash { .. } => 16,
-            Command::CreateDirectory { .. } => 17,
-            Command::RenamePath { .. } => 18,
-            Command::ChownPath { .. } => 19,
-            Command::ChmodPath { .. } => 20,
-            Command::ListAccounts => 21,
-            Command::Metadata { .. } => 22,
-            Command::DirectorySize { .. } => 23,
-            Command::GitContext { .. } => 24,
-            Command::GitStatus { .. } => 25,
-            Command::GitDiff { .. } => 26,
-            Command::MoveMetadata { .. } => 27,
-            Command::DeleteMoveSource { .. } => 28,
-            Command::OpenPath { .. } => 29,
-            Command::Echo { .. } => 30,
-            Command::AgentInfo => 31,
-            Command::GetAgentDetails => 32,
-            Command::GetLoggingLevel => 33,
-            Command::SetLoggingLevel { .. } => 34,
-            Command::Restart => 35,
-            Command::SelfExec { .. } => 36,
+            Command::Exec(request::Exec { .. }) => 0,
+            Command::Ls(request::Ls { .. }) => 1,
+            Command::FileSearch(request::FileSearch { .. }) => 2,
+            Command::ContentGrep(request::ContentGrep { .. }) => 3,
+            Command::RawDownload(request::RawDownload { .. }) => 4,
+            Command::TarDownload(request::TarDownload { .. }) => 5,
+            Command::RawUpload(request::RawUpload { .. }) => 6,
+            Command::EditFile(request::EditFile { .. }) => 7,
+            Command::TarUpload(request::TarUpload { .. }) => 8,
+            Command::LocalCopyFile(request::LocalCopyFile { .. }) => 9,
+            Command::LocalCopyDirectory(request::LocalCopyDirectory { .. }) => 10,
+            Command::LocalMove(request::LocalMove { .. }) => 11,
+            Command::RawDelete(request::RawDelete { .. }) => 12,
+            Command::Trash(request::Trash { .. }) => 13,
+            Command::ListTrash(request::ListTrash {}) => 14,
+            Command::EmptyTrash(request::EmptyTrash {}) => 15,
+            Command::RestoreTrash(request::RestoreTrash { .. }) => 16,
+            Command::CreateDirectory(request::CreateDirectory { .. }) => 17,
+            Command::RenamePath(request::RenamePath { .. }) => 18,
+            Command::ChownPath(request::ChownPath { .. }) => 19,
+            Command::ChmodPath(request::ChmodPath { .. }) => 20,
+            Command::ListAccounts(request::ListAccounts {}) => 21,
+            Command::Metadata(request::Metadata { .. }) => 22,
+            Command::DirectorySize(request::DirectorySize { .. }) => 23,
+            Command::GitContext(request::GitContext { .. }) => 24,
+            Command::GitStatus(request::GitStatus { .. }) => 25,
+            Command::GitDiff(request::GitDiff { .. }) => 26,
+            Command::MoveMetadata(request::MoveMetadata { .. }) => 27,
+            Command::DeleteMoveSource(request::DeleteMoveSource { .. }) => 28,
+            Command::OpenPath(request::OpenPath { .. }) => 29,
+            Command::Echo(request::Echo { .. }) => 30,
+            Command::AgentInfo(request::AgentInfo {}) => 31,
+            Command::GetAgentDetails(request::GetAgentDetails {}) => 32,
+            Command::GetLoggingLevel(request::GetLoggingLevel {}) => 33,
+            Command::SetLoggingLevel(request::SetLoggingLevel { .. }) => 34,
+            Command::Restart(request::Restart {}) => 35,
+            Command::SelfExec(request::SelfExec { .. }) => 36,
         }
     }
 
@@ -244,24 +235,24 @@ mod tests {
             is_directory: false,
         };
         vec![
-            Command::Exec {
+            Command::Exec(request::Exec {
                 request: ExecRequest {
                     argv: vec!["true".to_string()],
                     cwd: None,
                     env: Default::default(),
                     timeout_ms: None,
                 },
-            },
-            Command::Ls { path: None },
-            Command::FileSearch {
+            }),
+            Command::Ls(request::Ls { path: None }),
+            Command::FileSearch(request::FileSearch {
                 path: path(),
                 query: "q".to_string(),
                 timeout_seconds: 1,
                 include_hidden: false,
                 respect_gitignore: true,
                 case_sensitivity: CaseSensitivity::Smart,
-            },
-            Command::ContentGrep {
+            }),
+            Command::ContentGrep(request::ContentGrep {
                 path: path(),
                 query: "q".to_string(),
                 timeout_seconds: 1,
@@ -271,100 +262,100 @@ mod tests {
                 case_sensitivity: CaseSensitivity::Smart,
                 before_context: 0,
                 after_context: 0,
-            },
-            Command::RawDownload {
+            }),
+            Command::RawDownload(request::RawDownload {
                 path: path(),
                 range_start: None,
                 range_end: None,
-            },
-            Command::TarDownload {
+            }),
+            Command::TarDownload(request::TarDownload {
                 path: path(),
                 include_root: false,
-            },
-            Command::RawUpload {
+            }),
+            Command::RawUpload(request::RawUpload {
                 path: path(),
                 on_existing: CopyExistingMode::Override,
                 ownership: CreationOwnershipOptions::default(),
-            },
-            Command::EditFile { path: path() },
-            Command::TarUpload {
+            }),
+            Command::EditFile(request::EditFile { path: path() }),
+            Command::TarUpload(request::TarUpload {
                 path: path(),
                 on_existing: CopyExistingMode::Error,
-            },
-            Command::LocalCopyFile {
+            }),
+            Command::LocalCopyFile(request::LocalCopyFile {
                 source_path: path(),
                 dest_path: path(),
                 on_existing: CopyExistingMode::Error,
-            },
-            Command::LocalCopyDirectory {
+            }),
+            Command::LocalCopyDirectory(request::LocalCopyDirectory {
                 source_path: path(),
                 dest_path: path(),
                 on_existing: CopyExistingMode::Error,
-            },
-            Command::LocalMove {
+            }),
+            Command::LocalMove(request::LocalMove {
                 source_path: path(),
                 dest_path: path(),
                 source_is_directory: false,
                 expected_identity: identity.clone(),
                 on_existing: CopyExistingMode::Error,
-            },
-            Command::RawDelete { path: path() },
-            Command::Trash { path: path() },
-            Command::ListTrash,
-            Command::EmptyTrash,
-            Command::RestoreTrash {
+            }),
+            Command::RawDelete(request::RawDelete { path: path() }),
+            Command::Trash(request::Trash { path: path() }),
+            Command::ListTrash(request::ListTrash {}),
+            Command::EmptyTrash(request::EmptyTrash {}),
+            Command::RestoreTrash(request::RestoreTrash {
                 location_id: "l".to_string(),
                 item_id: "i".to_string(),
                 destination_path: path(),
-            },
-            Command::CreateDirectory {
+            }),
+            Command::CreateDirectory(request::CreateDirectory {
                 path: path(),
                 ownership: CreationOwnershipOptions::default(),
-            },
-            Command::RenamePath {
+            }),
+            Command::RenamePath(request::RenamePath {
                 dir: path(),
                 old: "a".to_string(),
                 new: "b".to_string(),
-            },
-            Command::ChownPath {
+            }),
+            Command::ChownPath(request::ChownPath {
                 path: path(),
                 owner: None,
                 group: None,
-            },
-            Command::ChmodPath {
+            }),
+            Command::ChmodPath(request::ChmodPath {
                 path: path(),
                 permissions: 0o644,
-            },
-            Command::ListAccounts,
-            Command::Metadata { path: path() },
-            Command::DirectorySize {
+            }),
+            Command::ListAccounts(request::ListAccounts {}),
+            Command::Metadata(request::Metadata { path: path() }),
+            Command::DirectorySize(request::DirectorySize {
                 path: path(),
                 timeout_seconds: 1,
-            },
-            Command::GitContext { path: path() },
-            Command::GitStatus { path: path() },
-            Command::GitDiff {
+            }),
+            Command::GitContext(request::GitContext { path: path() }),
+            Command::GitStatus(request::GitStatus { path: path() }),
+            Command::GitDiff(request::GitDiff {
                 files: Vec::new(),
                 mode: GitDiffMode::Full,
-            },
-            Command::MoveMetadata { path: path() },
-            Command::DeleteMoveSource {
+            }),
+            Command::MoveMetadata(request::MoveMetadata { path: path() }),
+            Command::DeleteMoveSource(request::DeleteMoveSource {
                 path: path(),
                 expected_identity: identity,
-            },
-            Command::OpenPath { path: path() },
-            Command::Echo {
+            }),
+            Command::OpenPath(request::OpenPath { path: path() }),
+            Command::Echo(request::Echo {
                 request: EchoRequest {
                     message: "m".to_string(),
                     random_sleep: false,
                 },
-            },
-            Command::AgentInfo,
-            Command::GetAgentDetails,
-            Command::GetLoggingLevel,
-            Command::SetLoggingLevel { level: Level::Info },
-            Command::Restart,
-            Command::SelfExec { path: path() },
+            }),
+            Command::AgentInfo(request::AgentInfo {}),
+            Command::GetAgentDetails(request::GetAgentDetails {}),
+            Command::GetLoggingLevel(request::GetLoggingLevel {}),
+            Command::SetLoggingLevel(request::SetLoggingLevel { level: Level::Info }),
+            Command::Restart(request::Restart {}),
+            Command::SelfExec(request::SelfExec { path: path() }),
         ]
     }
 
@@ -416,13 +407,13 @@ mod tests {
         }
     }
 
-    /// Verifies upload kinds match their commands and results.
+    /// Verifies upload kinds match their commands.
     #[test]
-    fn upload_lane_matches_the_command_and_its_success_result() {
+    fn upload_lane_matches_the_command() {
         let expected = [
-            (6, UploadKind::RawUpload, CommandResult::RawUpload),
-            (7, UploadKind::EditFile, CommandResult::EditFile),
-            (8, UploadKind::TarUpload, CommandResult::TarUpload),
+            (6, UploadKind::RawUpload),
+            (7, UploadKind::EditFile),
+            (8, UploadKind::TarUpload),
         ];
         let uploads: Vec<_> = every_command()
             .into_iter()
@@ -433,13 +424,11 @@ mod tests {
                     .map(|kind| (variant_index(&command), kind))
             })
             .collect();
-        // Exactly the three upload commands may announce transfer readiness and receive chunks.
+        // Exactly the three upload commands may grant upload credit and receive chunks.
         assert_eq!(uploads.len(), expected.len());
-        for (index, kind, success) in expected {
+        for (index, kind) in expected {
             // The server routes chunks and completion by this kind, so it must match the command.
             assert!(uploads.contains(&(index, kind)));
-            // Only the command's own success result may complete its upload stream.
-            assert!(kind.completion_matches(&success));
         }
         // Edits keep their own progress direction so the UI can distinguish inode rewrites.
         assert!(matches!(

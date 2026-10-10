@@ -17,8 +17,9 @@ use crate::transfers::{
 };
 use ctx::{CommandCtx, Reply};
 use redoor_protocol::wire::{
-    command::{Command, CommandResult},
+    command::Command,
     policy::UploadKind,
+    request::{self, AgentRequest},
 };
 use std::future::Future;
 
@@ -30,34 +31,38 @@ pub(crate) trait RunCommand {
 
 impl RunCommand for Command {
     /// The single exhaustive mapping from wire commands to their domain implementations.
+    ///
+    /// Each arm answers through `Reply::of::<R>` (or `Reply::stream::<R>`) for its own request
+    /// type `R`, so the compiler checks that a command can only return its own response.
     async fn run(self, ctx: CommandCtx) -> Reply {
         match self {
-            Command::Exec { request } => match ctx.into_output() {
-                Ok(output) => crate::exec::run(request, output.stream, output.registration).await,
-                Err(error) => CommandResult::from(error).into(),
+            Command::Exec(request::Exec { request: exec }) => match ctx.into_output() {
+                Ok(output) => crate::exec::run(exec, output.stream, output.registration).await,
+                Err(error) => Reply::failure(error),
             },
-            Command::Ls { path } => fs::ls(path).await.into(),
-            Command::FileSearch {
+            Command::Ls(request::Ls { path }) => Reply::of::<request::Ls>(fs::ls(path).await),
+            Command::FileSearch(request::FileSearch {
                 path,
                 query,
                 timeout_seconds,
                 include_hidden,
                 respect_gitignore,
                 case_sensitivity,
-            } => file_search::execute(
-                file_search::FileSearchRequest {
-                    path,
-                    query,
-                    timeout_seconds,
-                    include_hidden,
-                    respect_gitignore,
-                    case_sensitivity,
-                },
-                &ctx.cancel,
-            )
-            .await
-            .into(),
-            Command::ContentGrep {
+            }) => Reply::of::<request::FileSearch>(
+                file_search::execute(
+                    file_search::FileSearchRequest {
+                        path,
+                        query,
+                        timeout_seconds,
+                        include_hidden,
+                        respect_gitignore,
+                        case_sensitivity,
+                    },
+                    &ctx.cancel,
+                )
+                .await,
+            ),
+            Command::ContentGrep(request::ContentGrep {
                 path,
                 query,
                 timeout_seconds,
@@ -67,36 +72,37 @@ impl RunCommand for Command {
                 case_sensitivity,
                 before_context,
                 after_context,
-            } => content_grep::execute(
-                content_grep::ContentGrepRequest {
-                    path,
-                    query,
-                    timeout_seconds,
-                    include_hidden,
-                    respect_gitignore,
-                    fixed_string,
-                    case_sensitivity,
-                    before_context,
-                    after_context,
-                },
-                &ctx.cancel,
-                ctx.services.grep_slots.clone(),
-            )
-            .await
-            .into(),
-            Command::RawDownload {
+            }) => Reply::of::<request::ContentGrep>(
+                content_grep::execute(
+                    content_grep::ContentGrepRequest {
+                        path,
+                        query,
+                        timeout_seconds,
+                        include_hidden,
+                        respect_gitignore,
+                        fixed_string,
+                        case_sensitivity,
+                        before_context,
+                        after_context,
+                    },
+                    &ctx.cancel,
+                    ctx.services.grep_slots.clone(),
+                )
+                .await,
+            ),
+            Command::RawDownload(request::RawDownload {
                 path,
                 range_start,
                 range_end,
-            } => download::download_file(path, range_start, range_end, ctx).await,
-            Command::TarDownload { path, include_root } => {
+            }) => download::download_file(path, range_start, range_end, ctx).await,
+            Command::TarDownload(request::TarDownload { path, include_root }) => {
                 download::download_directory(path, include_root, ctx).await
             }
-            Command::RawUpload {
+            Command::RawUpload(request::RawUpload {
                 path,
                 on_existing,
                 ownership,
-            } => {
+            }) => {
                 let prepared = RawFileSink::prepare(
                     ctx.responder.request_id(),
                     path.clone(),
@@ -104,114 +110,159 @@ impl RunCommand for Command {
                     ownership,
                 )
                 .await;
-                UploadDriver::new(UploadKind::RawUpload, path, ctx)
-                    .run(prepared)
-                    .await
+                Reply::of::<request::RawUpload>(
+                    UploadDriver::new(UploadKind::RawUpload, path, ctx)
+                        .run(prepared)
+                        .await,
+                )
             }
-            Command::EditFile { path } => {
+            Command::EditFile(request::EditFile { path }) => {
                 let prepared = EditSession::open(ctx.responder.request_id(), path.clone()).await;
-                UploadDriver::new(UploadKind::EditFile, path, ctx)
-                    .run(prepared)
-                    .await
+                Reply::of::<request::EditFile>(
+                    UploadDriver::new(UploadKind::EditFile, path, ctx)
+                        .run(prepared)
+                        .await,
+                )
             }
-            Command::TarUpload { path, on_existing } => {
+            Command::TarUpload(request::TarUpload { path, on_existing }) => {
                 let prepared = TarDirectorySink::prepare(
                     ctx.responder.request_id(),
                     path.clone(),
                     on_existing,
                 )
                 .await;
-                UploadDriver::new(UploadKind::TarUpload, path, ctx)
-                    .run(prepared)
-                    .await
+                Reply::of::<request::TarUpload>(
+                    UploadDriver::new(UploadKind::TarUpload, path, ctx)
+                        .run(prepared)
+                        .await,
+                )
             }
-            Command::LocalCopyFile {
+            Command::LocalCopyFile(request::LocalCopyFile {
                 source_path,
                 dest_path,
                 on_existing,
-            } => ctx
-                .copy_context()
-                .copy_command(source_path, dest_path, on_existing, false)
-                .await
-                .into(),
-            Command::LocalCopyDirectory {
+            }) => Reply::of::<request::LocalCopyFile>(
+                ctx.copy_context()
+                    .copy_command(source_path, dest_path, on_existing, false)
+                    .await,
+            ),
+            Command::LocalCopyDirectory(request::LocalCopyDirectory {
                 source_path,
                 dest_path,
                 on_existing,
-            } => ctx
-                .copy_context()
-                .copy_command(source_path, dest_path, on_existing, true)
-                .await
-                .into(),
-            Command::LocalMove {
+            }) => Reply::of::<request::LocalCopyDirectory>(
+                ctx.copy_context()
+                    .copy_command(source_path, dest_path, on_existing, true)
+                    .await,
+            ),
+            Command::LocalMove(request::LocalMove {
                 source_path,
                 dest_path,
                 source_is_directory,
                 expected_identity,
                 on_existing,
-            } => ctx
-                .copy_context()
-                .move_command(
-                    source_path,
-                    dest_path,
-                    source_is_directory,
-                    expected_identity,
-                    on_existing,
-                )
-                .await
-                .into(),
-            Command::RawDelete { path } => fs::raw_delete(path).await.into(),
-            Command::Trash { path } => ctx.services.trash.move_to_trash(path).await.into(),
-            Command::ListTrash => ctx.services.trash.list().await.into(),
-            Command::EmptyTrash => ctx.services.trash.empty().await.into(),
-            Command::RestoreTrash {
+            }) => Reply::of::<request::LocalMove>(
+                ctx.copy_context()
+                    .move_command(
+                        source_path,
+                        dest_path,
+                        source_is_directory,
+                        expected_identity,
+                        on_existing,
+                    )
+                    .await,
+            ),
+            Command::RawDelete(request::RawDelete { path }) => {
+                Reply::of::<request::RawDelete>(fs::raw_delete(path).await)
+            }
+            Command::Trash(request::Trash { path }) => {
+                Reply::of::<request::Trash>(ctx.services.trash.move_to_trash(path).await)
+            }
+            Command::ListTrash(_) => {
+                Reply::of::<request::ListTrash>(ctx.services.trash.list().await)
+            }
+            Command::EmptyTrash(_) => {
+                Reply::of::<request::EmptyTrash>(ctx.services.trash.empty().await)
+            }
+            Command::RestoreTrash(request::RestoreTrash {
                 location_id,
                 item_id,
                 destination_path,
-            } => ctx
-                .services
-                .trash
-                .restore(&location_id, &item_id, destination_path, ctx.copy_context())
-                .await
-                .into(),
-            Command::CreateDirectory { path, ownership } => {
-                fs::create_directory(path, ownership).await.into()
+            }) => Reply::of::<request::RestoreTrash>(
+                ctx.services
+                    .trash
+                    .restore(&location_id, &item_id, destination_path, ctx.copy_context())
+                    .await,
+            ),
+            Command::CreateDirectory(request::CreateDirectory { path, ownership }) => {
+                Reply::of::<request::CreateDirectory>(fs::create_directory(path, ownership).await)
             }
-            Command::RenamePath { dir, old, new } => fs::rename_path(dir, old, new).await.into(),
-            Command::ChownPath { path, owner, group } => {
-                fs::chown_path(path, owner, group).await.into()
+            Command::RenamePath(request::RenamePath { dir, old, new }) => {
+                Reply::of::<request::RenamePath>(fs::rename_path(dir, old, new).await)
             }
-            Command::ChmodPath { path, permissions } => {
-                fs::chmod_path(path, permissions).await.into()
+            Command::ChownPath(request::ChownPath { path, owner, group }) => {
+                Reply::of::<request::ChownPath>(fs::chown_path(path, owner, group).await)
             }
-            Command::ListAccounts => host::list_accounts().await.into(),
-            Command::Metadata { path } => metadata::execute(path).await.into(),
-            Command::DirectorySize {
+            Command::ChmodPath(request::ChmodPath { path, permissions }) => {
+                Reply::of::<request::ChmodPath>(fs::chmod_path(path, permissions).await)
+            }
+            Command::ListAccounts(_) => {
+                Reply::of::<request::ListAccounts>(host::list_accounts().await)
+            }
+            Command::Metadata(request::Metadata { path }) => {
+                Reply::of::<request::Metadata>(metadata::execute(path).await)
+            }
+            Command::DirectorySize(request::DirectorySize {
                 path,
                 timeout_seconds,
-            } => fs::directory_size(path, timeout_seconds, &ctx.cancel)
-                .await
-                .into(),
-            Command::GitContext { path } => git::context(path).await.into(),
-            Command::GitStatus { path } => git::status(path).await.into(),
-            Command::GitDiff { files, mode } => git::diff(files, mode).await.into(),
-            Command::MoveMetadata { path } => fs::move_metadata(path).await.into(),
-            Command::DeleteMoveSource {
+            }) => Reply::of::<request::DirectorySize>(
+                fs::directory_size(path, timeout_seconds, &ctx.cancel).await,
+            ),
+            Command::GitContext(request::GitContext { path }) => {
+                Reply::of::<request::GitContext>(git::context(path).await)
+            }
+            Command::GitStatus(request::GitStatus { path }) => {
+                Reply::of::<request::GitStatus>(git::status(path).await)
+            }
+            Command::GitDiff(request::GitDiff { files, mode }) => {
+                Reply::of::<request::GitDiff>(git::diff(files, mode).await)
+            }
+            Command::MoveMetadata(request::MoveMetadata { path }) => {
+                Reply::of::<request::MoveMetadata>(fs::move_metadata(path).await)
+            }
+            Command::DeleteMoveSource(request::DeleteMoveSource {
                 path,
                 expected_identity,
-            } => fs::delete_move_source(path, expected_identity).await.into(),
-            Command::OpenPath { path } => host::open_path(path).await.into(),
-            Command::Echo { request } => host::echo(request).await.into(),
-            Command::AgentInfo => host::agent_info().await.into(),
-            Command::GetAgentDetails => host::get_agent_details(&ctx.services.loaded_config_path)
-                .await
-                .into(),
-            Command::GetLoggingLevel => {
-                CommandResult::LoggingLevel(redoor_core::logging::level()).into()
+            }) => Reply::of::<request::DeleteMoveSource>(
+                fs::delete_move_source(path, expected_identity).await,
+            ),
+            Command::OpenPath(request::OpenPath { path }) => {
+                Reply::of::<request::OpenPath>(host::open_path(path).await)
             }
-            Command::SetLoggingLevel { level } => host::set_logging_level(level).into(),
-            Command::Restart => CommandResult::Restart.into(),
-            Command::SelfExec { path } => host::self_exec(path).into(),
+            Command::Echo(request::Echo { request: echo }) => {
+                Reply::of::<request::Echo>(host::echo(echo).await)
+            }
+            Command::AgentInfo(_) => Reply::of::<request::AgentInfo>(host::agent_info().await),
+            Command::GetAgentDetails(_) => Reply::of::<request::GetAgentDetails>(
+                host::get_agent_details(&ctx.services.loaded_config_path).await,
+            ),
+            Command::GetLoggingLevel(_) => {
+                Reply::of::<request::GetLoggingLevel>(Ok(redoor_core::logging::level()))
+            }
+            Command::SetLoggingLevel(request::SetLoggingLevel { level }) => {
+                Reply::of::<request::SetLoggingLevel>(host::set_logging_level(level))
+            }
+            Command::Restart(_) => Reply::Reexec {
+                outcome: request::Restart::encode(Ok(())),
+                path: None,
+            },
+            Command::SelfExec(request::SelfExec { path }) => match host::self_exec(path) {
+                Ok(path) => Reply::Reexec {
+                    outcome: request::SelfExec::encode(Ok(())),
+                    path: Some(path),
+                },
+                Err(error) => Reply::failure(error),
+            },
         }
     }
 }
@@ -228,24 +279,34 @@ mod tests {
             files::CreationOwnershipOptions,
         },
         ids::RequestId,
-        wire::command::{Command, CommandErrorKind, CommandResult},
+        wire::{
+            command::{Command, CommandErrorKind},
+            request::{self, AgentRequest, CommandError, DecodeError, LsResponse},
+        },
     };
 
-    /// Runs one control-lane command through the real dispatch table without a connection.
-    async fn run(command: Command) -> CommandResult {
+    /// Runs one control-lane request through the real dispatch table without a connection
+    /// and decodes its typed response, as the server would.
+    async fn run<R: AgentRequest>(request: R) -> Result<R::Response, CommandError> {
         let (ctx, _frames) = CommandCtx::detached(RequestId::new(1));
-        match command.run(ctx).await {
-            Reply::Result(result) => result,
+        let command: Command = request.into();
+        let outcome = match command.run(ctx).await {
+            Reply::Result(outcome) | Reply::Reexec { outcome, .. } => outcome,
             Reply::Stream { .. } => panic!("control commands answer directly"),
+        };
+        match R::decode(outcome) {
+            Ok(response) => Ok(response),
+            Err(DecodeError::Failed(error)) => Err(error),
+            Err(DecodeError::Malformed(error)) => panic!("malformed response: {error}"),
         }
     }
 
     #[tokio::test]
     async fn test_ls_command() {
-        let result = run(Command::Ls { path: None }).await;
+        let result = run(request::Ls { path: None }).await;
 
         match result {
-            CommandResult::LsDirectory(ls_result) => {
+            Ok(LsResponse::Directory(ls_result)) => {
                 assert!(!ls_result.files.is_empty(), "ls should return files");
                 assert!(
                     !ls_result.path.is_empty(),
@@ -271,13 +332,13 @@ mod tests {
     #[tokio::test]
     async fn test_ls_error_includes_requested_path() {
         let path = "nonexistent-directory-for-ls-context";
-        let result = run(Command::Ls {
+        let result = run(request::Ls {
             path: Some(path.to_string()),
         })
         .await;
 
         match result {
-            CommandResult::Error { kind, message } => {
+            Err(CommandError { kind, message }) => {
                 // The stable kind lets the REST layer return a useful status without parsing text.
                 assert_eq!(kind, CommandErrorKind::NotFound);
                 // Naming the attempted path makes remote filesystem failures actionable.
@@ -296,13 +357,13 @@ mod tests {
             .await
             .expect("temporary file should be created");
 
-        let result = run(Command::RawDelete {
+        let result = run(request::RawDelete {
             path: temp_path.to_string_lossy().to_string(),
         })
         .await;
 
         match result {
-            CommandResult::RawDelete => {
+            Ok(()) => {
                 assert!(
                     !tokio::fs::try_exists(&temp_path)
                         .await
@@ -328,13 +389,13 @@ mod tests {
             .await
             .expect("temporary nested file should be created");
 
-        let result = run(Command::RawDelete {
+        let result = run(request::RawDelete {
             path: temp_dir.to_string_lossy().to_string(),
         })
         .await;
 
         match result {
-            CommandResult::RawDelete => {
+            Ok(()) => {
                 assert!(
                     !tokio::fs::try_exists(&temp_dir)
                         .await
@@ -348,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_echo_command() {
-        let result = run(Command::Echo {
+        let result = run(request::Echo {
             request: EchoRequest {
                 message: "hello world".to_string(),
                 random_sleep: false,
@@ -357,7 +418,7 @@ mod tests {
         .await;
 
         match result {
-            CommandResult::Echo(echo_result) => {
+            Ok(echo_result) => {
                 assert_eq!(echo_result.message, "hello world");
             }
             _ => panic!("Expected EchoResult"),
@@ -369,14 +430,14 @@ mod tests {
         let temp = TempDir::create();
         let nested_dir = temp.path().join("nested").join("child");
 
-        let result = run(Command::CreateDirectory {
+        let result = run(request::CreateDirectory {
             path: nested_dir.to_string_lossy().to_string(),
             ownership: CreationOwnershipOptions::default(),
         })
         .await;
 
         match result {
-            CommandResult::CreateDirectory => {
+            Ok(()) => {
                 assert!(
                     tokio::fs::try_exists(&nested_dir)
                         .await
@@ -397,7 +458,7 @@ mod tests {
             .await
             .expect("source file should be created");
 
-        let result = run(Command::RenamePath {
+        let result = run(request::RenamePath {
             dir: temp.path().to_string_lossy().to_string(),
             old: "before.txt".to_string(),
             new: "after.txt".to_string(),
@@ -405,7 +466,7 @@ mod tests {
         .await;
 
         match result {
-            CommandResult::RenamePath => {
+            Ok(()) => {
                 assert!(
                     !tokio::fs::try_exists(&source_path)
                         .await
@@ -440,14 +501,14 @@ mod tests {
             .await
             .expect("setuid fixture mode should apply");
 
-        let result = run(Command::ChmodPath {
+        let result = run(request::ChmodPath {
             path: path.to_string_lossy().to_string(),
             permissions: 0o600,
         })
         .await;
 
         match result {
-            CommandResult::ChmodPath(response) => {
+            Ok(response) => {
                 assert_eq!(
                     response.permissions, 0o600,
                     "the response must echo the ordinary bits the grid requested"
@@ -468,7 +529,7 @@ mod tests {
                     "setuid must survive an ordinary-mode chmod"
                 );
             }
-            other => panic!("Expected ChmodPath, got {}", other.summary()),
+            other => panic!("Expected ChmodPath, got {other:?}"),
         }
     }
 
@@ -483,7 +544,7 @@ mod tests {
             .await
             .expect("chown fixture should be created");
 
-        let result = run(Command::ChownPath {
+        let result = run(request::ChownPath {
             path: path.to_string_lossy().to_string(),
             owner: Some(String::from("0")),
             group: None,
@@ -491,23 +552,20 @@ mod tests {
         .await;
 
         match result {
-            CommandResult::Error {
+            Err(CommandError {
                 kind: CommandErrorKind::PermissionDenied,
                 ..
-            } => {}
-            other => panic!(
-                "non-root chown must be PermissionDenied, got {}",
-                other.summary()
-            ),
+            }) => {}
+            other => panic!("non-root chown must be PermissionDenied, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn test_get_agent_details_command() {
-        let result = run(Command::GetAgentDetails).await;
+        let result = run(request::GetAgentDetails {}).await;
 
         match result {
-            CommandResult::GetAgentDetails(details) => {
+            Ok(details) => {
                 assert!(details.pid > 0, "PID should be positive");
                 assert!(!details.cwd.is_empty(), "CWD should not be empty");
                 // Detached test services record no loaded config, so the path stays empty.

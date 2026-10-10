@@ -1,6 +1,7 @@
 //! File metadata and content sniffing that decides whether the UI may edit or preview a file.
 
-use redoor_protocol::{api::files::MetadataResponse, wire::command::CommandResult};
+use redoor_protocol::api::files::MetadataResponse;
+use redoor_protocol::wire::request::CommandError;
 use std::{os::unix::fs::MetadataExt, path::Path};
 use tokio::{fs::File, io::AsyncReadExt};
 
@@ -12,7 +13,7 @@ const MAX_VIEWABLE_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const MIME_SNIFF_BYTES: usize = 8 * 1024;
 
 /// Reads filesystem and content metadata needed by the remote file browser.
-pub(super) async fn execute(path: String) -> CommandResult {
+pub(super) async fn execute(path: String) -> Result<MetadataResponse, CommandError> {
     match tokio::fs::metadata(&path).await {
         Ok(metadata) => {
             let mime_type = match Path::new(&path)
@@ -33,7 +34,7 @@ pub(super) async fn execute(path: String) -> CommandResult {
             let editable = is_file_editable(&path, file_size, is_file).await;
             let viewable_image = is_viewable_image(&path, file_size, is_file).await;
 
-            CommandResult::Metadata(MetadataResponse {
+            Ok(MetadataResponse {
                 path,
                 mime_type,
                 file_size,
@@ -45,10 +46,10 @@ pub(super) async fn execute(path: String) -> CommandResult {
                 one_time_tokens: Vec::new(),
             })
         }
-        Err(error) => CommandResult::io_error(
+        Err(error) => Err(CommandError::io(
             &format!("Failed to get file metadata for path {path:?}"),
             error,
-        ),
+        )),
     }
 }
 
@@ -236,7 +237,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // Extensionless UTF-8 content must still be editable for the UI editor gate.
                 assert!(metadata.editable);
                 assert!(metadata.is_file);
@@ -256,7 +257,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // A .txt suffix must not override invalid UTF-8 content.
                 assert!(!metadata.editable);
             }
@@ -274,7 +275,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // Size gating avoids loading multi-megabyte bodies into the browser textarea.
                 assert!(!metadata.editable);
                 assert!(metadata.file_size > MAX_EDITABLE_FILE_BYTES);
@@ -294,7 +295,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // Image viewing is gated on content magic, not the filename suffix.
                 assert!(metadata.viewable_image);
                 assert!(!metadata.editable);
@@ -314,7 +315,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // A misleading extension must not hide a real image from the viewer.
                 assert!(metadata.viewable_image);
             }
@@ -333,7 +334,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // A .png suffix alone is not enough without matching magic bytes.
                 assert!(!metadata.viewable_image);
             }
@@ -354,7 +355,7 @@ mod tests {
         let result = execute(path.to_string_lossy().into_owned()).await;
 
         match result {
-            CommandResult::Metadata(metadata) => {
+            Ok(metadata) => {
                 // Size gating avoids loading multi-tens-of-megabyte images into the browser.
                 assert!(!metadata.viewable_image);
                 assert!(metadata.file_size > MAX_VIEWABLE_IMAGE_BYTES);

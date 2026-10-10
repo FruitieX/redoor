@@ -6,7 +6,12 @@ use crate::actors::router::{
 };
 use redoor_protocol::{
     ids::{AgentId, RequestId, SocketId},
-    wire::{ServerToAgent, command::Command, command::CommandResult, stream::StreamChunk},
+    wire::{
+        ServerToAgent,
+        command::Command,
+        request::{AgentRequest, CommandOutcome},
+        stream::StreamChunk,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -35,7 +40,7 @@ impl FakeAgent {
         let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
         let socket_id = registration.socket_id.clone();
         router
-            .send_async(RouterMsg::RegisterAgent(registration))
+            .send_async(RouterMsg::RegisterAgent(Box::new(registration)))
             .await
             .unwrap();
         let ServerToAgent::Welcome { .. } = Self::next(&mut priority).await else {
@@ -82,7 +87,7 @@ impl FakeAgent {
     }
 
     /// Sends the final result of `request_id` as the agent would.
-    pub(crate) async fn respond(&self, request_id: RequestId, result: CommandResult) {
+    pub(crate) async fn respond(&self, request_id: RequestId, result: CommandOutcome) {
         self.router
             .send_async(RouterMsg::RouteResponse(RouteResponse {
                 agent_id: self.agent_id.clone(),
@@ -94,8 +99,17 @@ impl FakeAgent {
             .unwrap();
     }
 
+    /// Sends request `R`'s successful response, encoded as the agent encodes it.
+    pub(crate) async fn respond_ok<R: AgentRequest>(
+        &self,
+        request_id: RequestId,
+        response: R::Response,
+    ) {
+        self.respond(request_id, R::encode(Ok(response))).await;
+    }
+
     /// Answers the next queued command with `result`.
-    pub(crate) async fn answer(&mut self, result: CommandResult) {
+    pub(crate) async fn answer(&mut self, result: CommandOutcome) {
         let (request_id, _) = self.next_command().await;
         self.respond(request_id, result).await;
     }

@@ -174,14 +174,14 @@ describe("agent websocket handshake", () => {
 
         const logged = waitForLogMessage(
             serverProcess(),
-            /Closing agent socket that sent a frame before hello: .*frame=command_response/,
+            /Closing agent socket that sent a frame before hello: .*frame=result/,
         );
 
         outcome.socket.send(
             JSON.stringify({
-                type: "command_response",
+                type: "result",
                 id: 1,
-                result: { type: "Echo", message: "forged" },
+                ok: { message: "forged" },
             }),
         );
 
@@ -196,7 +196,7 @@ describe("agent websocket handshake", () => {
         onTestFinished(() => fake.close());
         fake.onCommand(({ id, command }) => {
             if (command.type === "Echo") {
-                fake.respond(id, { type: "Echo", message: "from fake" });
+                fake.respond(id, { message: "from fake" });
             }
         });
 

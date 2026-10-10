@@ -10,13 +10,15 @@ pub mod handshake;
 pub mod log;
 pub mod policy;
 pub mod registration;
+pub mod request;
 pub mod stream;
 pub mod terminal;
 
 use crate::ids::{AgentId, RequestId, SocketId};
-use command::{Command, CommandResult};
+use command::Command;
 use handshake::RejectReason;
 use registration::{AgentCapabilities, AgentIdentity};
+use request::CommandOutcome;
 use serde::{Deserialize, Serialize};
 
 /// Control frames sent by the server to an agent.
@@ -118,19 +120,22 @@ pub enum AgentToServer {
     Hello {
         agent_id: AgentId,
         agent_name: String,
-        /// Platform, account and binary; flattened so the JSON keeps its flat field names.
+        /// Platform, account and binary; flattened so the JSON keeps its flat field names, and
+        /// boxed because it dwarfs every other frame.
         #[serde(flatten)]
-        identity: AgentIdentity,
+        identity: Box<AgentIdentity>,
         /// Optional features; flattened, and each flag defaults to off.
         #[serde(flatten)]
         capabilities: AgentCapabilities,
     },
 
-    /// The one final result of a request; for streaming commands it follows the stream's
-    /// data on the same lane, so the receiver has seen all data when it arrives.
-    CommandResponse {
+    /// The one final result of a request: `ok` with the request's response, or `error`. For
+    /// streaming commands it follows the stream's data on the same lane, so the receiver has
+    /// seen all data when it arrives.
+    Result {
         id: RequestId,
-        result: CommandResult,
+        #[serde(flatten)]
+        outcome: CommandOutcome,
     },
 
     /// Copy byte progress or a later-discovered directory-download tar total.
@@ -169,7 +174,7 @@ impl AgentToServer {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Hello { .. } => "hello",
-            Self::CommandResponse { .. } => "command_response",
+            Self::Result { .. } => "result",
             Self::TransferProgress { .. } => "transfer_progress",
             Self::PublishRequest { .. } => "publish_request",
             Self::Credit { .. } => "credit",
@@ -210,7 +215,7 @@ mod tests {
                 ServerToAgent::Command {
                     id: RequestId::new(1),
                     credit: 0,
-                    command: Command::ListTrash,
+                    command: request::ListTrash {}.into(),
                 },
                 r#"{"type":"command","id":1,"credit":0,"command":{"type":"ListTrash"}}"#,
             ),
@@ -239,11 +244,18 @@ mod tests {
     fn agent_frames_keep_their_wire_tags() {
         let frames = [
             (
-                AgentToServer::CommandResponse {
+                AgentToServer::Result {
                     id: RequestId::new(2),
-                    result: CommandResult::RawUpload,
+                    outcome: CommandOutcome::Ok(serde_json::Value::Null),
                 },
-                r#"{"type":"command_response","id":2,"result":{"type":"RawUpload"}}"#,
+                r#"{"type":"result","id":2,"ok":null}"#,
+            ),
+            (
+                AgentToServer::Result {
+                    id: RequestId::new(9),
+                    outcome: CommandOutcome::error(command::CommandErrorKind::NotFound, "missing"),
+                },
+                r#"{"type":"result","id":9,"error":{"kind":"not_found","message":"missing"}}"#,
             ),
             (
                 AgentToServer::TransferProgress {

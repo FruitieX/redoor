@@ -8,10 +8,11 @@ use super::state::RouterState;
 use super::transfers::copy::CopyRelease;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
+use redoor_protocol::wire::request::CommandOutcome;
 use redoor_protocol::{
     api::transfers::{CancelTransferResponse, CancelTransferStatus, TransferProgressState},
     ids::{AgentId, RequestId, TransferId},
-    wire::command::{CommandErrorKind, CommandResult},
+    wire::command::CommandErrorKind,
 };
 
 impl RouterState {
@@ -129,7 +130,7 @@ impl RouterState {
                     agent_id: agent_id.clone(),
                     socket_id: connection.socket_id.clone(),
                     request_id,
-                    result: CommandResult::error(
+                    result: CommandOutcome::error(
                         CommandErrorKind::Canceled,
                         "Canceled before it was sent to the agent",
                     ),
@@ -273,7 +274,7 @@ impl RouterState {
                     command.request_id,
                     agent_id
                 );
-                let _ = command.reply.send(CommandResult::error(
+                let _ = command.reply.send(CommandOutcome::error(
                     CommandErrorKind::Internal,
                     format!("Agent disconnected: {agent_id}"),
                 ));

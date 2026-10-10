@@ -8,13 +8,12 @@ use crate::http::{agent_client::STANDARD_TIMEOUT, error::ApiError};
 use axum::body::Body;
 use futures_util::StreamExt;
 use redoor_core::log_failure;
+use redoor_protocol::wire::request::{
+    self, AgentRequest, CommandError, CommandOutcome, DecodeError,
+};
 use redoor_protocol::{
     ids::{AgentId, RequestId},
-    wire::{
-        command::{Command, CommandResult},
-        policy::UploadKind,
-        stream::StreamChunk,
-    },
+    wire::{command::Command, policy::UploadKind, stream::StreamChunk},
 };
 use tokio::sync::oneshot;
 
@@ -35,7 +34,7 @@ pub(crate) struct AgentUpload {
     bytes_written: u64,
     /// Writes frames straight onto the connection's bulk lane, spending per-stream credit.
     stream: OutboundStream,
-    completion: oneshot::Receiver<Result<CommandResult, RouterError>>,
+    completion: oneshot::Receiver<Result<CommandOutcome, RouterError>>,
     cancel_guard: UploadCancelGuard,
 }
 
@@ -173,14 +172,19 @@ impl AgentUpload {
         Ok(self.bytes_written)
     }
 
-    /// Accepts only the success result of this upload kind, so another write operation's
-    /// response can never report this upload as done.
-    fn check_completion(kind: UploadKind, result: CommandResult) -> Result<(), ApiError> {
-        match result {
-            CommandResult::Error { kind, message } => Err(ApiError::Command { kind, message }),
-            result if kind.completion_matches(&result) => Ok(()),
-            _ => Err(ApiError::Unexpected("completing an upload")),
-        }
+    /// Decodes the upload's result as the response of its own request type.
+    fn check_completion(kind: UploadKind, result: CommandOutcome) -> Result<(), ApiError> {
+        let decoded = match kind {
+            UploadKind::RawUpload => request::RawUpload::decode(result),
+            UploadKind::TarUpload => request::TarUpload::decode(result),
+            UploadKind::EditFile => request::EditFile::decode(result),
+        };
+        decoded.map_err(|error| match error {
+            DecodeError::Failed(CommandError { kind, message }) => {
+                ApiError::Command { kind, message }
+            }
+            DecodeError::Malformed(_) => ApiError::Unexpected("completing an upload"),
+        })
     }
 
     /// Maps the outcome of sending frames directly to the agent, never through the router;

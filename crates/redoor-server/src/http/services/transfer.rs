@@ -162,9 +162,10 @@ mod tests {
     use super::*;
     use crate::http::fake_agent::FakeAgent;
     use axum::http::StatusCode;
+    use redoor_protocol::wire::request;
     use redoor_protocol::{
         api::files::MetadataResponse,
-        wire::command::{Command, CommandResult, MoveMetadataResult},
+        wire::command::{Command, MoveMetadataResult},
     };
 
     /// A spec between two paths of the fake agent.
@@ -232,9 +233,12 @@ mod tests {
         });
         let (request_id, command) = agent.next_command().await;
         // Copies only need plain metadata.
-        assert!(matches!(command, Command::Metadata { .. }));
+        assert!(matches!(
+            command,
+            Command::Metadata(request::Metadata { .. })
+        ));
         agent
-            .respond(request_id, CommandResult::Metadata(metadata(false)))
+            .respond_ok::<request::Metadata>(request_id, metadata(false))
             .await;
         let error = started.await.unwrap().err().unwrap();
         assert_eq!(
@@ -254,7 +258,10 @@ mod tests {
         });
         let (request_id, command) = agent.next_command().await;
         // Moves read the filesystem identity, not just metadata.
-        assert!(matches!(command, Command::MoveMetadata { .. }));
+        assert!(matches!(
+            command,
+            Command::MoveMetadata(request::MoveMetadata { .. })
+        ));
         let identity = redoor_protocol::wire::command::MoveSourceIdentity {
             device: 1,
             inode: 2,
@@ -264,14 +271,14 @@ mod tests {
             is_directory: false,
         };
         agent
-            .respond(
+            .respond_ok::<request::MoveMetadata>(
                 request_id,
-                CommandResult::MoveMetadata(MoveMetadataResult {
+                MoveMetadataResult {
                     file_size: 5,
                     is_file: true,
                     is_dir: false,
                     identity: identity.clone(),
-                }),
+                },
             )
             .await;
         let started = started.await.unwrap().unwrap();
@@ -281,7 +288,7 @@ mod tests {
         // The same-agent move carries exactly the identity read before copying.
         assert!(matches!(
             command,
-            Command::LocalMove { expected_identity, .. } if expected_identity == identity
+            Command::LocalMove(request::LocalMove { expected_identity, .. }) if expected_identity == identity
         ));
     }
 }

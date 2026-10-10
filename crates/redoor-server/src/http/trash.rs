@@ -70,7 +70,7 @@ pub(crate) async fn list_trash_handler(
 ) -> Result<Json<TrashListResponse>, ApiError> {
     let agent_id = AgentId::from(agent);
     require_trash_inventory_support(&state, &agent_id).await?;
-    Ok(Json(state.agents.call(&agent_id, ListTrash).await?))
+    Ok(Json(state.agents.call(&agent_id, ListTrash {}).await?))
 }
 
 /// Route: `DELETE /api/v1/agents/{agent}/trash` permanently removes every trash entry.
@@ -80,8 +80,10 @@ pub(crate) async fn empty_trash_handler(
 ) -> Result<Json<EmptyTrashResponse>, ApiError> {
     let agent_id = AgentId::from(agent);
     require_trash_inventory_support(&state, &agent_id).await?;
-    let deleted_items = state.agents.call(&agent_id, EmptyTrash).await?;
-    Ok(Json(EmptyTrashResponse { deleted_items }))
+    let emptied = state.agents.call(&agent_id, EmptyTrash {}).await?;
+    Ok(Json(EmptyTrashResponse {
+        deleted_items: emptied.deleted_items,
+    }))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/trash/restore` restores one opaque inventory item.
@@ -105,6 +107,8 @@ pub(crate) async fn restore_trash_handler(
         item_id: request.item_id,
         destination_path: request.destination_path,
     };
-    let path = state.agents.call(&agent_id, call).await?;
-    Ok(Json(RestoreTrashItemResponse { path }))
+    let restored = state.agents.call(&agent_id, call).await?;
+    Ok(Json(RestoreTrashItemResponse {
+        path: restored.path,
+    }))
 }

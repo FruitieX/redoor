@@ -86,7 +86,7 @@ describe("per-stream credit on the multiplexed connection", () => {
         expect(honest.credit).toBeGreaterThan(0);
         fake.sendStreamFrame(honest.id, Buffer.from(`${stdout}\n`));
         fake.sendStreamFrame(honest.id, Buffer.alloc(0), { last: true });
-        fake.respond(honest.id, { type: "Exec", event: exit });
+        fake.respond(honest.id, exit);
 
         // Another stream of the same connection still completes normally after the violation.
         expect(await honestResponse.text()).toBe(`${stdout}\n${JSON.stringify(exit)}\n`);

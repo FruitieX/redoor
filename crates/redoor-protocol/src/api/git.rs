@@ -164,21 +164,6 @@ pub enum GitDiffResult {
     UnsupportedEntry,
 }
 
-impl GitDiffResult {
-    /// Produces a payload-free label so command logs never contain file content.
-    pub(crate) fn summary(&self) -> &'static str {
-        match self {
-            Self::Text { .. } => "text",
-            Self::NoChanges => "no_changes",
-            Self::Untracked => "untracked",
-            Self::Ignored => "ignored",
-            Self::Binary => "binary",
-            Self::TooLarge => "too_large",
-            Self::UnsupportedEntry => "unsupported_entry",
-        }
-    }
-}
-
 /// Carries one file's bounded comparison in the same order as the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]

@@ -7,6 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use redoor_core::log;
+use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::{
         ErrorResponse,
@@ -96,11 +97,11 @@ async fn upload_upgrade_binary(
         destination_path,
         total_bytes
     );
-    let command = Command::RawUpload {
+    let command = Command::RawUpload(request::RawUpload {
         path: destination_path.to_string(),
         on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
         ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),
-    };
+    });
     let upload = AgentUpload::start(
         &state.router_ref,
         agent_id.clone(),

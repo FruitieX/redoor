@@ -6,10 +6,7 @@ use redoor_core::log;
 use redoor_core::staging::{StagingKind, reserve_unique};
 use redoor_protocol::{
     ids::RequestId,
-    wire::{
-        command::{CommandErrorKind, CommandResult},
-        log::Level,
-    },
+    wire::{command::CommandErrorKind, log::Level},
 };
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -235,8 +232,8 @@ impl UploadSink for EditSession {
     }
 
     /// Rewrites the pinned inode; the non-atomic rewrite ignores cancellation once started.
-    async fn commit(self, _gate: PublicationGate<'_>) -> Result<CommandResult, AgentCommandError> {
-        self.rewrite().await.map(|_| CommandResult::EditFile)
+    async fn commit(self, _gate: PublicationGate<'_>) -> Result<(), AgentCommandError> {
+        self.rewrite().await.map(|_| ())
     }
 
     /// Dropping both descriptors discards the anonymous staging inode without touching the target.
@@ -331,7 +328,7 @@ fn edit_error(kind: CommandErrorKind, message: impl Into<String>) -> AgentComman
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::ctx::{CommandCtx, Reply};
+    use crate::commands::ctx::CommandCtx;
     use crate::runtime::cancel::CancelRegistry;
     use crate::runtime::responder::ResultLedger;
     use crate::transfers::upload::UploadDriver;
@@ -642,13 +639,11 @@ mod tests {
         // Transfer teardown revokes cancellation and detaches routes after terminal delivery.
         registry.revoke_all();
         routes.clear();
-        let Reply::Result(result) = task.await.unwrap() else {
-            panic!("edits answer on the control lane");
-        };
+        let result = task.await.unwrap();
 
         // A terminal already accepted by the FIFO channel authorizes commit despite later teardown.
         assert_eq!(tokio::fs::read(&path).await.unwrap(), b"replacement");
         // Success proves cancellation did not nondeterministically win after terminal receipt.
-        assert!(matches!(result, CommandResult::EditFile));
+        assert!(matches!(result, Ok(())));
     }
 }

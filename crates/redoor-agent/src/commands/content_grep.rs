@@ -6,12 +6,13 @@ use super::{
 };
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
+use redoor_protocol::wire::request::CommandError;
 use redoor_protocol::{
     api::search::{
         CaseSensitivity, ContentGrepContextLine, ContentGrepMatch, ContentGrepResponse,
         MAX_GREP_CONTEXT_LINES,
     },
-    wire::command::{CommandErrorKind, CommandResult},
+    wire::command::CommandErrorKind,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -72,7 +73,7 @@ pub(crate) async fn execute(
     request: ContentGrepRequest,
     cancel: &CancellationToken,
     permit: Arc<Semaphore>,
-) -> CommandResult {
+) -> Result<ContentGrepResponse, CommandError> {
     let ContentGrepRequest {
         path,
         query,
@@ -85,18 +86,18 @@ pub(crate) async fn execute(
         after_context,
     } = request;
     if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             format!("Content grep query must be between 1 and {MAX_QUERY_BYTES} bytes"),
-        );
+        ));
     }
     if before_context > MAX_GREP_CONTEXT_LINES || after_context > MAX_GREP_CONTEXT_LINES {
-        return CommandResult::error(
+        return Err(CommandError::new(
             CommandErrorKind::InvalidInput,
             format!(
                 "Content grep context must be between 0 and {MAX_GREP_CONTEXT_LINES} lines per direction"
             ),
-        );
+        ));
     }
     let before_context = usize::try_from(before_context).unwrap_or(0);
     let after_context = usize::try_from(after_context).unwrap_or(0);
@@ -154,12 +155,15 @@ pub(crate) async fn execute(
     };
     if let Some(Err(error)) = io_result {
         if error.kind() == std::io::ErrorKind::InvalidInput {
-            return CommandResult::error(CommandErrorKind::InvalidInput, error.to_string());
+            return Err(CommandError::new(
+                CommandErrorKind::InvalidInput,
+                error.to_string(),
+            ));
         }
-        return CommandResult::io_error("Failed to grep directory", error);
+        return Err(CommandError::io("Failed to grep directory", error));
     }
 
-    CommandResult::ContentGrep(ContentGrepResponse {
+    Ok(ContentGrepResponse {
         results: output.results,
         context_supported: true,
         timed_out,
@@ -444,7 +448,7 @@ mod tests {
     use super::*;
 
     /// Runs an uncancelled grep with its own slot so cases stay independent.
-    async fn grep(request: ContentGrepRequest) -> CommandResult {
+    async fn grep(request: ContentGrepRequest) -> Result<ContentGrepResponse, CommandError> {
         execute(
             request,
             &CancellationToken::new(),
@@ -509,7 +513,7 @@ mod tests {
             false,
         ))
         .await;
-        let CommandResult::ContentGrep(response) = result else {
+        let Ok(response) = result else {
             panic!("valid grep should return its dedicated response");
         };
         // A NUL discovered after an apparent match must suppress the whole binary file.
@@ -550,7 +554,7 @@ mod tests {
         request.after_context = 2;
 
         let result = grep(request).await;
-        let CommandResult::ContentGrep(response) = result else {
+        let Ok(response) = result else {
             panic!("context grep should return its dedicated response");
         };
         // Per-match context intentionally duplicates the line shared by overlapping windows.
@@ -605,7 +609,7 @@ mod tests {
         request.after_context = 1;
 
         let result = grep(request).await;
-        let CommandResult::ContentGrep(response) = result else {
+        let Ok(response) = result else {
             panic!("context grep should return its dedicated response");
         };
         // Tentative matches and their retained context must still be discarded after a late NUL.
@@ -651,7 +655,7 @@ mod tests {
             false,
         ))
         .await;
-        let CommandResult::ContentGrep(response) = result else {
+        let Ok(response) = result else {
             panic!("valid grep should return its dedicated response");
         };
         // A file exactly at the limit remains searchable.
@@ -674,10 +678,10 @@ mod tests {
             // Validation must win over the deliberately missing traversal root.
             assert!(matches!(
                 result,
-                CommandResult::Error {
+                Err(CommandError {
                     kind: CommandErrorKind::InvalidInput,
                     ..
-                }
+                })
             ));
         }
     }
@@ -693,7 +697,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
         )
         .await;
-        let CommandResult::ContentGrep(response) = result else {
+        let Ok(response) = result else {
             panic!("cancellation should remain a grep response");
         };
         // Latest-wins cancellation is observable independently from a caller deadline.
@@ -718,7 +722,7 @@ mod tests {
             false,
         ))
         .await;
-        let CommandResult::ContentGrep(regex_response) = regex_dot else {
+        let Ok(regex_response) = regex_dot else {
             panic!("regex grep should return its dedicated response");
         };
         // A regex dot must still match the adjacent characters in default mode.
@@ -730,7 +734,7 @@ mod tests {
             true,
         ))
         .await;
-        let CommandResult::ContentGrep(literal_response) = literal_dot else {
+        let Ok(literal_response) = literal_dot else {
             panic!("literal grep should return its dedicated response");
         };
         // The same query must fail as a substring because the file has no literal period.
@@ -742,7 +746,7 @@ mod tests {
             true,
         ))
         .await;
-        let CommandResult::ContentGrep(paren_response) = literal_parens else {
+        let Ok(paren_response) = literal_parens else {
             panic!("literal grep should return its dedicated response");
         };
         // Unbalanced parentheses are valid needles once regex compilation is skipped.

@@ -5,7 +5,7 @@
 //! respond, or be joined on teardown.
 
 use super::cancel::{RegisterError, Registration};
-use super::responder::{ControlSender, Responder};
+use super::responder::{ControlSender, PostSend, Responder};
 use super::sessions::Sessions;
 use crate::commands::RunCommand;
 use crate::commands::ctx::{AgentServices, CommandCtx, Reply};
@@ -13,9 +13,10 @@ use redoor_core::{log, log_error};
 use redoor_protocol::{
     ids::RequestId,
     wire::{
-        command::{Command, CommandErrorKind, CommandResult},
+        command::{Command, CommandErrorKind},
         log::Level,
         policy::{CancelScope, CommandPolicy},
+        request::CommandOutcome,
     },
 };
 use std::sync::Arc;
@@ -97,7 +98,7 @@ impl Dispatcher {
         let is_upload = policy.upload_kind().is_some();
         if !is_upload && !self.command_capacity_available() {
             let _ = responder
-                .respond(CommandResult::error(
+                .respond(CommandOutcome::error(
                     CommandErrorKind::ServiceUnavailable,
                     "Agent command execution limit reached",
                 ))
@@ -109,7 +110,7 @@ impl Dispatcher {
             Ok(cancellation) => cancellation,
             Err(RegisterError::Duplicate | RegisterError::Full) => {
                 let _ = responder
-                    .respond(CommandResult::error(
+                    .respond(CommandOutcome::error(
                         CommandErrorKind::AlreadyExists,
                         format!("Request is already running for request_id={request_id}"),
                     ))
@@ -183,11 +184,20 @@ impl Dispatcher {
     /// gone that lane is closed and the send returns at once, so teardown can always join.
     async fn deliver(responder: &Responder, reply: Reply) {
         match reply {
-            Reply::Result(result) => {
-                let _ = responder.respond(result).await;
+            Reply::Result(outcome) => {
+                let _ = responder.respond(outcome).await;
             }
-            Reply::Stream { stream, result } => {
-                let _ = responder.respond_on(stream.lane(), result).await;
+            Reply::Reexec { outcome, path } => {
+                let _ = responder
+                    .respond_on(
+                        responder.control(),
+                        outcome,
+                        Some(PostSend::Reexec { path }),
+                    )
+                    .await;
+            }
+            Reply::Stream { stream, outcome } => {
+                let _ = responder.respond_on(stream.lane(), outcome, None).await;
             }
         }
     }
@@ -232,12 +242,15 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::responder::{OutboundFrame, PostSend};
+    use crate::runtime::responder::OutboundFrame;
     use crate::transfers::upload::UploadRoutes;
     use crate::trash::Trash;
     use redoor_protocol::{
         api::{agents::EchoRequest, transfers::CopyExistingMode},
-        wire::AgentToServer,
+        wire::{
+            AgentToServer,
+            request::{self, AgentRequest},
+        },
     };
     use tokio::sync::mpsc;
 
@@ -293,11 +306,11 @@ mod tests {
         }
 
         /// Receives the next command response from the recorded control lane.
-        async fn next_response(&mut self) -> (CommandResult, Option<PostSend>) {
+        async fn next_response(&mut self) -> (CommandOutcome, Option<PostSend>) {
             loop {
                 let frame = self.frames.recv().await.expect("control lane open");
-                if let Some(AgentToServer::CommandResponse { result, .. }) = frame.as_message() {
-                    return (result.clone(), frame.after_send.clone());
+                if let Some(AgentToServer::Result { outcome, .. }) = frame.as_message() {
+                    return (outcome.clone(), frame.after_send.clone());
                 }
             }
         }
@@ -305,11 +318,11 @@ mod tests {
 
     /// A download that cannot finish until cancelled, used to occupy a request id.
     fn blocking_download() -> Command {
-        Command::RawDownload {
+        Command::RawDownload(request::RawDownload {
             path: "/dev/zero".to_string(),
             range_start: None,
             range_end: None,
-        }
+        })
     }
 
     /// Verifies the dispatcher, not the command, sends the typed response.
@@ -320,18 +333,18 @@ mod tests {
         fixture
             .dispatch(
                 1,
-                Command::Echo {
+                Command::Echo(request::Echo {
                     request: EchoRequest {
                         message: "hello".to_string(),
                         random_sleep: false,
                     },
-                },
+                }),
             )
             .await;
-        let (result, after_send) = fixture.next_response().await;
+        let (outcome, after_send) = fixture.next_response().await;
 
-        // The dispatcher, not the command, sends the typed response.
-        assert!(matches!(result, CommandResult::Echo(echo) if echo.message == "hello"));
+        // The dispatcher, not the command, sends the echo's typed response.
+        assert_eq!(request::Echo::decode(outcome).unwrap().message, "hello");
         // Ordinary results never replace the process.
         assert_eq!(after_send, None);
     }
@@ -341,11 +354,13 @@ mod tests {
     async fn restart_response_carries_the_reexec_action() {
         let (mut fixture, _payload) = Fixture::new().await;
 
-        fixture.dispatch(2, Command::Restart).await;
-        let (result, after_send) = fixture.next_response().await;
+        fixture
+            .dispatch(2, Command::Restart(request::Restart {}))
+            .await;
+        let (outcome, after_send) = fixture.next_response().await;
 
         // Restart answers first so the router sees success before the socket drops.
-        assert!(matches!(result, CommandResult::Restart));
+        assert!(request::Restart::decode(outcome).is_ok());
         // The writer, not a JSON sniffer, performs the re-exec after this frame is written.
         assert_eq!(after_send, Some(PostSend::Reexec { path: None }));
     }
@@ -362,11 +377,11 @@ mod tests {
         fixture
             .dispatch(
                 4,
-                Command::RawDownload {
+                Command::RawDownload(request::RawDownload {
                     path: path.to_string_lossy().to_string(),
                     range_start: None,
                     range_end: None,
-                },
+                }),
             )
             .await;
         fixture.sessions.cancel_request(RequestId::new(4));
@@ -380,12 +395,7 @@ mod tests {
         let results: Vec<_> = frames
             .iter()
             .enumerate()
-            .filter(|(_, frame)| {
-                matches!(
-                    frame.as_message(),
-                    Some(AgentToServer::CommandResponse { .. })
-                )
-            })
+            .filter(|(_, frame)| matches!(frame.as_message(), Some(AgentToServer::Result { .. })))
             .collect();
         // Whichever of completion and cancel wins, the request gets exactly one result.
         assert_eq!(results.len(), 1);
@@ -404,11 +414,11 @@ mod tests {
         fixture
             .dispatch(
                 5,
-                Command::LocalCopyFile {
+                Command::LocalCopyFile(request::LocalCopyFile {
                     source_path: "/nonexistent".to_string(),
                     dest_path: "/nonexistent-copy".to_string(),
                     on_existing: CopyExistingMode::Error,
-                },
+                }),
             )
             .await;
 
@@ -433,17 +443,16 @@ mod tests {
                 .spawn(std::future::pending::<()>());
         }
 
-        fixture.dispatch(6, Command::GetLoggingLevel).await;
-        let (result, _) = fixture.next_response().await;
+        fixture
+            .dispatch(6, Command::GetLoggingLevel(request::GetLoggingLevel {}))
+            .await;
+        let (outcome, _) = fixture.next_response().await;
 
         // A full set rejects ordinary commands without blocking control handling.
-        assert!(matches!(
-            result,
-            CommandResult::Error {
-                kind: CommandErrorKind::ServiceUnavailable,
-                ..
-            }
-        ));
+        assert_eq!(
+            outcome.failure().map(|error| &error.kind),
+            Some(&CommandErrorKind::ServiceUnavailable)
+        );
         fixture.dispatcher.commands.abort_all();
     }
 
@@ -455,14 +464,14 @@ mod tests {
         fixture
             .dispatch(
                 8,
-                Command::FileSearch {
+                Command::FileSearch(request::FileSearch {
                     path: "/".to_string(),
                     query: "unlikely-redoor-query".to_string(),
                     timeout_seconds: 3600,
                     include_hidden: true,
                     respect_gitignore: false,
                     case_sensitivity: Default::default(),
-                },
+                }),
             )
             .await;
 

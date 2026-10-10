@@ -2,6 +2,7 @@
 
 use crate::actors::router::{CopyOperation, OutputStreamTracking, RouterMsg};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use redoor_protocol::wire::request::{self, LsResponse};
 use redoor_protocol::{
     api::{
         files::CreationOwnershipOptions,
@@ -19,9 +20,7 @@ use uuid::Uuid;
 
 use super::{error::McpError, policy, schema::server_metadata};
 use crate::http::{
-    agent_client::{
-        ContentGrep, CreateDirectory, DeletePath, FileSearch, ListPath, Listing, Metadata,
-    },
+    agent_client::{CreateDirectory, Ls, Metadata, RawDelete, Trash, content_grep, file_search},
     error::ApiError,
     machine_tokens::{MachinePrincipal, MachineScope},
     services::{
@@ -712,8 +711,8 @@ async fn list_directory(
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
     policy::require_device(principal, MachineScope::FilesRead, device, id)?;
-    let call = ListPath {
-        path: path.to_string(),
+    let call = Ls {
+        path: Some(path.to_string()),
     };
     match state
         .agents
@@ -721,12 +720,12 @@ async fn list_directory(
         .await
         .map_err(|error| op(error.to_string(), id))?
     {
-        Listing::Directory(mut result) => {
+        LsResponse::Directory(mut result) => {
             let truncated = result.files.len() > MAX_DIRECTORY_ENTRIES;
             result.files.truncate(MAX_DIRECTORY_ENTRIES);
             Ok(json!({"path":result.path,"entries":result.files,"truncated":truncated}))
         }
-        Listing::File(_) => Err(op("Path is not a directory", id)),
+        LsResponse::File(_) => Err(op("Path is not a directory", id)),
     }
 }
 /// Maps agent metadata to a credential-free path contract.
@@ -774,12 +773,12 @@ async fn read_file(
     let mut stream = OutputStream::open(
         &state.router_ref,
         AgentId::from(device),
-        Command::RawDownload {
+        Command::RawDownload(request::RawDownload {
             path: path.to_string(),
             range_start: Some(offset),
             // One byte past the page tells whether more content follows.
             range_end: Some(offset.saturating_add(limit as u64).saturating_add(1)),
-        },
+        }),
         OutputStreamTracking::Download {
             path: path.to_string(),
             total_bytes: limit as u64 + 1,
@@ -834,11 +833,11 @@ async fn write_file(
             id,
         ));
     }
-    let command = Command::RawUpload {
+    let command = Command::RawUpload(request::RawUpload {
         path: path.to_string(),
         on_existing: conflict_mode(string(args, "on_existing", id)?, id)?,
         ownership: CreationOwnershipOptions::default(),
-    };
+    });
     let written = write_inline(state, device, path, command, &bytes)
         .await
         .map_err(|error| op(error.to_string(), id))?;
@@ -1058,15 +1057,18 @@ async fn delete_path(
         "trash" => true,
         _ => return Err(invalid("mode must be trash or permanent", id)),
     };
-    let call = DeletePath {
-        path: path.to_string(),
-        to_trash,
+    let deleted = if to_trash {
+        let call = Trash {
+            path: path.to_string(),
+        };
+        state.agents.call(&agent_id, call).await
+    } else {
+        let call = RawDelete {
+            path: path.to_string(),
+        };
+        state.agents.call(&agent_id, call).await
     };
-    state
-        .agents
-        .call(&agent_id, call)
-        .await
-        .map_err(|error| op(error.to_string(), id))?;
+    deleted.map_err(|error| op(error.to_string(), id))?;
     Ok(json!({"path":path,"deleted":true}))
 }
 /// Creates one absolute directory through the same agent command used by REST.
@@ -1104,9 +1106,9 @@ async fn search_paths(
         .and_then(Value::as_u64)
         .unwrap_or(10)
         .clamp(1, 60);
-    let call = FileSearch {
-        path: root.to_string(),
-        request: FindRequest {
+    let call = file_search(
+        root.to_string(),
+        FindRequest {
             query: string(args, "query", id)?.to_string(),
             timeout,
             include_hidden: args
@@ -1119,7 +1121,7 @@ async fn search_paths(
                 .unwrap_or(true),
             case_sensitivity: case_sensitivity(args, id)?,
         },
-    };
+    );
     let mut result = state
         .agents
         .call(&AgentId::from(device), call)
@@ -1173,10 +1175,7 @@ async fn search_contents(
             .unwrap_or(0)
             .min(20),
     };
-    let call = ContentGrep {
-        path: root.to_string(),
-        request,
-    };
+    let call = content_grep(root.to_string(), request);
     let result = state
         .agents
         .call(&AgentId::from(device), call)

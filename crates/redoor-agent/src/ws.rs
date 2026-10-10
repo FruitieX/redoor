@@ -315,7 +315,7 @@ mod tests {
 
     use super::*;
     use crate::runtime::AgentLifecycleMsg;
-    use redoor_protocol::wire::{AgentToServer, command::CommandResult};
+    use redoor_protocol::wire::{AgentToServer, request::CommandOutcome};
     use std::sync::{Arc, Mutex};
 
     /// Wraps a control lane with idle interactive and bulk lanes.
@@ -531,9 +531,9 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(1);
         let frame = OutboundFrame {
             after_send: Some(PostSend::Reexec { path: None }),
-            ..OutboundFrame::message(AgentToServer::CommandResponse {
+            ..OutboundFrame::message(AgentToServer::Result {
                 id: redoor_protocol::ids::RequestId::new(1),
-                result: CommandResult::Restart,
+                outcome: CommandOutcome::Ok(serde_json::Value::Null),
             })
         };
         control_tx.send(frame).await.unwrap();
@@ -561,7 +561,7 @@ mod tests {
         let journal = journal.lock().unwrap();
         // The response must be on the wire before the process is replaced.
         assert_eq!(journal.len(), 2);
-        assert!(journal[0].starts_with("frame:") && journal[0].contains("Restart"));
+        assert!(journal[0].starts_with("frame:") && journal[0].contains(r#""type":"result""#));
         assert_eq!(journal[1], "Reexec { path: None }");
     }
 

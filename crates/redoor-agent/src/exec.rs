@@ -6,8 +6,8 @@ use crate::transfers::stream::StreamWriter;
 use redoor_protocol::{
     ids::RequestId,
     wire::{
-        command::CommandResult,
         exec::{ExecEvent, ExecRequest},
+        request,
     },
 };
 use std::{os::unix::process::ExitStatusExt, process::Stdio};
@@ -159,10 +159,7 @@ pub(crate) async fn run(
         });
     drop(registration);
     worker.stream.send(&[], true).await;
-    Reply::Stream {
-        stream: worker.stream,
-        result: CommandResult::Exec { event },
-    }
+    Reply::stream::<request::Exec>(worker.stream, Ok(event))
 }
 
 #[cfg(test)]
@@ -170,6 +167,7 @@ mod tests {
     use super::*;
     use crate::runtime::cancel::CancelRegistry;
     use crate::runtime::responder::OutboundFrame;
+    use redoor_protocol::wire::request::AgentRequest;
     use tokio::sync::mpsc;
 
     /// Builds an exec request for `script` run by `sh`.
@@ -205,14 +203,10 @@ mod tests {
 
     /// Extracts the exec event of a streamed reply.
     fn exit_event(reply: Reply) -> ExecEvent {
-        let Reply::Stream {
-            result: CommandResult::Exec { event },
-            ..
-        } = reply
-        else {
+        let Reply::Stream { outcome, .. } = reply else {
             panic!("exec results follow their stream");
         };
-        event
+        request::Exec::decode(outcome).expect("exec answers with its event")
     }
 
     /// Verifies output, then FIN, with the real exit status carried by the result.

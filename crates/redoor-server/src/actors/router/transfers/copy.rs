@@ -18,10 +18,13 @@ use super::super::streams::{OutboundStart, OutboundStream, OutputReceiver, Strea
 use redoor_core::log;
 use redoor_protocol::ids::{AgentId, RequestId};
 use redoor_protocol::wire::log::Level;
+use redoor_protocol::wire::request::{
+    self, AgentRequest, CommandError, CommandOutcome, DecodeError,
+};
 use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
 use redoor_protocol::{
     api::transfers::{TransferDirection, TransferProgressState},
-    wire::command::{Command, CommandResult},
+    wire::command::Command,
 };
 
 /// How a finished copy releases its streams.
@@ -164,24 +167,26 @@ impl RouterState {
     ) -> (AgentId, bool) {
         let request_id = self.next_id();
         let command = match &then {
-            Some(delete) => Command::LocalMove {
+            Some(delete) => Command::LocalMove(request::LocalMove {
                 source_path: request.source_path.clone(),
                 dest_path: request.dest_path.clone(),
                 source_is_directory: request.content_kind == CopyContentKind::TarDirectory,
                 expected_identity: delete.identity.clone(),
                 on_existing: request.on_existing,
-            },
+            }),
             None => match request.content_kind {
-                CopyContentKind::RawFile => Command::LocalCopyFile {
+                CopyContentKind::RawFile => Command::LocalCopyFile(request::LocalCopyFile {
                     source_path: request.source_path.clone(),
                     dest_path: request.dest_path.clone(),
                     on_existing: request.on_existing,
-                },
-                CopyContentKind::TarDirectory => Command::LocalCopyDirectory {
-                    source_path: request.source_path.clone(),
-                    dest_path: request.dest_path.clone(),
-                    on_existing: request.on_existing,
-                },
+                }),
+                CopyContentKind::TarDirectory => {
+                    Command::LocalCopyDirectory(request::LocalCopyDirectory {
+                        source_path: request.source_path.clone(),
+                        dest_path: request.dest_path.clone(),
+                        on_existing: request.on_existing,
+                    })
+                }
             },
         };
         self.flows.insert(
@@ -364,7 +369,7 @@ impl RouterState {
     /// The result follows the source's data, so a successful source has handed the forwarder
     /// everything and the destination's result completes the copy. A failed source sent no
     /// `FIN`; closing its stream ends the forwarder, and the copy fails.
-    fn finish_copy_source(&mut self, flow_id: FlowId, result: CommandResult) {
+    fn finish_copy_source(&mut self, flow_id: FlowId, result: CommandOutcome) {
         let Some(Flow::Copy(flow)) = self.flows.get_mut(flow_id) else {
             return;
         };
@@ -381,7 +386,7 @@ impl RouterState {
             // A finished or failed source holds nothing to clean up, so its result is its
             // cancel acknowledgement.
             self.acknowledge_copy_cancel(flow_id, source_id);
-        } else if let CommandResult::Error { message, .. } = result {
+        } else if let CommandOutcome::Error(CommandError { message, .. }) = result {
             self.end_copy(flow_id, Some(message));
         }
     }
@@ -441,7 +446,7 @@ impl RouterState {
     }
 
     /// Settles a remote copy from its destination's final response.
-    fn finish_remote_destination(&mut self, flow_id: FlowId, result: CommandResult) {
+    fn finish_remote_destination(&mut self, flow_id: FlowId, result: CommandOutcome) {
         let Some(Flow::Copy(flow)) = self.flows.get(flow_id) else {
             return;
         };
@@ -449,15 +454,13 @@ impl RouterState {
             return;
         };
         let canceling = matches!(remote.stage, RemoteStage::Canceling { .. });
-        let published = flow.content_kind.completion_matches(&result);
         let dest_id = remote.dest_id();
         let progress_id = flow.progress_id;
-        if flow.is_move() && published && !canceling {
-            self.begin_source_deletion(flow_id);
-            return;
-        }
+        let is_move = flow.is_move();
+        let content_kind = flow.content_kind;
         match result {
-            _ if flow.is_move() && published => {
+            CommandOutcome::Ok(_) if is_move && !canceling => self.begin_source_deletion(flow_id),
+            CommandOutcome::Ok(_) if is_move => {
                 log!(
                     Level::Debug,
                     "Smart move destination completed while canceling; preserving source: public_request_id={}, request_id={}",
@@ -468,36 +471,26 @@ impl RouterState {
                 // destination publication won.
                 self.acknowledge_copy_cancel(flow_id, dest_id);
             }
-            CommandResult::Error { .. } if canceling => {
+            CommandOutcome::Error(_) if canceling => {
                 self.acknowledge_copy_cancel(flow_id, dest_id);
             }
-            CommandResult::Error { message, .. } => self.end_copy(flow_id, Some(message)),
-            _ if published => {
+            CommandOutcome::Error(CommandError { message, .. }) => {
+                self.end_copy(flow_id, Some(message))
+            }
+            CommandOutcome::Ok(_) => {
                 // Tar copies have no known size up front; the forwarded bytes are the total.
-                let total = match flow.content_kind {
+                let total = match content_kind {
                     CopyContentKind::TarDirectory => self.transferred_bytes(progress_id),
                     CopyContentKind::RawFile => None,
                 };
                 self.end_copy(flow_id, None);
                 self.mark_copy_transfer_completed(progress_id, total);
             }
-            other => {
-                log!(
-                    Level::Warning,
-                    "Unexpected copy completion response: request_id={}, result={:?}",
-                    dest_id,
-                    other
-                );
-                self.end_copy(
-                    flow_id,
-                    Some("Unexpected copy completion response".to_string()),
-                );
-            }
         }
     }
 
     /// Settles an agent-local copy or move from its single command result.
-    fn finish_local_copy(&mut self, flow_id: FlowId, result: CommandResult) {
+    fn finish_local_copy(&mut self, flow_id: FlowId, result: CommandOutcome) {
         let Some(Flow::Copy(flow)) = self.flows.remove(flow_id) else {
             return;
         };
@@ -514,9 +507,16 @@ impl RouterState {
             CopyContentKind::TarDirectory => self.transferred_bytes(progress_id),
             CopyContentKind::RawFile => None,
         };
-        match result {
-            CommandResult::Error { .. } if canceling => self.mark_transfer_canceled(progress_id),
-            CommandResult::Error { message, .. } => {
+        let atomic = if flow.is_move() {
+            request::LocalMove::decode(result).map(|response| Some(response.atomic))
+        } else if flow.content_kind == CopyContentKind::TarDirectory {
+            request::LocalCopyDirectory::decode(result).map(|()| None)
+        } else {
+            request::LocalCopyFile::decode(result).map(|()| None)
+        };
+        match atomic {
+            Err(DecodeError::Failed(_)) if canceling => self.mark_transfer_canceled(progress_id),
+            Err(DecodeError::Failed(CommandError { message, .. })) => {
                 if flow.is_move() {
                     log!(
                         Level::Debug,
@@ -527,40 +527,32 @@ impl RouterState {
                 }
                 self.mark_transfer_errored(progress_id, message);
             }
-            CommandResult::LocalMove { atomic } if flow.is_move() => {
-                log!(
-                    Level::Debug,
-                    "Smart move local completion: public_request_id={}, atomic={}",
-                    progress_id,
-                    atomic
-                );
-                if let Some(entry) = self.progress.entries.get_mut(&progress_id) {
-                    // Copy/delete and cross-agent completions never take this arm.
-                    entry.atomic = atomic;
-                }
-                self.mark_copy_transfer_completed(progress_id, tar_total);
-            }
-            CommandResult::LocalCopyFile
-                if !flow.is_move() && flow.content_kind == CopyContentKind::RawFile =>
-            {
-                self.mark_copy_transfer_completed(progress_id, None);
-            }
-            CommandResult::LocalCopyDirectory
-                if !flow.is_move() && flow.content_kind == CopyContentKind::TarDirectory =>
-            {
-                self.mark_copy_transfer_completed(progress_id, tar_total);
-            }
-            other => {
+            Err(DecodeError::Malformed(error)) => {
                 log!(
                     Level::Warning,
-                    "Unexpected local copy completion response: public_request_id={}, result={:?}",
+                    "Malformed local copy result: public_request_id={}, error={}",
                     progress_id,
-                    other
+                    error
                 );
                 self.mark_transfer_errored(
                     progress_id,
                     "Unexpected copy completion response".to_string(),
                 );
+            }
+            Ok(atomic) => {
+                if let Some(atomic) = atomic {
+                    log!(
+                        Level::Debug,
+                        "Smart move local completion: public_request_id={}, atomic={}",
+                        progress_id,
+                        atomic
+                    );
+                    if let Some(entry) = self.progress.entries.get_mut(&progress_id) {
+                        // Copy/delete and cross-agent completions never take this branch.
+                        entry.atomic = atomic;
+                    }
+                }
+                self.mark_copy_transfer_completed(progress_id, tar_total);
             }
         }
     }
@@ -837,7 +829,7 @@ mod tests {
                 agent_id: AgentId::from("dest"),
                 socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id: dest_id,
-                result: CommandResult::error(
+                result: CommandOutcome::error(
                     redoor_protocol::wire::command::CommandErrorKind::InvalidInput,
                     "Upload canceled by server",
                 ),
@@ -915,7 +907,7 @@ mod tests {
                 agent_id: AgentId::from("source"),
                 socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id: source_id,
-                result: CommandResult::error(
+                result: CommandOutcome::error(
                     redoor_protocol::wire::command::CommandErrorKind::Internal,
                     "Failed to read file: boom",
                 ),

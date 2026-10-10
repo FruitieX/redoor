@@ -21,6 +21,15 @@ const controlFrameSchema = z
     .object({ type: z.string() })
     .catchall(z.unknown());
 
+/** Any JSON document, the shape of a response payload the fake agent sends. */
+export type JsonValue =
+    | string
+    | number
+    | boolean
+    | null
+    | JsonValue[]
+    | { [key: string]: JsonValue };
+
 /** One parsed control frame received from the server. */
 export type ControlFrame = z.infer<typeof controlFrameSchema>;
 
@@ -353,9 +362,14 @@ export class FakeAgent {
         this.control.send(JSON.stringify(frame));
     }
 
-    /** Answers request `id` with a command result in its wire shape. */
-    respond<Result extends { type: string }>(id: number, result: Result): void {
-        this.send({ type: "command_response", id, result });
+    /** Answers request `id` successfully with its typed response (`null` for none). */
+    respond(id: number, response: JsonValue): void {
+        this.send({ type: "result", id, ok: response });
+    }
+
+    /** Answers request `id` with a failure of `kind` (a snake_case `CommandErrorKind`). */
+    fail(id: number, kind: string, message: string): void {
+        this.send({ type: "result", id, error: { kind, message } });
     }
 
     /** Sends one binary frame of stream `stream` on the connection. */

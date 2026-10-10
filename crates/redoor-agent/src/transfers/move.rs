@@ -16,10 +16,8 @@ use redoor_core::destination::{
 use redoor_core::log;
 use redoor_core::staging::{StagingKind, reserve_unique};
 use redoor_protocol::wire::log::Level;
-use redoor_protocol::{
-    api::transfers::CopyExistingMode,
-    wire::command::{CommandResult, MoveSourceIdentity},
-};
+use redoor_protocol::wire::request::{CommandError, LocalMoveResponse};
+use redoor_protocol::{api::transfers::CopyExistingMode, wire::command::MoveSourceIdentity};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -65,7 +63,7 @@ impl CopyContext<'_> {
         source_is_directory: bool,
         expected_identity: MoveSourceIdentity,
         on_existing: CopyExistingMode,
-    ) -> CommandResult {
+    ) -> Result<LocalMoveResponse, CommandError> {
         let result = self
             .move_entry(
                 PathBuf::from(&source_path),
@@ -89,7 +87,7 @@ impl CopyContext<'_> {
                         "transfer_copy_delete"
                     }
                 );
-                CommandResult::LocalMove { atomic }
+                Ok(LocalMoveResponse { atomic })
             }
             Err(error) => {
                 log!(
@@ -99,7 +97,7 @@ impl CopyContext<'_> {
                     dest_path,
                     error
                 );
-                AgentCommandError::from(error).into()
+                Err(AgentCommandError::from(error).into())
             }
         }
     }

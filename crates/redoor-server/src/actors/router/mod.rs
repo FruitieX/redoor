@@ -319,7 +319,7 @@ impl RouterState {
     /// Runs the handler of one message.
     fn dispatch(&mut self, message: RouterMsg) {
         match message {
-            RouterMsg::RegisterAgent(request) => self.register_agent(request),
+            RouterMsg::RegisterAgent(request) => self.register_agent(*request),
             RouterMsg::RegisterManagedAgent(request) => self.register_managed(request),
             RouterMsg::UnregisterManagedAgent(request) => self.unregister_managed(request),
             RouterMsg::ApplyManagedLifecycle(request) => self.apply_managed_lifecycle(request),
@@ -411,8 +411,10 @@ mod tests {
     use crate::actors::lanes::ControlLanes;
     use crate::actors::router::messages::AgentListEntry;
     use redoor_protocol::ids::{AgentId, RequestId};
-    use redoor_protocol::wire::command::{Command, CommandResult};
+    use redoor_protocol::wire::command::Command;
     use redoor_protocol::wire::exec::ExecRequest;
+    use redoor_protocol::wire::request;
+    use redoor_protocol::wire::request::CommandOutcome;
     use redoor_protocol::wire::stream::{STREAM_CREDIT_WINDOW_FRAMES, StreamChunk};
     use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::{Duration, timeout};
@@ -480,7 +482,7 @@ mod tests {
         let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
         let socket_id = registration.socket_id.clone();
         router_ref
-            .send_async(RouterMsg::RegisterAgent(registration))
+            .send_async(RouterMsg::RegisterAgent(Box::new(registration)))
             .await
             .expect("agent registered");
 
@@ -497,9 +499,9 @@ mod tests {
                 .request(|reply| {
                     RouterMsg::StartUploadStreamRest(StartUploadRequest {
                         agent_id: AgentId::from("agent-1"),
-                        command: Command::EditFile {
+                        command: Command::EditFile(request::EditFile {
                             path: "/tmp/file.bin".to_string(),
-                        },
+                        }),
                         path: "/tmp/file.bin".to_string(),
                         total_bytes: 8,
                         completion_sender: completion_tx,
@@ -605,11 +607,11 @@ mod tests {
             .request(|reply| {
                 RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
-                    command: Command::RawDownload {
+                    command: Command::RawDownload(request::RawDownload {
                         path: "/tmp/big.bin".to_string(),
                         range_start: None,
                         range_end: None,
-                    },
+                    }),
                     tracking: OutputStreamTracking::Download {
                         path: "/tmp/big.bin".to_string(),
                         total_bytes: 1 << 30,
@@ -631,14 +633,14 @@ mod tests {
             .request(|reply| {
                 RouterMsg::ExecuteStreamCommandRest(ExecuteStreamRequest {
                     agent_id: agent_id.clone(),
-                    command: Command::Exec {
+                    command: Command::Exec(request::Exec {
                         request: ExecRequest {
                             argv: vec!["true".into()],
                             cwd: None,
                             env: Default::default(),
                             timeout_ms: None,
                         },
-                    },
+                    }),
                     tracking: OutputStreamTracking::Execution { terminal },
                     reply,
                 })
@@ -730,14 +732,14 @@ mod tests {
                 agent_id: agent_id.clone(),
                 socket_id: socket_id.clone(),
                 request_id,
-                result: CommandResult::EditFile,
+                result: CommandOutcome::Ok(serde_json::Value::Null),
             }))
             .await
             .expect("edit completion queued");
         // Final response must still reach the upload owner and release router transfer state.
         assert!(matches!(
             completion_rx.await.expect("edit completion delivered"),
-            Ok(CommandResult::EditFile)
+            Ok(CommandOutcome::Ok(serde_json::Value::Null))
         ));
         let progress = router_ref
             .request(|reply| RouterMsg::GetTransferProgress { reply })
