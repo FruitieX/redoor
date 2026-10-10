@@ -294,7 +294,6 @@ describe("stateless authenticated MCP", () => {
                     supported_features: {
                         trash: expect.any(Boolean),
                         trash_restore: expect.any(Boolean),
-                        self_exec: expect.any(Boolean),
                     },
                 }),
                 expect.objectContaining({ device_id: secondDeviceId }),
