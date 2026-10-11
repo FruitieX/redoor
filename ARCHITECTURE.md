@@ -4,7 +4,8 @@ Redoor is a single `redoor` binary that plays several roles:
 
 - **server**: REST API, browser UI, MCP endpoint and the websocket hub agents connect to
 - **agent**: connects to a server and executes filesystem, exec, git, terminal and log commands on its host
-- **remote CLI** (`redoor remote ...`): a REST client for scripting against a server
+- **remote CLI** (`redoor remote ...`): a REST client for scripting against a server, authenticated
+  with an access token
 - **service management**: installs the server or agent as a systemd or launchd service
 
 The Rust code is a cargo workspace under `crates/`. The roles live in separate crates so the
@@ -221,8 +222,9 @@ behind NAT, on a phone (Termux) or on a host that is only reachable over SSH.
   reaches the server through the tunnel. The token is passed on SSH stdin and the password
   through askpass, so neither appears on a command line. `redoor agent relay` runs the same
   mechanism without a server, for agents of a remote server.
-- **Browsers, the CLI and MCP clients** only use the REST API and browser websockets. They
-  never talk to agents directly; the server translates each request into agent commands.
+- **Browsers, the CLI and MCP clients** only use the REST API, the `/mcp` endpoint and browser
+  websockets. They never talk to agents directly; the server translates each request into
+  agent commands.
 
 ## One connection per agent
 
