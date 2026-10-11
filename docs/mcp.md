@@ -28,6 +28,10 @@ The device scope is either **all devices** (including devices added later) or
 an explicit list of devices. Listing devices needs no permission, but only
 shows devices in the token's scope.
 
+A local managed agent runs as the same OS user as the server. Write or command
+access to it can therefore change the server's own files, so leave such devices
+out of the scope of tokens that should not have full control.
+
 On a headless machine, create one with the remote CLI instead. It asks for the
 account password and the permissions (or takes them as flags) and prints the
 token and the MCP endpoint as JSON without saving anything:

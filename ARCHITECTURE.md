@@ -948,6 +948,11 @@ device ids. Listing devices needs no permission; it is filtered to the scope.
   management are never grantable. A token could otherwise widen its own access, for
   example by adding a local agent or minting a broader token. The exception is
   `/api/v1/tokens/current`, where a token reads or deletes itself.
+- **Limit of the model.** Permissions describe what a token may do through redoor, not
+  what the device's OS user can reach. A local managed agent runs as the server's OS user,
+  so `files:write` or `commands:execute` on it can rewrite the server's config, session
+  files and token store, which is equivalent to full access. Scope tokens away from such
+  devices when that matters.
 - **Bearer first.** When a request carries `Authorization: Bearer`, the token alone decides;
   a cookie on the same request is ignored. `/mcp` accepts only tokens, never cookies.
 - **MCP tools** declare the permissions they need, and `tools/list` hides the tools the
