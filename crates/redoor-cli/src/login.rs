@@ -4,11 +4,11 @@
 //! access token with the permissions the user picks, and log the session out again. The
 //! password never leaves this flow, and only the scoped token is kept.
 
-use std::{io::IsTerminal, sync::Arc};
+use std::{future::Future, io::IsTerminal, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use jiff::{SignedDuration, Timestamp};
+use jiff::{SignedDuration, Timestamp, Unit};
 use redoor_protocol::{
     api::{
         agents::{AgentInfoResponse, AgentListResponse},
@@ -32,6 +32,8 @@ use super::{
 const PASSWORD_ATTEMPTS: usize = 3;
 /// Name of the browser session cookie returned by `POST /api/v1/login`.
 const SESSION_COOKIE: &str = "redoor_session";
+/// Reported when the user presses Ctrl-C, whichever prompt or request was running.
+const LOGIN_CANCELED: &str = "Login canceled";
 
 /// Abstracts terminal interaction so `LoginFlow` ordering and defaults are testable with
 /// scripted answers instead of a TTY.
@@ -53,12 +55,51 @@ pub(crate) trait Prompter: Send + Sync + 'static {
 pub(crate) struct DialoguerPrompter;
 
 impl DialoguerPrompter {
-    /// Restores the cursor after an aborted prompt, which dialoguer may leave hidden.
+    /// Restores the cursor after an aborted prompt, which dialoguer may leave hidden, and
+    /// reports Ctrl-C (which `console` surfaces as an interrupted read) as a cancellation.
     fn finish<T>(result: dialoguer::Result<T>) -> Result<T> {
         result.map_err(|error| {
             let _ = dialoguer::console::Term::stderr().show_cursor();
-            anyhow::Error::from(error)
+            let dialoguer::Error::IO(io) = &error;
+            if io.kind() == std::io::ErrorKind::Interrupted {
+                // End the prompt line so the message does not run into it.
+                eprintln!();
+                anyhow::anyhow!(LOGIN_CANCELED)
+            } else {
+                anyhow::Error::from(error)
+            }
         })
+    }
+}
+
+/// Terminal settings captured before the first prompt, so Ctrl-C can undo what an
+/// interrupted prompt changed. A password prompt turns echo off and a selection list hides
+/// the cursor; neither is restored when the prompt thread never returns.
+struct TerminalState {
+    /// `None` when stdin is not a terminal, in which case there is nothing to restore.
+    termios: Option<nix::sys::termios::Termios>,
+}
+
+impl TerminalState {
+    /// Snapshots stdin's terminal settings when prompts will be shown.
+    fn capture(interactive: bool) -> Self {
+        let termios = interactive
+            .then(|| nix::sys::termios::tcgetattr(std::io::stdin()).ok())
+            .flatten();
+        Self { termios }
+    }
+
+    /// Puts echo and the cursor back and ends the half-drawn prompt line.
+    fn restore(&self) {
+        if let Some(termios) = &self.termios {
+            let _ = nix::sys::termios::tcsetattr(
+                std::io::stdin(),
+                nix::sys::termios::SetArg::TCSANOW,
+                termios,
+            );
+            let _ = dialoguer::console::Term::stderr().show_cursor();
+            eprintln!();
+        }
     }
 }
 
@@ -91,6 +132,9 @@ impl Prompter for DialoguerPrompter {
         Self::finish(
             dialoguer::MultiSelect::new()
                 .with_prompt(prompt)
+                // The long item descriptions would be echoed as one wrapped line; the
+                // confirmation summary lists the choices compactly instead.
+                .report(false)
                 .items_checked(items.iter().zip(defaults.iter().copied()))
                 .interact_on(&dialoguer::console::Term::stderr()),
         )
@@ -197,7 +241,9 @@ impl Expiry {
             Expiry::Days365 => 365,
             Expiry::Never => return None,
         };
-        Some(now + SignedDuration::from_hours(24 * days))
+        let expiry = now + SignedDuration::from_hours(24 * days);
+        // Whole seconds keep the timestamp readable in `status` and the UI.
+        Some(expiry.round(Unit::Second).unwrap_or(expiry))
     }
 }
 
@@ -276,20 +322,22 @@ impl<P: Prompter> LoginFlow<P> {
         }
     }
 
-    /// Logs in, creates the token and always logs the transient session out again.
+    /// Logs in, creates the token and always logs the transient session out again, also
+    /// when the user presses Ctrl-C.
     pub(crate) async fn issue(&self) -> Result<(Url, AccessTokenSecretResponse)> {
         let server = RemoteClient::parse_server(&self.args.server_url)?;
         self.require_flags()?;
-        let username = self.username().await?;
-        let session = self.open_session(&server, &username).await?;
-        let result = async {
+        let terminal = TerminalState::capture(self.interactive);
+        let username = interruptible(&terminal, self.username()).await?;
+        let session = interruptible(&terminal, self.open_session(&server, &username)).await?;
+        let result = interruptible(&terminal, async {
             let agents = session.agents().await?;
             let plan = self.plan(&agents).await?;
             if !self.confirm(&plan).await? {
                 bail!("Token creation canceled");
             }
             session.create_token(&plan.request(Timestamp::now())).await
-        }
+        })
         .await;
         // The session was only needed to create the token; leaving it alive would keep a
         // full-access credential around for a week.
@@ -528,6 +576,27 @@ impl<P: Prompter> LoginFlow<P> {
         self.ask(|prompter| prompter.confirm("Create token?", true))
             .await
     }
+}
+
+/// Runs one login phase until it finishes or the user presses Ctrl-C.
+///
+/// Handling the signal here, instead of letting it kill the process, is what lets `issue`
+/// still log the transient session out and give the terminal back in a usable state. A
+/// blocked prompt thread is abandoned; `main` does not wait for blocking tasks on exit.
+async fn interruptible<T>(
+    terminal: &TerminalState,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        result = work => result,
+        _ = tokio::signal::ctrl_c() => canceled(terminal),
+    }
+}
+
+/// Restores the terminal and reports the cancellation.
+fn canceled<T>(terminal: &TerminalState) -> Result<T> {
+    terminal.restore();
+    bail!(LOGIN_CANCELED)
 }
 
 /// A browser session that exists only while a token is being created.
