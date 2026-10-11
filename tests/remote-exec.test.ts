@@ -9,10 +9,12 @@ import {
 import { $ } from "zx";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import {
+    ALL_PERMISSIONS,
     ProcessManager,
     TempFileManager,
+    createAccessToken,
+    remoteEnv,
     startServerAndAgent,
     waitForValue,
 } from "./test-utils";
@@ -29,6 +31,7 @@ describe("Remote exec and non-shell streaming API", () => {
 
     let setup: Awaited<ReturnType<typeof startServerAndAgent>>;
     let home: string;
+    let tokenEnv: ReturnType<typeof remoteEnv>;
 
     beforeAll(async () => {
         setup = await startServerAndAgent({
@@ -37,25 +40,13 @@ describe("Remote exec and non-shell streaming API", () => {
             agentCwd: files.tempDirectory(),
         });
         home = files.tempDirectory();
-        const directory = path.join(home, ".local/share/exec-test");
-        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-        await fs.writeFile(
-            path.join(directory, "remote-session.json"),
-            JSON.stringify({
-                version: 1,
-                generation: randomUUID(),
-                server_url: `${setup.apiClient.baseUrl}/`,
-                cookies: [
-                    {
-                        raw_cookie: `${setup.apiClient.getAuthHeaders().Cookie}; Path=/`,
-                        path: ["/", true],
-                        domain: { HostOnly: "127.0.0.1" },
-                        expires: "SessionEnd",
-                    },
-                ],
-            }),
-            { mode: 0o600 },
-        );
+
+        const created = await createAccessToken(setup.apiClient, {
+            name: "remote exec test",
+            permissions: ALL_PERMISSIONS,
+        });
+
+        tokenEnv = remoteEnv(setup.apiClient.baseUrl, created.token);
     }, 30000);
 
     afterAll(async () => {
@@ -63,10 +54,15 @@ describe("Remote exec and non-shell streaming API", () => {
         files.cleanup();
     });
 
-    /** Separate invocations prove saved cookies and argv survive real CLI parsing. */
+    /** Separate invocations prove the token and argv survive real CLI parsing. */
     function exec(...args: string[]) {
         return $({
-            env: { ...process.env, HOME: home, REDOOR_APP_NAME: "exec-test" },
+            env: {
+                ...process.env,
+                HOME: home,
+                REDOOR_APP_NAME: "exec-test",
+                ...tokenEnv,
+            },
             quiet: true,
             nothrow: true,
         })`exec ${binary} remote exec ${args}`;

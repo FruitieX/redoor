@@ -1,6 +1,6 @@
 //! Streams execution records to local pipes without collecting remote output.
 
-use super::{client::RemoteClient, session::SessionStore};
+use super::{client::RemoteClient, credentials::CredentialStore};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use redoor_protocol::wire::exec::{ExecEvent, ExecRequest};
@@ -143,7 +143,7 @@ impl Output {
 }
 
 /// Handles interruption over the whole admission/read operation; closing HTTP cancels remote ownership.
-pub async fn run(store: SessionStore, args: ExecArgs) -> i32 {
+pub async fn run(store: CredentialStore, args: ExecArgs) -> i32 {
     let mut output = Output {
         json: args.json,
         stdout: tokio::io::stdout(),
@@ -174,7 +174,7 @@ pub async fn run(store: SessionStore, args: ExecArgs) -> i32 {
             timeout_ms: args.timeout,
         };
         request.validate().map_err(anyhow::Error::msg)?;
-        let client = RemoteClient::load(store).await?;
+        let client = RemoteClient::load(&store).await?;
         client.ensure_agent_running(&args.agent).await?;
         let mut url = client.endpoint("api/v1/agents/")?;
         url.path_segments_mut()

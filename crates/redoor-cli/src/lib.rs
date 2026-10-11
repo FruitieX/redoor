@@ -1,19 +1,21 @@
-//! Remote CLI commands share durable authentication for device inventory, transfers, execution, and agent lifecycle control.
+//! Remote CLI commands authenticate with an access token for device inventory, transfers,
+//! execution, and agent lifecycle control.
 
 mod archive;
 pub mod client;
 mod copy;
+pub mod credentials;
 mod exec;
 mod lifecycle;
-pub mod session;
+mod login;
+mod status;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use redoor_protocol::api::agents::AgentListResponse;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use client::RemoteClient;
-use session::SessionStore;
+use credentials::CredentialStore;
 
 /// Keeps remote utilities separate from server/agent process management.
 #[derive(Args)]
@@ -22,7 +24,8 @@ pub struct RemoteArgs {
     command: RemoteCommand,
 }
 
-/// Login-first operations reuse the server's existing cookie authentication APIs.
+/// Every command except `login` and `create-token` uses the saved access token or the
+/// `REDOOR_REMOTE_SERVER`/`REDOOR_REMOTE_TOKEN` environment override.
 #[derive(Subcommand)]
 enum RemoteCommand {
     /// Start a server-managed agent, including SSH agents, without waiting for connection.
@@ -33,10 +36,19 @@ enum RemoteCommand {
     Exec(exec::ExecArgs),
     /// Stream files or recursively copy directories between local and device paths.
     Cp(copy::CopyArgs),
-    /// Prompt for username/password and select a server for subsequent commands.
-    Login { server_url: String },
-    /// Invalidate the selected session remotely and remove local credentials.
+    /// Log in with the account password, choose the token's permissions and save the token.
+    Login(login::TokenRequestArgs),
+    /// Revoke the saved token on the server and remove it locally.
     Logout,
+    /// Show the server, token and permissions in use.
+    Status {
+        /// Print the token metadata as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Like login, but print the new token as JSON (for MCP clients) instead of saving it.
+    #[command(name = "create-token")]
+    CreateToken(login::TokenRequestArgs),
     /// List device IDs, names, and connection status.
     #[command(name = "devices")]
     Agents {
@@ -47,35 +59,18 @@ enum RemoteCommand {
 }
 
 /// Dispatches without mixing status messages into machine-readable stdout.
-pub async fn run(args: RemoteArgs, store: SessionStore) -> Result<i32> {
+pub async fn run(args: RemoteArgs, store: CredentialStore) -> Result<i32> {
     match args.command {
         RemoteCommand::Start(args) => lifecycle::run(store, args, true).await?,
         RemoteCommand::Stop(args) => lifecycle::run(store, args, false).await?,
         RemoteCommand::Exec(args) => return Ok(exec::run(store, args).await),
         RemoteCommand::Cp(args) => copy::run(store, args).await?,
-        RemoteCommand::Login { server_url } => {
-            RemoteClient::parse_server(&server_url)?;
-            let mut stderr = tokio::io::stderr();
-            stderr.write_all(b"Username: ").await?;
-            stderr.flush().await?;
-            let mut username = String::new();
-            tokio::io::BufReader::new(tokio::io::stdin())
-                .read_line(&mut username)
-                .await?;
-            // Terminal password input is necessarily blocking; keep it off async workers.
-            let password =
-                tokio::task::spawn_blocking(|| rpassword::prompt_password("Password: ")).await??;
-            let login =
-                RemoteClient::login(store, &server_url, username.trim().to_owned(), password)
-                    .await?;
-            eprintln!("Logged in as {}", login.username);
-        }
-        RemoteCommand::Logout => {
-            RemoteClient::logout(store).await?;
-            eprintln!("Logged out");
-        }
+        RemoteCommand::Login(args) => login::login(store, args).await?,
+        RemoteCommand::CreateToken(args) => login::create_token(args).await?,
+        RemoteCommand::Logout => status::logout(store).await?,
+        RemoteCommand::Status { json } => status::status(store, json).await?,
         RemoteCommand::Agents { json } => {
-            let agents: AgentListResponse = RemoteClient::load(store)
+            let agents: AgentListResponse = RemoteClient::load(&store)
                 .await?
                 .get_json("api/v1/agents")
                 .await?;

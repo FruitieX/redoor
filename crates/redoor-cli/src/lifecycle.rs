@@ -8,7 +8,10 @@ use redoor_protocol::api::agents::{
 };
 use reqwest::Method;
 
-use super::{client::RemoteClient, session::SessionStore};
+use super::{
+    client::{RemoteApiError, RemoteClient},
+    credentials::CredentialStore,
+};
 
 impl RemoteClient {
     /// Starts only managed inventory entries and keeps command payloads out of a pending startup.
@@ -62,7 +65,20 @@ impl RemoteClient {
                     self.request(Method::POST, url.as_str())?
                         .timeout(std::time::Duration::from_secs(30)),
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    // Auto-start is a convenience; without the permission, say how to proceed.
+                    if error
+                        .downcast_ref::<RemoteApiError>()
+                        .is_some_and(|error| error.status == reqwest::StatusCode::FORBIDDEN)
+                    {
+                        anyhow::anyhow!(
+                            "Device {label} is not running and this token lacks agents:manage; start it from the UI or log in with agents:manage"
+                        )
+                    } else {
+                        error
+                    }
+                })?;
             let response: StartAgentResponse = serde_json::from_slice(&response.bytes().await?)
                 .context("Invalid remote start response")?;
             snapshot = response.agent;
@@ -111,8 +127,8 @@ pub(super) struct LifecycleArgs {
 }
 
 /// Reports the accepted snapshot without mistaking an asynchronous start for a connection.
-pub(super) async fn run(store: SessionStore, args: LifecycleArgs, start: bool) -> Result<()> {
-    let client = RemoteClient::load(store).await?;
+pub(super) async fn run(store: CredentialStore, args: LifecycleArgs, start: bool) -> Result<()> {
+    let client = RemoteClient::load(&store).await?;
     let mut url = client.endpoint("api/v1/agents/")?;
     url.path_segments_mut()
         .map_err(|_| anyhow::anyhow!("Invalid server URL"))?

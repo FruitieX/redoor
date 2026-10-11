@@ -28,7 +28,7 @@ jiff = { version = "0.2.35", features = ["serde"] }
 ts-rs = "12.0.1"
 sysinfo = "0.39.6"
 tower-http = { version = "0.6.11", features = ["cors", "limit"] }
-nix = { version = "0.31.3", features = ["user", "signal", "process", "event"] }
+nix = { version = "0.31.3", features = ["user", "signal", "process", "event", "hostname"] }
 libc = "0.2"
 fastrand = "2.5.0"
 async-stream = "0.3.6"
@@ -42,8 +42,8 @@ thiserror = "2.0.20"
 # No `charset`: responses are JSON/bytes, so encoding_rs-based text decoding is unused.
 reqwest = { version = "0.13.4", default-features = false, features = ["default-tls", "http2", "stream", "system-proxy"] }
 url = "2.5.8"
-cookie_store = { version = "0.22", features = ["serde"] }
-rpassword = "7"
+# Terminal prompts for `redoor remote login`; only the console backend, no editor/tempfile.
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 semver = "1.0.27"
 axum-embed = "0.1.0"
 rust-embed = "8.12.0"

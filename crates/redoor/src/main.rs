@@ -277,7 +277,7 @@ fn main() -> ExitCode {
 async fn run(command: Commands, context: RuntimeContext, parent: LaunchParent) -> Result<ExitCode> {
     match command {
         Commands::Remote(args) => {
-            let store = redoor_cli::session::SessionStore::new(context.paths.data_dir()?);
+            let store = redoor_cli::credentials::CredentialStore::new(context.paths.data_dir()?);
             let code = redoor_cli::run(args, store).await?;
             // Wrapping matches what the OS does with an out-of-range process status.
             Ok(ExitCode::from(code as u8))

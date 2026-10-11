@@ -144,9 +144,16 @@ The agent runtime and the implementation of every command.
 
 ### `redoor-cli`
 
-The `redoor remote ...` client. It uses `reqwest` against the REST API with a saved session,
-and covers device inventory, copy (including tar archives), exec and agent lifecycle. It only
-depends on protocol and core, so it never links server or agent code.
+The `redoor remote ...` client. It uses `reqwest` against the REST API and authenticates
+with an access token, and covers device inventory, copy (including tar archives), exec and
+agent lifecycle (`login`, `logout`, `status`, `create-token`, `devices`, `start`, `stop`,
+`exec`, `cp`). It only depends on protocol and core, so it never links server or agent code.
+
+- `credentials`: the token saved by `login` in `<data_dir>/remote-credentials.json` (0600,
+  in a 0700 directory, never followed through symlinks). `REDOOR_REMOTE_SERVER` plus
+  `REDOOR_REMOTE_TOKEN` override it, so CI jobs and AI agents need no saved login.
+- `login`: `LoginFlow` behind a `Prompter` trait (dialoguer on a terminal, scripted answers
+  in tests). Every prompt also has a flag, so the same command works in scripts.
 
 ### `redoor`
 
@@ -859,8 +866,7 @@ credential only works on its own endpoints:
 | Client | Credential | Grants |
 |---|---|---|
 | Browser UI | `redoor_session` cookie from `POST /api/v1/login` | REST API and browser websockets, full access, including the session-only routes |
-| `redoor remote` CLI | The same kind of session, saved by `redoor remote login` | Same as the browser |
-| MCP clients, scripts | `redoor_at_...` access token (`Authorization: Bearer`) | REST API and `/mcp`, limited by permissions and a device scope |
+| `redoor remote` CLI, MCP clients, scripts | `redoor_at_...` access token (`Authorization: Bearer`) | REST API and `/mcp`, limited by permissions and a device scope |
 | Agents | The shared `agent_token` bearer | `/api/v1/agent/ws` only |
 | Plain download links | One-time token | One file on one agent, once |
 
@@ -954,6 +960,14 @@ device ids. Listing devices needs no permission; it is filtered to the scope.
 
 Agent registration (the shared agent token), one-time download links and browser sessions
 are separate credentials and not part of this model.
+
+**CLI login.** `redoor remote login` never stores the password. It logs in with the password
+to get a transient browser session, reads the device list, asks which permissions, devices,
+name and expiry the token should have, creates the token with that session, and then logs
+the session out (always, also on errors). If the previous login was to the same server, its
+token is revoked, so re-logins leave no orphan tokens. `logout` revokes the token through
+`DELETE /api/v1/tokens/current`. Because creating a token needs the password, a token alone
+can never mint another one.
 
 ## Design rules
 

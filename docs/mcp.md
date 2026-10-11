@@ -28,6 +28,14 @@ The device scope is either **all devices** (including devices added later) or
 an explicit list of devices. Listing devices needs no permission, but only
 shows devices in the token's scope.
 
+On a headless machine, create one with the remote CLI instead. It asks for the
+account password and the permissions (or takes them as flags) and prints the
+token and the MCP endpoint as JSON without saving anything:
+
+```sh
+redoor remote create-token http://127.0.0.1:7666 --permissions files:read,files:write
+```
+
 Redoor stores only a SHA-256 verifier of each token, so the token cannot be
 shown again; save it in the client's secret store. Editing a token changes its
 permissions on the next request without a new secret. Rotation issues a new

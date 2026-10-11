@@ -28,6 +28,5 @@ redoor-protocol.workspace = true
 axum.workspace = true
 bytes.workspace = true
 async-stream.workspace = true
-cookie_store.workspace = true
 reqwest.workspace = true
 uuid.workspace = true

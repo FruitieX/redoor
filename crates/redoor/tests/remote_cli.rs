@@ -6,7 +6,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cookie_store::CookieStore;
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Output};
 
 use redoor_core::test_support;
@@ -22,13 +21,41 @@ async fn cli(home: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// The endpoint rejects missing cookies, proving the CLI really reads its saved authentication.
-async fn agents(headers: HeaderMap) -> impl IntoResponse {
-    if headers
-        .get(header::COOKIE)
+/// Saves credentials for `server` the way `redoor remote login` does, in the given namespace.
+async fn seed_credentials(
+    home: &Path,
+    namespace: &str,
+    server: &reqwest::Url,
+) -> std::path::PathBuf {
+    let directory = home.join(".local/share").join(namespace);
+    tokio::fs::create_dir_all(&directory).await.unwrap();
+    let file = directory.join("remote-credentials.json");
+    let payload = serde_json::json!({
+        "version": 1,
+        "server_url": server.as_str(),
+        "token": "test-token",
+        "token_id": uuid::Uuid::new_v4(),
+    });
+    tokio::fs::write(&file, serde_json::to_vec(&payload).unwrap())
+        .await
+        .unwrap();
+    tokio::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+        .await
+        .unwrap();
+    file
+}
+
+/// Whether the request carries the seeded bearer token.
+fn authorized(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        != Some("redoor_session=cli-session")
-    {
+        == Some("Bearer test-token")
+}
+
+/// The endpoint rejects a missing token, proving the CLI really reads its saved authentication.
+async fn agents(headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     connected_inventory().await.into_response()
@@ -47,9 +74,12 @@ async fn connected_inventory() -> Json<serde_json::Value> {
     }]}))
 }
 
-/// Existing logout is public but receives cookies when available.
-async fn logout() -> impl IntoResponse {
-    Json(serde_json::json!({"logged_out": true}))
+/// Logout revokes the token it is authenticated with.
+async fn revoke_current(headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(serde_json::json!({"deleted": true})).into_response()
 }
 
 /// Executing the binary proves output/exit behavior and root namespace flags beyond parser unit tests.
@@ -63,23 +93,14 @@ async fn remote_cli_persistent_session_namespace_and_output() {
         .route("/api/v1/agents/{agent}/start", post(lifecycle_fixture))
         .route("/api/v1/agents/{agent}/shutdown", post(lifecycle_fixture))
         .route("/api/v1/agents/a/exec", post(exec_fixture))
-        .route("/api/v1/logout", post(logout));
+        .route(
+            "/api/v1/tokens/current",
+            axum::routing::delete(revoke_current),
+        );
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let mut jar = CookieStore::default();
-    jar.parse("redoor_session=cli-session; Path=/; Max-Age=3600", &url)
-        .unwrap();
-    let directory = root.path().join(".local/share/isolated");
-    tokio::fs::create_dir_all(&directory).await.unwrap();
-    let file = directory.join("remote-session.json");
-    let payload = serde_json::json!({"version": 1, "generation": uuid::Uuid::new_v4(), "server_url": url.as_str(), "cookies": jar.iter_any().collect::<Vec<_>>()});
-    tokio::fs::write(&file, serde_json::to_vec(&payload).unwrap())
-        .await
-        .unwrap();
-    tokio::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
-        .await
-        .unwrap();
+    let file = seed_credentials(root.path(), "isolated", &url).await;
     let output = cli(
         root.path(),
         &["--app-name", "isolated", "remote", "devices", "--json"],
@@ -176,7 +197,7 @@ async fn remote_cli_persistent_session_namespace_and_output() {
         &["remote", "cp", "--json", "/missing", "agent:/missing"],
     )
     .await;
-    // Copy scripts must receive the same terminal JSON shape even when no session can be loaded.
+    // Copy scripts must receive the same terminal JSON shape even when no token can be loaded.
     assert!(!output.status.success());
     let failure: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(failure["status"], "failed");
@@ -241,7 +262,7 @@ async fn remote_cli_persistent_session_namespace_and_output() {
             .contains("without a terminal event")
     );
     let output = cli(root.path(), &["--app-name", "isolated", "remote", "logout"]).await;
-    // Logout should have no stdout and delete the state used by the prior process.
+    // Logout should revoke the token, have no stdout and delete the state used by the prior process.
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     assert!(!tokio::fs::try_exists(&file).await.unwrap());
@@ -251,16 +272,22 @@ async fn remote_cli_persistent_session_namespace_and_output() {
         "The remote namespace must expose its command help"
     );
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        help.contains("login")
-            && help.contains("logout")
-            && help.contains("agents")
-            && help.contains("cp")
-            && help.contains("start")
-            && help.contains("stop")
-            && help.contains("exec"),
-        "Remote help must document the implemented login, inventory and copy commands"
-    );
+    for command in [
+        "login",
+        "logout",
+        "status",
+        "create-token",
+        "devices",
+        "cp",
+        "start",
+        "stop",
+        "exec",
+    ] {
+        assert!(
+            help.contains(command),
+            "Remote help must document the {command} command"
+        );
+    }
     server.abort();
 }
 
@@ -270,11 +297,7 @@ async fn lifecycle_fixture(
     axum::extract::Path(agent): axum::extract::Path<String>,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    if headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        != Some("redoor_session=cli-session")
-    {
+    if !authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if agent != "ssh agent?#" {
@@ -389,16 +412,7 @@ async fn remote_cp_interruption_during_admission_recovers_id_and_cancels() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let mut jar = CookieStore::default();
-    jar.parse("redoor_session=copy-test; Path=/; Max-Age=3600", &url)
-        .unwrap();
-    let directory = root.path().join(".local/share/redoor");
-    tokio::fs::create_dir_all(&directory).await.unwrap();
-    let session = directory.join("remote-session.json");
-    tokio::fs::write(&session, serde_json::to_vec(&serde_json::json!({"version": 1, "generation": uuid::Uuid::new_v4(), "server_url": url.as_str(), "cookies": jar.iter_any().collect::<Vec<_>>()})).unwrap()).await.unwrap();
-    tokio::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))
-        .await
-        .unwrap();
+    seed_credentials(root.path(), "redoor", &url).await;
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_redoor"))
         .args(["remote", "cp", "--json", "a:/source", "a:/destination"])
         .env("HOME", root.path())
@@ -477,16 +491,7 @@ async fn remote_exec_interruption_during_admission_drops_owned_response() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let mut jar = CookieStore::default();
-    jar.parse("redoor_session=exec-test; Path=/; Max-Age=3600", &url)
-        .unwrap();
-    let directory = root.path().join(".local/share/redoor");
-    tokio::fs::create_dir_all(&directory).await.unwrap();
-    let session = directory.join("remote-session.json");
-    tokio::fs::write(&session, serde_json::to_vec(&serde_json::json!({"version": 1, "generation": uuid::Uuid::new_v4(), "server_url": url.as_str(), "cookies": jar.iter_any().collect::<Vec<_>>()})).unwrap()).await.unwrap();
-    tokio::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))
-        .await
-        .unwrap();
+    seed_credentials(root.path(), "redoor", &url).await;
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_redoor"))
         .args(["remote", "exec", "--json", "a", "--", "true"])
         .env("HOME", root.path())
@@ -639,25 +644,7 @@ async fn remote_exec_waits_for_managed_startup_and_reports_progress_and_failures
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let mut jar = CookieStore::default();
-        jar.parse("redoor_session=startup; Path=/prefix; Max-Age=3600", &url)
-            .unwrap();
-        let directory = root.path().join(".local/share/redoor");
-        tokio::fs::create_dir_all(&directory).await.unwrap();
-        let session = directory.join("remote-session.json");
-        tokio::fs::write(
-            &session,
-            serde_json::to_vec(&serde_json::json!({
-                "version": 1, "generation": uuid::Uuid::new_v4(), "server_url": url.as_str(),
-                "cookies": jar.iter_any().collect::<Vec<_>>()
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-        tokio::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))
-            .await
-            .unwrap();
+        seed_credentials(root.path(), "redoor", &url).await;
         let output = cli(
             root.path(),
             &["remote", "exec", "--json", "a", "--", "true"],

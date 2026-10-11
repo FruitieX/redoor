@@ -505,8 +505,8 @@ async fn interrupted() -> Result<()> {
 }
 
 /// Waits by default and guarantees one final JSON object, including failures and interruption.
-pub async fn run(store: super::session::SessionStore, args: CopyArgs) -> Result<()> {
-    let client = match RemoteClient::load(store).await {
+pub async fn run(store: super::credentials::CredentialStore, args: CopyArgs) -> Result<()> {
+    let client = match RemoteClient::load(&store).await {
         Ok(client) => client,
         Err(error) => {
             let result = Err(error);
