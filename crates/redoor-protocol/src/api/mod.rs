@@ -10,6 +10,7 @@ pub mod logging;
 pub mod mcp;
 pub mod search;
 pub mod server;
+pub mod tokens;
 pub mod transfers;
 pub mod trash;
 pub mod ui_events;
