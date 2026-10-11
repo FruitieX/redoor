@@ -1,6 +1,7 @@
 //! Authenticated HTTP transport without response buffering or transfer-wide timeouts.
 
 use anyhow::{Context, Result, ensure};
+use redoor_protocol::api::transfers::CopyEndpoint;
 use reqwest::{Method, RequestBuilder, Response, StatusCode, Url, header};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -86,6 +87,24 @@ impl RemoteClient {
             "Remote request must target the selected server"
         );
         Ok(url)
+    }
+
+    /// Builds `api/v1/agents/{agent}/{operation}/{path}`, percent-encoding each component so
+    /// spaces, colons, `#` and `?` remain filesystem data.
+    pub fn agent_path(&self, endpoint: &CopyEndpoint, operation: &str) -> Result<String> {
+        let mut url = Url::parse("http://localhost/")?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("Invalid API URL"))?;
+            let agent = endpoint.agent.to_string();
+            segments.extend(["api", "v1", "agents", &agent]);
+            segments.extend(operation.split('/'));
+            for part in endpoint.path.trim_start_matches('/').split('/') {
+                segments.push(part);
+            }
+        }
+        Ok(url.path().trim_start_matches('/').to_owned())
     }
 
     /// Lets transfers attach streaming bodies/query options without bypassing authenticated send.

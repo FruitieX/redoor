@@ -145,9 +145,14 @@ The agent runtime and the implementation of every command.
 ### `redoor-cli`
 
 The `redoor remote ...` client. It uses `reqwest` against the REST API and authenticates
-with an access token, and covers device inventory, copy (including tar archives), exec and
-agent lifecycle (`login`, `logout`, `status`, `create-token`, `devices`, `start`, `stop`,
-`exec`, `cp`). It only depends on protocol and core, so it never links server or agent code.
+with an access token, and covers device inventory, copy (including tar archives), file
+operations, exec and agent lifecycle (`login`, `logout`, `status`, `create-token`, `devices`,
+`start`, `stop`, `exec`, `cp`, `mv`, `ls`, `stat`, `mkdir`, `rm`, `find`, `grep`). It only
+depends on protocol and core, so it never links server or agent code.
+
+The CLI and MCP offer roughly the same device operations. The difference is local files:
+only the CLI streams files and tar archives between the local machine and a device; MCP
+keeps file content inline and capped at 64 KiB.
 
 - `credentials`: the token saved by `login` in `<data_dir>/remote-credentials.json` (0600,
   in a 0700 directory, never followed through symlinks). `REDOOR_REMOTE_SERVER` plus

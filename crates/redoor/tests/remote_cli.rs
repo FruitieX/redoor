@@ -282,6 +282,13 @@ async fn remote_cli_persistent_session_namespace_and_output() {
         "start",
         "stop",
         "exec",
+        "ls",
+        "stat",
+        "mkdir",
+        "rm",
+        "mv",
+        "find",
+        "grep",
     ] {
         assert!(
             help.contains(command),

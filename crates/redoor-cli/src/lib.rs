@@ -8,6 +8,11 @@ pub mod credentials;
 mod exec;
 mod lifecycle;
 mod login;
+mod ls;
+mod mkdir;
+mod mv;
+mod rm;
+mod search;
 mod status;
 
 use anyhow::Result;
@@ -36,6 +41,20 @@ enum RemoteCommand {
     Exec(exec::ExecArgs),
     /// Stream files or recursively copy directories between local and device paths.
     Cp(copy::CopyArgs),
+    /// List a remote directory (or describe a file).
+    Ls(ls::PathArgs),
+    /// Show a remote path's metadata.
+    Stat(ls::PathArgs),
+    /// Create a remote directory.
+    Mkdir(mkdir::MkdirArgs),
+    /// Move a remote path to the trash, or delete it permanently.
+    Rm(rm::RmArgs),
+    /// Move or rename a path on one device or between devices.
+    Mv(mv::MvArgs),
+    /// Find files and directories by name below a remote directory.
+    Find(search::FindArgs),
+    /// Search file contents below a remote directory.
+    Grep(search::GrepArgs),
     /// Log in with the account password, choose the token's permissions and save the token.
     Login(login::TokenRequestArgs),
     /// Revoke the saved token on the server and remove it locally.
@@ -65,6 +84,13 @@ pub async fn run(args: RemoteArgs, store: CredentialStore) -> Result<i32> {
         RemoteCommand::Stop(args) => lifecycle::run(store, args, false).await?,
         RemoteCommand::Exec(args) => return Ok(exec::run(store, args).await),
         RemoteCommand::Cp(args) => copy::run(store, args).await?,
+        RemoteCommand::Ls(args) => ls::ls(store, args).await?,
+        RemoteCommand::Stat(args) => ls::stat(store, args).await?,
+        RemoteCommand::Mkdir(args) => mkdir::run(store, args).await?,
+        RemoteCommand::Rm(args) => rm::run(store, args).await?,
+        RemoteCommand::Mv(args) => mv::run(store, args).await?,
+        RemoteCommand::Find(args) => search::find(store, args).await?,
+        RemoteCommand::Grep(args) => search::grep(store, args).await?,
         RemoteCommand::Login(args) => login::login(store, args).await?,
         RemoteCommand::CreateToken(args) => login::create_token(args).await?,
         RemoteCommand::Logout => status::logout(store).await?,

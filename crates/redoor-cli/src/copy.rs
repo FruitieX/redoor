@@ -70,14 +70,14 @@ pub struct CopyArgs {
 
 /// Separates remote syntax from local colon filenames without guessing agent names from the server.
 #[derive(Debug)]
-enum Location {
+pub(crate) enum Location {
     Local(PathBuf),
     Remote(CopyEndpoint),
 }
 
 impl Location {
     /// Explicit ./ and / paths are local; unprefixed AGENT:path must contain an absolute remote path.
-    async fn parse(input: &str) -> Result<Self> {
+    pub(crate) async fn parse(input: &str) -> Result<Self> {
         ensure!(!input.is_empty(), "Copy paths must not be empty");
         if !input.starts_with('/')
             && !input.starts_with("./")
@@ -107,6 +107,14 @@ impl Location {
         } else {
             std::env::current_dir()?.join(path)
         }))
+    }
+
+    /// Parses an argument of a remote-only command, which must be `DEVICE:/absolute/path`.
+    pub(crate) async fn remote(input: &str) -> Result<CopyEndpoint> {
+        match Self::parse(input).await? {
+            Self::Remote(endpoint) => Ok(endpoint),
+            Self::Local(_) => bail!("Expected DEVICE:/absolute/path, got a local path: {input}"),
+        }
     }
 
     /// A source basename is required to reproduce directory-destination semantics predictably.
@@ -217,7 +225,8 @@ impl Transfer {
                 (metadata.is_dir(), metadata.len())
             }
             Location::Remote(remote) => {
-                let metadata = metadata(client, remote)
+                let metadata = client
+                    .metadata(remote)
                     .await?
                     .context("Source does not exist")?;
                 ensure!(
@@ -243,19 +252,7 @@ impl Transfer {
                 }
                 Err(error) => return Err(error.into()),
             },
-            Location::Remote(remote) => {
-                if metadata(client, remote)
-                    .await?
-                    .is_some_and(|metadata| metadata.is_dir)
-                {
-                    remote.path = Path::new(&remote.path)
-                        .join(basename)
-                        .to_string_lossy()
-                        .into_owned();
-                } else if remote.path.ends_with('/') {
-                    bail!("Destination directory does not exist");
-                }
-            }
+            Location::Remote(remote) => client.resolve_destination(remote, basename).await?,
         }
         let policy = args.on_existing.into();
         match (&source, &destination) {
@@ -296,7 +293,10 @@ impl Transfer {
         };
         let builder = client.request(
             Method::PUT,
-            &format!("{}?on_existing={mode}", api_path(destination, operation)?),
+            &format!(
+                "{}?on_existing={mode}",
+                client.agent_path(destination, operation)?
+            ),
         )?;
         let token = uuid::Uuid::new_v4();
         self.upload_token = Some(token);
@@ -370,7 +370,7 @@ impl Transfer {
         let staging = created??;
         self.staging = Some(staging.clone());
         let response = client
-            .send(client.request(Method::GET, &api_path(source, "raw")?)?)
+            .send(client.request(Method::GET, &client.agent_path(source, "raw")?)?)
             .await?;
         let counter = self.bytes.clone();
         let stream = response.bytes_stream().map(move |chunk| {
@@ -434,66 +434,83 @@ impl Transfer {
         self.admission = None;
         let id = admitted??;
         self.remote_id = Some(id);
+        let outcome = client.wait_for_transfer(id, &self.bytes).await?;
+        // A finished transfer needs no cancellation, whether it succeeded or not.
+        self.remote_id = None;
+        outcome
+    }
+}
+
+impl RemoteClient {
+    /// Polls retained progress until a server-side copy or move ends. The outer error is a
+    /// transport failure (the transfer may still run); the inner one is the transfer's own.
+    pub(crate) async fn wait_for_transfer(
+        &self,
+        id: TransferId,
+        bytes: &AtomicU64,
+    ) -> Result<Result<()>> {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
         loop {
             interval.tick().await;
             let progress: TransferProgressListResponse =
-                client.get_json("api/v1/transfers/progress").await?;
+                self.get_json("api/v1/transfers/progress").await?;
             let entry = progress
                 .transfers
                 .into_iter()
                 .find(|entry| entry.request_id == id)
-                .context("Copy progress disappeared before completion")?;
-            self.bytes.store(entry.transferred_bytes, Ordering::Relaxed);
+                .context("Transfer progress disappeared before completion")?;
+            bytes.store(entry.transferred_bytes, Ordering::Relaxed);
             match entry.state {
-                TransferProgressState::Completed => {
-                    self.remote_id = None;
-                    return Ok(());
-                }
+                TransferProgressState::Completed => return Ok(Ok(())),
                 TransferProgressState::Errored | TransferProgressState::Canceled => {
-                    self.remote_id = None;
-                    bail!(
+                    return Ok(Err(anyhow::anyhow!(
                         "{}",
                         entry.error.unwrap_or_else(|| "Transfer canceled".into())
-                    );
+                    )));
                 }
                 _ => {}
             }
         }
     }
-}
 
-/// Percent-encodes each route component so spaces, colons, #, and ? remain filesystem data.
-fn api_path(endpoint: &CopyEndpoint, operation: &str) -> Result<String> {
-    let mut url = reqwest::Url::parse("http://localhost/")?;
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| anyhow::anyhow!("Invalid API URL"))?;
-        let agent = endpoint.agent.to_string();
-        segments.extend(["api", "v1", "agents", &agent, operation]);
-        for part in endpoint.path.trim_start_matches('/').split('/') {
-            segments.push(part);
+    /// Treats only HTTP 404 as absence; authentication and permissions still fail clearly.
+    pub(crate) async fn metadata(
+        &self,
+        endpoint: &CopyEndpoint,
+    ) -> Result<Option<MetadataResponse>> {
+        match self.get_json(&self.agent_path(endpoint, "metadata")?).await {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error)
+                if error
+                    .downcast_ref::<RemoteApiError>()
+                    .is_some_and(|error| error.status == StatusCode::NOT_FOUND) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
-    Ok(url.path().trim_start_matches('/').to_owned())
-}
 
-/// Treats only HTTP 404 as absence; authentication and permissions still fail clearly.
-async fn metadata(
-    client: &RemoteClient,
-    endpoint: &CopyEndpoint,
-) -> Result<Option<MetadataResponse>> {
-    match client.get_json(&api_path(endpoint, "metadata")?).await {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error)
-            if error
-                .downcast_ref::<RemoteApiError>()
-                .is_some_and(|error| error.status == StatusCode::NOT_FOUND) =>
+    /// Applies copy-style destination rules: an existing directory receives the source's
+    /// basename, and a trailing slash requires that directory to exist.
+    pub(crate) async fn resolve_destination(
+        &self,
+        destination: &mut CopyEndpoint,
+        basename: &str,
+    ) -> Result<()> {
+        if self
+            .metadata(destination)
+            .await?
+            .is_some_and(|metadata| metadata.is_dir)
         {
-            Ok(None)
+            destination.path = Path::new(&destination.path)
+                .join(basename)
+                .to_string_lossy()
+                .into_owned();
+        } else if destination.path.ends_with('/') {
+            bail!("Destination directory does not exist");
         }
-        Err(error) => Err(error),
+        Ok(())
     }
 }
 

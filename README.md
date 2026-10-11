@@ -75,14 +75,21 @@ These credentials and the agent token built into the image are only for a local 
 
 ## Remote CLI
 
-The `redoor remote` subcommand lists devices, copies files, and executes commands through your Redoor server. Use it to give AI agents control of multiple servers at once.
+The `redoor remote` subcommand lists devices, copies, moves, searches and deletes files, and executes commands through your Redoor server. Use it to give AI agents control of multiple servers at once.
 
 ```sh
 redoor remote login https://redoor.example.com
 redoor remote devices
 redoor remote cp ./report.csv workstation:/srv/report.csv
 redoor remote exec workstation -- uptime
+redoor remote ls workstation:/srv
+redoor remote grep workstation:/srv/app "TODO"
 ```
+
+Remote paths are written `DEVICE:/absolute/path`. The commands are `devices`, `start`, `stop`,
+`exec`, `cp`, `mv`, `ls`, `stat`, `mkdir`, `rm` (to the trash unless `--permanent`), `find`
+and `grep`, plus `login`, `logout`, `status` and `create-token`. Most take `--json` for
+scripts.
 
 `redoor remote login` asks for your username and password, then lets you choose what the
 CLI may do. It creates an **access token** with those permissions and saves only the token;

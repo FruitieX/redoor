@@ -39,7 +39,7 @@ impl RemoteClient {
     }
 
     /// Inventory is available even for dormant agents, unlike the live agent-details endpoint.
-    async fn agent_snapshot(&self, agent: &str) -> Result<AgentInfoResponse> {
+    pub(crate) async fn agent_snapshot(&self, agent: &str) -> Result<AgentInfoResponse> {
         let inventory: AgentListResponse = self.get_json("api/v1/agents").await?;
         inventory
             .agents
