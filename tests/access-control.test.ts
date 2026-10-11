@@ -13,6 +13,11 @@ import {
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import {
+    type JsonObject,
+    type McpTestClient,
+    createMcpTestClient,
+} from "./mcp-client";
+import {
     ALL_PERMISSIONS,
     ProcessManager,
     TEST_AGENT_TOKEN,
@@ -33,6 +38,8 @@ const tempFiles = new TempFileManager();
 const baseUrl = `http://127.0.0.1:${VITEST_SERVER_PORT}`;
 
 const api = new ApiClient(baseUrl);
+
+const endpoint = `${baseUrl}/mcp`;
 
 const agentA = "access-control-a";
 
@@ -268,7 +275,11 @@ describe("Access token permissions", () => {
         // Every file permission together still does not allow running commands.
         expect(
             await rawStatus({
-                bearer: await token(["files:read", "files:write", "files:delete"]),
+                bearer: await token([
+                    "files:read",
+                    "files:write",
+                    "files:delete",
+                ]),
                 method: "POST",
                 path,
                 json,
@@ -285,8 +296,19 @@ describe("Access token permissions", () => {
     });
 
     it("agents:manage gates starting and stopping managed agents", async () => {
-        const without = agentAs(await token(ALL_PERMISSIONS.filter((permission) => permission !== "agents:manage")), managedAgent);
-        const withManage = agentAs(await token(["agents:manage"]), managedAgent);
+        const without = agentAs(
+            await token(
+                ALL_PERMISSIONS.filter(
+                    (permission) => permission !== "agents:manage",
+                ),
+            ),
+            managedAgent,
+        );
+
+        const withManage = agentAs(
+            await token(["agents:manage"]),
+            managedAgent,
+        );
 
         // Lifecycle control needs agents:manage.
         expect(await statusOf(without.start())).toBe(403);
@@ -400,7 +422,9 @@ describe("Access token device scope", () => {
 
         // A move removes the source, so read and write are not enough.
         expect(
-            await statusOf(agentAs(readWrite, agentA).moveTo(destination, source)),
+            await statusOf(
+                agentAs(readWrite, agentA).moveTo(destination, source),
+            ),
         ).toBe(403);
         // With delete the move is admitted and completes.
         expect(
@@ -452,6 +476,396 @@ describe("Access token device scope", () => {
     });
 });
 
+/** An empty JSON body for methods that may carry one; denied requests never parse it. */
+function bodyFor(method: string): string | undefined {
+    return method === "GET" ? undefined : "{}";
+}
+
+describe("Route access table", () => {
+    /** One token-reachable device route and the permissions it needs on `{agent}`. */
+    type DeviceRoute = {
+        method: string;
+        path: string;
+        permissions: Permission[];
+    };
+
+    /** Builds one table row; the rest parameter keeps permission literals typed. */
+    function route(
+        method: string,
+        path: string,
+        ...permissions: Permission[]
+    ): DeviceRoute {
+        return { method, path, permissions };
+    }
+
+    /** Every device route reachable by a token, mirroring `access/routes.rs`. */
+    function deviceRoutes(agent: string): DeviceRoute[] {
+        const base = `/api/v1/agents/${agent}`;
+        const file = `${rootA}/route-matrix.txt`;
+        const directory = `${rootA}/route-matrix-dir`;
+
+        return [
+            route("GET", `${base}/ls`, "files:read"),
+            route("GET", `${base}/ls${rootA}`, "files:read"),
+            route("GET", `${base}/metadata${file}`, "files:read"),
+            route("GET", `${base}/git/context${rootA}`, "files:read"),
+            route("GET", `${base}/git/status${rootA}`, "files:read"),
+            route("POST", `${base}/git/diff`, "files:read"),
+            route("GET", `${base}/raw${file}`, "files:read"),
+            route("GET", `${base}/accounts`, "files:read"),
+            route("GET", `${base}/trash`, "files:read"),
+            route("POST", `${base}/find${rootA}`, "files:read"),
+            route("POST", `${base}/grep${rootA}`, "files:read"),
+            route("POST", `${base}/directory-size${rootA}`, "files:read"),
+            route("POST", `${base}/one-time-token${file}`, "files:read"),
+            route("PUT", `${base}/raw${file}`, "files:write"),
+            route("PUT", `${base}/archive${directory}`, "files:write"),
+            route("PUT", `${base}/edit${file}`, "files:write"),
+            route("POST", `${base}/mkdir${directory}`, "files:write"),
+            route("POST", `${base}/chmod${file}`, "files:write"),
+            route("POST", `${base}/chown${file}`, "files:write"),
+            route("POST", `${base}/trash/restore`, "files:write"),
+            route("POST", `${base}/rename`, "files:write", "files:delete"),
+            route("DELETE", `${base}/raw${file}`, "files:delete"),
+            route("DELETE", `${base}/raw${file}?trash=true`, "files:delete"),
+            route("DELETE", `${base}/trash`, "files:delete"),
+            route("POST", `${base}/exec`, "commands:execute"),
+            route("DELETE", `${base}/exec/1`, "commands:execute"),
+            route("POST", `${base}/open${file}`, "commands:execute"),
+            route("POST", `${base}/start`, "agents:manage"),
+            route("POST", `${base}/shutdown`, "agents:manage"),
+            route("POST", `${base}/retry-start`, "agents:manage"),
+            route("POST", `${base}/restart`, "agents:manage"),
+            route("POST", `${base}/upgrade`, "agents:manage"),
+            route("GET", base),
+        ];
+    }
+
+    it("refuses every device route without its permission or outside the device scope", async () => {
+        const file = join(rootA, "route-matrix.txt");
+        writeFileSync(file, "untouched");
+        const lacking = new Map<Permission, string>();
+
+        for (const missing of ALL_PERMISSIONS) {
+            lacking.set(
+                missing,
+                await token(
+                    ALL_PERMISSIONS.filter(
+                        (permission) => permission !== missing,
+                    ),
+                ),
+            );
+        }
+
+        const outside = await token(ALL_PERMISSIONS, {
+            kind: "only",
+            device_ids: [agentB],
+        });
+
+        for (const route of deviceRoutes(agentA)) {
+            for (const missing of route.permissions) {
+                const bearer = lacking.get(missing);
+
+                if (bearer === undefined)
+                    throw new Error(`No ${missing} token`);
+                // The access table refuses the route before the handler runs.
+                expect(
+                    await rawStatus({
+                        bearer,
+                        ...route,
+                        json: bodyFor(route.method),
+                    }),
+                    `${route.method} ${route.path} without ${missing}`,
+                ).toBe(403);
+            }
+
+            // Every permission on another device does not reach this one.
+            expect(
+                await rawStatus({
+                    bearer: outside,
+                    ...route,
+                    json: bodyFor(route.method),
+                }),
+                `${route.method} ${route.path} outside the scope`,
+            ).toBe(403);
+        }
+
+        // None of the refused requests reached the agent: the file is unchanged and present.
+        expect(readFileSync(file, "utf8")).toBe("untouched");
+        expect(existsSync(join(rootA, "route-matrix-dir"))).toBe(false);
+    });
+
+    it("refuses body-addressed transfer routes for devices outside the scope", async () => {
+        const onlyA = await token(ALL_PERMISSIONS, {
+            kind: "only",
+            device_ids: [agentA],
+        });
+
+        const source = { agent: agentA, path: join(rootA, "route-copy.txt") };
+
+        const destination = {
+            agent: agentB,
+            path: join(rootB, "route-copy.txt"),
+        };
+
+        writeFileSync(source.path, "copy");
+
+        const routes = [
+            {
+                path: "/api/v1/copy",
+                json: { source, dest: destination },
+            },
+            {
+                path: "/api/v1/copy/preflight",
+                json: { source, dest: destination },
+            },
+            { path: "/api/v1/move", json: { source, dest: destination } },
+            {
+                path: "/api/v1/partials/resume",
+                json: { dest_agent_id: agentB, key: "route-matrix" },
+            },
+            {
+                path: "/api/v1/partials/discard",
+                json: { dest_agent_id: agentB, key: "route-matrix" },
+            },
+        ];
+
+        for (const route of routes) {
+            // The handler checks the devices named in the body against the scope.
+            expect(
+                await rawStatus({
+                    bearer: onlyA,
+                    method: "POST",
+                    path: route.path,
+                    json: JSON.stringify(route.json),
+                }),
+                route.path,
+            ).toBe(403);
+        }
+
+        // Discarding a partial changes the destination, so it needs files:write there.
+        expect(
+            await rawStatus({
+                bearer: await token(["files:read", "files:delete"]),
+                method: "POST",
+                path: "/api/v1/partials/discard",
+                json: JSON.stringify({
+                    dest_agent_id: agentA,
+                    key: "route-matrix",
+                }),
+            }),
+        ).toBe(403);
+        // Nothing reached the destination device.
+        expect(existsSync(destination.path)).toBe(false);
+    });
+
+    it("refuses every session-only route to a full-permission token", async () => {
+        const bearer = await token(ALL_PERMISSIONS);
+        const someId = "00000000-0000-4000-8000-000000000000";
+
+        const routes: [string, string][] = [
+            ["GET", "/api/v1/protocol-mismatches"],
+            ["GET", "/api/v1/server"],
+            ["GET", "/api/v1/server/logging-level"],
+            ["PUT", "/api/v1/server/logging-level"],
+            ["POST", "/api/v1/server/restart"],
+            ["GET", "/api/v1/user/state"],
+            ["PUT", "/api/v1/user/state"],
+            ["POST", "/api/v1/agents"],
+            ["PUT", `/api/v1/agents/${agentA}`],
+            ["DELETE", `/api/v1/agents/${agentA}`],
+            ["GET", `/api/v1/agents/${agentA}/configuration`],
+            ["POST", "/api/v1/local-agents"],
+            ["PUT", `/api/v1/local-agents/${managedAgent}`],
+            ["DELETE", `/api/v1/local-agents/${managedAgent}`],
+            ["GET", `/api/v1/local-agents/${managedAgent}/configuration`],
+            ["GET", `/api/v1/agents/${agentA}/logging-level`],
+            ["PUT", `/api/v1/agents/${agentA}/logging-level`],
+            ["POST", `/api/v1/agents/${agentA}/echo`],
+            ["GET", "/api/v1/tokens"],
+            ["POST", "/api/v1/tokens"],
+            ["PUT", `/api/v1/tokens/${someId}`],
+            ["DELETE", `/api/v1/tokens/${someId}`],
+            ["POST", `/api/v1/tokens/${someId}/rotate`],
+            ["GET", "/api/v1/ui/ws"],
+            ["GET", "/api/v1/server/logs/ws"],
+            ["GET", `/api/v1/agents/${agentA}/logs/ws`],
+            ["GET", `/api/v1/agents/${agentA}/terminal/ws`],
+        ];
+
+        for (const [method, path] of routes) {
+            // Configuration, live sockets and token management are never grantable.
+            expect(
+                await rawStatus({
+                    bearer,
+                    method,
+                    path,
+                    json: bodyFor(method),
+                }),
+                `${method} ${path}`,
+            ).toBe(403);
+        }
+
+        // The managed agent's configuration survived the refused delete.
+        expect(
+            (await api.listAgents()).some((agent) => agent.id === managedAgent),
+        ).toBe(true);
+    });
+});
+
+/** One MCP device tool, the permissions it needs and its arguments for one device. */
+type ToolCase = {
+    tool: string;
+    permissions: Permission[];
+    args: (device: string) => JsonObject;
+};
+
+/** Every MCP device tool, mirroring the declarative tool table in `mcp/tools.rs`. */
+function toolCases(kept: string, denied: string): ToolCase[] {
+    const readPermissions: Permission[] = ["files:read"];
+
+    const pathTool = (tool: string, path: string): ToolCase => ({
+        tool,
+        permissions: readPermissions,
+        args: (device) => ({ device_id: device, path }),
+    });
+
+    const searchTool = (tool: string): ToolCase => ({
+        tool,
+        permissions: readPermissions,
+        args: (device) => ({ device_id: device, root: rootA, query: "kept" }),
+    });
+
+    const transferTool = (
+        tool: string,
+        permissions: Permission[],
+    ): ToolCase => ({
+        tool,
+        permissions,
+        args: (device) => ({
+            source: { device_id: device, path: kept },
+            destination: { device_id: device, path: denied },
+            on_existing: "replace",
+        }),
+    });
+
+    const lifecycleTool = (tool: string): ToolCase => ({
+        tool,
+        permissions: ["agents:manage"],
+        args: (device) => ({ device_id: device }),
+    });
+
+    return [
+        {
+            tool: "run_command",
+            permissions: ["commands:execute"],
+            args: (device) => ({
+                device_id: device,
+                argv: ["touch", denied],
+                cwd: rootA,
+            }),
+        },
+        pathTool("list_directory", rootA),
+        pathTool("stat_path", kept),
+        pathTool("read_file", kept),
+        searchTool("search_paths"),
+        searchTool("search_contents"),
+        {
+            tool: "write_file",
+            permissions: ["files:write"],
+            args: (device) => ({
+                device_id: device,
+                path: denied,
+                content: "denied",
+                on_existing: "replace",
+            }),
+        },
+        {
+            tool: "create_directory",
+            permissions: ["files:write"],
+            args: (device) => ({ device_id: device, path: denied }),
+        },
+        {
+            tool: "delete_path",
+            permissions: ["files:delete"],
+            args: (device) => ({
+                device_id: device,
+                path: kept,
+                mode: "permanent",
+                recursive: false,
+            }),
+        },
+        transferTool("copy_path", ["files:read", "files:write"]),
+        transferTool("move_path", [
+            "files:read",
+            "files:write",
+            "files:delete",
+        ]),
+        lifecycleTool("start_managed_agent"),
+        lifecycleTool("stop_managed_agent"),
+    ];
+}
+
+describe("MCP tool access", () => {
+    it("hides and refuses every device tool without its permission or outside the scope", async () => {
+        const kept = join(rootA, "mcp-matrix-kept.txt");
+        const denied = join(rootA, "mcp-matrix-denied.txt");
+        writeFileSync(kept, "kept");
+
+        const lacking = new Map<Permission, McpTestClient>();
+
+        for (const missing of ALL_PERMISSIONS) {
+            const bearer = await token(
+                ALL_PERMISSIONS.filter((permission) => permission !== missing),
+            );
+
+            lacking.set(
+                missing,
+                createMcpTestClient({ endpoint, token: bearer }),
+            );
+        }
+
+        const outside = createMcpTestClient({
+            endpoint,
+            token: await token(ALL_PERMISSIONS, {
+                kind: "only",
+                device_ids: [agentB],
+            }),
+        });
+
+        for (const testCase of toolCases(kept, denied)) {
+            for (const missing of testCase.permissions) {
+                const client = lacking.get(missing);
+
+                if (client === undefined)
+                    throw new Error(`No ${missing} client`);
+
+                const listed = (await client.listTools()).result.tools.map(
+                    (tool) => tool.name,
+                );
+
+                // A token that can never use the tool does not see it in the catalog.
+                expect(listed, testCase.tool).not.toContain(testCase.tool);
+                // Calling it anyway is refused for the missing permission.
+                await expect(
+                    client.callTool(testCase.tool, testCase.args(agentA)),
+                    `${testCase.tool} without ${missing}`,
+                ).rejects.toThrow("(403)");
+            }
+
+            // Holding every permission on another device does not reach this one.
+            await expect(
+                outside.callTool(testCase.tool, testCase.args(agentA)),
+                `${testCase.tool} outside the scope`,
+            ).rejects.toThrow("(403)");
+        }
+
+        // No refused call touched the device: the kept file is intact and nothing was created.
+        expect(readFileSync(kept, "utf8")).toBe("kept");
+        expect(existsSync(denied)).toBe(false);
+    });
+});
+
 describe("Session-only routes and authentication", () => {
     it("refuses server, agent and account management to any token", async () => {
         const bearer = await token(ALL_PERMISSIONS);
@@ -483,7 +897,11 @@ describe("Session-only routes and authentication", () => {
             }),
         ).toBe(403);
         expect(
-            await rawStatus({ bearer, method: "GET", path: "/api/v1/user/state" }),
+            await rawStatus({
+                bearer,
+                method: "GET",
+                path: "/api/v1/user/state",
+            }),
         ).toBe(403);
         // The server is still the same process: the session sees it running.
         expect(await statusOf(api.getServerInfo())).toBe(200);
