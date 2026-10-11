@@ -1,4 +1,5 @@
-//! Axum router assembly: which routes are public and which require authentication.
+//! Axum router assembly. Which principal may call each route is decided by the access table
+//! in `access::routes`, applied by the `access_control` layer.
 
 use axum::{
     Router, middleware,
@@ -7,6 +8,7 @@ use axum::{
 use tower_http::cors::{Any, CorsLayer};
 
 use super::{
+    access::access_control,
     agent_configuration::{
         create_local_agent_handler, create_ssh_agent_handler, delete_local_agent_handler,
         delete_ssh_agent_handler, get_local_agent_configuration_handler,
@@ -21,7 +23,7 @@ use super::{
         open_path_agent_handler, restart_agent_handler, shutdown_agent_handler,
         start_agent_handler, upgrade_agent_handler,
     },
-    auth::{login_handler, logout_handler, require_authentication},
+    auth::{login_handler, logout_handler},
     copy::copy_file_handler,
     diffs::diff_files_handler,
     file_edit::file_edit_handler,
@@ -48,9 +50,9 @@ use super::{
     ws::ui_websocket_handler,
 };
 
-/// Builds public login/agent entry points and protects every browser-facing API route.
+/// Builds the REST and websocket routes behind the access layer, plus the separately
+/// authenticated MCP router.
 pub(crate) fn build_app(server_state: ServerState) -> Router {
-    let auth = server_state.auth.clone();
     let mcp_router = super::mcp::router(server_state.clone());
 
     let browser_router = Router::new()
@@ -265,19 +267,27 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route("/api/v1/agents/{agent}/echo", post(echo_agent_handler))
         .route("/api/v1/server/restart", post(restart_server_handler))
         .route(
-            "/api/v1/mcp/tokens",
-            get(super::mcp_tokens::list_handler).post(super::mcp_tokens::create_handler),
+            "/api/v1/tokens",
+            get(super::tokens::handlers::list).post(super::tokens::handlers::create),
+        )
+        // Registered as a static path so it is never captured by `{token_id}`.
+        .route(
+            "/api/v1/tokens/current",
+            get(super::tokens::handlers::current).delete(super::tokens::handlers::delete_current),
         )
         .route(
-            "/api/v1/mcp/tokens/{token_id}",
-            axum::routing::delete(super::mcp_tokens::revoke_handler)
-                .put(super::mcp_tokens::update_handler),
+            "/api/v1/tokens/{token_id}",
+            put(super::tokens::handlers::update).delete(super::tokens::handlers::delete),
         )
         .route(
-            "/api/v1/mcp/tokens/{token_id}/rotate",
-            post(super::mcp_tokens::rotate_handler),
+            "/api/v1/tokens/{token_id}/rotate",
+            post(super::tokens::handlers::rotate),
         )
-        .layer(middleware::from_fn_with_state(auth, require_authentication))
+        // `Router::layer` runs after routing, so the access table sees the matched template.
+        .layer(middleware::from_fn_with_state(
+            server_state.clone(),
+            access_control,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

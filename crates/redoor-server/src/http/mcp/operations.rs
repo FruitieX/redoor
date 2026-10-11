@@ -23,11 +23,11 @@ const DEFAULT_GLOBAL_QUOTA: usize = 64 * 1024 * 1024;
 /// Default age after which finished operations are dropped so history does not grow forever.
 const DEFAULT_EXPIRY_SECONDS: u64 = 24 * 60 * 60;
 
-/// One retained operation is addressable only through its stable owning grant.
+/// One retained operation is addressable only through the access token that admitted it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct OperationRecord {
     pub(super) id: Uuid,
-    pub(super) owner_grant: Uuid,
+    pub(super) owner_token: Uuid,
     pub(super) device_ids: Vec<String>,
     pub(super) kind: String,
     pub(super) state: String,
@@ -143,7 +143,7 @@ impl OperationRegistry {
     /// Creates and durably records admission before the caller starts remote work.
     pub(super) async fn create(
         &self,
-        owner_grant: Uuid,
+        owner_token: Uuid,
         device_ids: Vec<String>,
         kind: impl Into<String>,
     ) -> Result<Arc<Mutex<OperationRecord>>> {
@@ -152,7 +152,7 @@ impl OperationRegistry {
         let now = Timestamp::now();
         let record = Arc::new(Mutex::new(OperationRecord {
             id,
-            owner_grant,
+            owner_token,
             device_ids,
             kind: kind.into(),
             state: "admitted".to_string(),

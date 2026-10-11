@@ -261,7 +261,7 @@ list its exact HTTP(S) origin under `[server]`:
 mcp_allowed_origins = ["https://trusted-client.example"]
 ```
 
-See [MCP](mcp.md) for credential creation, client headers, and protocol limits.
+See [MCP](mcp.md) for creating access tokens, client headers, and protocol limits.
 
 Retained MCP operation output and metadata can be bounded or expired with
 `REDOOR_MCP_OPERATION_JOB_QUOTA` (bytes per operation),

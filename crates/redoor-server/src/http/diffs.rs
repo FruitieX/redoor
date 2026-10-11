@@ -1,26 +1,30 @@
 //! REST endpoint that diffs two editable files, possibly on different agents.
 
 use crate::actors::router::OutputStreamTracking;
-use axum::{Json, extract::State as AxumState};
+use axum::{Extension, Json, extract::State as AxumState};
 use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::{
         diffs::{DiffEndpoint, DiffFilesRequest, DiffFilesResponse},
         files::MetadataResponse,
+        tokens::Permission,
     },
     wire::command::Command,
 };
 
 use super::{
-    agent_client::Metadata, agent_helpers::require_absolute_path, error::ApiError,
-    services::output::OutputStream, state::ServerState,
+    access::Principal, agent_client::Metadata, agent_helpers::require_absolute_path,
+    error::ApiError, services::output::OutputStream, state::ServerState,
 };
 
-/// Route: `POST /api/v1/diff`
+/// Route: `POST /api/v1/diff`; reads both files, so it needs read on both devices.
 pub(crate) async fn diff_files_handler(
     AxumState(state): AxumState<ServerState>,
+    Extension(principal): Extension<Principal>,
     Json(payload): Json<DiffFilesRequest>,
 ) -> Result<Json<DiffFilesResponse>, ApiError> {
+    principal.require(&[Permission::FilesRead], &payload.left.agent)?;
+    principal.require(&[Permission::FilesRead], &payload.right.agent)?;
     let left = DiffEndpoint {
         path: require_absolute_path(payload.left.path)?,
         agent: payload.left.agent,

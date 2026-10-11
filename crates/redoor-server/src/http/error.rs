@@ -51,6 +51,11 @@ impl ApiError {
         Self::status(StatusCode::NOT_FOUND, message)
     }
 
+    /// Builds an authorization failure; the message names the missing permission or scope.
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+        Self::status(StatusCode::FORBIDDEN, message)
+    }
+
     /// Builds a conflict error for requests that are valid but clash with current state.
     pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self::status(StatusCode::CONFLICT, message)

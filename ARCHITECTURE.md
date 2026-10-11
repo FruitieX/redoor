@@ -59,7 +59,7 @@ The contract between all parties, with no runtime dependencies (no tokio).
   - `registration` holds `AgentIdentity` and `AgentCapabilities`, which are flattened into
     the `hello` frame.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
-  transfers, git, mcp, ...).
+  transfers, git, tokens, ...).
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
   and the integration tests use, so REST JSON (and the wire types the browser shares, such as
   exec, log and terminal events) is checked from both sides. Agent-only wire types are
@@ -111,7 +111,8 @@ The agent runtime and the implementation of every command.
 
 ### `redoor-server`
 
-- `http/`: Axum routes, auth (sessions, PAM, machine and MCP tokens), the UI assets and MCP.
+- `http/`: Axum routes, auth (sessions, PAM), access tokens (`http/tokens`), access control
+  (`http/access`), the UI assets and MCP.
   - `agent_client`: `AgentClient::call` for any protocol request that is also an
     `AgentCall`, which adds its deadline; all deadlines are defined in one place.
   - `error.rs`: `ApiError`, which owns all HTTP status mapping.
@@ -857,9 +858,9 @@ credential only works on its own endpoints:
 
 | Client | Credential | Grants |
 |---|---|---|
-| Browser UI | `redoor_session` cookie from `POST /api/v1/login` | REST API and browser websockets, full access |
+| Browser UI | `redoor_session` cookie from `POST /api/v1/login` | REST API and browser websockets, full access, including the session-only routes |
 | `redoor remote` CLI | The same kind of session, saved by `redoor remote login` | Same as the browser |
-| MCP clients | `redoor_mcp_...` bearer token | `/mcp` only, limited by scopes and a device allow-list |
+| MCP clients, scripts | `redoor_at_...` access token (`Authorization: Bearer`) | REST API and `/mcp`, limited by permissions and a device scope |
 | Agents | The shared `agent_token` bearer | `/api/v1/agent/ws` only |
 | Plain download links | One-time token | One file on one agent, once |
 
@@ -868,10 +869,11 @@ credential only works on its own endpoints:
   rate limited.
   - Sessions are files in the server data dir and expire after 7 days.
   - Changing the configured password invalidates existing sessions.
-- **MCP tokens** are created in the UI or with `redoor server mcp-token`, and only a hash of
-  each is stored. Scopes (`files:read`, `files:write`, `commands:execute`, ...) and an
-  explicit device list limit what a token can do. An MCP client is usually an AI assistant
-  acting for the user, so it should get no more access than its task needs.
+- **Access tokens** are the one credential type for clients other than the browser. They
+  are created and managed only by a browser session (see "Access control" below). An MCP
+  client is usually an AI assistant acting for the user, so it should get no more access
+  than its task needs. Tokens are independent of the login password: changing the password
+  does not invalidate them.
 - **The agent token** is one secret shared by all agents and checked during the websocket
   upgrade. It proves "this is an agent of this server", not which agent: the agent id in
   `hello` is self-reported. Agents are therefore only partly trusted.
@@ -888,14 +890,70 @@ credential only works on its own endpoints:
   - An agent cannot take over the name of a live agent.
   - The server signs resume manifests and checks them against the agent that returned them,
     and it compares both agents' hashes itself before reusing a prefix.
-  - The partial signing key, the sessions and the MCP token hashes exist only on the server.
+  - The partial signing key, the sessions and the access token verifiers exist only on the
+    server.
+  - Agent ids are self-reported, so a token scoped to device X trusts that no other holder
+    of the agent token registers as X. This is the same limit every agent check has.
 - **Browser protections.**
   - The cookie is `HttpOnly` and `SameSite=Lax`.
   - JSON endpoints require `Content-Type: application/json`.
   - The terminal and log websockets check `Origin` against `Host`, which stops cross-site
     websocket hijacking.
-  - MCP token changes reject cross-site requests.
+  - Token management rejects cross-site requests (`Sec-Fetch-Site` and `Origin`).
   - `/mcp` accepts only the origins listed in `mcp_allowed_origins`.
+
+### Access control
+
+Every authenticated request has a `Principal` (`http/access`): `Session` for a browser
+session, or `Token(TokenGrant)` for an access token. A grant is a set of permissions and a
+device scope:
+
+| Permission | Grants |
+|---|---|
+| `files:read` | list, stat, read and download, search, directory size, git status and diff, trash listing, one-time download links |
+| `files:write` | upload, edit, mkdir, chmod and chown, trash restore, copy destination |
+| `files:delete` | trash, permanent delete, empty trash, move source removal (rename needs write and delete) |
+| `commands:execute` | exec, exec cancel, native open. High trust: commands run as the agent's OS user and bypass every file permission |
+| `agents:manage` | start, stop, retry, restart and upgrade an agent |
+
+The device scope is `All` (every device, including devices added later) or `Only` a list of
+device ids. Listing devices needs no permission; it is filtered to the scope.
+
+- **One decision function.** `Principal::require(permissions, device)` checks the scope and
+  the permissions. REST routes, REST handlers and MCP tools all call it, so REST and MCP
+  cannot drift apart.
+- **One route table.** `access/routes.rs` maps each `(method, route template)` to an
+  `Access`: `Public`, `SessionOnly`, `AnyPrincipal` (the handler filters by scope),
+  `Device(permissions)` (checked against the `{agent}` path parameter) or `Handler` (the
+  devices are in the body, so the handler calls `require`: copy, move, diff, partials and
+  transfer cancel or pause). The `access_control` middleware is attached with
+  `Router::layer`, which runs after routing, so it sees the matched template.
+- **Default deny.** A route missing from the table is session-only, so a new route is not
+  reachable with a token until someone classifies it.
+- **Session-only routes.** Server and agent configuration, creating SSH or local agents,
+  restart, log levels, terminals, log streams, the UI websocket, user state and token
+  management are never grantable. A token could otherwise widen its own access, for
+  example by adding a local agent or minting a broader token. The exception is
+  `/api/v1/tokens/current`, where a token reads or deletes itself.
+- **Bearer first.** When a request carries `Authorization: Bearer`, the token alone decides;
+  a cookie on the same request is ignored. `/mcp` accepts only tokens, never cookies.
+- **MCP tools** declare the permissions they need, and `tools/list` hides the tools the
+  token can never use. Each call still checks the devices it touches. Operations are owned
+  by the token id, which survives rotation. MCP does not stream big files between the
+  client and a device: `read_file` and `write_file` are capped at 64 KiB, and large local
+  transfers are the remote CLI's job. Copies and moves between devices stay, because their
+  bytes never pass through the client.
+- **Storage.** The server process owns the token store (`http/tokens/store.rs`): an
+  in-memory table loaded at startup from `<data_dir>/tokens/access-tokens.json` (0600),
+  rewritten atomically on every change. A token is `redoor_at_<id>_<random>`; only a
+  SHA-256 verifier is stored and compared in constant time. The 256 random bits make a slow
+  password hash unnecessary, and the embedded id gives an O(1) lookup. Rotation replaces the
+  verifier and keeps the id; deletion removes the record. Last use is updated in memory on
+  every request but written at most once a minute per token, so authentication does not
+  rewrite the file for every CLI poll.
+
+Agent registration (the shared agent token), one-time download links and browser sessions
+are separate credentials and not part of this model.
 
 ## Design rules
 

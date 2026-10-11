@@ -7,6 +7,9 @@ use redoor_protocol::{
     api::{
         files::CreationOwnershipOptions,
         search::{CaseSensitivity, FindRequest, GrepRequest},
+        tokens::Permission::{
+            self, AgentsManage, CommandsExecute, FilesDelete, FilesRead, FilesWrite,
+        },
         transfers::{CopyEndpoint, CopyExistingMode},
     },
     ids::{AgentId, RequestId, TransferId},
@@ -18,11 +21,11 @@ use redoor_protocol::{
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use super::{error::McpError, policy, schema::server_metadata};
+use super::{error::McpError, schema::server_metadata};
 use crate::http::{
+    access::Principal,
     agent_client::{CreateDirectory, Ls, Metadata, RawDelete, Trash, content_grep, file_search},
     error::ApiError,
-    machine_tokens::{MachinePrincipal, MachineScope},
     services::{
         output::OutputStream,
         transfer::{CopySpec, StartedCopy},
@@ -33,18 +36,21 @@ use crate::http::{
 
 /// Bounds the `hello` tool's echoed name so the greeting stays small.
 const MAX_NAME_LENGTH: usize = 64;
-/// Keeps inline MCP reads and writes small; larger files use the streaming endpoints.
+/// Keeps inline MCP reads and writes small; large local transfers belong to the remote CLI.
 const INLINE_FILE_LIMIT: usize = 64 * 1024;
 /// Truncates directory listings so one large directory cannot blow up an MCP response.
 const MAX_DIRECTORY_ENTRIES: usize = 2_000;
 
-/// A compact definition keeps annotations and schemas consistent with implemented dispatch.
+/// A compact definition keeps annotations, schemas and permissions consistent with dispatch.
 struct ToolDefinition {
     name: &'static str,
     description: &'static str,
     read_only: bool,
     destructive: bool,
     required: &'static [&'static str],
+    /// What a token must hold (on some device) to use the tool at all; `tools/list` hides the
+    /// rest. Each call still checks the permissions on the devices it actually touches.
+    permissions: &'static [Permission],
 }
 
 /// Single source for the advertised tool catalog and the names accepted by dispatch.
@@ -55,13 +61,15 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &[],
+        permissions: &[],
     },
     ToolDefinition {
         name: "list_devices",
-        description: "List devices visible to this grant.",
+        description: "List devices visible to this token.",
         read_only: true,
         destructive: false,
         required: &[],
+        permissions: &[],
     },
     ToolDefinition {
         name: "get_device",
@@ -69,6 +77,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["device_id"],
+        permissions: &[],
     },
     ToolDefinition {
         name: "run_command",
@@ -76,13 +85,15 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: true,
         required: &["device_id", "argv", "cwd"],
+        permissions: &[CommandsExecute],
     },
     ToolDefinition {
         name: "get_operation",
-        description: "Read principal-owned operation state.",
+        description: "Read the state of an operation this token started.",
         read_only: true,
         destructive: false,
         required: &["operation_id"],
+        permissions: &[],
     },
     ToolDefinition {
         name: "read_command_output",
@@ -90,6 +101,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["operation_id"],
+        permissions: &[CommandsExecute],
     },
     ToolDefinition {
         name: "cancel_operation",
@@ -97,6 +109,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: true,
         required: &["operation_id"],
+        permissions: &[],
     },
     ToolDefinition {
         name: "list_directory",
@@ -104,6 +117,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["device_id", "path"],
+        permissions: &[FilesRead],
     },
     ToolDefinition {
         name: "stat_path",
@@ -111,6 +125,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["device_id", "path"],
+        permissions: &[FilesRead],
     },
     ToolDefinition {
         name: "read_file",
@@ -118,6 +133,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["device_id", "path"],
+        permissions: &[FilesRead],
     },
     ToolDefinition {
         name: "write_file",
@@ -125,6 +141,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: true,
         required: &["device_id", "path", "content", "on_existing"],
+        permissions: &[FilesWrite],
     },
     ToolDefinition {
         name: "copy_path",
@@ -132,6 +149,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: false,
         required: &["source", "destination", "on_existing"],
+        permissions: &[FilesRead, FilesWrite],
     },
     ToolDefinition {
         name: "move_path",
@@ -139,6 +157,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: true,
         required: &["source", "destination", "on_existing"],
+        permissions: &[FilesRead, FilesWrite, FilesDelete],
     },
     ToolDefinition {
         name: "delete_path",
@@ -146,6 +165,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: true,
         required: &["device_id", "path", "mode", "recursive"],
+        permissions: &[FilesDelete],
     },
     ToolDefinition {
         name: "create_directory",
@@ -153,6 +173,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: false,
         required: &["device_id", "path"],
+        permissions: &[FilesWrite],
     },
     ToolDefinition {
         name: "search_paths",
@@ -160,6 +181,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["device_id", "root", "query"],
+        permissions: &[FilesRead],
     },
     ToolDefinition {
         name: "search_contents",
@@ -167,6 +189,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: true,
         destructive: false,
         required: &["device_id", "root", "query"],
+        permissions: &[FilesRead],
     },
     ToolDefinition {
         name: "start_managed_agent",
@@ -174,6 +197,7 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: false,
         required: &["device_id"],
+        permissions: &[AgentsManage],
     },
     ToolDefinition {
         name: "stop_managed_agent",
@@ -181,30 +205,22 @@ const TOOLS: &[ToolDefinition] = &[
         read_only: false,
         destructive: true,
         required: &["device_id"],
-    },
-    ToolDefinition {
-        name: "prepare_file_download",
-        description: "Describe authenticated ranged download access.",
-        read_only: true,
-        destructive: false,
-        required: &["device_id", "path"],
-    },
-    ToolDefinition {
-        name: "prepare_file_upload",
-        description: "Describe authenticated streamed upload access.",
-        read_only: false,
-        destructive: true,
-        required: &["device_id", "path", "on_existing"],
+        permissions: &[AgentsManage],
     },
 ];
 
-/// Returns deterministic schemas for every implemented device operation.
-pub(super) fn list_result(params: &Value, id: &Value) -> Result<Value, McpError> {
+/// Returns deterministic schemas for the tools this token's permissions allow, so the model
+/// only sees what it can actually do.
+pub(super) fn list_result(
+    principal: &Principal,
+    params: &Value,
+    id: &Value,
+) -> Result<Value, McpError> {
     let object = object(params, "params", id)?;
     if object.get("cursor").is_some_and(|cursor| !cursor.is_null()) {
         return Err(invalid("The tool catalog has one page", id));
     }
-    let tools = TOOLS.iter().map(|tool| json!({
+    let tools = TOOLS.iter().filter(|tool| tool.permissions.iter().all(|permission| principal.holds(*permission))).map(|tool| json!({
         "name": tool.name, "description": tool.description,
         "inputSchema": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":input_properties(tool.name),"required":tool.required,"additionalProperties":true},
         "outputSchema": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},
@@ -218,7 +234,7 @@ pub(super) fn list_result(params: &Value, id: &Value) -> Result<Value, McpError>
 /// Dispatches one authorized tool without loopback HTTP or retained client session state.
 pub(super) async fn call_result(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     params: &Value,
     id: &Value,
 ) -> Result<Value, McpError> {
@@ -253,8 +269,6 @@ pub(super) async fn call_result(
         "search_contents" => search_contents(state, principal, args, id).await?,
         "start_managed_agent" => managed_agent(state, principal, args, id, true).await?,
         "stop_managed_agent" => managed_agent(state, principal, args, id, false).await?,
-        "prepare_file_download" => prepare_transfer(principal, args, id, false)?,
-        "prepare_file_upload" => prepare_transfer(principal, args, id, true)?,
         _ => unreachable!(),
     };
     Ok(complete(name, result))
@@ -322,28 +336,27 @@ fn hello(args: &Map<String, Value>, id: &Value) -> Result<Value, McpError> {
 /// Filters retained inventory before serialization so disallowed IDs are never disclosed.
 async fn list_devices(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     id: &Value,
 ) -> Result<Value, McpError> {
-    require_scope(principal, MachineScope::DevicesRead, id)?;
     let devices = crate::http::agents::list_agent_snapshots(state)
         .await
         .map_err(|error| op(error.to_string(), id))?
         .into_iter()
-        .filter(|agent| principal.grant.device_ids.contains(&agent.id.to_string()))
+        .filter(|agent| principal.can_see(&agent.id))
         .map(device_json)
         .collect::<Vec<_>>();
     Ok(json!({"devices":devices}))
 }
-/// Returns one explicitly granted device without exposing connection configuration.
+/// Returns one in-scope device without exposing connection configuration.
 async fn get_device(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
-    policy::require_device(principal, MachineScope::DevicesRead, device, id)?;
+    require(principal, &[], device, id)?;
     let agent = crate::http::agents::list_agent_snapshots(state)
         .await
         .map_err(|error| op(error.to_string(), id))?
@@ -360,12 +373,12 @@ fn device_json(agent: redoor_protocol::api::agents::AgentInfoResponse) -> Value 
 /// Admits foreground or independently owned background non-PTY execution.
 async fn run_command(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?.to_string();
-    policy::require_device(principal, MachineScope::CommandsExecute, &device, id)?;
+    require(principal, &[CommandsExecute], &device, id)?;
     let argv = args
         .get("argv")
         .and_then(Value::as_array)
@@ -418,7 +431,7 @@ async fn run_command(
     let record = state
         .mcp
         .operations
-        .create(principal.grant.id, vec![device.clone()], "command")
+        .create(owner(principal, id)?, vec![device.clone()], "command")
         .await
         .map_err(|error| {
             op(
@@ -538,10 +551,10 @@ async fn finish_execution(
     drop(current);
     let _ = operations.update(record).await;
 }
-/// Resolves an operation only after checking its stable grant owner.
+/// Resolves an operation only for the token that started it; rotation keeps the token id.
 async fn owned_operation(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<std::sync::Arc<tokio::sync::Mutex<super::operations::OperationRecord>>, McpError> {
@@ -554,13 +567,18 @@ async fn owned_operation(
         .await
         .map_err(|error| op(format!("Failed reading operation registry: {error:#}"), id))?
         .ok_or_else(|| McpError::operation_not_found("Operation not found", Some(id.clone())))?;
-    policy::require_owner(principal, record.lock().await.owner_grant, id)?;
+    if principal.token_id() != Some(record.lock().await.owner_token) {
+        return Err(McpError::forbidden(
+            "Operation belongs to another token",
+            Some(id.clone()),
+        ));
+    }
     Ok(record)
 }
 /// Returns durable state without depending on the router's prunable transfer history.
 async fn get_operation(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
@@ -627,7 +645,7 @@ fn operation_json(record: &super::operations::OperationRecord) -> Result<Value, 
 /// Reads one bounded binary-safe page from an owned command spool.
 async fn read_command_output(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
@@ -657,7 +675,7 @@ async fn read_command_output(
 /// Routes cancellation to the underlying execution or transfer without claiming termination.
 async fn cancel_operation(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
@@ -711,12 +729,12 @@ async fn cancel_operation(
 /// Bounds remote directory serialization independently of agent result size.
 async fn list_directory(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    policy::require_device(principal, MachineScope::FilesRead, device, id)?;
+    require(principal, &[FilesRead], device, id)?;
     let call = Ls {
         path: Some(path.to_string()),
     };
@@ -737,12 +755,12 @@ async fn list_directory(
 /// Maps agent metadata to a credential-free path contract.
 async fn stat_path(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    policy::require_device(principal, MachineScope::FilesRead, device, id)?;
+    require(principal, &[FilesRead], device, id)?;
     let result = state
         .agents
         .call(
@@ -760,12 +778,12 @@ async fn stat_path(
 /// Reads one inline file page and preserves an exact byte continuation offset.
 async fn read_file(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    policy::require_device(principal, MachineScope::FilesRead, device, id)?;
+    require(principal, &[FilesRead], device, id)?;
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let limit = args
         .get("limit")
@@ -816,12 +834,12 @@ async fn read_file(
 /// Sends bounded inline content through the shared streamed upload service.
 async fn write_file(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    policy::require_device(principal, MachineScope::FilesWrite, device, id)?;
+    require(principal, &[FilesWrite], device, id)?;
     let encoding = args
         .get("encoding")
         .and_then(Value::as_str)
@@ -836,7 +854,7 @@ async fn write_file(
     };
     if bytes.len() > INLINE_FILE_LIMIT {
         return Err(invalid(
-            "Inline writes are limited to 65536 bytes; use prepare_file_upload",
+            "Inline writes are limited to 65536 bytes; use `redoor remote cp` for larger files",
             id,
         ));
     }
@@ -878,7 +896,7 @@ async fn write_inline(
 /// Authorizes both endpoints before admitting copy or move work idempotently.
 async fn transfer(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
     is_move: bool,
@@ -899,23 +917,16 @@ async fn transfer(
     let source_path = absolute(string(source, "path", id)?, id)?;
     let destination_device = string(destination, "device_id", id)?;
     let destination_path = absolute(string(destination, "path", id)?, id)?;
-    policy::require_device(principal, MachineScope::FilesRead, source_device, id)?;
-    policy::require_device(principal, MachineScope::FilesWrite, destination_device, id)?;
-    if is_move {
-        policy::require_device(principal, MachineScope::FilesDelete, source_device, id)?
-    }
+    let (source_permissions, destination_permissions) = transfer_permissions(is_move);
+    require(principal, source_permissions, source_device, id)?;
+    require(principal, destination_permissions, destination_device, id)?;
+    let owner = owner(principal, id)?;
     let mode = conflict_mode(string(args, "on_existing", id)?, id)?;
     let kind = if is_move { "move" } else { "copy" };
     let fingerprint = json!({"kind": kind, "arguments": args}).to_string();
     let key = args.get("idempotency_key").and_then(Value::as_str);
     let _admission = if let Some(key) = key {
-        Some(
-            state
-                .mcp
-                .operations
-                .lock_admission(principal.grant.id, key)
-                .await,
-        )
+        Some(state.mcp.operations.lock_admission(owner, key).await)
     } else {
         None
     };
@@ -923,7 +934,7 @@ async fn transfer(
         match state
             .mcp
             .operations
-            .idempotent_result(principal.grant.id, key, &fingerprint)
+            .idempotent_result(owner, key, &fingerprint)
             .await
         {
             Ok(Some(result)) => return Ok(result),
@@ -940,7 +951,7 @@ async fn transfer(
         .mcp
         .operations
         .create(
-            principal.grant.id,
+            owner,
             vec![source_device.to_string(), destination_device.to_string()],
             kind,
         )
@@ -957,12 +968,7 @@ async fn transfer(
         state
             .mcp
             .operations
-            .remember(
-                principal.grant.id,
-                key.to_string(),
-                fingerprint,
-                result.clone(),
-            )
+            .remember(owner, key.to_string(), fingerprint, result.clone())
             .await
             .map_err(|error| {
                 op(
@@ -1041,12 +1047,12 @@ async fn transfer(
 /// Requires explicit deletion mode and recursive intent before mutation.
 async fn delete_path(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    policy::require_device(principal, MachineScope::FilesDelete, device, id)?;
+    require(principal, &[FilesDelete], device, id)?;
     let recursive = args
         .get("recursive")
         .and_then(Value::as_bool)
@@ -1092,12 +1098,12 @@ async fn delete_path(
 /// Creates one absolute directory through the same agent command used by REST.
 async fn create_directory(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    policy::require_device(principal, MachineScope::FilesWrite, device, id)?;
+    require(principal, &[FilesWrite], device, id)?;
     let call = CreateDirectory {
         path: path.to_string(),
         ownership: CreationOwnershipOptions::default(),
@@ -1112,13 +1118,13 @@ async fn create_directory(
 /// Runs the existing bounded platform-aware path search implementation.
 async fn search_paths(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
     let root = absolute(string(args, "root", id)?, id)?;
-    policy::require_device(principal, MachineScope::FilesRead, device, id)?;
+    require(principal, &[FilesRead], device, id)?;
     let timeout = args
         .get("timeout_seconds")
         .and_then(Value::as_u64)
@@ -1154,13 +1160,13 @@ async fn search_paths(
 /// Runs bounded grep while preserving regex, ignore, case, and context controls.
 async fn search_contents(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
     let root = absolute(string(args, "root", id)?, id)?;
-    policy::require_device(principal, MachineScope::FilesRead, device, id)?;
+    require(principal, &[FilesRead], device, id)?;
     let timeout = args
         .get("timeout_seconds")
         .and_then(Value::as_u64)
@@ -1204,13 +1210,13 @@ async fn search_contents(
 /// Applies existing watchdog desired-state semantics only to configured managed devices.
 async fn managed_agent(
     state: &ServerState,
-    principal: &MachinePrincipal,
+    principal: &Principal,
     args: &Map<String, Value>,
     id: &Value,
     start: bool,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
-    policy::require_device(principal, MachineScope::AgentsManage, device, id)?;
+    require(principal, &[AgentsManage], device, id)?;
     let agent_id = AgentId::from(device);
     let snapshot = crate::http::agents::managed_agent_snapshot(state, &agent_id)
         .await
@@ -1239,73 +1245,56 @@ async fn managed_agent(
         Ok(json!({"device_id":device,"cleanup_complete":true}))
     }
 }
-/// Describes the separately authenticated byte-stream request a client must perform.
-fn prepare_transfer(
-    principal: &MachinePrincipal,
-    args: &Map<String, Value>,
-    id: &Value,
-    upload: bool,
-) -> Result<Value, McpError> {
-    let (device, path) = device_path(args, id)?;
-    policy::require_device(
-        principal,
-        if upload {
-            MachineScope::FilesWrite
-        } else {
-            MachineScope::FilesRead
-        },
-        device,
-        id,
-    )?;
-    let conflict = args
-        .get("on_existing")
-        .and_then(Value::as_str)
-        .unwrap_or("error");
-    let suffix = if upload {
-        let mode = conflict_mode(conflict, id)?;
-        let normalized = match mode {
-            CopyExistingMode::Error => "error",
-            CopyExistingMode::Override => "override",
-            CopyExistingMode::Merge => "merge",
-        };
-        format!("?on_existing={normalized}")
-    } else {
-        String::new()
-    };
-    Ok(
-        json!({"method":if upload{"PUT"}else{"GET"},"endpoint":format!("/mcp/files/{device}{path}{suffix}"),"authentication":"Authorization: Bearer <the same MCP token>","range_supported":!upload,"content_length_required":upload,"expires_with_credential":true}),
-    )
-}
-
-/// Rechecks current scopes and devices rather than trusting admission-time authority.
+/// Rechecks the token's current permissions and scope rather than trusting admission-time
+/// authority, so editing a token also limits access to the work it already started.
 fn recheck_operation_access(
-    principal: &MachinePrincipal,
+    principal: &Principal,
     record: &super::operations::OperationRecord,
     id: &Value,
 ) -> Result<(), McpError> {
-    for device in &record.device_ids {
-        if !principal.grant.device_ids.contains(device) {
-            return Err(McpError::forbidden(
-                "Operation device is no longer included in this grant",
-                Some(id.clone()),
-            ));
+    match (record.kind.as_str(), record.device_ids.as_slice()) {
+        ("command", [device]) => require(principal, &[CommandsExecute], device, id),
+        (kind @ ("copy" | "move"), [source, destination]) => {
+            let (source_permissions, destination_permissions) =
+                transfer_permissions(kind == "move");
+            require(principal, source_permissions, source, id)?;
+            require(principal, destination_permissions, destination, id)
         }
+        _ => Err(McpError::forbidden(
+            "Operation is not accessible with this token",
+            Some(id.clone()),
+        )),
     }
-    let required = match record.kind.as_str() {
-        "command" => vec![MachineScope::CommandsExecute],
-        "copy" => vec![MachineScope::FilesRead, MachineScope::FilesWrite],
-        "move" => vec![
-            MachineScope::FilesRead,
-            MachineScope::FilesWrite,
-            MachineScope::FilesDelete,
-        ],
-        _ => Vec::new(),
-    };
-    for scope in required {
-        require_scope(principal, scope, id)?;
-    }
-    Ok(())
 }
+
+/// Source and destination permissions of a copy or move: a move also removes the source.
+fn transfer_permissions(is_move: bool) -> (&'static [Permission], &'static [Permission]) {
+    if is_move {
+        (&[FilesRead, FilesWrite, FilesDelete], &[FilesWrite])
+    } else {
+        (&[FilesRead], &[FilesWrite])
+    }
+}
+
+/// Applies `Principal::require` to an MCP device argument and reports denial as an MCP error.
+fn require(
+    principal: &Principal,
+    permissions: &[Permission],
+    device: &str,
+    id: &Value,
+) -> Result<(), McpError> {
+    principal
+        .require(permissions, &AgentId::from(device))
+        .map_err(|error| McpError::denied(error, id))
+}
+
+/// The token that owns new operations; MCP only admits token principals.
+fn owner(principal: &Principal, id: &Value) -> Result<Uuid, McpError> {
+    principal
+        .token_id()
+        .ok_or_else(|| McpError::forbidden("MCP requires an access token", Some(id.clone())))
+}
+
 /// Parses the shared search case vocabulary without silent fallback for invalid values.
 fn case_sensitivity(args: &Map<String, Value>, id: &Value) -> Result<CaseSensitivity, McpError> {
     match args
@@ -1347,21 +1336,6 @@ fn absolute<'a>(path: &'a str, id: &Value) -> Result<&'a str, McpError> {
         Err(invalid("path must be absolute and contain no NUL", id))
     } else {
         Ok(path)
-    }
-}
-/// Applies a scope-only check for inventory calls without a device target.
-fn require_scope(
-    principal: &MachinePrincipal,
-    scope: MachineScope,
-    id: &Value,
-) -> Result<(), McpError> {
-    if principal.grant.scopes.contains(&scope) {
-        Ok(())
-    } else {
-        Err(McpError::forbidden(
-            format!("Missing required scope {scope}"),
-            Some(id.clone()),
-        ))
     }
 }
 /// Provides uniform object validation for schema-driven dispatch.

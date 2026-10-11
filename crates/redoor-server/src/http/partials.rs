@@ -1,6 +1,7 @@
 //! Resumable inventory and actions trust only signed manifests read from agents.
 
 use super::{
+    access::Principal,
     agent_client::{DeletePartial, ListPartials, MoveMetadata, ReadPartial},
     agent_helpers::require_absolute_path,
     error::ApiError,
@@ -8,12 +9,17 @@ use super::{
     state::ServerState,
 };
 use crate::actors::router::CopyOperation;
-use axum::{Json, extract::State};
-use redoor_protocol::{api::transfers::*, wire::partials::PartialOperation};
+use axum::{Extension, Json, extract::State};
+use redoor_protocol::{
+    api::{tokens::Permission, transfers::*},
+    wire::partials::PartialOperation,
+};
 
-/// Offline agents are skipped because their partials cannot currently be resumed.
+/// Offline agents are skipped because their partials cannot currently be resumed. Tokens
+/// only see partials whose source and destination are both in their scope.
 pub(crate) async fn list(
     State(state): State<ServerState>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<PartialsResponse>, ApiError> {
     let active = state
         .router_ref
@@ -25,7 +31,7 @@ pub(crate) async fn list(
         .inventory()
         .await?
         .into_iter()
-        .filter(|agent| agent.connection_id.is_some())
+        .filter(|agent| agent.connection_id.is_some() && principal.can_see(&agent.id))
     {
         let records = match state.agents.call(&agent.id, ListPartials {}).await {
             Ok(records) => records,
@@ -55,6 +61,11 @@ pub(crate) async fn list(
                 continue;
             }
             let authorization = record.manifest.signed.authorization;
+            if !principal.can_see(&authorization.source_agent_id)
+                || !principal.can_see(&authorization.dest_agent_id)
+            {
+                continue;
+            }
             partials.push(ResumableTransfer {
                 dest_agent_id: agent.id.clone(),
                 key: record.key,
@@ -80,10 +91,14 @@ pub(crate) async fn list(
 }
 
 /// Resume re-reads authorization and source metadata rather than trusting the browser.
+/// The caller needs the same permissions as starting the transfer afresh.
 pub(crate) async fn resume(
     State(state): State<ServerState>,
+    Extension(principal): Extension<Principal>,
     Json(request): Json<PartialActionRequest>,
 ) -> Result<Json<ResumePartialResponse>, ApiError> {
+    // Reading the partial already touches the destination agent.
+    principal.require(&[Permission::FilesWrite], &request.dest_agent_id)?;
     let record = state
         .agents
         .call(&request.dest_agent_id, ReadPartial { key: request.key })
@@ -97,6 +112,16 @@ pub(crate) async fn resume(
         return Err(ApiError::bad_request("Invalid partial signature"));
     }
     let a = record.manifest.signed.authorization;
+    let source_permissions: &[Permission] = match a.operation {
+        PartialOperation::Copy => &[Permission::FilesRead],
+        PartialOperation::Move => &[
+            Permission::FilesRead,
+            Permission::FilesWrite,
+            Permission::FilesDelete,
+        ],
+    };
+    principal.require(source_permissions, &a.source_agent_id)?;
+    principal.require(&[Permission::FilesWrite], &a.dest_agent_id)?;
     let started = state
         .transfers
         .start_copy(CopySpec {
@@ -125,8 +150,10 @@ pub(crate) async fn resume(
 /// Explicit discard requires no source permission and deletes only agent-owned output.
 pub(crate) async fn discard(
     State(state): State<ServerState>,
+    Extension(principal): Extension<Principal>,
     Json(request): Json<PartialActionRequest>,
 ) -> Result<Json<DiscardPartialResponse>, ApiError> {
+    principal.require(&[Permission::FilesWrite], &request.dest_agent_id)?;
     state
         .agents
         .call(&request.dest_agent_id, DeletePartial { key: request.key })
@@ -137,8 +164,11 @@ pub(crate) async fn discard(
 /// The dialog probes cheaply; expensive prefix verification belongs to the transfer.
 pub(crate) async fn preflight(
     State(state): State<ServerState>,
+    Extension(principal): Extension<Principal>,
     Json(request): Json<CopyPreflightRequest>,
 ) -> Result<Json<CopyPreflightResponse>, ApiError> {
+    principal.require(&[Permission::FilesRead], &request.source.agent)?;
+    principal.require(&[Permission::FilesWrite], &request.dest.agent)?;
     let source_path = require_absolute_path(request.source.path)?;
     let dest_path = require_absolute_path(request.dest.path)?;
     let source = state

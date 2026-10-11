@@ -57,6 +57,12 @@ impl McpError {
         Self::new(StatusCode::FORBIDDEN, -32003, message, id)
     }
 
+    /// Converts an access decision from `Principal::require` into the MCP forbidden error, so
+    /// REST and MCP report the same reason.
+    pub(super) fn denied(error: crate::http::error::ApiError, id: &Value) -> Self {
+        Self::forbidden(error.to_string(), Some(id.clone()))
+    }
+
     /// Remote failures remain tool errors while preserving a stable JSON-RPC envelope.
     pub(super) fn operation(message: impl Into<String>, id: Option<Value>) -> Self {
         Self::new(StatusCode::CONFLICT, -32010, message, id)

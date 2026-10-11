@@ -47,7 +47,7 @@ export const queryKeys = {
     protocolMismatches: () =>
         [...queryKeys.all, "protocol-mismatches"] as const,
     userState: () => [...queryKeys.all, "user-state"] as const,
-    mcpTokens: () => [...queryKeys.all, "mcp-tokens"] as const,
+    accessTokens: () => [...queryKeys.all, "access-tokens"] as const,
     serverLoggingLevel: () =>
         [...queryKeys.all, "server-logging-level"] as const,
     agentLoggingLevel: (agentId: string) =>
@@ -132,10 +132,10 @@ export function agentsQueryOptions(api: ApiClient) {
 }
 
 /** Shares only secret-free token metadata between the settings loader and page. */
-export function mcpTokensQueryOptions(api: ApiClient) {
+export function accessTokensQueryOptions(api: ApiClient) {
     return queryOptions({
-        queryKey: queryKeys.mcpTokens(),
-        queryFn: () => api.listMcpTokens(),
+        queryKey: queryKeys.accessTokens(),
+        queryFn: () => api.listAccessTokens(),
     });
 }
 

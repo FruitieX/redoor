@@ -14,10 +14,8 @@ use argon2::{
 };
 use axum::{
     Json,
-    body::Body,
-    extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
-    middleware::Next,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use redoor_core::config::AuthMode;
@@ -265,7 +263,7 @@ impl AuthState {
     }
 
     /// Reads the session file on every request so logout and server restarts share one source of truth.
-    async fn is_authenticated(&self, headers: &HeaderMap) -> bool {
+    pub(crate) async fn session_valid(&self, headers: &HeaderMap) -> bool {
         let Some(session_id) = session_cookie(headers) else {
             return false;
         };
@@ -508,62 +506,6 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
         .find_map(|(name, value)| (name == SESSION_COOKIE_NAME).then(|| value.to_string()))
 }
 
-/// Allows only resources needed to establish a session before enforcing authentication globally.
-fn is_public_path(path: &str) -> bool {
-    path == redoor_protocol::wire::handshake::AGENT_WS_PATH
-        || path == "/api/v1/login"
-        || path == "/api/v1/logout"
-        || !path.starts_with("/api/")
-}
-
-/// Identifies narrowly scoped raw GET requests whose handler will validate one-time authorization.
-fn is_one_time_token_raw_request(method: &Method, uri: &Uri) -> bool {
-    if method != Method::GET {
-        return false;
-    }
-    let Some(remainder) = uri.path().strip_prefix("/api/v1/agents/") else {
-        return false;
-    };
-    let Some((agent, raw_path)) = remainder.split_once("/raw") else {
-        return false;
-    };
-    if agent.is_empty()
-        || agent.contains('/')
-        || !(raw_path.is_empty() || raw_path.starts_with('/'))
-    {
-        return false;
-    }
-    uri.query().is_some_and(|query| {
-        query.split('&').any(|parameter| {
-            parameter
-                .split_once('=')
-                .is_some_and(|(name, value)| name == "one_time_token" && !value.is_empty())
-        })
-    })
-}
-
-/// Rejects unauthenticated HTTP and browser WebSocket requests before handlers start streaming work.
-pub(crate) async fn require_authentication(
-    State(auth): State<AuthState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    if is_public_path(request.uri().path())
-        || is_one_time_token_raw_request(request.method(), request.uri())
-        || auth.is_authenticated(request.headers()).await
-    {
-        return next.run(request).await;
-    }
-
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(ErrorResponse {
-            error: "Authentication required".to_string(),
-        }),
-    )
-        .into_response()
-}
-
 /// Verifies configured credentials and persists a new server-side login session.
 pub(crate) async fn login_handler(
     State(state): State<ServerState>,
@@ -688,9 +630,8 @@ pub(crate) async fn logout_handler(
 mod tests {
     use super::{
         FailureWindow, LOGIN_MAX_FAILURES_GLOBAL, LOGIN_MAX_FAILURES_PER_IP, LOGIN_MAX_TRACKED_IPS,
-        LOGIN_RATE_WINDOW, LoginRateLimiter, is_one_time_token_raw_request, is_public_path,
+        LOGIN_RATE_WINDOW, LoginRateLimiter,
     };
-    use axum::http::{Method, Uri};
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Instant,
@@ -819,49 +760,5 @@ mod tests {
             limiter.by_ip.lock().expect("test lock must succeed").len(),
             1
         );
-    }
-
-    /// Protects the agent endpoint exception without exposing browser or neighboring API routes.
-    #[test]
-    fn only_the_agent_endpoints_are_public() {
-        // The agent endpoint authenticates with the agent token during the upgrade instead.
-        assert!(is_public_path("/api/v1/agent/ws"));
-        // Neighboring agent paths must not inherit the exception.
-        assert!(!is_public_path("/api/v1/agent/ws/extra"));
-        // The removed dedicated sockets must not stay reachable without a session.
-        assert!(!is_public_path("/api/v1/agent-transfer/ws"));
-        assert!(!is_public_path(
-            "/api/v1/log-streams/00000000-0000-0000-0000-000000000001/agent/ws"
-        ));
-        // The browser-owned endpoint must remain protected by normal session authentication.
-        assert!(!is_public_path("/api/v1/agents/agent-1/logs/ws"));
-    }
-
-    /// Keeps the cookie bypass limited to raw GETs that present a non-empty token parameter.
-    #[test]
-    fn only_token_bearing_raw_gets_reach_handler_without_cookie_authentication() {
-        let token_uri: Uri = "/api/v1/agents/agent-1/raw/tmp/file?one_time_token=token"
-            .parse()
-            .expect("test URI must parse");
-        // The handler must receive a token-bearing raw GET so it can validate the credential.
-        assert!(is_one_time_token_raw_request(&Method::GET, &token_uri));
-        // Token creation remains protected even if a caller adds a similarly named query parameter.
-        assert!(!is_one_time_token_raw_request(&Method::POST, &token_uri));
-        let missing_token_uri: Uri = "/api/v1/agents/agent-1/raw/tmp/file"
-            .parse()
-            .expect("test URI must parse");
-        // Ordinary raw downloads still require the authenticated browser session.
-        assert!(!is_one_time_token_raw_request(
-            &Method::GET,
-            &missing_token_uri
-        ));
-        let neighboring_uri: Uri = "/api/v1/agents/agent-1/rawness?one_time_token=token"
-            .parse()
-            .expect("test URI must parse");
-        // Neighboring route names cannot use the raw-download exception.
-        assert!(!is_one_time_token_raw_request(
-            &Method::GET,
-            &neighboring_uri
-        ));
     }
 }

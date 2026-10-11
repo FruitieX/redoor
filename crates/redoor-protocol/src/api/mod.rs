@@ -7,7 +7,6 @@ pub mod exec;
 pub mod files;
 pub mod git;
 pub mod logging;
-pub mod mcp;
 pub mod search;
 pub mod server;
 pub mod tokens;

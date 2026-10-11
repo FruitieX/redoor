@@ -101,8 +101,6 @@ enum ServerCommand {
     Systemd(service::SystemdArgs),
     /// Install or manage the server as a macOS LaunchAgent.
     Launchd(service::LaunchdArgs),
-    /// Create, inspect, or revoke durable MCP machine credentials.
-    McpToken(redoor_server::http::machine_tokens::MachineTokenArgs),
 }
 
 /// Options used to locate and limit server file logs.
@@ -313,9 +311,6 @@ async fn run_server_command(
         }
         Some(ServerCommand::Launchd(launchd)) => {
             service::run_launchd(launchd, ServiceRole::Server, paths).await?
-        }
-        Some(ServerCommand::McpToken(tokens)) => {
-            redoor_server::http::machine_tokens::run_cli(tokens, paths).await?
         }
         None => {
             let daemon = args.run.daemon;

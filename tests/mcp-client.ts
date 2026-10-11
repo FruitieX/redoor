@@ -144,18 +144,6 @@ export class McpTestClient {
         }
     }
 
-    /** Fetches a prepared streaming URL with the same bearer credential. */
-    public async stream(
-        endpoint: string,
-        options: { method?: "GET" | "PUT"; body?: BodyInit } = {},
-    ): Promise<Response> {
-        return fetch(endpoint, {
-            method: options.method ?? "GET",
-            headers: { Authorization: `Bearer ${this.token}` },
-            body: options.body,
-        });
-    }
-
     /** Exposes method-level requests so section 2 can add polling without another transport. */
     public async request<TResult = JsonObject>(
         method: string,

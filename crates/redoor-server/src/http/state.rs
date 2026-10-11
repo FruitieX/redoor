@@ -12,8 +12,8 @@ use redoor_protocol::api::server::ServerAuthMode;
 use redoor_protocol::wire::log::Level;
 
 use super::auth::AuthState;
-use super::machine_tokens::MachineTokenService;
 use super::mcp::McpState;
+use super::tokens::TokenStore;
 
 /// Everything handlers need, cloned cheaply per request because every member is a handle.
 #[derive(Clone)]
@@ -41,9 +41,8 @@ pub(crate) struct ServerState {
     pub(crate) protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches,
     /// Validates opaque cookies against durable, server-side session files.
     pub(crate) auth: AuthState,
-    /// Reads durable MCP grants on every request so CLI revocations take effect immediately.
-    #[allow(dead_code)]
-    pub(crate) machine_tokens: MachineTokenService,
+    /// The server-owned access token table used by REST and MCP authentication.
+    pub(crate) tokens: TokenStore,
     /// Enforces MCP-specific origin, rate, and concurrency policy outside browser auth.
     pub(crate) mcp: McpState,
     /// Absolute path of the TOML config loaded at process start (for the server

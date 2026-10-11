@@ -7,13 +7,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { $ } from "zx";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 
+import { ApiClient, type Permission } from "#ui/api-client";
 import {
+    ALL_PERMISSIONS,
     ProcessManager,
-    SERVER_PATH,
     TEST_AGENT_TOKEN,
+    createAccessToken,
     TEST_APP_NAME,
     TEST_PASSWORD,
     TEST_SERVER_HOME,
@@ -22,6 +23,7 @@ import {
     waitForAgentReady,
     waitForLogMessage,
     waitForPort,
+    waitForValue,
 } from "./test-utils";
 import {
     type JsonObject,
@@ -42,6 +44,8 @@ const allowedOrigin = "https://allowed-mcp-client.example";
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "redoor-mcp-test-"));
 
 const configPath = join(temporaryDirectory, "config.toml");
+
+const api = new ApiClient(baseUrl);
 
 let activeToken: string;
 
@@ -68,66 +72,33 @@ type RawMcpRequest = {
     params: JsonObject;
 };
 
-/** Invokes the administrative CLI against the same application data as the test server. */
-async function tokenCli(arguments_: string[]): Promise<string> {
-    const result = await $({
-        quiet: true,
-        env: {
-            ...process.env,
-            HOME: TEST_SERVER_HOME,
-            REDOOR_APP_NAME: TEST_APP_NAME,
-        },
-    })`${SERVER_PATH} server mcp-token ${arguments_}`;
-
-    return result.stdout.trim();
-}
-
-/** Creates a token through the public bootstrap CLI and extracts its one-time secret. */
+/** Creates a token through the REST API and returns its one-time secret and id. */
 async function createToken(options: {
     name: string;
     expiresAt?: string;
-    scopes?: string[];
+    permissions?: Permission[];
     devices?: string[];
-}): Promise<{ token: string; credentialId: string }> {
-    const arguments_ = ["create", "--name", options.name];
+}): Promise<{ token: string; tokenId: string }> {
+    const created = await createAccessToken(api, {
+        name: options.name,
+        expiresAt: options.expiresAt,
+        permissions: options.permissions ?? ["files:read"],
+        devices:
+            options.devices === undefined
+                ? { kind: "all" }
+                : { kind: "only", device_ids: options.devices },
+    });
 
-    if (options.expiresAt !== undefined) {
-        arguments_.push("--expires-at", options.expiresAt);
-    }
-
-    if (options.scopes?.length) {
-        arguments_.push("--scopes", options.scopes.join(","));
-    }
-
-    if (options.devices?.length) {
-        arguments_.push("--devices", options.devices.join(","));
-    }
-
-    const output: {
-        token: string;
-        credential: { credential_id: string };
-    } = JSON.parse(await tokenCli(arguments_));
-
-    return {
-        token: output.token,
-        credentialId: output.credential.credential_id,
-    };
+    return { token: created.token, tokenId: created.metadata.id };
 }
 
-/** Creates a token with every operator scope on every test device and returns its secret. */
+/** Creates a token with every permission on every test device and returns its secret. */
 async function createOperatorToken(name: string): Promise<string> {
-    const scopes = [
-        "devices:read",
-        "files:read",
-        "files:write",
-        "files:delete",
-        "commands:execute",
-        "agents:manage",
-    ];
-
     const devices = [testDeviceId, secondDeviceId, managedDeviceId];
 
-    return (await createToken({ name, scopes, devices })).token;
+    return (
+        await createToken({ name, permissions: ALL_PERMISSIONS, devices })
+    ).token;
 }
 
 /** Sends deliberately invalid protocol requests that the normal helper refuses to construct. */
@@ -202,7 +173,14 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
     process.env.REDOOR_PORT = VITEST_SERVER_PORT.toString();
     serverPid = processManager.spawnServer({ config: configPath });
     await waitForPort(VITEST_SERVER_PORT);
-    activeToken = (await createToken({ name: "primary test client" })).token;
+    await api.login(TEST_USERNAME, TEST_PASSWORD);
+    // A read-only token limited to the dormant managed device.
+    activeToken = (
+        await createToken({
+            name: "primary test client",
+            devices: [managedDeviceId],
+        })
+    ).token;
     const server = processManager.getProcess(serverPid);
 
     if (server === undefined) throw new Error("MCP test server missing");
@@ -263,21 +241,48 @@ describe("stateless authenticated MCP", () => {
         expect(discovery.result.capabilities).toEqual({ tools: {} });
 
         const tools = await client.listTools();
+        const names = tools.result.tools.map((tool) => tool.name);
         // The harmless smoke test remains available beside the device-operation catalog.
-        expect(tools.result.tools).toHaveLength(21);
         expect(
             tools.result.tools.find((tool) => tool.name === "hello"),
         ).toMatchObject({
             name: "hello",
             annotations: { readOnlyHint: true, destructiveHint: false },
         });
+        // A read-only token sees its read tools but nothing it could never use.
+        expect(names).toEqual(
+            expect.arrayContaining(["list_devices", "read_file", "search_contents"]),
+        );
+        expect(names).not.toContain("run_command");
+        expect(names).not.toContain("write_file");
+        expect(names).not.toContain("delete_path");
+
+        const operator = createMcpTestClient({ endpoint, token: deviceToken });
+
+        const operatorNames = (await operator.listTools()).result.tools.map(
+            (tool) => tool.name,
+        );
+
+        // A full-permission token sees the whole catalog.
+        expect(operatorNames).toHaveLength(19);
+        expect(operatorNames).toContain("run_command");
+        // Big local file transfers belong to the remote CLI, so MCP no longer offers them.
+        expect(operatorNames).not.toContain("prepare_file_download");
+        expect(operatorNames).not.toContain("prepare_file_upload");
     });
 
     it("enforces device grants and performs file, search, command, and transfer workflows", async () => {
         const client = createMcpTestClient({ endpoint, token: deviceToken });
-        const denied = createMcpTestClient({ endpoint, token: activeToken });
-        // Inventory requires its dedicated scope even though hello is available to every token.
-        await expect(denied.callTool("list_devices")).rejects.toThrow("(403)");
+        const limited = createMcpTestClient({ endpoint, token: activeToken });
+        // Inventory needs no permission but only lists devices in the token's scope.
+        expect(
+            (await limited.callTool("list_devices")).result.structuredContent
+                ?.devices,
+        ).toEqual([expect.objectContaining({ device_id: managedDeviceId })]);
+        // Devices outside the scope are refused, not just hidden.
+        await expect(
+            limited.callTool("get_device", { device_id: testDeviceId }),
+        ).rejects.toThrow("(403)");
         const inventory = await client.callTool("list_devices");
         expect(inventory.result.structuredContent?.devices).toEqual(
             expect.arrayContaining([
@@ -439,55 +444,21 @@ describe("stateless authenticated MCP", () => {
             token: secondDeviceToken,
         });
 
-        // Device permission alone cannot disclose another stable grant's retained output.
+        // Device permission alone cannot disclose another token's retained output.
         await expect(
             other.callTool("read_command_output", {
                 operation_id: operationId,
             }),
         ).rejects.toThrow("(403)");
 
-        const prepared = await client.callTool<
-            JsonObject & { endpoint: string }
-        >("prepare_file_download", {
-            device_id: testDeviceId,
-            path: firstPath,
-        });
-
-        const streamResponse = await fetch(
-            `${baseUrl}${prepared.result.structuredContent?.endpoint}`,
-            { headers: { Authorization: `Bearer ${deviceToken}` } },
-        );
-
-        // Direct bearer streaming moves bytes without embedding the full file in MCP JSON.
-        expect(streamResponse.status).toBe(200);
-        expect(await streamResponse.text()).toBe("alpha MCP marker");
-
-        const uploadedPath = join(agentRoot, "prepared-upload.txt");
-
-        const preparedUpload = await client.callTool<
-            JsonObject & { endpoint: string }
-        >("prepare_file_upload", {
+        const uploadedPath = join(agentRoot, "inline-upload.txt");
+        await client.callTool("write_file", {
             device_id: testDeviceId,
             path: uploadedPath,
+            content: "inline upload",
             on_existing: "error",
         });
-
-        const uploadResponse = await client.stream(
-            `${baseUrl}${preparedUpload.result.structuredContent?.endpoint}`,
-            { method: "PUT", body: "streamed upload" },
-        );
-
-        expect(uploadResponse.status).toBe(200);
-        expect(
-            (
-                await client.callTool("read_file", {
-                    device_id: testDeviceId,
-                    path: uploadedPath,
-                    encoding: "text",
-                })
-            ).result.structuredContent?.content,
-        ).toBe("streamed upload");
-        const sameDeviceMoved = join(agentRoot, "prepared-upload-moved.txt");
+        const sameDeviceMoved = join(agentRoot, "inline-upload-moved.txt");
 
         const sameMove = await client.callTool<
             JsonObject & { operation_id: string }
@@ -580,7 +551,7 @@ describe("stateless authenticated MCP", () => {
             TEST_SERVER_HOME,
             ".local/share",
             TEST_APP_NAME,
-            "mcp/operations/operations.json",
+            "mcp-operations/operations.json",
         ),
     });
 
@@ -684,34 +655,6 @@ describe("stateless authenticated MCP", () => {
         });
         expect(listing.result.structuredContent?.entries).toHaveLength(2000);
 
-        const largeFile = join(agentRoot, "large-stream.bin");
-        await client.callTool("run_command", {
-            device_id: testDeviceId,
-            argv: ["sh", "-lc", `head -c 1048576 /dev/zero > '${largeFile}'`],
-            cwd: agentRoot,
-            mode: "foreground",
-            output_limit: 128,
-        });
-
-        const prepared = await client.callTool<
-            JsonObject & { endpoint: string }
-        >("prepare_file_download", {
-            device_id: testDeviceId,
-            path: largeFile,
-        });
-
-        const slowResponse = await client.stream(
-            `${baseUrl}${prepared.result.structuredContent?.endpoint}`,
-        );
-
-        expect(slowResponse.status).toBe(200);
-        // A deliberately unconsumed large body must not block independent control traffic.
-        expect(
-            (await client.callTool("get_device", { device_id: testDeviceId }))
-                .result.structuredContent,
-        ).toBeDefined();
-        await slowResponse.body?.cancel();
-
         const background = await client.callTool<
             JsonObject & { operation_id: string }
         >("run_command", {
@@ -758,16 +701,16 @@ describe("stateless authenticated MCP", () => {
         ).toBe(true);
     }, 30_000);
 
-    it("enforces both transfer endpoints and reauthenticates direct streams", async () => {
+    it("enforces both transfer endpoints and serves no big-file endpoints", async () => {
         const sourceOnly = await createToken({
             name: "source-only transfer",
-            scopes: ["files:read", "files:write", "files:delete"],
+            permissions: ["files:read", "files:write", "files:delete"],
             devices: [testDeviceId],
         });
 
         const destinationOnly = await createToken({
             name: "destination-only transfer",
-            scopes: ["files:read", "files:write", "files:delete"],
+            permissions: ["files:read", "files:write", "files:delete"],
             devices: [secondDeviceId],
         });
 
@@ -781,9 +724,9 @@ describe("stateless authenticated MCP", () => {
             token: destinationOnly.token,
         });
 
-        const sourcePath = join(agentRoot, "prepared-upload-moved.txt");
+        const sourcePath = join(agentRoot, "inline-upload-moved.txt");
         const destinationPath = join(secondAgentRoot, "unauthorized-copy.txt");
-        // A source grant cannot infer or write a destination outside its device allowlist.
+        // A source scope cannot infer or write a destination outside its device scope.
         await expect(
             sourceClient.callTool("copy_path", {
                 source: { device_id: testDeviceId, path: sourcePath },
@@ -806,22 +749,75 @@ describe("stateless authenticated MCP", () => {
             }),
         ).rejects.toThrow("(403)");
 
-        const prepared = await sourceClient.callTool<
-            JsonObject & { endpoint: string }
-        >("prepare_file_download", {
-            device_id: testDeviceId,
-            path: sourcePath,
+        const removedEndpoint = `${baseUrl}/mcp/files/${testDeviceId}${sourcePath}`;
+        const authorization = { Authorization: `Bearer ${sourceOnly.token}` };
+
+        const download = await fetch(removedEndpoint, {
+            headers: authorization,
         });
 
-        await tokenCli(["revoke", sourceOnly.credentialId]);
+        // The old streaming side endpoint is gone; only the UI fallback answers, never with file bytes.
+        expect(await download.text()).not.toContain("inline upload");
 
-        const rejectedStream = await fetch(
-            `${baseUrl}${prepared.result.structuredContent?.endpoint}`,
-            { headers: { Authorization: `Bearer ${sourceOnly.token}` } },
+        const upload = await fetch(removedEndpoint, {
+            method: "PUT",
+            headers: authorization,
+            body: "replaced through a removed endpoint",
+        });
+
+        // Uploads are refused, and the file keeps its content.
+        expect(upload.ok).toBe(false);
+        expect(readFileSync(sourcePath, "utf8")).toBe("inline upload");
+    });
+
+    it("shows devices added later to an all-devices token", async () => {
+        const created = await createToken({ name: "all devices" });
+        const client = createMcpTestClient({ endpoint, token: created.token });
+        const lateDeviceId = "mcp-late-agent";
+        const lateRoot = join(temporaryDirectory, "late-agent-root");
+        mkdirSync(lateRoot, { recursive: true });
+
+        const before = (await client.callTool("list_devices")).result
+            .structuredContent?.devices;
+
+        // The device does not exist yet, so it cannot be listed.
+        expect(before).not.toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ device_id: lateDeviceId }),
+            ]),
         );
+        const server = processManager.getProcess(serverPid);
 
-        // Streaming requests authenticate afresh, so a prepared URL survives no revocation.
-        expect(rejectedStream.status).toBe(401);
+        if (server === undefined) throw new Error("MCP test server missing");
+        const ready = waitForAgentReady(server, lateDeviceId);
+
+        const agentPid = processManager.spawnAgent({
+            wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}`,
+            name: lateDeviceId,
+            cwd: lateRoot,
+            home: lateRoot,
+        });
+
+        onTestFinished(async () => {
+            await processManager.killAndWait(agentPid);
+        });
+        await ready;
+
+        // An all-devices scope covers devices that connect after the token was created.
+        await waitForValue({
+            description: "late agent in the all-devices inventory",
+            predicate: async () => {
+                const listed = await client.callTool<
+                    JsonObject & { devices: Array<{ device_id: string }> }
+                >("list_devices");
+
+                return listed.result.structuredContent?.devices.some(
+                    (device) => device.device_id === lateDeviceId,
+                )
+                    ? true
+                    : undefined;
+            },
+        });
     });
 
     it("recovers admitted background work as interrupted after server restart", async () => {
@@ -881,7 +877,7 @@ describe("stateless authenticated MCP", () => {
         });
     });
 
-    it("requires machine bearer credentials despite the non-API public-path exception", async () => {
+    it("requires access tokens despite the non-API public-path exception", async () => {
         const body = requestBody("server/discover");
 
         const headers = {
@@ -900,10 +896,10 @@ describe("stateless authenticated MCP", () => {
 
         const cookieOnly = await rawMcp({
             body,
-            headers: { ...headers, Cookie: "redoor_session=fake" },
+            headers: { ...headers, Cookie: api.getAuthHeaders().Cookie ?? "" },
         });
 
-        // Browser cookies cannot cross the machine-credential boundary.
+        // Even a valid browser session cookie cannot authenticate MCP; only access tokens do.
         expect(cookieOnly.status).toBe(401);
 
         const publicPage = await fetch(`${baseUrl}/not-an-api-route`);
@@ -911,14 +907,14 @@ describe("stateless authenticated MCP", () => {
         expect(publicPage.status).toBe(200);
     });
 
-    it("observes CLI revocation on the next request without a restart", async () => {
+    it("observes REST deletion on the next request without a restart", async () => {
         const created = await createToken({ name: "revocation test" });
         const client = createMcpTestClient({ endpoint, token: created.token });
-        // A CLI-created credential must be immediately visible to the already-running server.
+        // A newly created token must be immediately usable.
         expect((await client.callTool("hello")).result.resultType).toBe(
             "complete",
         );
-        await tokenCli(["revoke", created.credentialId]);
+        await api.deleteAccessToken(created.tokenId);
         await expect(client.callTool("hello")).rejects.toThrow("(401)");
     });
 
@@ -944,7 +940,7 @@ describe("stateless authenticated MCP", () => {
             }
         }
 
-        // Authentication re-reads expiry instead of retaining an accepted in-memory session.
+        // Authentication checks expiry on every request instead of caching an accepted token.
         expect(expired).toBe(true);
     });
 
@@ -1104,8 +1100,8 @@ describe("stateless authenticated MCP", () => {
     });
 
     it("does not expose secrets in listings or server logs", async () => {
-        const listed = await tokenCli(["list"]);
-        // Administrative metadata intentionally contains neither the one-time token nor verifier fields.
+        const listed = JSON.stringify(await api.listAccessTokens());
+        // Token metadata intentionally contains neither the one-time secret nor verifier fields.
         expect(listed).not.toContain(activeToken);
         expect(listed).not.toContain("verifier");
 
@@ -1114,7 +1110,7 @@ describe("stateless authenticated MCP", () => {
                 TEST_SERVER_HOME,
                 ".local/share",
                 TEST_APP_NAME,
-                "mcp/machine-tokens.json",
+                "tokens/access-tokens.json",
             ),
             "utf8",
         );

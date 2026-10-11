@@ -268,17 +268,13 @@ impl ServerRuntime {
         )
         .await
         .context("Failed to initialize authentication")?;
-        let machine_tokens =
-            crate::http::machine_tokens::MachineTokenService::in_data_dir(&data_dir)
+        let tokens = crate::http::tokens::TokenStore::load(&data_dir)
+            .await
+            .context("Failed to load access tokens")?;
+        let mcp =
+            crate::http::mcp::McpState::new(tokens.clone(), config.mcp_allowed_origins, &data_dir)
                 .await
-                .context("Failed to initialize MCP credential storage")?;
-        let mcp = crate::http::mcp::McpState::new(
-            machine_tokens.clone(),
-            config.mcp_allowed_origins,
-            &data_dir,
-        )
-        .await
-        .context("Failed to initialize MCP operation storage")?;
+                .context("Failed to initialize MCP operation storage")?;
 
         let (router, _router_task) = spawn_router();
         // Built before the listener so the registry exists when the first WebSocket connects.
@@ -312,7 +308,7 @@ impl ServerRuntime {
             upload_requests: crate::http::upload_requests::UploadRequests::default(),
             protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches::default(),
             auth,
-            machine_tokens,
+            tokens,
             mcp,
             config_path: config.config_path,
             config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),

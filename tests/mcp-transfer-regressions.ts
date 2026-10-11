@@ -152,7 +152,7 @@ export function registerMcpTransferRegressionTests(
         });
     });
 
-    it("prepares a usable replacement upload URL and validates conflict policy", async () => {
+    it("replaces inline files only with an explicit valid conflict policy", async () => {
         const client = createMcpTestClient({
             endpoint: options.endpoint,
             token: options.token(),
@@ -161,34 +161,25 @@ export function registerMcpTransferRegressionTests(
         const path = join(options.sourceRoot, "replacement-upload.txt");
         writeFileSync(path, "old bytes");
 
-        const prepared = await client.callTool<
-            JsonObject & { endpoint: string }
-        >("prepare_file_upload", {
+        await client.callTool("write_file", {
             device_id: options.sourceDevice,
             path,
+            content: "replacement bytes",
             on_existing: "replace",
         });
 
-        const url = prepared.result.structuredContent?.endpoint;
-
-        if (url === undefined) throw new Error("Prepared upload URL missing");
-
-        const response = await client.stream(`${options.baseUrl}${url}`, {
-            method: "PUT",
-            body: "replacement bytes",
-        });
-
-        // Following the returned URL must accept the MCP replacement policy and replace existing bytes.
-        expect(response.status).toBe(200);
+        // The explicit replacement policy overwrites the existing bytes.
         expect(readFileSync(path, "utf8")).toBe("replacement bytes");
-        // Bad conflict policies must fail during preparation rather than issuing an unusable URL.
+        // Bad conflict policies are rejected before anything is written.
         await expect(
-            client.callTool("prepare_file_upload", {
+            client.callTool("write_file", {
                 device_id: options.sourceDevice,
                 path,
+                content: "must not be written",
                 on_existing: "invalid",
             }),
         ).rejects.toThrow("on_existing");
+        expect(readFileSync(path, "utf8")).toBe("replacement bytes");
     });
 }
 

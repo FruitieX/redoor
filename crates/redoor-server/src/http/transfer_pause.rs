@@ -1,9 +1,12 @@
 //! Pause waits for destination durability before returning control to the browser.
 
-use super::{error::ApiError, state::ServerState};
+use super::{
+    access::Principal, error::ApiError, state::ServerState,
+    transfer_progress::require_transfer_write,
+};
 use crate::actors::router::RouterMsg;
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
 };
 use redoor_protocol::{api::transfers::PauseTransferResponse, ids::TransferId};
@@ -11,9 +14,11 @@ use redoor_protocol::{api::transfers::PauseTransferResponse, ids::TransferId};
 /// The router removes the transfer only after its destination acknowledges durable storage.
 pub(crate) async fn pause(
     State(state): State<ServerState>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<u64>,
 ) -> Result<Json<PauseTransferResponse>, ApiError> {
     let transfer_id = TransferId::new(id);
+    require_transfer_write(&state, &principal, transfer_id).await?;
     state
         .router_ref
         .request(|reply| RouterMsg::PauseTransfer { transfer_id, reply })

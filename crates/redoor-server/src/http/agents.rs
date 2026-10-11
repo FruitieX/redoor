@@ -3,7 +3,7 @@
 
 use crate::actors;
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State as AxumState},
     http::StatusCode,
 };
@@ -18,7 +18,7 @@ use redoor_protocol::{
     ids::AgentId,
 };
 
-use super::{agent_client::Restart, error::ApiError, state::ServerState};
+use super::{access::Principal, agent_client::Restart, error::ApiError, state::ServerState};
 use crate::watchdog::WatchdogHandle;
 
 mod accounts;
@@ -60,11 +60,17 @@ pub(super) async fn list_agent_snapshots(
     Ok(agents)
 }
 
-/// Route: `GET /api/v1/agents` returns configured, connected, and previously seen agents.
+/// Route: `GET /api/v1/agents` returns configured, connected, and previously seen agents,
+/// limited to the devices an access token may see.
 pub(crate) async fn list_agents_handler(
     AxumState(state): AxumState<ServerState>,
+    Extension(principal): Extension<Principal>,
 ) -> Result<Json<AgentListResponse>, ApiError> {
-    let agents = list_agent_snapshots(&state).await?;
+    let agents = list_agent_snapshots(&state)
+        .await?
+        .into_iter()
+        .filter(|agent| principal.can_see(&agent.id))
+        .collect();
     Ok(Json(AgentListResponse { agents }))
 }
 

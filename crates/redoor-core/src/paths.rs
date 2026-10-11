@@ -78,7 +78,7 @@ impl AppPaths {
             .with_context(|| format!("cannot locate {purpose}"))
     }
 
-    /// Persistent per-application data (`~/.local/share/<app-name>`): sessions, PID files, MCP state.
+    /// Persistent per-application data (`~/.local/share/<app-name>`): sessions, PID files, access tokens, MCP operations.
     pub fn data_dir(&self) -> Result<PathBuf> {
         Ok(self
             .home("the application data directory")?

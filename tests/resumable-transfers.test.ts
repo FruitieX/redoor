@@ -23,6 +23,7 @@ import {
     createToxiproxyAgent,
     TEST_USERNAME,
     TEST_PASSWORD,
+    createAccessToken,
 } from "./test-utils";
 
 const size = 512 * 1024 * 1024;
@@ -406,15 +407,10 @@ describe("resumable transfers", () => {
     it("MCP defaults to resuming a paused copy", async () => {
         const run = await paused();
 
-        const created = await api.createMcpToken({
+        const created = await createAccessToken(api, {
             name: "resumable-copy-test",
-            scopes: ["files:read", "files:write"],
-            device_ids: [source.id, dest.id],
-            expires_at: null,
-        });
-
-        onTestFinished(async () => {
-            await api.revokeMcpToken(created.credential.credential_id);
+            permissions: ["files:read", "files:write"],
+            devices: { kind: "only", device_ids: [source.id, dest.id] },
         });
 
         const client = createMcpTestClient({
