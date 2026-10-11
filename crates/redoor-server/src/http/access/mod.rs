@@ -5,5 +5,5 @@ mod middleware;
 mod principal;
 pub(crate) mod routes;
 
-pub(crate) use middleware::access_control;
+pub(crate) use middleware::{access_control, bearer_token};
 pub(crate) use principal::{Principal, TokenGrant};

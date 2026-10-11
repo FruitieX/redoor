@@ -29,7 +29,11 @@ use tower_http::{
     limit::RequestBodyLimitLayer,
 };
 
-use super::{access::Principal, state::ServerState, tokens::TokenStore};
+use super::{
+    access::{Principal, bearer_token},
+    state::ServerState,
+    tokens::TokenStore,
+};
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
 use schema::{JsonRpcRequest, JsonRpcResponse};
@@ -144,13 +148,7 @@ pub(crate) fn router(state: ServerState) -> Router<ServerState> {
 
 /// Authenticates an access token on every request and never considers cookies or agent secrets.
 async fn authenticate(State(state): State<McpState>, mut request: Request, next: Next) -> Response {
-    let secret = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty());
-    let grant = match secret {
+    let grant = match bearer_token(request.headers()) {
         Some(secret) => state.tokens.authenticate(secret).await,
         None => None,
     };

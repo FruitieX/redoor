@@ -55,12 +55,8 @@ pub(crate) async fn access_control(
 /// A bearer token alone decides when present, so a stale cookie can never upgrade a rejected
 /// token; otherwise the browser session cookie is used.
 async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Principal, Response> {
-    let bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    if let Some(secret) = bearer {
-        return match state.tokens.authenticate(secret.trim()).await {
+    if let Some(secret) = bearer_token(headers) {
+        return match state.tokens.authenticate(secret).await {
             Some(grant) => Ok(Principal::Token(grant)),
             None => Err(unauthorized("Access token is invalid, expired or revoked")),
         };
@@ -69,6 +65,15 @@ async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Princi
         return Ok(Principal::Session);
     }
     Err(unauthorized("Authentication required"))
+}
+
+/// Extracts the bearer credential shared by REST and `/mcp`, so both accept exactly the same
+/// header forms. The scheme is case-insensitive (RFC 9110); an `Authorization` header with
+/// another scheme is not a bearer token.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, secret) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then(|| secret.trim())
 }
 
 /// Applies the coarse route rule; `AnyPrincipal` and `Handler` routes decide in the handler.
@@ -167,6 +172,27 @@ mod tests {
             .headers_mut()
             .insert("x-agent", agent.parse().unwrap());
         response
+    }
+
+    /// REST and MCP share this parser, so the accepted header forms are pinned here once.
+    #[test]
+    fn bearer_token_parsing() {
+        let parse = |value: &str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+            super::bearer_token(&headers).map(str::to_owned)
+        };
+        // The canonical form yields the secret.
+        assert_eq!(parse("Bearer abc").as_deref(), Some("abc"));
+        // The scheme is case-insensitive, as HTTP requires.
+        assert_eq!(parse("bearer abc").as_deref(), Some("abc"));
+        // Surrounding whitespace is not part of the secret.
+        assert_eq!(parse("Bearer  abc ").as_deref(), Some("abc"));
+        // Other schemes are not bearer tokens, so the cookie path stays in charge.
+        assert_eq!(parse("Basic abc"), None);
+        assert_eq!(parse("Bearerabc"), None);
+        // No header at all is no token.
+        assert_eq!(super::bearer_token(&axum::http::HeaderMap::new()), None);
     }
 
     /// The design depends on `Router::layer` middleware seeing the matched template and the
