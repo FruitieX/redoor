@@ -37,9 +37,7 @@ async function latestStartedStreamId(): Promise<string | undefined> {
     const contents = await fs.readFile(agentLogPath, "utf8");
 
     return Array.from(
-        contents.matchAll(
-            /Agent log stream started: log_stream_id=([0-9a-f-]+)/g,
-        ),
+        contents.matchAll(/Agent log stream started: stream=(\d+)/g),
     ).at(-1)?.[1];
 }
 
@@ -223,12 +221,12 @@ test.describe.serial("Agent logs", () => {
         await expect
             .poll(async () => fs.readFile(agentLogPath, "utf8"))
             // The agent marker proves its logger receiver and active task were released.
-            .toContain(`Agent log stream stopped: log_stream_id=${streamId}`);
+            .toContain(`Agent log stream stopped: stream=${streamId}`);
         await expect
             .poll(async () => fs.readFile(serverLogPath, "utf8"))
             // The server marker proves no detached paired relay survived browser teardown.
             .toContain(
-                `Agent log relay stopped: agent_id=${context.agentId}, log_stream_id=${streamId}`,
+                `Agent log relay stopped: agent_id=${context.agentId}, stream=${streamId}`,
             );
     });
 });

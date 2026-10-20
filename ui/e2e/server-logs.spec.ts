@@ -4,7 +4,7 @@ import {
     type WebSocket as PlaywrightWebSocket,
 } from "@playwright/test";
 
-import { WEB_BASE_URL } from "./helpers";
+import { WEB_BASE_URL, upgradeWithProtocol } from "./helpers";
 
 /** Identifies only the route-scoped socket so unrelated UI refresh traffic does not affect assertions. */
 function isServerLogSocket(socket: PlaywrightWebSocket): boolean {
@@ -192,29 +192,11 @@ test.describe.serial("Server logs", () => {
         expect(scrollTopBefore).toBeLessThanOrEqual(1);
 
         const marker = `playwright-live-log-${crypto.randomUUID()}`;
-        await page.evaluate(async (value) => {
-            const protocol =
-                window.location.protocol === "https:" ? "wss:" : "ws:";
 
-            const socket = new WebSocket(
-                `${protocol}//${window.location.host}/ws`,
-            );
+        // An agent offering an unknown protocol is refused and its offer is logged as an error.
+        expect(await upgradeWithProtocol(marker, "0.0.0-live-log")).toBe(426);
 
-            await new Promise<void>((resolve, reject) => {
-                socket.addEventListener("open", () => resolve(), {
-                    once: true,
-                });
-                socket.addEventListener(
-                    "error",
-                    () => reject(new Error("agent test socket failed")),
-                    { once: true },
-                );
-            });
-            socket.send(`not-json-${value}`);
-            socket.close();
-        }, marker);
-
-        // The unique malformed agent payload must reach the page through the logger broadcast path.
+        // The unique refused protocol must reach the page through the logger broadcast path.
         await expect(logRegion).toContainText(marker);
 
         const newestEntryTexts = await logRegion.evaluate((element) =>

@@ -38,11 +38,6 @@ export function formatAgentRecency(agent: AgentRecency, nowMs: number): string {
     return "Never connected";
 }
 
-/** Accepts leftover second stamps from older localStorage without mis-scaling them. */
-function provisioningStampMs(at: number): number {
-    return at < 1_000_000_000_000 ? at * 1000 : at;
-}
-
 /** Formats provisioning deltas as whole seconds plus leftover milliseconds. */
 export function formatElapsedSecsMs(totalMs: number): string {
     const ms = Math.max(0, Math.floor(totalMs));
@@ -85,9 +80,9 @@ export function provisioningElapsedFromStartMs(options: {
     const endMs =
         options.index === options.messages.length - 1
             ? options.nowMs
-            : provisioningStampMs(current.at);
+            : current.at;
 
-    return Math.max(0, endMs - provisioningStampMs(first.at));
+    return Math.max(0, endMs - first.at);
 }
 
 /** Gap from the previous stamp, or how long the first step stayed current. */
@@ -105,18 +100,14 @@ export function provisioningStepElapsedMs(options: {
     const previous = options.messages[options.index - 1];
 
     if (previous !== undefined) {
-        return Math.max(
-            0,
-            provisioningStampMs(current.at) - provisioningStampMs(previous.at),
-        );
+        return Math.max(0, current.at - previous.at);
     }
 
     const next = options.messages[options.index + 1];
 
-    const endMs =
-        next === undefined ? options.nowMs : provisioningStampMs(next.at);
+    const endMs = next === undefined ? options.nowMs : next.at;
 
-    return Math.max(0, endMs - provisioningStampMs(current.at));
+    return Math.max(0, endMs - current.at);
 }
 
 /** Updates labels locally so duration ticking does not create API traffic. */

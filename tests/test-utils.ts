@@ -9,7 +9,15 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { ApiClient, Agent } from "#ui/api-client";
+import {
+    ApiClient,
+    Agent,
+    ApiError,
+    type AccessTokenResponse,
+    type DeviceScope,
+    type Permission,
+} from "#ui/api-client";
+import { onTestFinished } from "vitest";
 import { Toxiproxy } from "toxiproxy-node-client";
 import type Proxy from "toxiproxy-node-client/dist/Proxy";
 import { testPorts } from "#test-ports";
@@ -82,7 +90,6 @@ export async function createToxiproxyAgent(options: {
             connection_issue: options.agent.connectionIssue,
             provisioning_status: options.agent.provisioningStatus,
             binary: options.agent.binary,
-            supports_self_exec: options.agent.supportsSelfExec,
             supports_native_open: options.agent.supportsNativeOpen,
             supports_move_to_trash: options.agent.supportsMoveToTrash,
             supports_trash: options.agent.supportsTrash,
@@ -253,7 +260,6 @@ export type SpawnAgentArgs = {
     name?: string;
     cwd: string;
     home?: string;
-    legacyDir?: string;
     log?: string;
     token?: string;
     env?: NodeJS.ProcessEnv;
@@ -323,10 +329,6 @@ export class ProcessManager {
 
         if (args.home !== undefined) {
             cliArgs.push("--home", args.home);
-        }
-
-        if (args.legacyDir !== undefined) {
-            cliArgs.push("--dir", args.legacyDir);
         }
 
         if (args.log !== undefined) {
@@ -506,7 +508,7 @@ export async function startServerAndAgent(options: {
 }> {
     const serverPort = VITEST_SERVER_PORT;
     const apiClient = new ApiClient(`http://127.0.0.1:${serverPort}`);
-    const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+    const wsUrl = `ws://127.0.0.1:${serverPort}/api/v1/agent/ws`;
 
     process.env.REDOOR_PORT = serverPort.toString();
     const serverPid = options.processManager.spawnServer({});
@@ -526,7 +528,7 @@ export async function startServerAndAgent(options: {
         10000,
     );
 
-    const waitForTransferPromise = waitForAgentTransfer(
+    const waitForTransferPromise = waitForAgentReady(
         serverProcess,
         options.agentName,
     );
@@ -559,14 +561,14 @@ export async function startServerAndAgent(options: {
     };
 }
 
-/** Waits until the agent's payload socket is router-owned before tests start streamed work. */
-export async function waitForAgentTransfer(
+/** Waits until the router accepted the agent's connection, which carries all of its streams. */
+export async function waitForAgentReady(
     serverProcess: ChildProcess,
     agentId: string,
 ): Promise<void> {
     await waitForLogMessage(
         serverProcess,
-        new RegExp(`Transfer socket registered: agent_id=${agentId},`),
+        new RegExp(`Agent registered: agent_id=${agentId},`),
         10000,
     );
 }
@@ -714,4 +716,56 @@ export async function waitForValue<T>(options: {
 
     const errorSuffix = lastError ? `: ${lastError.message}` : "";
     throw new Error(`Timeout waiting for ${options.description}${errorSuffix}`);
+}
+
+/** Every grantable permission, for tokens that should behave like the old full-access CLI. */
+export const ALL_PERMISSIONS: Permission[] = [
+    "files:read",
+    "files:write",
+    "files:delete",
+    "commands:execute",
+    "agents:manage",
+];
+
+/**
+ * Mints an access token through the session-authenticated REST API. Inside a test the token is
+ * deleted when the test finishes, so tests cannot leak credentials into later tests.
+ */
+export async function createAccessToken(
+    apiClient: ApiClient,
+    options: {
+        name?: string;
+        permissions: Permission[];
+        devices?: DeviceScope;
+        expiresAt?: string | null;
+    },
+): Promise<{ token: string; metadata: AccessTokenResponse }> {
+    const created = await apiClient.createAccessToken({
+        name: options.name ?? "integration test token",
+        permissions: options.permissions,
+        devices: options.devices ?? { kind: "all" },
+        expires_at: options.expiresAt ?? null,
+    });
+
+    try {
+        onTestFinished(async () => {
+            try {
+                await apiClient.deleteAccessToken(created.metadata.id);
+            } catch (error) {
+                // Tests that revoke or rotate-and-delete their token already cleaned up.
+                if (!(error instanceof ApiError && error.status === 404)) {
+                    throw error;
+                }
+            }
+        });
+    } catch {
+        // Outside a test (beforeAll) the token lives as long as the test server.
+    }
+
+    return { token: created.token, metadata: created.metadata };
+}
+
+/** Environment that lets the remote CLI authenticate with a token without a saved login. */
+export function remoteEnv(baseUrl: string, token: string) {
+    return { REDOOR_REMOTE_SERVER: baseUrl, REDOOR_REMOTE_TOKEN: token };
 }

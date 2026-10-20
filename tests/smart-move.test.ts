@@ -40,13 +40,13 @@ describe("Smart Move API", () => {
         const connected = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${destinationName},`,
+                `Agent registered: agent_id=${destinationName},`,
             ),
             10000,
         );
 
         processManager.spawnAgent({
-            wsAddress: `ws://127.0.0.1:${setup.serverPort}/ws`,
+            wsAddress: `ws://127.0.0.1:${setup.serverPort}`,
             name: destinationName,
             cwd: tempFiles.tempDirectory({ suffix: "-move-destination-cwd" }),
         });
@@ -558,6 +558,25 @@ describe("Smart Move API", () => {
             "source after failed setup",
         );
         // Failed setup must not create a partial destination tree.
+        await expect(fs.stat(destPath)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
+    it("rejects sources that are neither files nor directories", async () => {
+        const destPath = tempFiles.tempFile({ suffix: ".txt" });
+
+        // The shared transfer service names the requested operation in its rejection.
+        await expect(
+            sourceAgent.moveTo(
+                { agent: sourceAgent.id, path: destPath },
+                "/dev/null",
+            ),
+        ).rejects.toMatchObject({
+            status: 400,
+            message: "Move supports regular files and directories only",
+        });
+        // Rejection happens before any destination is created.
         await expect(fs.stat(destPath)).rejects.toMatchObject({
             code: "ENOENT",
         });

@@ -83,13 +83,13 @@ describe("File Diff API", () => {
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${secondAgentName},`,
+                `Agent registered: agent_id=${secondAgentName},`,
             ),
             10000,
         );
 
         const secondAgentPid = processManager.spawnAgent({
-            wsAddress: `ws://127.0.0.1:${serverPort}/ws`,
+            wsAddress: `ws://127.0.0.1:${serverPort}`,
             name: secondAgentName,
             cwd: tempFiles.tempDirectory({ suffix: "-second-agent-cwd" }),
         });

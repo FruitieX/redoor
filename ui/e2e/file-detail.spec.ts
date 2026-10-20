@@ -190,11 +190,10 @@ test.describe.serial("File Detail View", () => {
         await fs.writeFile(sourcePath, `left-${wideMarker}\n`);
         await fs.writeFile(destinationPath, `right-${wideMarker}\n`);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=diff`,
+            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
         );
 
-        // Legacy diff bookmarks must replace-redirect onto the unified Sync workspace.
-        await expect(page).toHaveURL(/\?view=sync$/);
+        // Diffing lives inside Sync, so there is no separate Diff view link.
         await expect(
             page.getByRole("link", { name: "Diff", exact: true }),
         ).toHaveCount(0);

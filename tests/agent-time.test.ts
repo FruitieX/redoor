@@ -61,15 +61,4 @@ describe("provisioning step elapsed time", () => {
             "14s 750ms after the previous step",
         );
     });
-
-    test("treats leftover second stamps as seconds", () => {
-        // Older localStorage wrote unix seconds; those must not be read as millis.
-        expect(
-            provisioningStepElapsedMs({
-                messages: [{ at: 100 }, { at: 130 }],
-                index: 0,
-                nowMs: 160_000,
-            }),
-        ).toBe(30_000);
-    });
 });

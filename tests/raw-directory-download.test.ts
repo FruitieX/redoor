@@ -1,8 +1,17 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import {
+    describe,
+    it,
+    expect,
+    beforeAll,
+    afterAll,
+    afterEach,
+    onTestFinished,
+} from "vitest";
 import type { TransferProgressEntry } from "#ui/api-client";
 import { Agent } from "#ui/api-client";
 
 import fs from "node:fs/promises";
+import { createServer } from "node:net";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { execFile } from "node:child_process";
@@ -222,6 +231,56 @@ describe("Raw Directory Archive Download API", () => {
         const members = await listTarMembers(archivePath);
         // Empty downloads still contain their root so extraction creates the requested directory.
         expect(members).toEqual([path.basename(sourceRoot)]);
+    });
+
+    it("fails the download when the archive cannot be completed", async () => {
+        const sourceRoot = tempFiles.tempFile({ suffix: "-broken-dir-archive" });
+        await fs.mkdir(sourceRoot, { recursive: true });
+        // A large first member makes the agent stream data before it reaches the socket.
+        await fs.writeFile(
+            path.join(sourceRoot, "a-payload.bin"),
+            Buffer.alloc(1024 * 1024, 3),
+        );
+        const socketServer = createServer();
+        await new Promise<void>((resolve, reject) => {
+            socketServer.once("error", reject);
+            socketServer.listen(path.join(sourceRoot, "z.sock"), resolve);
+        });
+        onTestFinished(
+            () =>
+                new Promise<void>((resolve) => {
+                    socketServer.close(() => resolve());
+                }),
+        );
+
+        const outcome = await testAgent
+            .download(sourceRoot, { download: true })
+            .then((response) => response.arrayBuffer())
+            .then(
+                () => "complete",
+                () => "failed",
+            );
+
+        // A tar that stopped at an unsupported member must not look like a finished download.
+        expect(outcome).toBe("failed");
+
+        const failedTransfer = await waitForValue({
+            description: "truncated directory archive recorded as errored",
+            predicate: async () => {
+                const progress = await apiClient.getTransferProgress();
+
+                return progress.transfers.find(
+                    (transfer: TransferProgressEntry) =>
+                        transfer.agent_id === testAgent.id &&
+                        transfer.path === sourceRoot &&
+                        transfer.direction === "download" &&
+                        transfer.state === "errored",
+                );
+            },
+        });
+
+        // Transfer history must report the failure instead of a completed archive.
+        expect(failedTransfer.state).toBe("errored");
     });
 
     it("should reject range requests for directory archives", async () => {

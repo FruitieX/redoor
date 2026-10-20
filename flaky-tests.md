@@ -11,6 +11,18 @@
 
 ## Failure history
 
+- 2026-10-10 `pn test` Playwright (resumable transfers): `server-home.spec.ts > shows a measuring badge until a directory archive total arrives` hit the previously recorded tooltip visibility flake at line 219. All integration tests and 224 browser tests passed; the unchanged browser case and its three log-test dependencies passed immediately in isolation (4 passed, 8.7 seconds).
+
+- 2026-10-10 `pn test` integration (resumable transfers): `resumes after toxiproxy interrupts the destination connection` exceeded its default 10-second timeout under full-suite load. The unchanged case passed immediately in isolation in 9.20 seconds; logs showed the expected three-second agent reconnect backoff. Network recovery now gets the same 30-second timeout as process restart tests, while continuing to poll state without sleeps.
+
+- 2026-10-10 resumable transfer integration: `resumable-transfers.test.ts` intermittently failed in `rediscovers a partial after both destination and server restarts` because destination inventory appeared before the source reconnected (one run exceeded the 10-second timeout; another reported `Agent not found: resume-source`). The fixture now waits for both endpoints and allows 30 seconds for restart cases. All 14 focused tests passed on the next run.
+
+- 2026-10-10 `pn test` integration (wire protocol v2, phase 5 review fixes): `create-ssh-agent.test.ts` failed 8 of 9 tests with `ECONNREFUSED` right after the first test's `restartServer()` succeeded, so the restarted server was briefly unreachable under full-suite load. The file passed four immediate isolated reruns (9 passed each).
+
+- 2026-10-10 `pn test` integration (wire protocol v2, phase 3): `mcp.test.ts` failed in `bounds retained output, cancels background execution, and keeps searches independent` because `waitForOperation` got `404 Operation not found` for the canceled background command at line 749. The agent acknowledged the cancel within 40 ms, so the record most likely passed its 2-second test retention before the first poll under full-suite load. The whole file passed on immediate isolated rerun (19 passed).
+
+- 2026-10-10 `pn test` Playwright (wire protocol v2, phase 3): `server-home.spec.ts` failed again in `shows a measuring badge until a directory archive total arrives`. The test mocks every transfer response, and it passed on immediate isolated rerun.
+
 - 2026-10-04 `pn test` integration (stateless MCP implementation): `real-ssh.test.ts` failed in `runs and controls multiple relays independently on one SSH host` because the shared SSH relay port was not ready after 50 retries. The exact test passed on immediate isolated rerun (1 passed, 4 skipped).
 
 - 2026-10-03 `pn test` Playwright (R9 memory-retention fix): `server-home.spec.ts` failed in `shows a measuring badge until a directory archive total arrives` while waiting for the measuring-badge tooltip at line 205. Rust and integration checks passed in that run. The browser case passed in subsequent isolated fix suites and the final combined `pn test` run; no UI implementation or test change was needed.
@@ -36,3 +48,6 @@
 - 2026-10-04 `pn test` integration (MCP token editing): `tests/raw-download.test.ts` skipped all 22 tests after setup failed with `Port 35237 not ready after 50 retries`. The related agent log contained only an older run, so no agent started during the failed setup. All 22 tests passed on the immediate isolated rerun with `pn exec node scripts/test/run-integration-tests.mts tests/raw-download.test.ts`; no code or test changes were needed.
 
 - 2026-10-04 `pn test` Playwright (MCP token editing): `agent-management.spec.ts` failed in `adds and connects an SSH agent with password auth` at line 465 when the 30-second test timeout expired while waiting for the connected device link. The case passed on the immediate rerun of `agent-management.spec.ts` with the existing SSH fixture and no code or test changes.
+
+- 2026-10-09 `pn test` integration (workspace split; also failed in the baseline run on the old single-crate code): `tests/mcp.test.ts` failed in `stateless authenticated MCP > bounds retained output, cancels background execution, and keeps searches independent` with `MCP tools/call failed (429): "rate_limited"`. The exact test passed on the immediate isolated rerun with `pn integration-test tests/mcp.test.ts -t "bounds retained output"`, which suggests earlier tests in the file exhaust the MCP rate limit.
+  - Resolved 2026-10-09 (not a flake): the limiter is correctly keyed per credential, but this test shared `deviceToken` with the preceding workflow test, whose calls (plus a 20 ms operation-expiry poll loop costing ~100 requests) spent the 120 requests/minute budget, so the first call failed deterministically in file runs. With a dedicated credential a second latent cause appeared: ten parallel `run_command` admissions on one credential exceed its concurrency cap of eight. The test now uses two dedicated credentials (parallel admissions split across them, since the retention ceiling under test is global) and polls expiry every 100 ms. The full file passed three consecutive runs.

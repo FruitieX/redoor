@@ -54,7 +54,7 @@ import type { MountPoint } from "#bindings/MountPoint";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 
 type BrowserSearch = {
-    view?: "details" | "edit" | "diff" | "sync" | "git";
+    view?: "details" | "sync" | "git";
     line?: number;
     preview?: boolean;
 };
@@ -109,8 +109,6 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
     validateSearch: (search): BrowserSearch => ({
         view:
             search.view === "details" ||
-            search.view === "edit" ||
-            search.view === "diff" ||
             search.view === "sync" ||
             search.view === "git"
                 ? search.view
@@ -138,16 +136,6 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                 path: `/${params._splat ?? ""}`,
                 lsResult: null,
             };
-        }
-
-        // Legacy ?view=diff bookmarks land on the unified Sync workspace.
-        if (deps.view === "diff") {
-            throw redirect({
-                to: "/agents/$agentId/browser/$",
-                params,
-                search: { view: "sync" },
-                replace: true,
-            });
         }
 
         const rawSearch = new URLSearchParams(
@@ -215,12 +203,7 @@ export const Route = createFileRoute("/agents/$agentId/browser/$")({
                 : null;
 
             if (isLsFileResponse(lsResult)) {
-                replaceUnsupportedOrLegacyFileView(params, deps.view, metadata);
-                replaceLegacyEditFileView(
-                    params,
-                    deps.view,
-                    lineFromLocationSearch(location.searchStr),
-                );
+                replaceUnsupportedFileView(params, deps.view, metadata);
                 replaceDefaultMarkdownPreview({
                     params,
                     view: deps.view,
@@ -632,7 +615,7 @@ function DirectoryBrowserPage(props: {
     parentPath: string | null;
     lsResult: LsDirectoryResponse;
     mountPoints: MountPoint[];
-    view?: "details" | "edit" | "diff" | "sync" | "git";
+    view?: "details" | "sync" | "git";
     gitAvailable: boolean;
 }) {
     const [userState, setUserState] = useUserState();
@@ -743,13 +726,13 @@ function DirectoryBrowserPage(props: {
     );
 }
 
-/** Content is the file default, including leftover ?view=edit bookmarks. */
+/** Content is the file default view. */
 function wantsFileContentView(view: BrowserSearch["view"]) {
-    return view === undefined || view === "edit";
+    return view === undefined;
 }
 
-/** Replaces history so unsupported files and leftover content URLs do not stay on the stack. */
-function replaceUnsupportedOrLegacyFileView(
+/** Replaces history so a content URL for a file without viewable content does not stay on the stack. */
+function replaceUnsupportedFileView(
     params: { agentId: string; _splat?: string },
     view: BrowserSearch["view"],
     metadata: MetadataResponse | null,
@@ -765,24 +748,6 @@ function replaceUnsupportedOrLegacyFileView(
             replace: true,
         });
     }
-}
-
-/** Strips leftover ?view=edit while keeping an inbound line bookmark. */
-function replaceLegacyEditFileView(
-    params: { agentId: string; _splat?: string },
-    view: BrowserSearch["view"],
-    line: BrowserSearch["line"],
-) {
-    if (view !== "edit") {
-        return;
-    }
-
-    throw redirect({
-        to: "/agents/$agentId/browser/$",
-        params,
-        search: line === undefined ? {} : { line },
-        replace: true,
-    });
 }
 
 /** Makes rendered markdown the canonical first view while line bookmarks stay in the editor. */

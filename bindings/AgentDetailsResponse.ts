@@ -25,14 +25,14 @@ external_ip: string | null, username: string, connected_at: UnixTimestampSeconds
  */
 binary: BinaryIdentity, 
 /**
- * Current filesystems are optional on the wire so newer servers can still inspect older agents.
+ * Mounted filesystems, for capacity checks and direct navigation.
  */
 mount_points: Array<MountPoint>, 
 /**
- * Effective UID of the connected agent process; defaults for older agents that omit it.
+ * Effective UID of the connected agent process.
  */
 uid: number, 
 /**
- * Whether the connected agent process is running as root; defaults false for older agents.
+ * Whether the connected agent process is running as root.
  */
 is_root: boolean, };

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page } from "@playwright/test";
@@ -174,5 +175,41 @@ export async function simulateTabRefocus(page: Page): Promise<void> {
     await page.evaluate(() => {
         window.dispatchEvent(new Event("visibilitychange"));
         window.dispatchEvent(new Event("focus"));
+    });
+}
+
+/** Agent token the Playwright server is configured with. */
+const AGENT_TOKEN = "test-agent-token";
+
+/**
+ * Attempts an agent websocket upgrade that offers an unknown protocol, the way an agent of a
+ * different release would, and resolves with the HTTP status the server answered.
+ */
+export function upgradeWithProtocol(protocol: string, version: string) {
+    const url = new URL("/api/v1/agent/ws", WEB_BASE_URL);
+
+    return new Promise<number>((resolve, reject) => {
+        const request = http.request(url, {
+            headers: {
+                Connection: "Upgrade",
+                Upgrade: "websocket",
+                "Sec-WebSocket-Version": "13",
+                "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "Sec-WebSocket-Protocol": protocol,
+                "X-Redoor-Agent-Version": version,
+                Authorization: `Bearer ${AGENT_TOKEN}`,
+            },
+        });
+
+        request.on("response", (response) => {
+            response.resume();
+            resolve(response.statusCode ?? 0);
+        });
+        request.on("upgrade", (_response, socket) => {
+            socket.destroy();
+            reject(new Error("the server accepted an unknown protocol"));
+        });
+        request.on("error", reject);
+        request.end();
     });
 }

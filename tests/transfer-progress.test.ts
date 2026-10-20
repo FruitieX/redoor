@@ -27,7 +27,7 @@ function transfer(
         state: "active",
         cancelable: true,
         error: null,
-        atomic: false,
+        atomic: false, pausable: false, verifying: false, resumed_bytes: 0,
         ...overrides,
     };
 }

@@ -16,7 +16,7 @@ import { Route as TestRouteImport } from './routes/test'
 import { Route as AgentsIndexRouteImport } from './routes/agents.index'
 import { Route as AgentsAgentIdRouteImport } from './routes/agents.$agentId'
 import { Route as AgentsNewRouteImport } from './routes/agents.new'
-import { Route as SettingsMcpRouteImport } from './routes/settings.mcp'
+import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
 import { Route as TransfersIndexRouteImport } from './routes/transfers.index'
 import { Route as AgentsAgentIdIndexRouteImport } from './routes/agents.$agentId.index'
 import { Route as AgentsAgentIdEditRouteImport } from './routes/agents.$agentId.edit'
@@ -59,9 +59,9 @@ const AgentsNewRoute = AgentsNewRouteImport.update({
   path: '/agents/new',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SettingsMcpRoute = SettingsMcpRouteImport.update({
-  id: '/settings/mcp',
-  path: '/settings/mcp',
+const SettingsTokensRoute = SettingsTokensRouteImport.update({
+  id: '/settings/tokens',
+  path: '/settings/tokens',
   getParentRoute: () => rootRouteImport,
 } as any)
 const TransfersIndexRoute = TransfersIndexRouteImport.update({
@@ -103,7 +103,7 @@ export interface FileRoutesByFullPath {
   '/test': typeof TestRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
   '/agents/new': typeof AgentsNewRoute
-  '/settings/mcp': typeof SettingsMcpRoute
+  '/settings/tokens': typeof SettingsTokensRoute
   '/agents/': typeof AgentsIndexRoute
   '/transfers/': typeof TransfersIndexRoute
   '/agents/$agentId/edit': typeof AgentsAgentIdEditRoute
@@ -118,7 +118,7 @@ export interface FileRoutesByTo {
   '/logs': typeof LogsRoute
   '/test': typeof TestRoute
   '/agents/new': typeof AgentsNewRoute
-  '/settings/mcp': typeof SettingsMcpRoute
+  '/settings/tokens': typeof SettingsTokensRoute
   '/agents': typeof AgentsIndexRoute
   '/transfers': typeof TransfersIndexRoute
   '/agents/$agentId/edit': typeof AgentsAgentIdEditRoute
@@ -135,7 +135,7 @@ export interface FileRoutesById {
   '/test': typeof TestRoute
   '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
   '/agents/new': typeof AgentsNewRoute
-  '/settings/mcp': typeof SettingsMcpRoute
+  '/settings/tokens': typeof SettingsTokensRoute
   '/agents/': typeof AgentsIndexRoute
   '/transfers/': typeof TransfersIndexRoute
   '/agents/$agentId/edit': typeof AgentsAgentIdEditRoute
@@ -153,7 +153,7 @@ export interface FileRouteTypes {
     | '/test'
     | '/agents/$agentId'
     | '/agents/new'
-    | '/settings/mcp'
+    | '/settings/tokens'
     | '/agents/'
     | '/transfers/'
     | '/agents/$agentId/edit'
@@ -168,7 +168,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/test'
     | '/agents/new'
-    | '/settings/mcp'
+    | '/settings/tokens'
     | '/agents'
     | '/transfers'
     | '/agents/$agentId/edit'
@@ -184,7 +184,7 @@ export interface FileRouteTypes {
     | '/test'
     | '/agents/$agentId'
     | '/agents/new'
-    | '/settings/mcp'
+    | '/settings/tokens'
     | '/agents/'
     | '/transfers/'
     | '/agents/$agentId/edit'
@@ -201,7 +201,7 @@ export interface RootRouteChildren {
   TestRoute: typeof TestRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRouteWithChildren
   AgentsNewRoute: typeof AgentsNewRoute
-  SettingsMcpRoute: typeof SettingsMcpRoute
+  SettingsTokensRoute: typeof SettingsTokensRoute
   AgentsIndexRoute: typeof AgentsIndexRoute
   TransfersIndexRoute: typeof TransfersIndexRoute
 }
@@ -257,11 +257,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentsNewRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/settings/mcp': {
-      id: '/settings/mcp'
-      path: '/settings/mcp'
-      fullPath: '/settings/mcp'
-      preLoaderRoute: typeof SettingsMcpRouteImport
+    '/settings/tokens': {
+      id: '/settings/tokens'
+      path: '/settings/tokens'
+      fullPath: '/settings/tokens'
+      preLoaderRoute: typeof SettingsTokensRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/transfers/': {
@@ -336,7 +336,7 @@ const rootRouteChildren: RootRouteChildren = {
   TestRoute: TestRoute,
   AgentsAgentIdRoute: AgentsAgentIdRouteWithChildren,
   AgentsNewRoute: AgentsNewRoute,
-  SettingsMcpRoute: SettingsMcpRoute,
+  SettingsTokensRoute: SettingsTokensRoute,
   AgentsIndexRoute: AgentsIndexRoute,
   TransfersIndexRoute: TransfersIndexRoute,
 }

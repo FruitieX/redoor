@@ -1,0 +1,32 @@
+[package]
+name = "redoor"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "redoor"
+path = "src/main.rs"
+
+[dependencies]
+redoor-core.workspace = true
+redoor-agent.workspace = true
+redoor-server.workspace = true
+redoor-cli.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+fastrand.workspace = true
+jiff.workspace = true
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+redoor-core = { workspace = true, features = ["test-support"] }
+redoor-protocol.workspace = true
+axum.workspace = true
+bytes.workspace = true
+async-stream.workspace = true
+reqwest.workspace = true
+uuid.workspace = true

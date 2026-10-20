@@ -11,11 +11,14 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
+    ALL_PERMISSIONS,
     ProcessManager,
     TempFileManager,
+    createAccessToken,
+    remoteEnv,
     startServerAndAgent,
     waitForValue,
-    waitForAgentTransfer,
+    waitForAgentReady,
 } from "./test-utils";
 import type { ArchiveUploadResponse } from "#bindings/ArchiveUploadResponse";
 import type { CancelUploadRequestResponse } from "#bindings/CancelUploadRequestResponse";
@@ -26,6 +29,7 @@ describe("Remote cp and streaming archive upload", () => {
     let setup: Awaited<ReturnType<typeof startServerAndAgent>>;
     let secondId: string;
     let home: string;
+    let tokenEnv: ReturnType<typeof remoteEnv>;
 
     const binary =
         process.env.REDOOR_TEST_BINARY ?? path.resolve("target/debug/redoor");
@@ -39,7 +43,7 @@ describe("Remote cp and streaming archive upload", () => {
         const server = processes.getProcess(setup.serverPid);
 
         if (server === undefined) throw new Error("Missing server process");
-        const ready = waitForAgentTransfer(server, "remote-cp-dest");
+        const ready = waitForAgentReady(server, "remote-cp-dest");
         processes.spawnAgent({
             wsAddress: setup.wsUrl,
             name: "remote-cp-dest",
@@ -55,26 +59,13 @@ describe("Remote cp and streaming archive upload", () => {
         if (second === undefined) throw new Error("Missing second agent");
         secondId = second.id;
         home = files.tempDirectory();
-        const directory = path.join(home, ".local/share/cp-test");
-        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-        // Seed the cookie issued by the real login API, using the durable cookie_store wire format.
-        await fs.writeFile(
-            path.join(directory, "remote-session.json"),
-            JSON.stringify({
-                version: 1,
-                generation: randomUUID(),
-                server_url: `${setup.apiClient.baseUrl}/`,
-                cookies: [
-                    {
-                        raw_cookie: `${setup.apiClient.getAuthHeaders().Cookie}; Path=/`,
-                        path: ["/", true],
-                        domain: { HostOnly: "127.0.0.1" },
-                        expires: "SessionEnd",
-                    },
-                ],
-            }),
-            { mode: 0o600 },
-        );
+
+        const created = await createAccessToken(setup.apiClient, {
+            name: "remote cp test",
+            permissions: ALL_PERMISSIONS,
+        });
+
+        tokenEnv = remoteEnv(setup.apiClient.baseUrl, created.token);
     }, 30000);
 
     afterAll(async () => {
@@ -82,16 +73,21 @@ describe("Remote cp and streaming archive upload", () => {
         files.cleanup();
     });
 
-    /** Every invocation reloads the saved login and retains stdout/stderr for contract assertions. */
+    /** Every invocation authenticates with the token and retains stdout/stderr for contract assertions. */
     function cp(...args: string[]) {
         return $({
-            env: { ...process.env, HOME: home, REDOOR_APP_NAME: "cp-test" },
+            env: {
+                ...process.env,
+                HOME: home,
+                REDOOR_APP_NAME: "cp-test",
+                ...tokenEnv,
+            },
             quiet: true,
             nothrow: true,
         })`exec ${binary} remote cp ${args}`;
     }
 
-    /** Direct REST requests use the real cookie and deliberately omit Content-Length for streams. */
+    /** Direct REST requests use the real session and deliberately omit Content-Length for streams. */
     function archiveUrl(destination: string, mode = "error") {
         const encoded = destination
             .split("/")

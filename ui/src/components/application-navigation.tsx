@@ -85,9 +85,9 @@ function ApplicationMenu(props: {
         { to: "/logs", label: "Server logs", icon: ScrollText },
         { to: "/transfers", label: "Transfers", icon: ArrowLeftRight },
         {
-            to: "/settings/mcp",
-            label: "MCP tokens",
-            ariaLabel: "Manage MCP tokens",
+            to: "/settings/tokens",
+            label: "Access tokens",
+            ariaLabel: "Manage access tokens",
             icon: KeyRound,
         },
     ] as const;

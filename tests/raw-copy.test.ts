@@ -112,7 +112,7 @@ describe("Raw Copy API", () => {
         const sourceContent = "cross-agent-copy".repeat(4096);
         const sourcePath = tempFiles.create(sourceContent, { suffix: ".txt" });
         const destPath = tempFiles.tempFile({ suffix: ".txt" });
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const secondAgentName = "raw-copy-target-agent";
 
         const serverProcess = processManager.getProcess(serverPid);
@@ -123,7 +123,9 @@ describe("Raw Copy API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(`Transfer socket registered: agent_id=${secondAgentName},`),
+            new RegExp(
+                `Agent registered: agent_id=${secondAgentName},`,
+            ),
             10000,
         );
 
@@ -291,7 +293,7 @@ describe("Raw Copy API", () => {
     it("should copy a directory across agents", async () => {
         const sourceRoot = tempFiles.tempFile({ suffix: "-cross-source-dir" });
         const destRoot = tempFiles.tempFile({ suffix: "-cross-dest-dir" });
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const secondAgentName = "raw-copy-target-agent-dir";
 
         await fs.mkdir(path.join(sourceRoot, "nested"), { recursive: true });
@@ -309,7 +311,9 @@ describe("Raw Copy API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(`Transfer socket registered: agent_id=${secondAgentName},`),
+            new RegExp(
+                `Agent registered: agent_id=${secondAgentName},`,
+            ),
             10000,
         );
 
@@ -426,6 +430,22 @@ describe("Raw Copy API", () => {
         ).rejects.toThrow(/different/i);
     });
 
+    it("should reject sources that are neither files nor directories", async () => {
+        // A character device has neither a byte length nor a tree to archive.
+        await expect(
+            testAgent.copyTo(
+                {
+                    agent: testAgent.id,
+                    path: tempFiles.tempFile({ suffix: ".txt" }),
+                },
+                "/dev/null",
+            ),
+        ).rejects.toMatchObject({
+            status: 400,
+            message: "Copy supports regular files and directories only",
+        });
+    });
+
     it("should reject the same source and destination directory", async () => {
         const sourceRoot = tempFiles.tempFile({ suffix: "-same-dir" });
         await fs.mkdir(sourceRoot, { recursive: true });
@@ -504,13 +524,13 @@ describe("Raw Copy API", () => {
             const waitForSecondAgent = waitForLogMessage(
                 serverProcess,
                 new RegExp(
-                    `Transfer socket registered: agent_id=${secondAgentName},`,
+                    `Agent registered: agent_id=${secondAgentName},`,
                 ),
                 10000,
             );
 
             secondAgentPid = processManager.spawnAgent({
-                wsAddress: `ws://127.0.0.1:${serverPort}/ws`,
+                wsAddress: `ws://127.0.0.1:${serverPort}`,
                 name: secondAgentName,
                 cwd: tempFiles.tempDirectory({
                     suffix: "-on-existing-target-agent-cwd",
@@ -524,7 +544,9 @@ describe("Raw Copy API", () => {
                 predicate: async () => {
                     const agents = await apiClient.listAgents();
 
-                    return agents.find((agent) => agent.name === secondAgentName);
+                    return agents.find(
+                        (agent) => agent.name === secondAgentName,
+                    );
                 },
             });
 
@@ -601,7 +623,9 @@ describe("Raw Copy API", () => {
                 suffix: `-on-existing-override-dest-${scope}`,
             });
 
-            await fs.mkdir(path.join(sourceRoot, "nested"), { recursive: true });
+            await fs.mkdir(path.join(sourceRoot, "nested"), {
+                recursive: true,
+            });
             await fs.mkdir(destRoot, { recursive: true });
             await fs.writeFile(
                 path.join(sourceRoot, "nested", "file.txt"),
@@ -665,7 +689,9 @@ describe("Raw Copy API", () => {
                 suffix: `-on-existing-merge-dest-${scope}`,
             });
 
-            await fs.mkdir(path.join(sourceRoot, "shared"), { recursive: true });
+            await fs.mkdir(path.join(sourceRoot, "shared"), {
+                recursive: true,
+            });
             await fs.mkdir(path.join(destRoot, "shared"), { recursive: true });
             await fs.writeFile(
                 path.join(sourceRoot, "shared", "conflict.txt"),
@@ -718,11 +744,17 @@ describe("Raw Copy API", () => {
             ).toBe("from-source");
             // Source-only files must be added beside existing destination entries.
             expect(
-                await fs.readFile(path.join(destRoot, "source-only.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(destRoot, "source-only.txt"),
+                    "utf-8",
+                ),
             ).toBe("source-only");
             // Dest-only files must survive merge because only overlapping paths are replaced.
             expect(
-                await fs.readFile(path.join(destRoot, "dest-only.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(destRoot, "dest-only.txt"),
+                    "utf-8",
+                ),
             ).toBe("dest-only");
         });
 
@@ -776,7 +808,10 @@ describe("Raw Copy API", () => {
             expect(erroredTransfer.dest?.agent).toBe(destAgentId);
             // External content must stay untouched so merge never follows the destination root link.
             expect(
-                await fs.readFile(path.join(externalRoot, "secret.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(externalRoot, "secret.txt"),
+                    "utf-8",
+                ),
             ).toBe("external-secret");
             // Source files must not appear outside the requested destination via the symlink target.
             await expect(
@@ -797,7 +832,9 @@ describe("Raw Copy API", () => {
                 suffix: `-on-existing-merge-nested-symlink-dest-${scope}`,
             });
 
-            await fs.mkdir(path.join(sourceRoot, "linked"), { recursive: true });
+            await fs.mkdir(path.join(sourceRoot, "linked"), {
+                recursive: true,
+            });
             await fs.mkdir(destRoot, { recursive: true });
             await fs.mkdir(externalRoot, { recursive: true });
             await fs.writeFile(
@@ -851,11 +888,17 @@ describe("Raw Copy API", () => {
             ).toBe("from-source");
             // Dest-only files must survive merge beside the replaced symlink path.
             expect(
-                await fs.readFile(path.join(destRoot, "dest-only.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(destRoot, "dest-only.txt"),
+                    "utf-8",
+                ),
             ).toBe("dest-only");
             // The previous symlink target must remain untouched outside the destination tree.
             expect(
-                await fs.readFile(path.join(externalRoot, "secret.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(externalRoot, "secret.txt"),
+                    "utf-8",
+                ),
             ).toBe("external-secret");
             await expect(
                 fs.stat(path.join(externalRoot, "file.txt")),

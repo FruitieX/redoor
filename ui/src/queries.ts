@@ -41,9 +41,13 @@ export const queryKeys = {
     all: ["server-state"] as const,
     agents: () => [...queryKeys.all, "agents"] as const,
     transfers: () => [...queryKeys.all, "transfers"] as const,
+    /** Resumable partials, rediscovered from the connected destination agents. */
+    partials: () => [...queryKeys.all, "partials"] as const,
     serverInfo: () => [...queryKeys.all, "server-info"] as const,
+    protocolMismatches: () =>
+        [...queryKeys.all, "protocol-mismatches"] as const,
     userState: () => [...queryKeys.all, "user-state"] as const,
-    mcpTokens: () => [...queryKeys.all, "mcp-tokens"] as const,
+    accessTokens: () => [...queryKeys.all, "access-tokens"] as const,
     serverLoggingLevel: () =>
         [...queryKeys.all, "server-logging-level"] as const,
     agentLoggingLevel: (agentId: string) =>
@@ -128,10 +132,10 @@ export function agentsQueryOptions(api: ApiClient) {
 }
 
 /** Shares only secret-free token metadata between the settings loader and page. */
-export function mcpTokensQueryOptions(api: ApiClient) {
+export function accessTokensQueryOptions(api: ApiClient) {
     return queryOptions({
-        queryKey: queryKeys.mcpTokens(),
-        queryFn: () => api.listMcpTokens(),
+        queryKey: queryKeys.accessTokens(),
+        queryFn: () => api.listAccessTokens(),
     });
 }
 
@@ -141,6 +145,21 @@ export function transfersQueryOptions(api: ApiClient) {
         queryKey: queryKeys.transfers(),
         queryFn: () => api.getTransferProgress(),
         staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/** How often the device list rechecks for refused agents, which push no UI events. */
+const PROTOCOL_MISMATCH_POLL_MS = 10_000;
+
+/**
+ * Polls refused agent connections: a mismatched agent never registers, so no refresh event
+ * announces it and the list has to be fetched periodically while the page is open.
+ */
+export function protocolMismatchesQueryOptions(api: ApiClient) {
+    return queryOptions({
+        queryKey: queryKeys.protocolMismatches(),
+        queryFn: () => api.listProtocolMismatches(),
+        refetchInterval: PROTOCOL_MISMATCH_POLL_MS,
     });
 }
 
@@ -299,5 +318,14 @@ export function contentGrepQueryOptions(
             }),
         enabled: search.query.trim() !== "",
         placeholderData: keepPreviousData,
+    });
+}
+
+/** Polling also rediscovers partials when a destination reconnects after a crash. */
+export function partialsQueryOptions(api: ApiClient) {
+    return queryOptions({
+        queryKey: queryKeys.partials(),
+        queryFn: () => api.listPartials(),
+        refetchInterval: 5000,
     });
 }

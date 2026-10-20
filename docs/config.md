@@ -31,13 +31,13 @@ For values that exist in more than one place:
 
 **CLI flag > environment variable > `config.toml` > built-in default**
 
-Unknown top-level keys and unknown keys inside `[server]` / `[agent]` are rejected so typos fail fast.
+Unknown keys anywhere in the file (top level, `[server]`, `[agent]`, `[[agents]]` and `[[relays]]` rows) are rejected so typos fail fast.
 
 ## Top-level
 
 | Key           | Type   | Required | Description                                                                                    |
 | ------------- | ------ | -------- | ---------------------------------------------------------------------------------------------- |
-| `agent_token` | string | yes      | Shared registration secret. Agents present this when connecting over `/ws`. Must be non-empty. |
+| `agent_token` | string | yes      | Shared agent secret. Agents present it as a bearer token when they open their websocket (`/api/v1/agent/ws`). Must be non-empty. |
 
 ```toml
 agent_token = "long-private-secret"
@@ -90,7 +90,7 @@ Used by a standalone `redoor agent` process (and by systemd/launchd agent units)
 
 | Key          | Type   | Default                     | Description                                                                                                                                  |
 | ------------ | ------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server`     | string | none (required to connect)  | Redoor server URL (`http(s)://` or `ws(s)://`). Path is optional and forced to `/ws`. Override with positional `SERVER` / `REDOOR_AGENT_WS`. |
+| `server`     | string | none (required to connect)  | Redoor server URL (`http(s)://` or `ws(s)://`). Path is optional and forced to the agent endpoint `/api/v1/agent/ws`. Override with positional `SERVER` / `REDOOR_AGENT_WS`. |
 | `name`       | string | computer hostname           | Device name shown in the UI and remote CLI. Override with `--name` / `REDOOR_AGENT_NAME`.                                                    |
 | `home`       | string | process user home directory | Home directory opened in the UI; does not limit filesystem access. Override with `--home` / `REDOOR_AGENT_HOME`.                             |
 | `log`        | string | platform default\*          | Agent log file path. Override with `--log` / `REDOOR_AGENT_LOG`.                                                                             |
@@ -98,8 +98,6 @@ Used by a standalone `redoor agent` process (and by systemd/launchd agent units)
 | `log_format` | string | `line`                      | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_AGENT_LOG_FORMAT`.                   |
 
 \*Default log path: `~/.local/share/redoor/agent.log` (non-root) or `/var/log/redoor/agent.log` (root).
-
-Legacy alias: `ws_address` is still accepted as a synonym for `server`. Do not set both.
 
 ```toml
 [agent]
@@ -263,7 +261,7 @@ list its exact HTTP(S) origin under `[server]`:
 mcp_allowed_origins = ["https://trusted-client.example"]
 ```
 
-See [MCP](mcp.md) for credential creation, client headers, and protocol limits.
+See [MCP](mcp.md) for creating access tokens, client headers, and protocol limits.
 
 Retained MCP operation output and metadata can be bounded or expired with
 `REDOOR_MCP_OPERATION_JOB_QUOTA` (bytes per operation),

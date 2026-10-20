@@ -8,6 +8,8 @@ const errorResponseSchema: z.ZodType<ErrorResponse> = z.object({
 /** Supplies browser or Node-managed authentication without coupling transport to the router. */
 export type RequestContext = {
     getSessionCookie?: () => string | null;
+    /** An access token takes precedence over the cookie on the server, as for the CLI. */
+    getAccessToken?: () => string | null;
     onUnauthorized?: () => void;
 };
 
@@ -25,16 +27,34 @@ export class ApiError extends Error {
     }
 }
 
-/** Adds browser credentials and the explicit cookie needed by Node-based integration clients. */
+/** Returns the explicit credentials a Node-based client sends; browsers rely on their cookie jar. */
+export function authenticationHeaders(context: RequestContext) {
+    const headers = new Map<string, string>();
+    const sessionCookie = context.getSessionCookie?.();
+    const accessToken = context.getAccessToken?.();
+
+    if (sessionCookie) {
+        headers.set("Cookie", sessionCookie);
+    }
+
+    if (accessToken) {
+        headers.set("Authorization", `Bearer ${accessToken}`);
+    }
+
+    return Object.fromEntries(headers);
+}
+
+/** Adds browser credentials and the explicit cookie or token needed by Node-based clients. */
 export function withAuthentication(
     options: RequestInit | undefined,
     context: RequestContext,
 ): RequestInit {
     const headers = new Headers(options?.headers);
-    const sessionCookie = context.getSessionCookie?.();
 
-    if (sessionCookie) {
-        headers.set("Cookie", sessionCookie);
+    for (const [name, value] of Object.entries(
+        authenticationHeaders(context),
+    )) {
+        headers.set(name, value);
     }
 
     return { ...options, credentials: "same-origin", headers };

@@ -8,10 +8,10 @@ import {
     it,
     onTestFinished,
 } from "vitest";
-import WebSocket from "ws";
-import { z } from "zod";
-
+import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
+import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import { ApiError, type Agent, type ApiClient } from "#ui/api-client";
+import { FakeAgent } from "./fake-agent";
 import {
     ProcessManager,
     SERVER_PATH,
@@ -20,45 +20,9 @@ import {
     TempFileManager,
     startServerAndAgent,
     waitForValue,
-    webSocketDataToString,
 } from "./test-utils";
 
 const AGENT_NAME = "upgrade-external-agent";
-
-const transferSocketOpenSchema = z.object({
-    type: z.literal("transfer_socket_open"),
-    token: z.string().min(1),
-});
-
-const controlMessageSchema = z.object({ type: z.string() });
-
-/** Waits for a websocket to become writable without relying on timing delays. */
-async function waitForSocketOpen(socket: WebSocket): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-        socket.once("open", resolve);
-        socket.once("error", reject);
-    });
-}
-
-/** Reads one JSON control message from a websocket fixture. */
-async function nextTransferSocketOpenMessage(
-    socket: WebSocket,
-): Promise<z.infer<typeof transferSocketOpenSchema>> {
-    return new Promise((resolve, reject) => {
-        socket.once("message", (data) => {
-            try {
-                resolve(
-                    transferSocketOpenSchema.parse(
-                        JSON.parse(webSocketDataToString(data)),
-                    ),
-                );
-            } catch (error) {
-                reject(error);
-            }
-        });
-        socket.once("error", reject);
-    });
-}
 
 describe("connected external agent upgrade", () => {
     const processes = new ProcessManager();
@@ -222,61 +186,36 @@ describe("connected external agent upgrade", () => {
         expect(details.pid).toBe(agentPid);
     }, 60000);
 
-    it("rejects an older agent before sending an upload command", async () => {
-        const oldAgentName = "upgrade-unsupported-agent";
+    it("refuses to self-exec when the upgrade upload completes before any byte", async () => {
+        const earlyAgentName = "upgrade-early-completion-agent";
         const serverInfo = await api.getServerInfo();
-        const control = new WebSocket(`ws://127.0.0.1:${serverPort}/ws`);
-        let transfer: WebSocket | undefined;
-        onTestFinished(() => {
-            control.close();
-            transfer?.close();
+        const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+
+        const binary: BinaryIdentity = {
+            version: serverInfo.version,
+            git_rev: "early",
+            git_dirty: false,
+            version_dirty: false,
+            build_mode: "debug",
+            build_date: "unknown",
+        };
+
+        const earlyAgent = await FakeAgent.connect({
+            serverPort,
+            agentId: earlyAgentName,
+            arch,
+            hostname: "early-host",
+            username: "early-user",
+            binary,
         });
-        await waitForSocketOpen(control);
-        control.send(
-            JSON.stringify({
-                type: "agent_register",
-                agent_id: oldAgentName,
-                agent_name: oldAgentName,
-                os: "linux",
-                arch: "x86_64",
-                hostname: "old-host",
-                username: "old-user",
-                cwd: "/tmp",
-                token: serverInfo.agent_token,
-                binary: {
-                    version: "0.0.3",
-                    git_rev: "old",
-                    git_dirty: false,
-                    version_dirty: false,
-                    build_mode: "release",
-                    build_date: "unknown",
-                },
-                // Deliberately omit supports_self_exec to model a pre-protocol agent.
-            }),
-        );
-        const transferOpen = await nextTransferSocketOpenMessage(control);
-        // The transfer socket must be opened before the fixture can authenticate it.
-        expect(transferOpen.type).toBe("transfer_socket_open");
-        // A non-empty one-time token binds the transfer socket to this control connection.
-        expect(transferOpen.token.length).toBeGreaterThan(0);
 
-        transfer = new WebSocket(
-            `ws://127.0.0.1:${serverPort}/api/v1/agent-transfer/ws`,
-        );
-        await waitForSocketOpen(transfer);
-        transfer.send(
-            JSON.stringify({
-                type: "authenticate",
-                agent_id: oldAgentName,
-                token: transferOpen.token,
-            }),
-        );
+        onTestFinished(() => earlyAgent.close());
 
-        const oldAgent = await waitForValue({
-            description: "unsupported fixture transfer registration",
+        const listed = await waitForValue({
+            description: "early-completion fixture transfer registration",
             predicate: async () => {
                 const candidate = (await api.listAgents()).find(
-                    (entry) => entry.name === oldAgentName,
+                    (entry) => entry.name === earlyAgentName,
                 );
 
                 return candidate?.status === "connected"
@@ -285,34 +224,59 @@ describe("connected external agent upgrade", () => {
             },
         });
 
-        // An omitted capability must remain visible as unsupported metadata.
-        expect(oldAgent.supportsSelfExec).toBe(false);
+        earlyAgent.onCommand(({ id, command }) => {
+            if (command.type === "GetAgentDetails") {
+                const details: AgentDetailsResponse = {
+                    id: earlyAgentName,
+                    name: earlyAgentName,
+                    pid: 1,
+                    cwd: "/tmp",
+                    config_path: "",
+                    exe_path: "/tmp/early-redoor",
+                    load_average_one: 0,
+                    load_average_five: 0,
+                    load_average_fifteen: 0,
+                    system_uptime: 0,
+                    os: "linux",
+                    arch,
+                    hostname: "early-host",
+                    external_ip: null,
+                    username: "early-user",
+                    connected_at: 0,
+                    binary,
+                    mount_points: [],
+                    uid: 1000,
+                    is_root: false,
+                };
 
-        const receivedCommandTypes: string[] = [];
-        control.on("message", (data) => {
-            receivedCommandTypes.push(
-                controlMessageSchema.parse(
-                    JSON.parse(webSocketDataToString(data)),
-                ).type,
-            );
+                earlyAgent.respond(id, details);
+            } else if (command.type === "RawUpload") {
+                // Finishing before granting upload credit means the agent never received the
+                // binary.
+                earlyAgent.respond(id, null);
+            }
         });
+
         let error: unknown;
 
         try {
-            await oldAgent.upgrade(targetVersion);
+            await listed.forceInstallRunningBinary();
         } catch (caught) {
             error = caught;
         }
 
-        // Conflict plus remediation tells operators how to make the upgrade safe.
+        const receivedCommandTypes = earlyAgent.commands.map(
+            ({ command }) => command.type,
+        );
+
+        // An upload that stored no bytes must fail instead of reporting a started upgrade.
         expect(error).toBeInstanceOf(ApiError);
         expect(error).toMatchObject({
-            status: 409,
-            message: expect.stringContaining(
-                "Install a current Redoor agent manually",
-            ),
+            status: 500,
+            message: "Unexpected early upgrade upload completion",
         });
-        // No RawUpload command proves rejection happened before any remote mutation began.
-        expect(receivedCommandTypes).toEqual([]);
+        // The upload was attempted, but self-exec must never follow it.
+        expect(receivedCommandTypes).toContain("RawUpload");
+        expect(receivedCommandTypes).not.toContain("SelfExec");
     });
 });

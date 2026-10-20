@@ -1,11 +1,14 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import fs from "node:fs/promises";
+import { ApiClient } from "#ui/api-client";
+import { readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, onTestFinished } from "vitest";
 
+import { TEST_USERNAME, TEST_PASSWORD, waitForValue } from "./test-utils";
 import { type JsonObject, createMcpTestClient } from "./mcp-client";
 
-/** Shares the live MCP fixture so regressions exercise the same server and grants as the main workflows. */
-export function registerMcpTransferRegressionTests(options: {
+/** Grants and paths shared by transfer regressions on the existing live fixture. */
+type McpTransferRegressionFixture = {
     endpoint: string;
     baseUrl: string;
     token: () => string;
@@ -14,7 +17,13 @@ export function registerMcpTransferRegressionTests(options: {
     sourceRoot: string;
     destinationRoot: string;
     metadataPath: string;
-}): void {
+};
+
+/** Shares the live MCP fixture so regressions exercise the same server and grants as the main workflows. */
+export function registerMcpTransferRegressionTests(
+    options: McpTransferRegressionFixture,
+): void {
+    registerMoveIdentityRegressionTest(options);
     it("shares concurrent transfer admissions and rejects reuse across copy and move", async () => {
         const client = createMcpTestClient({
             endpoint: options.endpoint,
@@ -143,7 +152,7 @@ export function registerMcpTransferRegressionTests(options: {
         });
     });
 
-    it("prepares a usable replacement upload URL and validates conflict policy", async () => {
+    it("replaces inline files only with an explicit valid conflict policy", async () => {
         const client = createMcpTestClient({
             endpoint: options.endpoint,
             token: options.token(),
@@ -152,33 +161,115 @@ export function registerMcpTransferRegressionTests(options: {
         const path = join(options.sourceRoot, "replacement-upload.txt");
         writeFileSync(path, "old bytes");
 
-        const prepared = await client.callTool<
-            JsonObject & { endpoint: string }
-        >("prepare_file_upload", {
+        await client.callTool("write_file", {
             device_id: options.sourceDevice,
             path,
+            content: "replacement bytes",
             on_existing: "replace",
         });
 
-        const url = prepared.result.structuredContent?.endpoint;
-
-        if (url === undefined) throw new Error("Prepared upload URL missing");
-
-        const response = await client.stream(`${options.baseUrl}${url}`, {
-            method: "PUT",
-            body: "replacement bytes",
-        });
-
-        // Following the returned URL must accept the MCP replacement policy and replace existing bytes.
-        expect(response.status).toBe(200);
+        // The explicit replacement policy overwrites the existing bytes.
         expect(readFileSync(path, "utf8")).toBe("replacement bytes");
-        // Bad conflict policies must fail during preparation rather than issuing an unusable URL.
+        // Bad conflict policies are rejected before anything is written.
         await expect(
-            client.callTool("prepare_file_upload", {
+            client.callTool("write_file", {
                 device_id: options.sourceDevice,
                 path,
+                content: "must not be written",
                 on_existing: "invalid",
             }),
         ).rejects.toThrow("on_existing");
+        expect(readFileSync(path, "utf8")).toBe("replacement bytes");
+    });
+}
+
+/** Waits until the source is opened so this test isolates the destructive cleanup boundary. */
+function registerMoveIdentityRegressionTest(
+    options: McpTransferRegressionFixture,
+): void {
+    it("retains a changed move source when post-copy cleanup cannot be proven safe", async () => {
+        const client = createMcpTestClient({
+            endpoint: options.endpoint,
+            token: options.token(),
+        });
+
+        const sourcePath = join(options.sourceRoot, "cleanup-source.bin");
+
+        const retainedOriginal = join(
+            options.sourceRoot,
+            "cleanup-source-original.bin",
+        );
+
+        const destinationPath = join(
+            options.destinationRoot,
+            "cleanup-destination.bin",
+        );
+
+        onTestFinished(() => {
+            rmSync(sourcePath, { force: true });
+            rmSync(retainedOriginal, { force: true });
+            rmSync(destinationPath, { force: true });
+        });
+        const file = await fs.open(sourcePath, "w");
+        await file.truncate(512 * 1024 * 1024);
+        await file.close();
+        const api = new ApiClient(options.baseUrl);
+        await api.login(TEST_USERNAME, TEST_PASSWORD);
+
+        const move = await client.callTool<
+            JsonObject & { operation_id: string }
+        >("move_path", {
+            source: { device_id: options.sourceDevice, path: sourcePath },
+            destination: {
+                device_id: options.destinationDevice,
+                path: destinationPath,
+            },
+            on_existing: "error",
+        });
+
+        const operationId = move.result.structuredContent?.operation_id;
+
+        if (operationId === undefined)
+            throw new Error("Guarded move operation missing");
+        await waitForValue({
+            description: "source has opened before replacement",
+            intervalMs: 1,
+            predicate: async () =>
+                (await api.getTransferProgress()).transfers.find(
+                    (transfer) =>
+                        transfer.dest?.path === destinationPath &&
+                        transfer.state === "active" &&
+                        transfer.transferred_bytes > 0,
+                ),
+        });
+        // Replacing after the open isolates post-publication deletion from the new resume identity check.
+        renameSync(sourcePath, retainedOriginal);
+        writeFileSync(sourcePath, "replacement must survive");
+        const completed = await client.waitForOperation(operationId);
+        // Identity-guarded cleanup reports a partial result instead of deleting a replacement path.
+        expect(completed.result.structuredContent).toMatchObject({
+            state: "failed",
+            termination: {
+                error: expect.stringContaining("changed"),
+            },
+        });
+        expect(
+            (
+                await client.callTool("read_file", {
+                    device_id: options.sourceDevice,
+                    path: sourcePath,
+                    encoding: "text",
+                })
+            ).result.structuredContent?.content,
+        ).toBe("replacement must survive");
+        // Destination publication remains visible even though destructive source cleanup failed.
+        expect(
+            (
+                await client.callTool("stat_path", {
+                    device_id: options.destinationDevice,
+                    path: destinationPath,
+                })
+            ).result.structuredContent,
+        ).toMatchObject({ is_file: true });
     });
 }

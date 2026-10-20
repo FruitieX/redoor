@@ -171,7 +171,7 @@ port = ${port}
 
         const agentArgs = [
             "agent",
-            `ws://127.0.0.1:${port}/ws`,
+            `ws://127.0.0.1:${port}`,
             "--token",
             "lifecycle-token",
             "--name",
@@ -330,7 +330,7 @@ port = ${port}
             const parent = spawnWithKillableParent(
                 [
                     "agent",
-                    `ws://127.0.0.1:${port}/ws`,
+                    `ws://127.0.0.1:${port}`,
                     "--token",
                     "lifecycle-token",
                     "--name",

@@ -7,56 +7,53 @@ request is independent: there is no `initialize` handshake, MCP session ID,
 standalone GET event stream, resumable SSE, or client capability remembered
 from an earlier request.
 
-## Create a machine credential
+## Create an access token
 
-The normal setup path is **MCP tokens** in Redoor's application menu. Select
-only the devices and permissions the client needs, create the token, and copy
-both the endpoint and bearer token from the one-time result. Read-only device
-inventory and file access are selected by default; no device is selected by
-default. Shell access is deliberately separate because a command runs with
-the agent OS user's authority and can bypass file-tool scope restrictions.
+MCP clients authenticate with an **access token**, the same kind of credential
+the remote CLI uses. Create one under **Access tokens** in Redoor's application
+menu. Choose only the permissions and devices the client needs, create the
+token, and copy both the endpoint and the token from the one-time result.
 
-The settings page never saves the displayed secret in browser storage or its
-metadata cache. Closing the result discards the browser's copy. Rotation
-preserves the stable grant and immediately invalidates the prior credential;
-revocation immediately rejects later MCP and prepared streaming requests.
+Permissions:
 
-The administrative CLI remains available for bootstrap and headless servers.
+| Permission | Allows |
+|---|---|
+| `files:read` | List, stat, read and search files |
+| `files:write` | Write files, create directories, copy destinations |
+| `files:delete` | Trash and delete files, move sources |
+| `commands:execute` | Run commands as the agent's OS user (high trust: this bypasses every file permission) |
+| `agents:manage` | Start and stop managed agents |
 
-Machine credentials live under the selected application's private data
-directory. They are separate from the browser password, browser cookies, and
-agent registration token. Create one with:
+The device scope is either **all devices** (including devices added later) or
+an explicit list of devices. Listing devices needs no permission, but only
+shows devices in the token's scope.
 
-```sh
-mise exec -- redoor --app-name redoor server mcp-token create --name "My MCP client"
-```
+A local managed agent runs as the same OS user as the server. Write or command
+access to it can therefore change the server's own files, so leave such devices
+out of the scope of tokens that should not have full control.
 
-The JSON output contains `token` once. Redoor stores only its verifier. Save
-the token in the client's secret store; it cannot be recovered later.
-
-The policy model already supports the scopes `devices:read`, `files:read`,
-`files:write`, `files:delete`, `commands:execute`, and `agents:manage`, plus an
-explicit device allowlist. The `hello` tool needs neither a scope nor a device.
-For example, a device-reading credential can be bootstrapped with:
+On a headless machine, create one with the remote CLI instead. It asks for the
+account password and the permissions (or takes them as flags) and prints the
+token and the MCP endpoint as JSON without saving anything:
 
 ```sh
-mise exec -- redoor --app-name redoor server mcp-token create \
-  --name "Read-only automation" \
-  --scopes devices:read,files:read \
-  --devices DEVICE_ID \
-  --expires-at 2027-01-01T00:00:00Z
+redoor remote create-token http://127.0.0.1:7666 --permissions files:read,files:write
 ```
 
-List secret-free metadata or revoke a credential by its ID:
+Redoor stores only a SHA-256 verifier of each token, so the token cannot be
+shown again; save it in the client's secret store. Editing a token changes its
+permissions on the next request without a new secret. Rotation issues a new
+secret for the same token and invalidates the old one at once. Deleting a
+token rejects every later request that uses it. Tokens are independent of the
+login password: changing the password does not invalidate them.
 
-```sh
-mise exec -- redoor --app-name redoor server mcp-token list
-mise exec -- redoor --app-name redoor server mcp-token revoke CREDENTIAL_ID
-```
+Tokens can only be created and managed by a browser session (or by
+`redoor remote login`, which logs in with the password). A token can never
+create or edit tokens, so it cannot widen its own access.
 
-CLI updates are serialized across processes and atomically published. A
-running server re-reads the current grant and credential on every request, so
-expiry and revocation take effect without a restart.
+Old `server mcp-token` credentials are not migrated. The files
+`mcp/machine-tokens.json`, `mcp/machine-tokens.lock` and `mcp/operations/` in
+the application data directory are no longer used and can be deleted.
 
 ## Client configuration
 
@@ -68,7 +65,7 @@ Configure an HTTP MCP client with the endpoint and bearer header:
         "redoor": {
             "url": "http://127.0.0.1:7666/mcp",
             "headers": {
-                "Authorization": "Bearer YOUR_ONE_TIME_TOKEN"
+                "Authorization": "Bearer YOUR_ACCESS_TOKEN"
             }
         }
     }
@@ -114,7 +111,7 @@ mcp_allowed_origins = ["https://trusted-client.example"]
 
 An unconfigured or malformed `Origin` receives 403. MCP has its own narrow
 CORS and bearer middleware and does not inherit the wildcard browser API CORS
-or the legacy rule that treats non-`/api/` paths as public.
+or the rule that treats non-`/api/` paths as public.
 
 Responses are bounded JSON. This initial server does not emit SSE, advertise
 subscriptions/resources/prompts, or initiate calls into a client.
@@ -125,58 +122,51 @@ The catalog contains `hello`, `list_devices`, `get_device`, `run_command`,
 `get_operation`, `read_command_output`, `cancel_operation`, `list_directory`,
 `stat_path`, `read_file`, `write_file`, `copy_path`, `move_path`,
 `delete_path`, `create_directory`, `search_paths`, `search_contents`,
-`start_managed_agent`, `stop_managed_agent`, `prepare_file_download`, and
-`prepare_file_upload`.
+`start_managed_agent` and `stop_managed_agent`. `tools/list` only returns the
+tools the token's permissions allow, so a model never sees tools it cannot use.
+
+| Tool | Permissions |
+|---|---|
+| `hello`, `list_devices`, `get_device` | none (inventory is filtered to the device scope) |
+| `run_command`, `read_command_output` | `commands:execute` |
+| `get_operation`, `cancel_operation` | the permissions of the operation's kind |
+| `list_directory`, `stat_path`, `read_file`, `search_paths`, `search_contents` | `files:read` |
+| `write_file`, `create_directory` | `files:write` |
+| `copy_path` | `files:read` on the source, `files:write` on the destination |
+| `move_path` | `files:read`, `files:write` and `files:delete` on the source, `files:write` on the destination |
+| `delete_path` | `files:delete` |
+| `start_managed_agent`, `stop_managed_agent` | `agents:manage` |
 
 Every filesystem request includes an explicit stable `device_id` and absolute
-path. There is no remembered device or working directory. Inventory is
-filtered to the grant's device allowlist. File tools require their matching
-`files:*` scope, copy requires source read and destination write, and move also
-requires source delete. Arbitrary command execution has its own high-trust
-`commands:execute` scope because a process runs with the device agent's OS
-authority and can bypass the file-tool policy. Managed lifecycle calls require
-`agents:manage` and reject external agents.
+path. There is no remembered device or working directory. Each call checks its
+permissions on the devices it touches through the same decision function the
+REST API uses. Managed lifecycle calls reject external agents.
 
 Background commands and copy/move calls return an operation UUID. Operation
-state, output pages, and cancellation are restricted to the stable grant that
-admitted the work; rotating a credential can therefore preserve ownership.
-Current device and scope permissions are checked again when work is inspected
-or canceled. Cancellation acceptance is reported separately from remote
-termination acknowledgement. Optional `idempotency_key` values on transfer
-admission are principal-scoped and bound to the tool and its arguments; reusing
-a key for a different tool or different arguments is rejected. Concurrent
-retries share one durable operation UUID. If a keyed admission's remote start
-fails, inspect that operation for the failure; retrying the same key returns
-the original admission without starting new work. Transfer completion is
-persisted independently of client polling. After a server restart, retained
-operations cannot cancel work admitted by the new server.
+state, output pages, and cancellation are restricted to the access token that
+admitted the work; rotating the token keeps its id, so ownership survives
+rotation. Current device and permission checks run again when work is
+inspected or canceled. Cancellation acceptance is reported separately from
+remote termination acknowledgement. Optional `idempotency_key` values on
+transfer admission are scoped to the token and bound to the tool and its
+arguments; reusing a key for a different tool or different arguments is
+rejected. Concurrent retries share one durable operation UUID. If a keyed
+admission's remote start fails, inspect that operation for the failure;
+retrying the same key returns the original admission without starting new
+work. Transfer completion is persisted independently of client polling. After
+a server restart, retained operations cannot cancel work admitted by the new
+server.
 
-`read_file` and `write_file` are limited to 64 KiB per call. Command retention
-defaults to 1 MiB per operation and 64 MiB globally, reports truncation while
-continuing to drain the agent stream, and expires after 24 hours. Configure
-these with `REDOOR_MCP_OPERATION_JOB_QUOTA`,
-`REDOOR_MCP_OPERATION_GLOBAL_QUOTA`, and
-`REDOOR_MCP_OPERATION_EXPIRY_SECONDS`. Directory and search results are bounded. Copy and
-move keep bytes in Redoor's existing backpressured device transfer pipeline;
-they are not embedded in MCP responses.
-
-The prepare tools return a relative endpoint such as
-`/mcp/files/DEVICE_ID/absolute/path`. Resolve it against the server origin and
-send the same bearer token. Downloads accept HTTP `Range`; uploads require
-`Content-Length` and use `?on_existing=error`, `replace`, or `merge`. These
-endpoints stream through the existing agent pipeline and reauthenticate the
-credential and device grant on every request. Treat prepared URLs and bearer
-headers as private even though the URL alone is not sufficient authorization.
-
-```sh
-curl -H 'Authorization: Bearer YOUR_TOKEN' \
-  -H 'Range: bytes=0-65535' \
-  'https://redoor.example/mcp/files/DEVICE_ID/home/user/large.bin'
-
-curl -X PUT -H 'Authorization: Bearer YOUR_TOKEN' \
-  -H 'Content-Length: 1048576' --data-binary @local.bin \
-  'https://redoor.example/mcp/files/DEVICE_ID/home/user/large.bin?on_existing=error'
-```
+`read_file` and `write_file` are limited to 64 KiB per call. MCP does not
+transfer big files between the client and a device; use the remote CLI
+(`redoor remote cp`) for that. Copies and moves between devices have no size
+limit, because the bytes stay in Redoor's backpressured device transfer
+pipeline and never pass through the MCP client. Command retention defaults to
+1 MiB per operation and 64 MiB globally, reports truncation while continuing to
+drain the agent stream, and expires after 24 hours. Configure these with
+`REDOOR_MCP_OPERATION_JOB_QUOTA`, `REDOOR_MCP_OPERATION_GLOBAL_QUOTA`, and
+`REDOOR_MCP_OPERATION_EXPIRY_SECONDS`. Directory and search results are
+bounded.
 
 The deployment remains single-server: live agent routes and transfer progress
 are process-local. Operation admissions and retained command output are durable;

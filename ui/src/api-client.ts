@@ -1,4 +1,13 @@
+import type { ResumeMode } from "#bindings/ResumeMode";
+import type { CopyPreflightRequest } from "#bindings/CopyPreflightRequest";
+import type { CopyPreflightResponse } from "#bindings/CopyPreflightResponse";
+import type { PartialsResponse } from "#bindings/PartialsResponse";
+import type { PartialActionRequest } from "#bindings/PartialActionRequest";
+import type { ResumePartialResponse } from "#bindings/ResumePartialResponse";
+import type { DiscardPartialResponse } from "#bindings/DiscardPartialResponse";
+import type { PauseTransferResponse } from "#bindings/PauseTransferResponse";
 import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
+import type { ProtocolMismatchListResponse } from "#bindings/ProtocolMismatchListResponse";
 import type { LsFileResponse } from "#bindings/LsFileResponse";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
@@ -87,16 +96,17 @@ import type { ChmodPathResponse } from "#bindings/ChmodPathResponse";
 import type { Level } from "#bindings/Level";
 import type { LoggingLevelRequest } from "#bindings/LoggingLevelRequest";
 import type { LoggingLevelResponse } from "#bindings/LoggingLevelResponse";
-import type { UpdateMcpTokenRequest } from "#bindings/UpdateMcpTokenRequest";
-import type { UpdateMcpTokenResponse } from "#bindings/UpdateMcpTokenResponse";
-import type { CreateMcpTokenRequest } from "#bindings/CreateMcpTokenRequest";
-import type { McpTokenListResponse } from "#bindings/McpTokenListResponse";
-import type { McpTokenSecretResponse } from "#bindings/McpTokenSecretResponse";
-import type { RevokeMcpTokenResponse } from "#bindings/RevokeMcpTokenResponse";
-import type { McpTokenScope } from "#bindings/McpTokenScope";
-import type { McpTokenMetadataResponse } from "#bindings/McpTokenMetadataResponse";
+import type { AccessTokenListResponse } from "#bindings/AccessTokenListResponse";
+import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
+import type { AccessTokenSecretResponse } from "#bindings/AccessTokenSecretResponse";
+import type { CreateAccessTokenRequest } from "#bindings/CreateAccessTokenRequest";
+import type { DeleteAccessTokenResponse } from "#bindings/DeleteAccessTokenResponse";
+import type { DeviceScope } from "#bindings/DeviceScope";
+import type { Permission } from "#bindings/Permission";
+import type { UpdateAccessTokenRequest } from "#bindings/UpdateAccessTokenRequest";
 import {
     apiRequest,
+    authenticationHeaders,
     requireSuccessfulResponse,
     withAuthentication,
     type RequestContext,
@@ -182,14 +192,14 @@ export type {
     Level,
     LoggingLevelRequest,
     LoggingLevelResponse,
-    UpdateMcpTokenRequest,
-    UpdateMcpTokenResponse,
-    CreateMcpTokenRequest,
-    McpTokenListResponse,
-    McpTokenSecretResponse,
-    RevokeMcpTokenResponse,
-    McpTokenScope,
-    McpTokenMetadataResponse,
+    AccessTokenListResponse,
+    AccessTokenResponse,
+    AccessTokenSecretResponse,
+    CreateAccessTokenRequest,
+    DeleteAccessTokenResponse,
+    DeviceScope,
+    Permission,
+    UpdateAccessTokenRequest,
 };
 
 export class Agent {
@@ -230,12 +240,10 @@ export class Agent {
 
     /** Returns authentication headers for lower-level streaming tests and integrations. */
     getAuthHeaders(): Record<string, string> {
-        const sessionCookie = this.requestContext.getSessionCookie?.();
-
-        return sessionCookie ? { Cookie: sessionCookie } : {};
+        return authenticationHeaders(this.requestContext);
     }
 
-    /** Reads the threshold from the connected agent over its authoritative control socket. */
+    /** Reads the threshold from the connected agent over its connection. */
     async getLoggingLevel(): Promise<LoggingLevelResponse> {
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.id)}/logging-level`,
@@ -291,7 +299,7 @@ export class Agent {
         return this.info.supports_move_to_trash || this.info.supports_trash;
     }
 
-    /** Effective UID from registration; null until first connect or for older agents. */
+    /** Effective UID from registration; null until first connect. */
     get uid(): number | null {
         return this.info.uid;
     }
@@ -316,7 +324,7 @@ export class Agent {
         return this.info.connected_at;
     }
 
-    /** Identifies the current control socket so process restarts can await a replacement. */
+    /** Identifies the current agent connection so process restarts can await a replacement. */
     get connectionId(): string | null {
         return this.info.connection_id;
     }
@@ -339,11 +347,6 @@ export class Agent {
     /** Returns binary identity from the latest registration, if any. */
     get binary(): BinaryIdentity | null {
         return this.info.binary;
-    }
-
-    /** Reports whether this session can complete the safe in-place upgrade protocol. */
-    get supportsSelfExec(): boolean {
-        return this.info.supports_self_exec;
     }
 
     /** Reports whether this session can launch paths in its graphical desktop. */
@@ -817,6 +820,7 @@ export class Agent {
         sourcePath: string,
         options?: {
             on_existing?: CopyExistingMode;
+            resume?: ResumeMode;
         },
     ): Promise<CopyFileResponse> {
         encodeFilesystemPath(sourcePath);
@@ -829,6 +833,7 @@ export class Agent {
             },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
+            resume: options?.resume ?? "auto",
         };
 
         return apiRequest<CopyFileResponse>(
@@ -848,7 +853,7 @@ export class Agent {
     async moveTo(
         destination: CopyEndpoint,
         sourcePath: string,
-        options?: { on_existing?: CopyExistingMode },
+        options?: { on_existing?: CopyExistingMode; resume?: ResumeMode },
     ): Promise<MoveFileResponse> {
         encodeFilesystemPath(sourcePath);
         encodeFilesystemPath(destination.path);
@@ -857,6 +862,7 @@ export class Agent {
             source: { agent: this.info.id, path: sourcePath },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
+            resume: options?.resume ?? "auto",
         };
 
         return apiRequest<MoveFileResponse>(
@@ -915,6 +921,7 @@ export class Agent {
 export class ApiClient {
     baseUrl: string;
     private sessionCookie: string | null = null;
+    private accessToken: string | null = null;
     private unauthorizedHandler: (() => void) | undefined;
 
     constructor(baseUrl: string) {
@@ -928,13 +935,22 @@ export class ApiClient {
 
     /** Returns authentication headers for direct streaming requests outside this wrapper. */
     getAuthHeaders(): Record<string, string> {
-        return this.sessionCookie ? { Cookie: this.sessionCookie } : {};
+        return authenticationHeaders(this.requestContext());
     }
 
-    /** Shares current cookie and expiry handling with agents created by this client. */
+    /**
+     * Authenticates later requests with an access token instead of a session, which is how
+     * Node-based scripts and the integration tests act as the remote CLI or an MCP client.
+     */
+    setAccessToken(token: string | null): void {
+        this.accessToken = token;
+    }
+
+    /** Shares current credentials and expiry handling with agents created by this client. */
     private requestContext(): RequestContext {
         return {
             getSessionCookie: () => this.sessionCookie,
+            getAccessToken: () => this.accessToken,
             onUnauthorized: () => this.unauthorizedHandler?.(),
         };
     }
@@ -1146,6 +1162,69 @@ export class ApiClient {
         );
     }
 
+    /** Discovers durable partials from the currently connected destination agents. */
+    async listPartials(): Promise<PartialsResponse> {
+        return apiRequest<PartialsResponse>(
+            `${this.baseUrl}/api/v1/partials`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Checks metadata without making the dialog wait for prefix hashing. */
+    async copyPreflight(
+        request: CopyPreflightRequest,
+    ): Promise<CopyPreflightResponse> {
+        return apiRequest<CopyPreflightResponse>(
+            `${this.baseUrl}/api/v1/copy/preflight`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Waits until the destination confirms the partial is durable. */
+    async pauseTransfer(transferId: number): Promise<PauseTransferResponse> {
+        return apiRequest<PauseTransferResponse>(
+            `${this.baseUrl}/api/v1/transfers/${transferId}/pause`,
+            { method: "POST" },
+            this.requestContext(),
+        );
+    }
+
+    /** An opaque manifest key creates a fresh transfer using signed endpoints. */
+    async resumePartial(
+        request: PartialActionRequest,
+    ): Promise<ResumePartialResponse> {
+        return apiRequest<ResumePartialResponse>(
+            `${this.baseUrl}/api/v1/partials/resume`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Deletes agent-owned output after the user chooses to abandon it. */
+    async discardPartial(
+        request: PartialActionRequest,
+    ): Promise<DiscardPartialResponse> {
+        return apiRequest<DiscardPartialResponse>(
+            `${this.baseUrl}/api/v1/partials/discard`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
     async cancelTransfer(transferId: number): Promise<CancelTransferResponse> {
         return apiRequest<CancelTransferResponse>(
             `${this.baseUrl}/api/v1/transfers/${encodeURIComponent(String(transferId))}`,
@@ -1183,21 +1262,30 @@ export class ApiClient {
         );
     }
 
-    /** Lists secret-free MCP credential metadata owned by the browser account. */
-    async listMcpTokens(): Promise<McpTokenListResponse> {
-        return apiRequest<McpTokenListResponse>(
-            `${this.baseUrl}/api/v1/mcp/tokens`,
+    /** Lists recent agent connections refused because they speak another protocol version. */
+    async listProtocolMismatches(): Promise<ProtocolMismatchListResponse> {
+        return apiRequest<ProtocolMismatchListResponse>(
+            `${this.baseUrl}/api/v1/protocol-mismatches`,
             undefined,
             this.requestContext(),
         );
     }
 
-    /** Creates one MCP credential whose bearer secret is never retained by this client. */
-    async createMcpToken(
-        request: CreateMcpTokenRequest,
-    ): Promise<McpTokenSecretResponse> {
-        return apiRequest<McpTokenSecretResponse>(
-            `${this.baseUrl}/api/v1/mcp/tokens`,
+    /** Lists secret-free metadata of every access token. */
+    async listAccessTokens(): Promise<AccessTokenListResponse> {
+        return apiRequest<AccessTokenListResponse>(
+            `${this.baseUrl}/api/v1/tokens`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Mints an access token; the returned secret is never retained by this client. */
+    async createAccessToken(
+        request: CreateAccessTokenRequest,
+    ): Promise<AccessTokenSecretResponse> {
+        return apiRequest<AccessTokenSecretResponse>(
+            `${this.baseUrl}/api/v1/tokens`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -1207,13 +1295,13 @@ export class ApiClient {
         );
     }
 
-    /** Saves token policy while retaining the client's existing bearer credential. */
-    async updateMcpToken(
+    /** Replaces a token's policy while its clients keep using the same secret. */
+    async updateAccessToken(
         tokenId: string,
-        request: UpdateMcpTokenRequest,
-    ): Promise<UpdateMcpTokenResponse> {
-        return apiRequest<UpdateMcpTokenResponse>(
-            `${this.baseUrl}/api/v1/mcp/tokens/${encodeURIComponent(tokenId)}`,
+        request: UpdateAccessTokenRequest,
+    ): Promise<AccessTokenResponse> {
+        return apiRequest<AccessTokenResponse>(
+            `${this.baseUrl}/api/v1/tokens/${encodeURIComponent(tokenId)}`,
             {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -1223,20 +1311,33 @@ export class ApiClient {
         );
     }
 
-    /** Atomically replaces an active credential while keeping its authorization grant. */
-    async rotateMcpToken(tokenId: string): Promise<McpTokenSecretResponse> {
-        return apiRequest<McpTokenSecretResponse>(
-            `${this.baseUrl}/api/v1/mcp/tokens/${encodeURIComponent(tokenId)}/rotate`,
+    /** Issues a new secret for the same token, invalidating the old one at once. */
+    async rotateAccessToken(
+        tokenId: string,
+    ): Promise<AccessTokenSecretResponse> {
+        return apiRequest<AccessTokenSecretResponse>(
+            `${this.baseUrl}/api/v1/tokens/${encodeURIComponent(tokenId)}/rotate`,
             { method: "POST" },
             this.requestContext(),
         );
     }
 
-    /** Immediately rejects future MCP and streaming requests using this credential. */
-    async revokeMcpToken(tokenId: string): Promise<RevokeMcpTokenResponse> {
-        return apiRequest<RevokeMcpTokenResponse>(
-            `${this.baseUrl}/api/v1/mcp/tokens/${encodeURIComponent(tokenId)}`,
+    /** Revokes a token so every later request using it is rejected. */
+    async deleteAccessToken(
+        tokenId: string,
+    ): Promise<DeleteAccessTokenResponse> {
+        return apiRequest<DeleteAccessTokenResponse>(
+            `${this.baseUrl}/api/v1/tokens/${encodeURIComponent(tokenId)}`,
             { method: "DELETE" },
+            this.requestContext(),
+        );
+    }
+
+    /** Reads the metadata of the access token this client authenticates with. */
+    async getCurrentAccessToken(): Promise<AccessTokenResponse> {
+        return apiRequest<AccessTokenResponse>(
+            `${this.baseUrl}/api/v1/tokens/current`,
+            undefined,
             this.requestContext(),
         );
     }

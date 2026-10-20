@@ -2,10 +2,12 @@ import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vites
 import { $ } from "zx";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { ApiClient } from "#ui/api-client";
+import { ApiClient, type Permission } from "#ui/api-client";
 import {
+    ALL_PERMISSIONS,
     ProcessManager,
+    createAccessToken,
+    remoteEnv,
     TempFileManager,
     TEST_AGENT_TOKEN,
     TEST_PASSWORD,
@@ -23,6 +25,7 @@ describe("Remote managed agent automatic startup", () => {
     const failingId = "auto-start-failing";
     let api: ApiClient;
     let home: string;
+    let token: string;
 
     beforeAll(async () => {
         const agentHome = files.tempDirectory();
@@ -54,19 +57,10 @@ home = "${agentHome}/missing"
         api = new ApiClient(`http://127.0.0.1:${VITEST_SERVER_PORT}`);
         await api.login(TEST_USERNAME, TEST_PASSWORD);
         home = files.tempDirectory();
-        const directory = path.join(home, ".local/share/auto-start-test");
-        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-        await fs.writeFile(path.join(directory, "remote-session.json"), JSON.stringify({
-            version: 1,
-            generation: randomUUID(),
-            server_url: `${api.baseUrl}/`,
-            cookies: [{
-                raw_cookie: `${api.getAuthHeaders().Cookie}; Path=/`,
-                path: ["/", true],
-                domain: { HostOnly: "127.0.0.1" },
-                expires: "SessionEnd",
-            }],
-        }), { mode: 0o600 });
+        token = (await createAccessToken(api, {
+            name: "auto-start test",
+            permissions: ALL_PERMISSIONS,
+        })).token;
     });
 
     afterAll(async () => {
@@ -74,10 +68,20 @@ home = "${agentHome}/missing"
         files.cleanup();
     });
 
-    /** Each CLI invocation reloads the saved session and exposes progress separately from command output. */
+    /** Each CLI invocation authenticates with a token and exposes progress separately from command output. */
     function remote(...args: string[]) {
+        return remoteWith(token, args);
+    }
+
+    /** Runs the CLI with a specific token, so permission-limited tokens use the same harness. */
+    function remoteWith(bearer: string, args: string[]) {
         return $({
-            env: { ...process.env, HOME: home, REDOOR_APP_NAME: "auto-start-test" },
+            env: {
+                ...process.env,
+                HOME: home,
+                REDOOR_APP_NAME: "auto-start-test",
+                ...remoteEnv(api.baseUrl, bearer),
+            },
             quiet: true,
             nothrow: true,
         })`exec ${binary} remote ${args}`;
@@ -94,6 +98,25 @@ home = "${agentHome}/missing"
             await agent.shutdown();
         }
     }
+
+    it("explains that auto-start needs agents:manage", async () => {
+        const permissions: Permission[] = ALL_PERMISSIONS.filter(
+            (permission) => permission !== "agents:manage",
+        );
+
+        const limited = await createAccessToken(api, {
+            name: "no agents:manage",
+            permissions,
+        });
+
+        const result = await remoteWith(limited.token, ["exec", sourceId, "--", "true"]);
+        // Without agents:manage the dormant agent cannot be started, and the error says why.
+        expect(result.exitCode).not.toBe(0);
+        expect(result.stderr).toContain("lacks agents:manage");
+        // The refused start leaves the agent dormant.
+        expect((await api.listAgents()).find((agent) => agent.id === sourceId)?.status)
+            .not.toBe("connected");
+    });
 
     it("starts a dormant agent before exec and leaves connected agents undisturbed", async () => {
         onTestFinished(() => stop(sourceId));

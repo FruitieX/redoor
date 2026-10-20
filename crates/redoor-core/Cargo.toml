@@ -1,0 +1,32 @@
+[package]
+name = "redoor-core"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Exposes `test_support` to other crates' tests without shipping it in release builds.
+test-support = []
+
+[dependencies]
+blake3.workspace = true
+redoor-protocol.workspace = true
+anyhow.workspace = true
+fastrand.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "process", "rt", "sync", "time"] }
+toml_edit = { workspace = true, features = ["serde"] }
+ts-rs.workspace = true
+uuid.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["macros"] }
+jiff.workspace = true
