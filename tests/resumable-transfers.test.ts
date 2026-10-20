@@ -208,6 +208,7 @@ describe("resumable transfers", () => {
                         transfer.request_id === transferId &&
                         transfer.state === "active" &&
                         transfer.transferred_bytes >= 70 * 1024 * 1024 &&
+                        transfer.pausable &&
                         transfer.cancelable,
                 ),
         });
@@ -296,7 +297,23 @@ describe("resumable transfers", () => {
     }
 
     it("pauses, probes, and resumes a cross-agent copy", async () => {
+        // Keep the copy active across the busy-admission and inventory round trips.
+        // Otherwise a fast CI runner can publish the file before pause reaches the router.
+        const bandwidth = await proxy.addToxic({
+            name: "hold-copy-open-for-busy-check",
+            type: "bandwidth",
+            stream: "downstream",
+            toxicity: 1,
+            attributes: { rate: 32 * 1024 },
+        });
+
+        let bandwidthRemoved = false;
+        onTestFinished(async () => {
+            if (!bandwidthRemoved) await bandwidth.remove();
+        });
         const run = await paused(false, false, { checkBusy: true });
+        await bandwidth.remove();
+        bandwidthRemoved = true;
 
         const preflight = await api.copyPreflight({
             source: run.partial.source,
@@ -322,7 +339,7 @@ describe("resumable transfers", () => {
             transfer.resumed_bytes,
             "whole matching segments are reused",
         ).toBeGreaterThanOrEqual(64 * 1024 * 1024);
-    });
+    }, 30000);
 
     it("resumes after toxiproxy interrupts the destination connection", async () => {
         const run = await paused(false, false, {
