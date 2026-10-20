@@ -381,6 +381,84 @@ fn idempotency_key(owner: Uuid, key: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Aging records directly exercises retention without racing a short wall-clock deadline.
+    #[tokio::test]
+    async fn expiry_removes_only_old_terminal_records_and_their_spools() {
+        let directory = std::env::temp_dir().join(format!("mcp-expiry-{}", Uuid::new_v4()));
+        let mut registry = OperationRegistry::in_directory(directory.clone())
+            .await
+            .unwrap();
+        registry.expiry = Duration::from_secs(60);
+        let owner = Uuid::new_v4();
+        let mut retained = Vec::new();
+        let mut expired = Vec::new();
+        for state in [
+            "admitted",
+            "running",
+            "canceling",
+            "completed",
+            "failed",
+            "canceled",
+            "timed_out",
+            "interrupted",
+            "unknown",
+        ] {
+            let record = registry.create(owner, vec![], "command").await.unwrap();
+            registry
+                .append_output(&record, b"output", 512)
+                .await
+                .unwrap();
+            let current = record.lock().await;
+            let entry = (
+                current.id,
+                current.spool_path.clone(),
+                record.clone(),
+                state,
+            );
+            if matches!(state, "admitted" | "running" | "canceling") {
+                retained.push(entry);
+            } else {
+                expired.push(entry);
+            }
+        }
+        let fresh = registry.create(owner, vec![], "command").await.unwrap();
+        fresh.lock().await.state = "completed".to_string();
+        // Age only after all admissions, since create itself runs expiry.
+        for (_, _, record, state) in retained.iter().chain(&expired) {
+            let mut current = record.lock().await;
+            current.state = state.to_string();
+            current.updated_at = Timestamp::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap();
+        }
+        for (id, path, _, _) in expired {
+            assert!(
+                registry.get(id).await.unwrap().is_none(),
+                "old terminal operations must no longer be addressable"
+            );
+            assert!(
+                !tokio::fs::try_exists(path).await.unwrap(),
+                "expiry must reclaim the terminal operation's retained output"
+            );
+        }
+        for (id, path, _, _) in retained {
+            assert!(
+                registry.get(id).await.unwrap().is_some(),
+                "retention must not remove active work even when it has been idle"
+            );
+            assert!(
+                tokio::fs::try_exists(path).await.unwrap(),
+                "active work must keep its retained output"
+            );
+        }
+        let fresh_id = fresh.lock().await.id;
+        assert!(
+            registry.get(fresh_id).await.unwrap().is_some(),
+            "recent terminal operations must remain available to callers"
+        );
+        redoor_core::safe_fs::safe_rm_all(&directory).await.unwrap();
+    }
+
     /// Recovery must detach all persisted states from counters reused by the next router.
     #[tokio::test]
     async fn restart_invalidates_remote_ids_for_active_and_terminal_operations() {
