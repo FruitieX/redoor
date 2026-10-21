@@ -9,6 +9,12 @@ export type SideMenuId = "application" | "agents";
 /** Shares drawer requests so in-page controls can open the same side menus as the top bar. */
 export const openSideMenuAtom = atom<SideMenuId | null>(null);
 
+/** Keeps bookmark folding consistent between the sidebar and drawer across tab reloads. */
+export const foldedBookmarkAgentsAtom = atomWithSessionStorage<string[]>(
+    "redoor.folded-bookmark-agents",
+    [],
+);
+
 export type SidebarMode = "auto" | "show" | "hide";
 
 /** Remembers the tab's layout choice without affecting other windows. */

@@ -1,7 +1,15 @@
 import * as React from "react";
 import { Link } from "@tanstack/react-router";
-import { useAtomValue } from "jotai";
-import { Bookmark, HardDrive, Pencil, X } from "lucide-react";
+import { useAtom, useAtomValue } from "jotai";
+import {
+    Bookmark,
+    ChevronDown,
+    FoldVertical,
+    HardDrive,
+    Pencil,
+    UnfoldVertical,
+    X,
+} from "lucide-react";
 
 import type { Agent } from "#ui/api-client";
 import {
@@ -23,6 +31,7 @@ import {
     type Bookmark as BookmarkEntry,
 } from "#ui/user-state";
 import type { ItemMove } from "#ui/utils/reorder";
+import { foldedBookmarkAgentsAtom } from "#ui/side-menu-state";
 
 /** Places agent selection and management actions in the shared right-side presentation. */
 export function AgentNavigation(props: {
@@ -58,6 +67,7 @@ function AgentMenu(props: {
 }) {
     const agentTabLocations = useAtomValue(agentTabLocationsAtom);
     const [userState, setUserState] = useUserState();
+    const [foldedAgents, setFoldedAgents] = useAtom(foldedBookmarkAgentsAtom);
     const listRef = React.useRef<HTMLUListElement>(null);
     const inventoryIds = props.agents.map((agent) => agent.id);
     const agentsById = new Map(props.agents.map((agent) => [agent.id, agent]));
@@ -71,19 +81,72 @@ function AgentMenu(props: {
         return agent ? [agent] : [];
     });
 
+    const bookmarkedAgents = orderedAgents.filter((agent) =>
+        userState.bookmarks.some((bookmark) => bookmark.agentId === agent.id),
+    );
+
+    const hasExpandedBookmarks = bookmarkedAgents.some(
+        (agent) => !foldedAgents.includes(agent.id),
+    );
+
     return (
         <nav aria-label="Devices" className="flex min-h-0 flex-1 flex-col">
             <div className="mb-3 flex items-center justify-between gap-2 px-2">
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">
                     Devices
                 </h2>
-                <AddButton tooltip="Add device">
-                    <Link
-                        to="/agents/new"
-                        aria-label="Add device"
-                        onClick={props.onClose}
-                    />
-                </AddButton>
+                <div className="flex items-center gap-1">
+                    {bookmarkedAgents.length > 0 ? (
+                        <IconButton
+                            type="button"
+                            label={
+                                hasExpandedBookmarks
+                                    ? "Fold all bookmarks"
+                                    : "Unfold all bookmarks"
+                            }
+                            onClick={() =>
+                                setFoldedAgents((current) =>
+                                    hasExpandedBookmarks
+                                        ? [
+                                              ...new Set([
+                                                  ...current,
+                                                  ...bookmarkedAgents.map(
+                                                      (agent) => agent.id,
+                                                  ),
+                                              ]),
+                                          ]
+                                        : current.filter(
+                                              (id) =>
+                                                  !bookmarkedAgents.some(
+                                                      (agent) =>
+                                                          agent.id === id,
+                                                  ),
+                                          ),
+                                )
+                            }
+                            className="rounded p-1.5 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                        >
+                            {hasExpandedBookmarks ? (
+                                <FoldVertical
+                                    className="h-4 w-4"
+                                    aria-hidden="true"
+                                />
+                            ) : (
+                                <UnfoldVertical
+                                    className="h-4 w-4"
+                                    aria-hidden="true"
+                                />
+                            )}
+                        </IconButton>
+                    ) : null}
+                    <AddButton tooltip="Add device">
+                        <Link
+                            to="/agents/new"
+                            aria-label="Add device"
+                            onClick={props.onClose}
+                        />
+                    </AddButton>
+                </div>
             </div>
             {orderedAgents.length === 0 ? (
                 <span className="px-2 py-3 text-sm text-slate-500">
@@ -137,6 +200,18 @@ function AgentMenu(props: {
                                 bookmarks={userState.bookmarks.filter(
                                     (bookmark) => bookmark.agentId === agent.id,
                                 )}
+                                bookmarksFolded={foldedAgents.includes(
+                                    agent.id,
+                                )}
+                                onToggleBookmarks={() =>
+                                    setFoldedAgents((current) =>
+                                        current.includes(agent.id)
+                                            ? current.filter(
+                                                  (id) => id !== agent.id,
+                                              )
+                                            : [...current, agent.id],
+                                    )
+                                }
                                 onClose={props.onClose}
                                 onMoveBookmarks={(move) => {
                                     setUserState((current) => {
@@ -179,10 +254,13 @@ function DeviceBlock(props: {
     pathname: string;
     rememberedTarget: string;
     bookmarks: BookmarkEntry[];
+    bookmarksFolded: boolean;
+    onToggleBookmarks: () => void;
     onClose: () => void;
     onMoveBookmarks: (move: ItemMove) => void;
     onRemoveBookmark: (bookmark: BookmarkEntry) => void;
 }) {
+    const bookmarksId = React.useId();
     const agentPrefix = `/agents/${encodeURIComponent(props.agent.id)}`;
 
     const isActive =
@@ -211,6 +289,25 @@ function DeviceBlock(props: {
                     <div
                         className={`group flex items-center rounded-md border text-sm ${isActive ? "border-blue-500/40 bg-blue-500/10" : "border-transparent hover:bg-white/5"}`}
                     >
+                        {props.bookmarks.length > 0 ? (
+                            <IconButton
+                                type="button"
+                                label={`${props.bookmarksFolded ? "Unfold" : "Fold"} bookmarks for ${props.agent.name}`}
+                                aria-expanded={!props.bookmarksFolded}
+                                aria-controls={
+                                    props.bookmarksFolded
+                                        ? undefined
+                                        : bookmarksId
+                                }
+                                onClick={props.onToggleBookmarks}
+                                className="ml-1 shrink-0 rounded p-1 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                            >
+                                <ChevronDown
+                                    className={`h-3.5 w-3.5 ${props.bookmarksFolded ? "-rotate-90" : ""}`}
+                                    aria-hidden="true"
+                                />
+                            </IconButton>
+                        ) : null}
                         <Link
                             to={target}
                             onClick={props.onClose}
@@ -252,8 +349,9 @@ function DeviceBlock(props: {
                             </Tooltip>
                         ) : null}
                     </div>
-                    {props.bookmarks.length > 0 ? (
+                    {props.bookmarks.length > 0 && !props.bookmarksFolded ? (
                         <AgentBookmarks
+                            id={bookmarksId}
                             agent={props.agent}
                             bookmarks={props.bookmarks}
                             pathname={props.pathname}
@@ -270,6 +368,7 @@ function DeviceBlock(props: {
 
 /** Keeps each agent's remembered paths visually nested under that agent. */
 function AgentBookmarks(props: {
+    id: string;
     agent: Agent;
     bookmarks: BookmarkEntry[];
     pathname: string;
@@ -295,6 +394,7 @@ function AgentBookmarks(props: {
             onMove={props.onMove}
         >
             <ul
+                id={props.id}
                 ref={listRef}
                 aria-label={`${props.agent.name} bookmarks`}
                 className="mt-0.5 mb-1 ml-4 flex min-w-0 flex-col gap-0.5 border-l border-slate-800 pl-2"
