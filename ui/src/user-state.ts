@@ -44,6 +44,7 @@ export const userStateSchema = z.object({
     recursiveSearchIncludeHidden: z.boolean().catch(false),
     recursiveSearchRespectGitignore: z.boolean().catch(true),
     deviceOrder: z.array(z.string()).catch([]),
+    showOnlyConnectedDevices: z.boolean().catch(false),
 });
 
 export type UserState = z.infer<typeof userStateSchema>;
@@ -59,6 +60,7 @@ export const defaultUserState: UserState = {
     recursiveSearchIncludeHidden: false,
     recursiveSearchRespectGitignore: true,
     deviceOrder: [],
+    showOnlyConnectedDevices: false,
 };
 
 /** Identifies one bookmarked path so the same file cannot be stored twice. */

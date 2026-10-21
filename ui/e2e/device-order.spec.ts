@@ -42,6 +42,101 @@ test.describe.serial("Device order", () => {
         });
     });
 
+    test("filters disconnected devices and restores the preference from user state", async ({
+        page,
+    }) => {
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+        await api.updateUserState({
+            state: { showOnlyConnectedDevices: false },
+        });
+        let allDisconnected = false;
+
+        await page.route("**/api/v1/agents", async (route) => {
+            const response = await route.fetch();
+            const body: AgentListResponse = await response.json();
+            const template = body.agents[0];
+
+            if (!template) {
+                throw new Error(
+                    "Expected an agent for the device filter fixture",
+                );
+            }
+
+            await route.fulfill({
+                json: {
+                    agents: [
+                        {
+                            ...template,
+                            id: "filter-online",
+                            name: "Filter online",
+                            status: allDisconnected
+                                ? "disconnected"
+                                : "connected",
+                        },
+                        {
+                            ...template,
+                            id: "filter-offline",
+                            name: "Filter offline",
+                            status: "disconnected",
+                            cwd: null,
+                        },
+                    ],
+                },
+            });
+        });
+        await page.goto(`${WEB_BASE_URL}/`);
+
+        const menu = page.getByRole("navigation", {
+            name: "Devices",
+            exact: true,
+        });
+
+        const toggle = menu.getByRole("button", {
+            name: "Show only connected devices",
+            exact: true,
+        });
+
+        const online = menu.getByRole("listitem", {
+            name: "Device Filter online",
+            exact: true,
+        });
+
+        const offline = menu.getByRole("listitem", {
+            name: "Device Filter offline",
+            exact: true,
+        });
+
+        // Existing users initially see all devices, including those that are disconnected.
+        await expect(toggle).toHaveAttribute("aria-pressed", "false");
+        await expect(online).toBeVisible();
+        await expect(offline).toBeVisible();
+        await toggle.click();
+        // Filtering affects only disconnected entries and saves through the shared server state.
+        await expect(online).toBeVisible();
+        await expect(offline).toHaveCount(0);
+        await expect
+            .poll(async () => (await api.getUserState()).state)
+            .toMatchObject({ showOnlyConnectedDevices: true });
+        await page.reload();
+        // Reload must restore the user preference without relying on tab storage.
+        await expect(toggle).toHaveAttribute("aria-pressed", "true");
+        await expect(offline).toHaveCount(0);
+        allDisconnected = true;
+        await page.reload();
+        // An empty connected subset explains why the list is empty and still offers the toggle.
+        await expect(
+            menu.getByText("No connected devices", { exact: true }),
+        ).toBeVisible();
+        await toggle.click();
+        // Turning the filter off reveals disconnected entries again and persists the reset.
+        await expect(online).toBeVisible();
+        await expect(offline).toBeVisible();
+        await expect
+            .poll(async () => (await api.getUserState()).state)
+            .toMatchObject({ showOnlyConnectedDevices: false });
+    });
+
     test("reorders devices with their bookmarks and restores the saved slots", async ({
         page,
     }) => {

@@ -8,6 +8,7 @@ import {
     HardDrive,
     Pencil,
     UnfoldVertical,
+    Wifi,
     X,
 } from "lucide-react";
 
@@ -81,7 +82,11 @@ function AgentMenu(props: {
         return agent ? [agent] : [];
     });
 
-    const bookmarkedAgents = orderedAgents.filter((agent) =>
+    const visibleAgents = userState.showOnlyConnectedDevices
+        ? orderedAgents.filter((agent) => agent.status === "connected")
+        : orderedAgents;
+
+    const bookmarkedAgents = visibleAgents.filter((agent) =>
         userState.bookmarks.some((bookmark) => bookmark.agentId === agent.id),
     );
 
@@ -96,6 +101,7 @@ function AgentMenu(props: {
                     Devices
                 </h2>
                 <div className="flex items-center gap-1">
+                    <ConnectedDevicesToggle />
                     {bookmarkedAgents.length > 0 ? (
                         <IconButton
                             type="button"
@@ -148,13 +154,15 @@ function AgentMenu(props: {
                     </AddButton>
                 </div>
             </div>
-            {orderedAgents.length === 0 ? (
+            {visibleAgents.length === 0 ? (
                 <span className="px-2 py-3 text-sm text-slate-500">
-                    No devices configured or connected
+                    {userState.showOnlyConnectedDevices
+                        ? "No connected devices"
+                        : "No devices configured or connected"}
                 </span>
             ) : (
                 <SortableList
-                    itemIds={orderedAgents.map((agent) => agent.id)}
+                    itemIds={visibleAgents.map((agent) => agent.id)}
                     orientation="vertical"
                     label="Devices"
                     listRef={listRef}
@@ -165,7 +173,7 @@ function AgentMenu(props: {
                         setUserState((current) => {
                             const deviceOrder = commitDeviceOrder(
                                 current.deviceOrder,
-                                inventoryIds,
+                                visibleAgents.map((agent) => agent.id),
                                 move,
                             );
 
@@ -182,7 +190,7 @@ function AgentMenu(props: {
                         aria-label="Device list"
                         className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto"
                     >
-                        {orderedAgents.map((agent) => (
+                        {visibleAgents.map((agent) => (
                             <DeviceBlock
                                 key={agent.id}
                                 agent={agent}
@@ -245,6 +253,33 @@ function AgentMenu(props: {
                 </SortableList>
             )}
         </nav>
+    );
+}
+
+/** Keeps the connected-only preference discoverable and consistent in the sidebar and drawer. */
+function ConnectedDevicesToggle() {
+    const [userState, setUserState] = useUserState();
+
+    return (
+        <IconButton
+            type="button"
+            label="Show only connected devices"
+            aria-pressed={userState.showOnlyConnectedDevices}
+            tooltip={
+                userState.showOnlyConnectedDevices
+                    ? "Show all devices"
+                    : "Show only connected devices"
+            }
+            onClick={() =>
+                setUserState((current) => ({
+                    ...current,
+                    showOnlyConnectedDevices: !current.showOnlyConnectedDevices,
+                }))
+            }
+            className={`rounded p-1.5 hover:bg-white/10 ${userState.showOnlyConnectedDevices ? "bg-blue-500/15 text-blue-400" : "text-slate-500 hover:text-slate-200"}`}
+        >
+            <Wifi className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
     );
 }
 

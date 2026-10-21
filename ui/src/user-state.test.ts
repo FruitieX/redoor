@@ -30,6 +30,8 @@ test("old and malformed documents fall back without dropping other defaults", ()
     const missing = userStateSchema.parse({ showHiddenFiles: false });
     // A document without a device order keeps the empty default instead of failing to load.
     expect(missing.deviceOrder).toEqual([]);
+    // Saved documents from before the device filter must continue to show all devices.
+    expect(missing.showOnlyConnectedDevices).toBe(false);
     expect(missing.showHiddenFiles).toBe(false);
     expect(missing.theme).toBe(defaultUserState.theme);
 
