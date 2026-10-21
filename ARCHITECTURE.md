@@ -951,6 +951,46 @@ The route tree separates the authenticated application from the public login for
   `/agents/$agentId`, and `useAgentSearchNavigation` changes them with the router's typed
   `search` updater, so the path, hash and the child view's own keys survive.
 
+### File browser
+
+The file browser is one route, `_app/agents/$agentId/browser/$`, whose splat is the filesystem
+path. Everything that distinguishes one screen from another lives in the URL or the query
+cache, so Back, reload and shared links all land on the same screen.
+
+- **URL state is a validated schema.** `browser-search.ts` defines the search keys: `view`
+  (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file) and
+  `sort` / `order` (the listing order). Each field falls back to undefined, so a stale link
+  shows the defaults. The loader depends on `view` and `diffMode`, so it prefetches the diff
+  the page is about to show; sorting and `line` stay out of the loader's dependencies and never
+  reload the route.
+- **Typed links, string URLs only where a string is required.** `browserRoute(agentId, path)`
+  returns the typed `to` and `params`, so the router encodes the path and checks the search
+  keys. `Agent.getBrowserUrl` remains for real string hrefs, such as links created inside the
+  diff and markdown renderers or a copied URL.
+- **The loader identifies, the cache supplies data.** The loader resolves what lives at the
+  path (directory, file, missing, unreadable) and applies redirects. The page then reads the
+  live listing from the query cache, so a refresh reaches it without reloading the route.
+- **One workflow per path operation.** Four dialogs that ask for a name (rename, duplicate,
+  new file, new directory) share `PathNameDialog` and `validatePathComponent`, which rejects
+  empty names, `.` and `..`, and separators. Directory creation alone opts in to nested names
+  (`a/b`), because the agent creates every missing parent. `DeletePathDialog` owns what must
+  follow any delete: leave the path's own page for its parent, unselect it, unpin it and
+  refresh the agent's data, so the list, details and editor cannot drift apart. Dialogs are
+  mounted only while open, which replaces effects that reset their state.
+- **Waiting on a transfer uses the transfers query.** Duplicate, batch copy and move, and the
+  Sync view all follow transfers they started through `transfers_changed` plus a short poll on
+  the same cache entry (`watchedTransfersQueryOptions`). `waitForTransfers` is an observer on
+  that entry for flows that await completion, and the Sync view reads it as a query for a live
+  progress readout. No feature polls the API on its own.
+- **Waiting for an agent to return is shared.** Restarting or upgrading an agent recognizes the
+  replacement as the same agent id on a new connection. `useAgentReconnect` does that in one
+  place for the device list and the device page.
+- **The editor owns its keys at the window.** Mod-S (save) and the find keys are handled by one
+  capture-phase listener each, which consumes the key so CodeMirror and Vim never see it. That
+  works with focus inside or outside the editor and needs no second binding in CodeMirror.
+  Whether the find panel is open belongs to the editor view, which also shows it on the
+  toolbar.
+
 ## Authentication and trust
 
 Redoor has a single user account. Each kind of client has its own credential, and each
