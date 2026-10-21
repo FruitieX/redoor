@@ -584,7 +584,7 @@ function SelectedFilesCardActions(props: {
                 type="button"
                 label="Clear selection"
                 onClick={props.onClear}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
             >
                 <X className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -671,7 +671,7 @@ export function SelectedFilesCard(props: {
                         {(moveTrigger) => (
                             <section
                                 aria-label="Selected files actions"
-                                className="flex min-w-0 items-center gap-2 overflow-hidden border-b border-slate-800 bg-[#11141b] p-4 sm:p-5"
+                                className="flex min-w-0 items-center gap-2 overflow-hidden border-b border-slate-800 bg-surface p-4 sm:p-5"
                             >
                                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center text-blue-400">
                                     <Files
@@ -693,7 +693,7 @@ export function SelectedFilesCard(props: {
                                                     "selected",
                                                 )
                                             }
-                                            className="h-9 min-w-0 w-full justify-start gap-2 px-2 py-0 text-left text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white"
+                                            className="h-9 min-w-0 w-full justify-start gap-2 px-2 py-0 text-left text-sm font-medium text-slate-200 hover:bg-tint hover:text-slate-100"
                                         >
                                             <span className="truncate">
                                                 {selectionSummary}

@@ -22,7 +22,7 @@ export function WaitingUploads(props: {
     return (
         <section
             aria-labelledby="upload-queue-heading"
-            className="mb-3 overflow-hidden rounded-lg border border-slate-800 bg-[#11141b]"
+            className="mb-3 overflow-hidden rounded-lg border border-slate-800 bg-surface"
         >
             <div className="border-b border-slate-800 bg-slate-900/35 px-4 py-3">
                 <h2

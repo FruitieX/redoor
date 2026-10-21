@@ -130,7 +130,7 @@ export function SideMenu(props: {
                 id={panelId}
                 aria-label={props.label}
                 style={{ width: resize.width }}
-                className={`${isPersistent ? "flex" : "hidden"} relative min-w-0 shrink-0 flex-col ${borderClass} border-slate-800 bg-[#0f1218] p-3`}
+                className={`${isPersistent ? "flex" : "hidden"} relative min-w-0 shrink-0 flex-col ${borderClass} border-slate-800 bg-chrome p-3`}
             >
                 {props.children}
                 {isPersistent ? (
@@ -170,7 +170,7 @@ export function SideMenu(props: {
                         ref={drawerRef}
                         id={drawerId}
                         tabIndex={-1}
-                        className={`absolute ${edgeClass} flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto ${borderClass} border-slate-700 bg-[#11141b] p-3 shadow-2xl shadow-black/50`}
+                        className={`absolute ${edgeClass} flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto ${borderClass} border-slate-700 bg-surface p-3 shadow-2xl shadow-black/50`}
                     >
                         <div
                             className={`mb-2 flex ${props.placement === "left" ? "justify-end" : "justify-start"}`}
@@ -180,7 +180,7 @@ export function SideMenu(props: {
                                 label={`Close ${props.label.toLowerCase()}`}
                                 tooltip={false}
                                 onClick={onClose}
-                                className="rounded p-2 text-slate-400 hover:bg-white/10 hover:text-slate-100"
+                                className="rounded p-2 text-slate-400 hover:bg-tint-strong hover:text-slate-100"
                             >
                                 <X className="h-4 w-4" />
                             </IconButton>

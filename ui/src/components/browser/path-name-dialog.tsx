@@ -141,7 +141,7 @@ export function PathNameDialog(props: {
                         <p className="mb-2 text-sm text-slate-400">
                             {props.preview.label}
                         </p>
-                        <p className="break-all rounded bg-[#0b0d12] px-3 py-2 font-mono text-sm text-slate-300">
+                        <p className="break-all rounded bg-canvas px-3 py-2 font-mono text-sm text-slate-300">
                             {previewPath}
                         </p>
                     </div>

@@ -107,7 +107,7 @@ export function TerminalPanel(props: {
     return (
         <section
             aria-label="Terminal panel"
-            className="flex h-full min-h-0 flex-col bg-[#11141b]"
+            className="flex h-full min-h-0 flex-col bg-surface"
         >
             <TerminalToolbar
                 isFullWindow={props.isFullWindow}
@@ -132,7 +132,7 @@ export function TerminalPanel(props: {
             </TerminalToolbar>
             <div
                 data-terminal-theme={resolvedTheme}
-                className={`relative min-h-0 flex-1 overflow-hidden bg-[#0b0d12] ${props.isFullWindow ? "mx-2 mb-2 rounded-md sm:mx-4 sm:mb-4" : "rounded-md"}`}
+                className={`relative min-h-0 flex-1 overflow-hidden bg-canvas ${props.isFullWindow ? "mx-2 mb-2 rounded-md sm:mx-4 sm:mb-4" : "rounded-md"}`}
             >
                 {snapshot.tabs.map((tab) => {
                     const session = terminals.sessionFor(tab.id);
@@ -320,7 +320,7 @@ function TerminalView(props: {
             {props.tab.state.type === "disconnected" ? (
                 <div
                     role="alert"
-                    className="absolute inset-x-0 bottom-0 rounded-md border border-red-500/20 bg-[#161018]/95 px-3 py-2 text-sm text-red-300 shadow-lg"
+                    className="absolute inset-x-0 bottom-0 rounded-md border border-red-500/20 bg-error-tint/95 px-3 py-2 text-sm text-red-300 shadow-lg"
                 >
                     {props.tab.state.message}
                 </div>

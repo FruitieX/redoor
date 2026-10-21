@@ -48,7 +48,7 @@ export function ActionMenu(props: {
             disabled={props.disabled}
             onClick={() => setIsOpen(true)}
             className={twMerge(
-                "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-50",
+                "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-tint hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50",
                 isIcon &&
                     "h-8 w-8 shrink-0 justify-center p-0 text-slate-400 hover:text-slate-100",
                 props.className,
@@ -104,7 +104,7 @@ export function ActionMenuButton(props: {
     const className = `flex w-full items-center justify-start gap-2 rounded-md px-3 py-2 text-left text-sm font-medium transition-colors ${
         props.tone === "danger"
             ? "text-red-300 hover:bg-red-500/10 hover:text-red-200 disabled:text-red-900"
-            : "text-slate-200 hover:bg-white/5 hover:text-white disabled:text-slate-600"
+            : "text-slate-200 hover:bg-tint hover:text-slate-100 disabled:text-slate-600"
     } disabled:cursor-not-allowed disabled:hover:bg-transparent`;
 
     if (

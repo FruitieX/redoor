@@ -17,7 +17,7 @@ export function FullWindowToggle(props: {
             }
             aria-pressed={props.isFullWindow}
             onClick={props.onToggle}
-            className="h-8 w-8 shrink-0 rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+            className="h-8 w-8 shrink-0 rounded-md text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
         >
             {props.isFullWindow ? (
                 <Minimize2 className="h-4 w-4" aria-hidden="true" />

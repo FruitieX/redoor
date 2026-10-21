@@ -124,7 +124,7 @@ function AgentMenu(props: { agents: Agent[] }) {
                                           ),
                                 )
                             }
-                            className="rounded p-1.5 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                            className="rounded p-1.5 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
                         >
                             {hasExpandedBookmarks ? (
                                 <FoldVertical
@@ -268,7 +268,7 @@ function ConnectedDevicesToggle() {
                     showOnlyConnectedDevices: !current.showOnlyConnectedDevices,
                 }))
             }
-            className={`rounded p-1.5 hover:bg-white/10 ${userState.showOnlyConnectedDevices ? "bg-blue-500/15 text-blue-400" : "text-slate-500 hover:text-slate-200"}`}
+            className={`rounded p-1.5 hover:bg-tint-strong ${userState.showOnlyConnectedDevices ? "bg-blue-500/15 text-blue-400" : "text-slate-500 hover:text-slate-200"}`}
         >
             <Wifi className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -310,7 +310,7 @@ function DeviceBlock(props: {
                     }`}
                 >
                     <div
-                        className={`group flex items-center rounded-md border text-sm ${isActive ? "border-blue-500/40 bg-blue-500/10" : "border-transparent hover:bg-white/5"}`}
+                        className={`group flex items-center rounded-md border text-sm ${isActive ? "border-blue-500/40 bg-blue-500/10" : "border-transparent hover:bg-tint"}`}
                     >
                         {props.bookmarks.length > 0 ? (
                             <IconButton
@@ -323,7 +323,7 @@ function DeviceBlock(props: {
                                         : bookmarksId
                                 }
                                 onClick={props.onToggleBookmarks}
-                                className="ml-1 shrink-0 rounded p-1 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                                className="ml-1 shrink-0 rounded p-1 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
                             >
                                 <ChevronDown
                                     className={`h-3.5 w-3.5 ${props.bookmarksFolded ? "-rotate-90" : ""}`}
@@ -368,7 +368,7 @@ function DeviceBlock(props: {
                                     params={{ agentId: props.agent.id }}
                                     aria-label={`Edit ${props.agent.name}`}
                                     onClick={closeMenu}
-                                    className="mr-1 rounded p-1.5 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                                    className="mr-1 rounded p-1.5 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
                                 >
                                     <Pencil
                                         className="h-3.5 w-3.5"
@@ -465,7 +465,7 @@ function BookmarkRow(props: {
                     } ${
                         isActive
                             ? "bg-blue-500/10 text-blue-300"
-                            : "text-slate-400 hover:bg-white/5 hover:text-slate-100"
+                            : "text-slate-400 hover:bg-tint hover:text-slate-100"
                     }`}
                 >
                     <Tooltip
@@ -492,7 +492,7 @@ function BookmarkRow(props: {
                         label={`Remove bookmark ${props.bookmark.name}`}
                         tooltip={`Remove ${props.bookmark.name}`}
                         onClick={() => props.onRemove(props.bookmark)}
-                        className="mr-0.5 shrink-0 rounded p-1 text-slate-600 opacity-0 hover:bg-white/10 hover:text-slate-200 group-hover:opacity-100 group-focus-within:opacity-100"
+                        className="mr-0.5 shrink-0 rounded p-1 text-slate-600 opacity-0 hover:bg-tint-strong hover:text-slate-200 group-hover:opacity-100 group-focus-within:opacity-100"
                     >
                         <X className="h-3 w-3" aria-hidden="true" />
                     </IconButton>

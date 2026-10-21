@@ -30,7 +30,7 @@ export function Checkbox(props: {
             onClick={() => props.onCheckedChange(!props.checked)}
             disabled={props.disabled}
             className={twMerge(
-                "inline-flex items-center gap-2 rounded p-1 text-sm text-slate-300 hover:bg-white/10 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent disabled:hover:text-slate-300",
+                "inline-flex items-center gap-2 rounded p-1 text-sm text-slate-300 hover:bg-tint-strong hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent disabled:hover:text-slate-300",
                 props.className,
             )}
         >

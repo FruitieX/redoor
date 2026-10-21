@@ -541,7 +541,7 @@ export function LogViewer(props: {
                     role="log"
                     aria-label={`${props.sourceLabel} log entries`}
                     aria-live="off"
-                    className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-800 bg-[#080a0e] p-4 font-mono text-xs leading-5 text-slate-300"
+                    className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-800 bg-surface-code p-4 font-mono text-xs leading-5 text-slate-300"
                 >
                     {entries.map((entry) => (
                         <LogRecordRow

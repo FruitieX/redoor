@@ -145,7 +145,7 @@ ${props.selection.text}
                         : "Search and replace in the file (Ctrl+F)"
                 }
                 onClick={props.onToggleSearch}
-                className="h-9 w-9 aria-[pressed=false]:text-slate-200 aria-[pressed=false]:hover:bg-white/5"
+                className="h-9 w-9 aria-[pressed=false]:text-slate-200 aria-[pressed=false]:hover:bg-tint"
             >
                 <Replace className="h-4 w-4" aria-hidden="true" />
             </ToggleButton>
@@ -345,7 +345,7 @@ function CloseMarkdownPreviewButton(props: { onClose: () => void }) {
             label="Close markdown preview"
             tooltip="Edit markdown"
             onClick={props.onClose}
-            className="h-8 w-8 rounded-md bg-[#11141b]/90 text-slate-300 hover:bg-white/5 hover:text-slate-50"
+            className="h-8 w-8 rounded-md bg-surface/90 text-slate-300 hover:bg-tint hover:text-slate-50"
         >
             <X className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -394,7 +394,7 @@ function FileEditorSecondaryActions(props: {
                         terminals.openOrFocus(terminalTarget);
                     }
                 }}
-                className="h-9 w-9 rounded-md text-slate-400 hover:bg-white/5 hover:text-slate-100"
+                className="h-9 w-9 rounded-md text-slate-400 hover:bg-tint hover:text-slate-100"
             >
                 <Terminal className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -818,7 +818,7 @@ export function FileEditView(props: FileEditViewProps) {
             <article
                 aria-label="Editing panel"
                 data-editor-full-window={props.isFullWindow}
-                className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-[#11141b] shadow-2xl shadow-black/20 ${
+                className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-surface shadow-2xl shadow-black/20 ${
                     props.isFullWindow ? "fixed inset-0 z-[60]" : ""
                 }`}
             >

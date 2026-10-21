@@ -39,7 +39,7 @@ export function AffectedPathsList(props: {
                             type="button"
                             label={`Deselect ${path.fileName}`}
                             onClick={() => props.onDeselect(path)}
-                            className="h-7 w-7 shrink-0 rounded text-slate-500 hover:bg-white/5 hover:text-slate-200"
+                            className="h-7 w-7 shrink-0 rounded text-slate-500 hover:bg-tint hover:text-slate-200"
                         >
                             <X className="h-4 w-4" aria-hidden="true" />
                         </IconButton>

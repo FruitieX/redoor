@@ -170,7 +170,7 @@ export function RouteError(
             role="alert"
             className="flex min-h-full items-center justify-center p-6"
         >
-            <div className="w-full max-w-xl rounded-xl border border-red-900/60 bg-[#141821] shadow-lg shadow-black/40">
+            <div className="w-full max-w-xl rounded-xl border border-red-900/60 bg-surface-error shadow-lg shadow-black/40">
                 <div className="border-b border-red-900/40 px-5 py-4">
                     <div className="flex items-start gap-3">
                         <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-500/10 text-red-400">
@@ -222,12 +222,12 @@ export function RouteError(
                     </dl>
 
                     {hasTechnicalDetails ? (
-                        <div className="rounded-lg border border-slate-800 bg-[#0b0d12]">
+                        <div className="rounded-lg border border-slate-800 bg-canvas">
                             <button
                                 type="button"
                                 aria-expanded={detailsOpen}
                                 onClick={() => setDetailsOpen((open) => !open)}
-                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-medium text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-medium text-slate-400 hover:bg-tint hover:text-slate-200"
                             >
                                 Technical details
                                 <ChevronDown

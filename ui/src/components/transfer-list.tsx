@@ -110,7 +110,7 @@ function TransferProgressCell(props: { transfer: TransferProgressEntry }) {
 
 function TransferTableHeader() {
     return (
-        <thead className="sticky top-0 bg-[#1a1f2a]">
+        <thead className="sticky top-0 bg-surface-raised">
             <tr className="border-b border-slate-800">
                 <th className="text-left p-3 text-sm font-medium text-slate-400">
                     Device
@@ -346,8 +346,8 @@ export function TransferList(props: {
     }
 
     return (
-        <div className="overflow-x-auto bg-[#11141b]">
-            <table className="w-full min-w-[48rem] bg-[#11141b]">
+        <div className="overflow-x-auto bg-surface">
+            <table className="w-full min-w-[48rem] bg-surface">
                 <TransferTableHeader />
                 <tbody>
                     {props.transfers.map((transfer) => {
@@ -375,7 +375,7 @@ export function TransferList(props: {
                         return (
                             <tr
                                 key={transfer.request_id.toString()}
-                                className="border-b border-slate-800/60 last:border-b-0 hover:bg-white/5 align-top"
+                                className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint align-top"
                             >
                                 <td className="whitespace-nowrap p-3">
                                     <div className="flex flex-col">

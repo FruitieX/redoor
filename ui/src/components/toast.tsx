@@ -64,7 +64,7 @@ export function Toast(props: {
             role={props.tone === "error" ? "alert" : "status"}
             aria-live={props.tone === "error" ? "assertive" : "polite"}
             aria-atomic="true"
-            className={`fixed left-1/2 top-16 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-xl border border-l-4 border-slate-700 bg-[#11141b]/95 px-4 py-3 text-sm text-slate-200 shadow-xl backdrop-blur-md ${toneClasses[props.tone].accent}`}
+            className={`fixed left-1/2 top-16 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-xl border border-l-4 border-slate-700 bg-surface/95 px-4 py-3 text-sm text-slate-200 shadow-xl backdrop-blur-md ${toneClasses[props.tone].accent}`}
         >
             {props.icon ? (
                 <span
@@ -79,7 +79,7 @@ export function Toast(props: {
                 type="button"
                 label={props.dismissAriaLabel ?? "Dismiss notification"}
                 onClick={dismiss}
-                className="ml-1 shrink-0 rounded-md p-1 text-slate-500 transition-colors hover:bg-white/10 hover:text-slate-200"
+                className="ml-1 shrink-0 rounded-md p-1 text-slate-500 transition-colors hover:bg-tint-strong hover:text-slate-200"
             >
                 <X className="h-4 w-4" />
             </IconButton>

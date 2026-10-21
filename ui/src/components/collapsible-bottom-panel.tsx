@@ -90,7 +90,7 @@ export function TabbedBottomDrawer(props: {
                 style={{ height: props.isFullWindow ? "100%" : panelHeight }}
                 aria-label="Application tools"
                 data-overlay-bottom-panel=""
-                className={`absolute inset-x-0 bottom-0 flex min-h-0 flex-col overflow-hidden bg-[#11141b]/95 shadow-[0_-10px_30px_-12px_rgba(0,0,0,0.6)] backdrop-blur supports-backdrop-filter:bg-[#11141b]/80 motion-reduce:transition-none ${props.isFullWindow ? "" : "border-t border-slate-800"} ${
+                className={`absolute inset-x-0 bottom-0 flex min-h-0 flex-col overflow-hidden bg-surface/95 shadow-[0_-10px_30px_-12px_rgba(0,0,0,0.6)] backdrop-blur supports-backdrop-filter:bg-surface/80 motion-reduce:transition-none ${props.isFullWindow ? "" : "border-t border-slate-800"} ${
                     resize.isResizing || props.isFullWindow
                         ? ""
                         : "transition-[height] duration-150 ease-out"
@@ -149,7 +149,7 @@ export function TabbedBottomDrawer(props: {
                                 onClick={() =>
                                     props.onCollapsedChange(!props.isCollapsed)
                                 }
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
                             >
                                 {props.isCollapsed ? (
                                     <ChevronUp className="h-4 w-4" />
@@ -286,7 +286,7 @@ function BottomDrawerTabButton(props: {
             className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors sm:px-3 ${
                 props.isActive
                     ? "bg-slate-800 text-slate-100"
-                    : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                    : "text-slate-400 hover:bg-tint hover:text-slate-200"
             }`}
         >
             {props.tab.icon}

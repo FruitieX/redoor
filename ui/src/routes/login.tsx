@@ -77,7 +77,7 @@ function LoginPage() {
     const isSubmitting = loginMutation.isPending;
 
     return (
-        <main className="flex min-h-screen items-center justify-center bg-[#0b0d12] p-6">
+        <main className="flex min-h-screen items-center justify-center bg-canvas p-6">
             <div className="flex w-full max-w-sm flex-col gap-4">
                 {firstRunMessage ? (
                     <div
@@ -93,7 +93,7 @@ function LoginPage() {
                         </p>
                     </div>
                 ) : null}
-                <div className="w-full rounded-xl border border-slate-800 bg-[#11141b] p-8 shadow-2xl">
+                <div className="w-full rounded-xl border border-slate-800 bg-surface p-8 shadow-2xl">
                     <div className="mb-8 flex items-center justify-center gap-3">
                         <span
                             className="relative h-9 w-9 shrink-0"

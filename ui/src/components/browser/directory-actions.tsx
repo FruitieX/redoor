@@ -365,7 +365,7 @@ export function DirectoryFilesActions(props: {
                         variant="subtle"
                         onClick={importFromClipboard}
                         aria-label="Paste files or text"
-                        className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-white/5 hover:text-white"
+                        className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-tint hover:text-slate-100"
                     >
                         <ClipboardPaste className="h-4 w-4 text-slate-400" />
                         <span className="hidden sm:inline">Paste</span>
@@ -401,7 +401,7 @@ export function DirectoryFilesActions(props: {
                                 }}
                                 disabled={isReloading}
                                 isLoading={isReloading}
-                                className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-white/5 hover:text-white"
+                                className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-tint hover:text-slate-100"
                             >
                                 <RefreshCw className="h-4 w-4 text-slate-400" />
                                 <span className="hidden sm:inline">

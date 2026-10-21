@@ -106,7 +106,7 @@ export function UpgradeButton(props: UpgradeButtonProps) {
     return (
         <section
             aria-labelledby="agent-upgrade-title"
-            className="rounded-lg border border-slate-800 bg-[#11141b] p-4"
+            className="rounded-lg border border-slate-800 bg-surface p-4"
         >
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2

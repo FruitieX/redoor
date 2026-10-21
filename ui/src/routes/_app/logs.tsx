@@ -38,7 +38,7 @@ function ServerLogsPage() {
                         to="/agents/$agentId/logs"
                         params={{ agentId: agent.id }}
                         aria-label={`View logs for ${agent.name}`}
-                        className="rounded border border-slate-700 px-2 py-1 text-slate-200 hover:bg-white/5"
+                        className="rounded border border-slate-700 px-2 py-1 text-slate-200 hover:bg-tint"
                     >
                         {agent.name}
                     </Link>

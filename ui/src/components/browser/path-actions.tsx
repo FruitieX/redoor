@@ -604,7 +604,7 @@ export function PersistentPathActions(props: {
             variant={props.secondaryDownload ? "subtle" : "primary"}
             className={
                 props.secondaryDownload
-                    ? "rounded-md px-3 text-slate-200 hover:bg-white/5 hover:text-white"
+                    ? "rounded-md px-3 text-slate-200 hover:bg-tint hover:text-slate-100"
                     : "rounded-md px-3.5 font-semibold shadow-sm shadow-blue-950/30"
             }
         >

@@ -112,7 +112,7 @@ function EditorPin(props: {
                     } ${
                         props.isActive
                             ? "bg-white/10 text-slate-100"
-                            : "text-slate-300 hover:bg-white/5 hover:text-slate-100"
+                            : "text-slate-300 hover:bg-tint hover:text-slate-100"
                     }`}
                 >
                     <Tooltip
@@ -135,7 +135,7 @@ function EditorPin(props: {
                         label={`Close pinned file ${props.file.name}`}
                         tooltip={`Unpin ${props.file.name}`}
                         onClick={props.onClose}
-                        className="mr-1 shrink-0 rounded p-1 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                        className="mr-1 shrink-0 rounded p-1 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
                     >
                         <X className="h-3 w-3" aria-hidden="true" />
                     </IconButton>

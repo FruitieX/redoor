@@ -160,7 +160,7 @@ export function FileList(props: {
     };
 
     return (
-        <div className="overflow-hidden bg-[#11141b]">
+        <div className="overflow-hidden bg-surface">
             {props.actions}
             <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800 bg-slate-900/35 p-1.5 sm:gap-2 sm:p-2">
                 <label className="relative min-w-0 flex-1">
@@ -248,7 +248,7 @@ function FileTable(props: {
         <div className="overflow-x-auto">
             <table ref={tableRef} className="w-full min-w-[55rem]">
                 <thead>
-                    <tr className="border-b border-slate-800 bg-[#1a1f2a]">
+                    <tr className="border-b border-slate-800 bg-surface-raised">
                         <th className="p-1.5 text-left text-sm font-medium text-slate-400 sm:p-2">
                             Select
                         </th>
@@ -338,7 +338,7 @@ function SortableFileColumnHeader(props: {
                 variant="subtle"
                 onClick={() => props.onSort(props.column)}
                 aria-label={`Sort by ${props.label} ${nextDirection}`}
-                className="flex w-full justify-start gap-1.5 px-1.5 py-1.5 text-left font-medium text-slate-400 hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="flex w-full justify-start gap-1.5 px-1.5 py-1.5 text-left font-medium text-slate-400 hover:bg-tint hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
                 {props.label}
                 <SortIcon className="h-3.5 w-3.5" />
@@ -594,7 +594,7 @@ function FileEntry(props: {
 
     return (
         <tr
-            className="border-b border-slate-800/60 last:border-b-0 hover:bg-white/5"
+            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint"
             aria-label={`${isDirectory ? "Directory" : "File"} entry ${entry.name}`}
         >
             <td className="p-1.5 sm:p-2" aria-label="">

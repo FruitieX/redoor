@@ -68,10 +68,10 @@ export function Dialog(props: DialogProps) {
             tabIndex={props.initialFocus === "panel" ? -1 : undefined}
             className={
                 isAnchored
-                    ? "absolute w-56 rounded-xl border border-slate-700 bg-[#11141b] p-3 shadow-2xl shadow-black/40"
+                    ? "absolute w-56 rounded-xl border border-slate-700 bg-surface p-3 shadow-2xl shadow-black/40"
                     : props.size === "search"
-                      ? "min-h-dvh w-full bg-[#11141b] p-4 text-left shadow-2xl shadow-black/40 sm:min-h-0 sm:rounded-xl sm:border sm:border-slate-700 sm:p-6"
-                      : "w-full rounded-xl border border-slate-700 bg-[#11141b] p-6 text-left shadow-2xl shadow-black/40"
+                      ? "min-h-dvh w-full bg-surface p-4 text-left shadow-2xl shadow-black/40 sm:min-h-0 sm:rounded-xl sm:border sm:border-slate-700 sm:p-6"
+                      : "w-full rounded-xl border border-slate-700 bg-surface p-6 text-left shadow-2xl shadow-black/40"
             }
             style={
                 isAnchored && anchorPosition
@@ -115,7 +115,7 @@ export function Dialog(props: DialogProps) {
                         label={props.closeAriaLabel}
                         onClick={props.onClose}
                         disabled={props.isBusy}
-                        className="rounded p-2 text-slate-400 hover:bg-white/10 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="rounded p-2 text-slate-400 hover:bg-tint-strong hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                         <X className="h-4 w-4" />
                     </IconButton>

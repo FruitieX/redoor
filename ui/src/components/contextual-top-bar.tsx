@@ -45,7 +45,7 @@ export function ContextualTopBar() {
     return (
         <header
             aria-label="View navigation"
-            className="flex min-h-12 min-w-0 items-center gap-2 border-b border-slate-800 bg-[#0f1218] px-2 pt-2 md:px-3"
+            className="flex min-h-12 min-w-0 items-center gap-2 border-b border-slate-800 bg-chrome px-2 pt-2 md:px-3"
         >
             {isPersistent ? null : (
                 <IconButton
@@ -56,7 +56,7 @@ export function ContextualTopBar() {
                     aria-controls={sideMenuDrawerIds.application}
                     aria-expanded={openMenu === "application"}
                     onClick={() => setOpenMenu("application")}
-                    className="rounded p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100"
+                    className="rounded p-2 text-slate-400 hover:bg-tint hover:text-slate-100"
                 >
                     <PanelLeftOpen className="h-5 w-5" aria-hidden="true" />
                 </IconButton>
@@ -65,7 +65,7 @@ export function ContextualTopBar() {
                 <ContextualViewSwitch context={context} />
             </div>
             {context && !isFilesystemContext ? (
-                <SearchButton className="rounded p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100" />
+                <SearchButton className="rounded p-2 text-slate-400 hover:bg-tint hover:text-slate-100" />
             ) : null}
             <ThemeToggle />
             {isPersistent ? null : (
@@ -77,7 +77,7 @@ export function ContextualTopBar() {
                     aria-controls={sideMenuDrawerIds.agents}
                     aria-expanded={openMenu === "agents"}
                     onClick={() => setOpenMenu("agents")}
-                    className="rounded p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100"
+                    className="rounded p-2 text-slate-400 hover:bg-tint hover:text-slate-100"
                 >
                     <PanelRightOpen className="h-5 w-5" aria-hidden="true" />
                 </IconButton>

@@ -109,10 +109,10 @@ function ApplicationMenu() {
                             "ariaLabel" in item ? item.ariaLabel : undefined
                         }
                         activeOptions={{ exact: item.exact }}
-                        activeProps={{ className: "bg-white/5 text-slate-100" }}
+                        activeProps={{ className: "bg-tint text-slate-100" }}
                         inactiveProps={{
                             className:
-                                "text-slate-300 hover:bg-white/5 hover:text-slate-100",
+                                "text-slate-300 hover:bg-tint hover:text-slate-100",
                         }}
                         onClick={closeMenu}
                         className="flex items-center gap-2.5 rounded px-3 py-2.5 text-sm transition-colors"
@@ -164,7 +164,7 @@ function ApplicationMenu() {
                 <RestartButton
                     target="server"
                     ariaLabel="Restart server"
-                    className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm text-slate-300 hover:bg-white/5 hover:text-slate-100"
+                    className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm text-slate-300 hover:bg-tint hover:text-slate-100"
                     description="The server will restart and re-read its configuration. Connected agents reconnect automatically. In-flight transfers and terminals are interrupted."
                     restart={() => api.restartServer()}
                     waitUntilReady={() => {
@@ -227,7 +227,7 @@ function LogoutButton() {
             variant="subtle"
             onClick={() => logoutMutation.mutate()}
             disabled={logoutMutation.isPending}
-            className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm font-normal text-slate-300 hover:bg-white/5 hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
+            className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm font-normal text-slate-300 hover:bg-tint hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
         >
             {logoutMutation.isPending ? (
                 <LoaderCircle
@@ -335,8 +335,8 @@ function PinnedFileRow(props: {
                             : ""
                     } ${
                         isActive
-                            ? "bg-white/5 text-slate-100"
-                            : "text-slate-300 hover:bg-white/5 hover:text-slate-100"
+                            ? "bg-tint text-slate-100"
+                            : "text-slate-300 hover:bg-tint hover:text-slate-100"
                     }`}
                 >
                     <Tooltip
@@ -363,7 +363,7 @@ function PinnedFileRow(props: {
                         label="Remove pinned file"
                         tooltip={`Remove ${props.file.name}`}
                         onClick={() => props.onRemove(props.file)}
-                        className="mt-1 mr-1 shrink-0 rounded p-1 text-slate-500 hover:bg-white/10 hover:text-slate-200"
+                        className="mt-1 mr-1 shrink-0 rounded p-1 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
                     >
                         <X className="h-3 w-3" aria-hidden="true" />
                     </IconButton>
@@ -379,7 +379,7 @@ function BrandMark() {
         <Link
             to="/"
             tabIndex={-1}
-            className="mr-2 flex shrink-0 items-center gap-2 px-2 pb-2 text-slate-200 hover:text-white"
+            className="mr-2 flex shrink-0 items-center gap-2 px-2 pb-2 text-slate-200 hover:text-slate-100"
         >
             <span className="relative h-12 w-12 shrink-0" aria-hidden="true">
                 <img

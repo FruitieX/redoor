@@ -77,7 +77,7 @@ export function ThemeToggle() {
                 type="button"
                 aria-label={`Color theme: ${selectedOption.label}`}
                 onClick={toggleTheme}
-                className="inline-flex items-center rounded-md p-2 text-slate-200 transition-colors hover:bg-white/5 hover:text-white"
+                className="inline-flex items-center rounded-md p-2 text-slate-200 transition-colors hover:bg-tint hover:text-slate-100"
             >
                 <SelectedIcon className="h-4 w-4" aria-hidden="true" />
             </button>

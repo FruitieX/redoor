@@ -241,8 +241,8 @@ export function ManagedAgentForm(props: {
     const isDisabled = props.isSubmitting || props.isDisabled === true;
 
     return (
-        <div className="min-h-full bg-[#0b0d12] px-4 py-8 sm:px-8">
-            <main className="mx-auto max-w-4xl overflow-hidden rounded-xl border border-slate-800 bg-[#11141b] shadow-2xl shadow-black/20">
+        <div className="min-h-full bg-canvas px-4 py-8 sm:px-8">
+            <main className="mx-auto max-w-4xl overflow-hidden rounded-xl border border-slate-800 bg-surface shadow-2xl shadow-black/20">
                 <FormHeader mode={props.mode} kind={kind} />
                 <form onSubmit={submit} className="space-y-7 p-6 sm:p-8">
                     {isEdit ? null : (

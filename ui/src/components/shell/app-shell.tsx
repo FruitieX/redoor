@@ -35,7 +35,7 @@ export function AppShell() {
 
     return (
         <ShellFileImportHandler>
-            <div className="flex h-dvh overflow-hidden bg-[#0b0d12]">
+            <div className="flex h-dvh overflow-hidden bg-canvas">
                 <ThemeManager />
                 <RouteLoadingIndicator />
                 <UserStatePersistToast />

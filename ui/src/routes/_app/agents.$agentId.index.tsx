@@ -340,7 +340,7 @@ function MountPoints(props: {
     return (
         <section
             aria-labelledby="mount-points-heading"
-            className="overflow-hidden rounded-lg border border-slate-800 bg-[#11141b] md:col-span-2"
+            className="overflow-hidden rounded-lg border border-slate-800 bg-surface md:col-span-2"
         >
             <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3 font-semibold text-slate-300">
                 <HardDrive className="h-5 w-5" />
@@ -470,7 +470,7 @@ function DetailCard(props: {
     children: React.ReactNode;
 }) {
     return (
-        <div className="rounded-lg border border-slate-800 bg-[#11141b] p-4">
+        <div className="rounded-lg border border-slate-800 bg-surface p-4">
             <div className="mb-3 flex items-center gap-2 font-semibold text-slate-300">
                 {props.icon}
                 <h3 className="text-sm uppercase tracking-wide">

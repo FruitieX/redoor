@@ -536,7 +536,7 @@ function SearchControls(props: {
                                     props.caseSensitivity
                                 ]
                             }
-                            className="h-9 w-9 rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            className="h-9 w-9 rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                             onClick={() =>
                                 void props.onUpdate({
                                     case: nextCaseSensitivity[

@@ -29,7 +29,7 @@ function SelectedFilesPanelActions(props: {
                 variant="subtle"
                 aria-label="Clear all selected items"
                 onClick={props.onClearSelectedFiles}
-                className="inline-flex h-8 items-center justify-center rounded-md px-2 text-xs font-medium text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 sm:px-2.5"
+                className="inline-flex h-8 items-center justify-center rounded-md px-2 text-xs font-medium text-slate-400 transition-colors hover:bg-tint hover:text-slate-100 sm:px-2.5"
             >
                 <X className="h-4 w-4 sm:hidden" aria-hidden="true" />
                 <span className="hidden sm:inline">Clear all</span>
@@ -45,7 +45,7 @@ function SelectedFilesTable(props: {
     onUnselectFile: (file: Pick<SelectedPath, "agentId" | "path">) => void;
 }) {
     return (
-        <div className="h-full overflow-auto bg-[#11141b]">
+        <div className="h-full overflow-auto bg-surface">
             <ul className="divide-y divide-slate-800/70 md:hidden">
                 {props.selectedFiles.map((file) => (
                     <li
@@ -83,7 +83,7 @@ function SelectedFilesTable(props: {
                                     path: file.path,
                                 })
                             }
-                            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-700 text-slate-300 transition-colors hover:bg-white/5"
+                            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-700 text-slate-300 transition-colors hover:bg-tint"
                         >
                             <X className="h-4 w-4" aria-hidden="true" />
                         </IconButton>
@@ -91,7 +91,7 @@ function SelectedFilesTable(props: {
                 ))}
             </ul>
             <table className="hidden min-w-[44rem] w-full md:table">
-                <thead className="sticky top-0 bg-[#1a1f2a]">
+                <thead className="sticky top-0 bg-surface-raised">
                     <tr className="border-b border-slate-800">
                         <th className="p-3 text-left text-sm font-medium text-slate-400">
                             Device
@@ -111,7 +111,7 @@ function SelectedFilesTable(props: {
                     {props.selectedFiles.map((file) => (
                         <tr
                             key={`${file.agentId}:${file.path}`}
-                            className="border-b border-slate-800/60 last:border-b-0 hover:bg-white/5 align-top"
+                            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint align-top"
                         >
                             <td className="p-3">
                                 <div className="flex flex-col">

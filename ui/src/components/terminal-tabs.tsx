@@ -201,7 +201,7 @@ function TerminalTabControl(props: {
                         onKeyDown={(event) =>
                             props.onTabKeyDown(event, props.tabIndex)
                         }
-                        className={`flex h-8 items-center gap-2 px-2.5 text-xs font-medium transition-colors ${props.isActive ? "text-slate-100" : "text-slate-400 hover:bg-white/5 hover:text-slate-200"}`}
+                        className={`flex h-8 items-center gap-2 px-2.5 text-xs font-medium transition-colors ${props.isActive ? "text-slate-100" : "text-slate-400 hover:bg-tint hover:text-slate-200"}`}
                     >
                         <span className="max-w-36 truncate whitespace-nowrap">
                             {props.tab.agent.name}
@@ -238,7 +238,7 @@ function TerminalTabControl(props: {
                         type="button"
                         label={`Close ${props.tab.title}`}
                         onClick={() => props.onClose(props.tab.id)}
-                        className="inline-flex h-8 w-7 items-center justify-center border-l border-slate-700 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-200"
+                        className="inline-flex h-8 w-7 items-center justify-center border-l border-slate-700 text-slate-500 transition-colors hover:bg-tint hover:text-slate-200"
                     >
                         <X className="h-3.5 w-3.5" />
                     </IconButton>

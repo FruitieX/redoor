@@ -952,7 +952,7 @@ function ShareableLinkCard(props: {
                         void copy();
                     }}
                     label={`Copy shareable link ${props.linkNumber}`}
-                    className="shrink-0 rounded-md p-2 text-slate-400 transition hover:bg-white/5 hover:text-slate-100"
+                    className="shrink-0 rounded-md p-2 text-slate-400 transition hover:bg-tint hover:text-slate-100"
                 >
                     {isCopied ? (
                         <Check className="h-4 w-4 text-emerald-400" />

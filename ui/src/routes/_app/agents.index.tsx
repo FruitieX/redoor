@@ -237,7 +237,7 @@ function AgentTable(props: {
     return (
         <div className="mt-6 overflow-x-auto rounded-lg border border-slate-800">
             <table className="w-full text-left text-sm">
-                <thead className="bg-[#11141b] text-slate-400">
+                <thead className="bg-surface text-slate-400">
                     <tr>
                         <th className="px-4 py-3">Name</th>
                         <th className="px-4 py-3">Source</th>
@@ -254,7 +254,7 @@ function AgentTable(props: {
                         <tr
                             key={agent.id}
                             aria-label={`Device ${agent.name}`}
-                            className="bg-[#0f1218] text-slate-200"
+                            className="bg-chrome text-slate-200"
                         >
                             <td className="px-4 py-3">
                                 <Link

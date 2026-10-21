@@ -18,7 +18,7 @@ export function AddButton(props: {
     const child = React.cloneElement(props.children, {
         children: <Plus className="h-4 w-4" aria-hidden="true" />,
         className:
-            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100",
+            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-tint hover:text-slate-100",
     });
 
     return <Tooltip content={props.tooltip}>{child}</Tooltip>;

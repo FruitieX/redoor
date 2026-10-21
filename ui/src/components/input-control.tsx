@@ -12,7 +12,7 @@ export const InputControl = React.forwardRef<
         {...props}
         ref={ref}
         className={twMerge(
-            "rounded-md border border-slate-700 bg-[#0b0d12] px-3 py-2 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
+            "rounded-md border border-slate-700 bg-canvas px-3 py-2 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
             props.className,
         )}
     />

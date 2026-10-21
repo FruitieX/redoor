@@ -101,7 +101,7 @@ export function CopyableCodeRow(props: {
                     className={
                         isCopied
                             ? "inline-flex items-center gap-1.5 rounded-md bg-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300"
-                            : "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-white/5 hover:text-slate-100"
+                            : "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-tint hover:text-slate-100"
                     }
                     aria-label={
                         isCopied
@@ -183,7 +183,7 @@ export function CopyablePath(props: {
                     className={
                         isCopied
                             ? "relative mr-1 shrink-0 gap-1 rounded bg-emerald-500/20 px-1.5 py-1 text-xs text-emerald-300"
-                            : "relative mr-1 shrink-0 rounded px-1.5 py-1 text-slate-400 hover:bg-white/5 hover:text-slate-100"
+                            : "relative mr-1 shrink-0 rounded px-1.5 py-1 text-slate-400 hover:bg-tint hover:text-slate-100"
                     }
                     aria-label={isCopied ? "Copied!" : props.copyAriaLabel}
                 >

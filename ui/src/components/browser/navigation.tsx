@@ -48,12 +48,12 @@ function BrowserPageHeader(props: {
                                 props.agent.cwd ?? "/",
                             )}
                             aria-label="Device home"
-                            className="inline-flex shrink-0 items-center rounded-md p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                            className="inline-flex shrink-0 items-center rounded-md p-1.5 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
                         >
                             <Home className="h-4 w-4" aria-hidden="true" />
                         </Link>
                     </Tooltip>
-                    <SearchButton className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 [&_svg]:h-4 [&_svg]:w-4" />
+                    <SearchButton className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100 [&_svg]:h-4 [&_svg]:w-4" />
                     {props.navigation}
                     <Breadcrumbs
                         // A new location resets the path editor, so it starts closed (or open for a path that needs correcting).
@@ -190,8 +190,8 @@ export function getViewSwitchItemClass(isActive: boolean) {
         "inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-t-lg border border-b-0 px-4 py-2 text-sm font-medium transition-colors";
 
     return isActive
-        ? `${baseClass} border-slate-700 bg-[#161a23] text-slate-100 shadow-[0_-2px_0_0_rgb(59,130,246)_inset] [&_svg]:text-blue-400`
-        : `${baseClass} border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-100`;
+        ? `${baseClass} border-slate-700 bg-surface-active text-slate-100 shadow-[0_-2px_0_0_rgb(59,130,246)_inset] [&_svg]:text-blue-400`
+        : `${baseClass} border-transparent text-slate-400 hover:bg-tint hover:text-slate-100`;
 }
 
 /** Uses an underline so file and directory views read as in-page switches, not a second top bar. */
@@ -267,7 +267,7 @@ export function BrowserHeader(props: {
                                 props.parentPath ?? "/",
                             )}
                             aria-label="Go to the parent directory"
-                            className="inline-flex items-center rounded-md p-2 text-slate-200 transition-colors hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent"
+                            className="inline-flex items-center rounded-md p-2 text-slate-200 transition-colors hover:bg-tint hover:text-slate-100 disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent"
                             disabled={props.parentPath === null}
                         >
                             <ArrowUp className="h-4 w-4" aria-hidden="true" />
@@ -342,7 +342,7 @@ export function UnavailablePathState(props: {
                 {props.parentPath ? (
                     <Link
                         {...browserRoute(props.agent.id, props.parentPath)}
-                        className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-white/5"
+                        className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-tint"
                     >
                         <ArrowUp className="h-4 w-4" aria-hidden="true" />
                         Open parent directory
@@ -438,7 +438,7 @@ function Breadcrumbs(props: {
                     <IconButton
                         type="submit"
                         label="Navigate to path"
-                        className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                        className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
                     >
                         <Check className="h-4 w-4" />
                     </IconButton>
@@ -504,7 +504,7 @@ function Breadcrumbs(props: {
                         className={
                             isCopied
                                 ? "shrink-0 rounded-md p-1.5 text-emerald-300"
-                                : "shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-100"
+                                : "shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-tint hover:text-slate-100"
                         }
                     >
                         {isCopied ? (
@@ -517,7 +517,7 @@ function Breadcrumbs(props: {
                         type="button"
                         onClick={startEditing}
                         label="Edit file path"
-                        className="shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-100"
+                        className="shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-tint hover:text-slate-100"
                     >
                         <Pencil className="h-3.5 w-3.5" />
                     </IconButton>

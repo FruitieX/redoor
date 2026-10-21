@@ -110,7 +110,7 @@ function AgentNameGrid(props: { agents: Agent[] }) {
                             <Link
                                 to="/agents/$agentId"
                                 params={{ agentId: agent.id }}
-                                className="inline-flex items-center gap-1.5 rounded border border-slate-800 bg-[#11141b] px-2 py-0.5 text-sm text-slate-200 hover:border-slate-600 hover:bg-white/5"
+                                className="inline-flex items-center gap-1.5 rounded border border-slate-800 bg-surface px-2 py-0.5 text-sm text-slate-200 hover:border-slate-600 hover:bg-tint"
                             >
                                 <AgentStatusDot agent={agent} />
                                 {agent.name}
@@ -143,7 +143,7 @@ function OpenAgentSidebarButton() {
                 aria-controls={sideMenuDrawerIds.agents}
                 aria-expanded={openMenu === "agents"}
                 onClick={() => setOpenMenu("agents")}
-                className="mt-2 inline-flex items-center gap-1.5 rounded border border-slate-800 bg-[#11141b] px-2 py-0.5 text-sm font-normal text-slate-200 hover:border-slate-600 hover:bg-white/5"
+                className="mt-2 inline-flex items-center gap-1.5 rounded border border-slate-800 bg-surface px-2 py-0.5 text-sm font-normal text-slate-200 hover:border-slate-600 hover:bg-tint"
             >
                 <PanelRightOpen className="h-3.5 w-3.5" aria-hidden="true" />
                 Device menu
@@ -179,7 +179,7 @@ server = ${JSON.stringify(serverAddress)}
                     </h1>
                 </div>
                 <AgentNameGrid agents={agents} />
-                <div className="space-y-4 rounded-lg border border-slate-800 bg-[#11141b] p-6">
+                <div className="space-y-4 rounded-lg border border-slate-800 bg-surface p-6">
                     <div className="flex items-start gap-3">
                         <AppWindow className="mt-0.5 h-5 w-5 shrink-0 text-slate-400" />
                         <div className="min-w-0">

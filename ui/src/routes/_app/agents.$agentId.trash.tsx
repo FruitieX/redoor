@@ -230,7 +230,7 @@ function TrashAvailability(props: { agent: Agent }) {
     if (!props.agent.supportsTrash) {
         return (
             <main className="flex h-full items-center justify-center p-6">
-                <section className="max-w-lg rounded-lg border border-slate-800 bg-[#11141b] px-8 py-12 text-center">
+                <section className="max-w-lg rounded-lg border border-slate-800 bg-surface px-8 py-12 text-center">
                     <Trash2
                         className="mx-auto h-10 w-10 text-slate-600"
                         aria-hidden="true"
@@ -325,7 +325,7 @@ function TrashInventoryPage(props: { agent: Agent }) {
                         </p>
                     </section>
                 ) : (
-                    <div className="overflow-hidden rounded-lg border border-slate-800 bg-[#11141b]">
+                    <div className="overflow-hidden rounded-lg border border-slate-800 bg-surface">
                         <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_10rem_7rem] gap-4 border-b border-slate-800 bg-slate-900/50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 md:grid">
                             <span>Name</span>
                             <span>Original path</span>
