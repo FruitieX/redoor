@@ -1002,6 +1002,41 @@ context (`useTerminals`, `useUploads`).
   handler in a CodeMirror facet of the editor that ran it. The open editor's path and dirty
   flag, which refresh triggers read, are an atom in the application's store.
 
+### Browser component library and theme
+
+Shared controls live in `ui/src/components`, and a feature adds one there instead of styling a
+native element, so behaviour and look stay in one place.
+
+- **Controls declare a tooltip the same way.** `Button`, `IconButton`, `ToggleButton` and
+  `Tab` take `tooltip` and `tooltipClassName`, and `OptionalTooltip` wraps the control only
+  when there is text. `IconButton` is the one that defaults it, to its `label`, because an icon
+  alone is ambiguous; `tooltip={false}` opts out. Callers never wrap these controls in a
+  `Tooltip` themselves.
+- **Variants carry the repeated looks.** `IconButton` has `variant` (`ghost`, `quiet`,
+  `outline`) and `size` (`xs` to `xl`); `Button` has a `ghost` variant for borderless menu-style
+  actions. `IconLinkButton` and `LinkButton` are router links with the same looks, which is
+  how an icon-only destination avoids a raw anchor. Callers add only what is specific to them,
+  such as `shrink-0`.
+- **`ref` is an ordinary prop.** React 19 passes it through the props spread, so `InputControl`
+  and `Select` are plain functions typed with `ComponentPropsWithRef`, like the buttons.
+- **One tab strip implementation.** `TabList` owns the `tablist` role and the arrow-key
+  navigation; `Tab` owns `role="tab"`, `aria-selected` and the roving tabindex. The drawer and
+  the terminal strip use them. The list activates the neighbouring tab by clicking it, so each
+  owner's click handler stays the only definition of what selecting a tab means.
+- **Modal overlays share one focus trap.** `useFocusTrap` wraps Tab at the first and last
+  control as a modal-tier shortcut binding. The side-menu drawer and the anchored dialog
+  (which is portaled and so lacks the native `<dialog>` trap) both use it. Escape stays a
+  separate binding per overlay because their phases differ on purpose: the drawer lets a
+  keyboard sort inside it claim Escape first, while an anchored menu swallows it in capture.
+- **Theme colors are semantic.** The light theme is a set of `--app-*` variables that switch
+  with `light-dark()`, and `@theme inline` in `styles.css` exposes them as the Tailwind colors
+  `canvas`, `chrome`, `surface` (and its `active`, `raised`, `code`, `error` variants) plus
+  `tint` and `tint-strong` for hover overlays. Components use those classes, so opacity
+  modifiers such as `bg-surface/80` follow the theme too; a hex color in a class would stay
+  dark in light mode.
+- **Imports name their owner.** `api-client.ts` exports only the clients. Binding types come
+  from `#bindings/*`, `ApiError` from `api-transport` and the path helpers from `api-paths`.
+
 ### File browser
 
 The file browser is one route, `_app/agents/$agentId/browser/$`, whose splat is the filesystem
