@@ -20,6 +20,7 @@ import type { FileSearchEntry } from "#bindings/FileSearchEntry";
 import type { FileSearchResponse } from "#bindings/FileSearchResponse";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import { type Agent } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import { getImmediateParentPath } from "#ui/components/browser/utils";
 import { Dialog } from "#ui/components/dialog";
 import { IconButton } from "#ui/components/icon-button";
@@ -160,11 +161,13 @@ function useOpenSearchShortcut(isOpen: boolean) {
     }, [isOpen, openSearch]);
 }
 
+/** Names where a search result leads, with the line a content match should reveal. */
+type SearchResultTarget = { path: string; line?: number };
+
 /** Leaves modified clicks on the real href so middle-click and new-tab still work. */
 function handleSearchResultClick(
     event: React.MouseEvent<HTMLAnchorElement>,
-    href: string,
-    openSelectedResult: (href: string) => void,
+    openSelectedResult: () => void,
 ) {
     if (
         event.button !== 0 ||
@@ -177,7 +180,7 @@ function handleSearchResultClick(
     }
 
     event.preventDefault();
-    openSelectedResult(href);
+    openSelectedResult();
 }
 
 /** Owns the single route-wide path and content search workflow. */
@@ -249,12 +252,15 @@ export function SearchDialog(props: { agent: Agent }) {
     useArrayKeyboardFocus(getResults, isOpen);
 
     /** Snapshots the typed query onto this history entry so Back can restore the search. */
-    const openSelectedResult = async (href: string) => {
+    const openSelectedResult = async (target: SearchResultTarget) => {
         if (query !== (search.q ?? "")) {
             await updateSearch({ q: query });
         }
 
-        await navigate({ to: href });
+        await navigate({
+            ...browserRoute(props.agent.id, target.path),
+            search: { line: target.line },
+        });
     };
 
     const close = () =>
@@ -339,7 +345,11 @@ export function SearchDialog(props: { agent: Agent }) {
                               <ContentResult
                                   key={`${result.path}:${result.line_number}:${result.line}`}
                                   result={result}
-                                  href={`${props.agent.getBrowserUrl(result.path)}?line=${result.line_number}`}
+                                  agentId={props.agent.id}
+                                  target={{
+                                      path: result.path,
+                                      line: result.line_number,
+                                  }}
                                   onOpen={openSelectedResult}
                               />
                           ))
@@ -347,7 +357,8 @@ export function SearchDialog(props: { agent: Agent }) {
                               <PathResult
                                   key={result.path}
                                   result={result}
-                                  href={props.agent.getBrowserUrl(result.path)}
+                                  agentId={props.agent.id}
+                                  target={{ path: result.path }}
                                   onOpen={openSelectedResult}
                               />
                           ))}
@@ -625,18 +636,20 @@ function SearchNumberInputs(props: {
 /** Presents one fuzzy path match with enough context to distinguish duplicate names. */
 function PathResult(props: {
     result: FileSearchEntry;
-    href: string;
-    onOpen: (href: string) => void;
+    agentId: string;
+    target: SearchResultTarget;
+    onOpen: (target: SearchResultTarget) => void;
 }) {
     const ResultIcon = props.result.type === "directory" ? Folder : File;
 
     return (
         <Link
-            to={props.href}
+            {...browserRoute(props.agentId, props.target.path)}
+            search={{ line: props.target.line }}
             className="flex w-full items-start gap-3 rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
             aria-label={`Open path ${props.result.path}`}
             onClick={(event) =>
-                handleSearchResultClick(event, props.href, props.onOpen)
+                handleSearchResultClick(event, () => props.onOpen(props.target))
             }
         >
             <ResultIcon className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
@@ -655,16 +668,18 @@ function PathResult(props: {
 /** Presents a grep match with its line preview and exact navigation destination. */
 function ContentResult(props: {
     result: ContentGrepMatch;
-    href: string;
-    onOpen: (href: string) => void;
+    agentId: string;
+    target: SearchResultTarget;
+    onOpen: (target: SearchResultTarget) => void;
 }) {
     return (
         <Link
-            to={props.href}
+            {...browserRoute(props.agentId, props.target.path)}
+            search={{ line: props.target.line }}
             className="block w-full rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
             aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}
             onClick={(event) =>
-                handleSearchResultClick(event, props.href, props.onOpen)
+                handleSearchResultClick(event, () => props.onOpen(props.target))
             }
         >
             <span className="block text-xs text-blue-300 sm:text-sm">

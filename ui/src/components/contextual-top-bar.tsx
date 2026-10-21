@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { createLink } from "@tanstack/react-router";
 import {
     Files,
     HardDrive,
@@ -11,6 +11,7 @@ import {
 import { useAtom } from "jotai";
 import type * as React from "react";
 
+import { browserRoute } from "#ui/browser-route";
 import { IconButton } from "#ui/components/icon-button";
 import {
     getViewSwitchItemClass,
@@ -85,6 +86,28 @@ export function ContextualTopBar() {
     );
 }
 
+/** Renders an anchor with the top bar's tab look, leaving navigation to the router link around it. */
+function ViewSwitchAnchor(
+    props: React.ComponentPropsWithRef<"a"> & { active: boolean },
+) {
+    const anchorProps: Partial<typeof props> = { ...props };
+    delete anchorProps.active;
+
+    return (
+        <a
+            {...anchorProps}
+            aria-current={props.active ? "page" : undefined}
+            className={getViewSwitchItemClass(props.active)}
+        />
+    );
+}
+
+/**
+ * A typed router link that looks like a top bar tab and carries current-page semantics, so
+ * every destination keeps its checked `to`, `params` and `search`.
+ */
+const ViewSwitchLink = createLink(ViewSwitchAnchor);
+
 /** Selects only representations supported by the loaded agent or filesystem resource. */
 function ContextualViewSwitch(props: { context: AgentViewContext }) {
     if (!props.context) {
@@ -92,129 +115,77 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
     }
 
     const agent = props.context.agent;
-    const agentTarget = `/agents/${encodeURIComponent(agent.id)}`;
-    const logsTarget = `${agentTarget}/logs`;
-    const configurationTarget = `${agentTarget}/edit`;
-    const trashTarget = `${agentTarget}/trash`;
-
-    const isFilesystemContext =
-        props.context.kind === "directory" || props.context.kind === "file";
-
-    const canBrowse = agent.status === "connected" && agent.cwd !== null;
+    const kind = props.context.kind;
+    const isFilesystemContext = kind === "directory" || kind === "file";
 
     // Stopped TOML homes can be relative; only connected resolved paths are browser URLs.
-    const filesTarget =
-        canBrowse && agent.cwd !== null
-            ? agent.getBrowserUrl(agent.cwd)
-            : agentTarget;
+    const browseHome =
+        agent.status === "connected" && agent.cwd !== null ? agent.cwd : null;
 
-    if (!isFilesystemContext) {
-        return (
-            <ViewSwitch label="Device view">
-                <ViewLink
-                    to={agentTarget}
-                    label={agent.name}
-                    icon={<HardDrive className="h-4 w-4" aria-hidden="true" />}
-                    active={props.context.kind === "agent"}
-                />
-                {canBrowse ? (
-                    <ViewLink
-                        to={filesTarget}
-                        label="Files"
-                        icon={<Files className="h-4 w-4" aria-hidden="true" />}
-                        active={false}
-                    />
-                ) : null}
-                {canBrowse ? (
-                    <ViewLink
-                        to={trashTarget}
-                        label="Trash"
-                        icon={<Trash2 className="h-4 w-4" aria-hidden="true" />}
-                        active={props.context.kind === "trash"}
-                    />
-                ) : null}
-                {agent.configurationEditable ? (
-                    <ViewLink
-                        to={configurationTarget}
-                        label="Configuration"
-                        icon={
-                            <Settings className="h-4 w-4" aria-hidden="true" />
-                        }
-                        active={props.context.kind === "configuration"}
-                    />
-                ) : null}
-                {canBrowse ? (
-                    <ViewLink
-                        to={logsTarget}
-                        label="Logs"
-                        icon={
-                            <ScrollText
-                                className="h-4 w-4"
-                                aria-hidden="true"
-                            />
-                        }
-                        active={props.context.kind === "logs"}
-                    />
-                ) : null}
-            </ViewSwitch>
-        );
-    }
+    const canBrowse = isFilesystemContext || browseHome !== null;
+
+    const filesIcon = <Files className="h-4 w-4" aria-hidden="true" />;
 
     return (
         <ViewSwitch label="Device view">
-            <ViewLink
-                to={agentTarget}
-                label={agent.name}
-                icon={<HardDrive className="h-4 w-4" aria-hidden="true" />}
-                active={false}
-            />
-            <ViewLink
-                to={filesTarget}
-                label="Files"
-                icon={<Files className="h-4 w-4" aria-hidden="true" />}
-                active={true}
-            />
-            <ViewLink
-                to={trashTarget}
-                label="Trash"
-                icon={<Trash2 className="h-4 w-4" aria-hidden="true" />}
-                active={false}
-            />
-            {agent.configurationEditable ? (
-                <ViewLink
-                    to={configurationTarget}
-                    label="Configuration"
-                    icon={<Settings className="h-4 w-4" aria-hidden="true" />}
-                    active={false}
-                />
+            <ViewSwitchLink
+                to="/agents/$agentId"
+                params={{ agentId: agent.id }}
+                active={kind === "agent"}
+            >
+                <HardDrive className="h-4 w-4" aria-hidden="true" />
+                {agent.name}
+            </ViewSwitchLink>
+            {canBrowse ? (
+                browseHome === null ? (
+                    <ViewSwitchLink
+                        to="/agents/$agentId"
+                        params={{ agentId: agent.id }}
+                        active={isFilesystemContext}
+                    >
+                        {filesIcon}
+                        Files
+                    </ViewSwitchLink>
+                ) : (
+                    <ViewSwitchLink
+                        {...browserRoute(agent.id, browseHome)}
+                        active={isFilesystemContext}
+                    >
+                        {filesIcon}
+                        Files
+                    </ViewSwitchLink>
+                )
             ) : null}
-            <ViewLink
-                to={logsTarget}
-                label="Logs"
-                icon={<ScrollText className="h-4 w-4" aria-hidden="true" />}
-                active={false}
-            />
+            {canBrowse ? (
+                <ViewSwitchLink
+                    to="/agents/$agentId/trash"
+                    params={{ agentId: agent.id }}
+                    active={kind === "trash"}
+                >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    Trash
+                </ViewSwitchLink>
+            ) : null}
+            {agent.configurationEditable ? (
+                <ViewSwitchLink
+                    to="/agents/$agentId/edit"
+                    params={{ agentId: agent.id }}
+                    active={kind === "configuration"}
+                >
+                    <Settings className="h-4 w-4" aria-hidden="true" />
+                    Configuration
+                </ViewSwitchLink>
+            ) : null}
+            {canBrowse ? (
+                <ViewSwitchLink
+                    to="/agents/$agentId/logs"
+                    params={{ agentId: agent.id }}
+                    active={kind === "logs"}
+                >
+                    <ScrollText className="h-4 w-4" aria-hidden="true" />
+                    Logs
+                </ViewSwitchLink>
+            ) : null}
         </ViewSwitch>
-    );
-}
-
-/** Applies consistent current-page semantics to contextual representation links. */
-function ViewLink(props: {
-    to: string;
-    search?: Record<string, string>;
-    label: string;
-    icon: React.ReactNode;
-    active: boolean;
-}) {
-    return (
-        <Link
-            to={props.to}
-            search={props.search ?? {}}
-            aria-current={props.active ? "page" : undefined}
-            className={getViewSwitchItemClass(props.active)}
-        >
-            {props.icon}
-            {props.label}
-        </Link>
     );
 }

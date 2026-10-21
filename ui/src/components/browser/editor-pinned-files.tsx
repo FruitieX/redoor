@@ -2,7 +2,7 @@ import * as React from "react";
 import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
 
-import { getBrowserUrl } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import { IconButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import { Tooltip } from "#ui/components/tooltip";
@@ -119,7 +119,7 @@ function EditorPin(props: {
                         content={`Open ${props.file.path} on ${props.file.agentName}`}
                     >
                         <Link
-                            to={getBrowserUrl(
+                            {...browserRoute(
                                 props.file.agentId,
                                 props.file.path,
                             )}
