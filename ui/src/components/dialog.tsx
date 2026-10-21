@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { IconButton } from "#ui/components/icon-button";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { useFocusTrap } from "#ui/utils/use-focus-trap";
 
 /**
  * Provides consistent modal structure and dismissal behavior for UI workflows.
@@ -215,6 +216,10 @@ function useDialogBehavior(props: {
         },
         props.isOpen && props.isAnchored && !props.isBusy,
     );
+
+    // The native <dialog> traps focus itself; the portaled panel of an anchored menu does not,
+    // so it needs the same wrap-around the side-menu drawer uses.
+    useFocusTrap(props.panelRef, props.isOpen && props.isAnchored);
 
     React.useEffect(() => {
         const dialog = props.dialogRef.current;

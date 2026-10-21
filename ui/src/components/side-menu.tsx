@@ -11,9 +11,7 @@ import {
     type SideMenuId,
 } from "#ui/side-menu-state";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
-
-const focusableSelector =
-    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+import { focusableSelector, useFocusTrap } from "#ui/utils/use-focus-trap";
 
 /**
  * Provides the shared wide-screen sidebar and responsive drawer behavior for either edge.
@@ -82,44 +80,7 @@ export function SideMenu(props: {
         isOpen,
     );
 
-    // Keeps Tab inside the modal drawer by wrapping focus at either end.
-    useShortcut(
-        {
-            name: "side-menu-focus-trap",
-            phase: "bubble",
-            priority: shortcutPriority.modal,
-            match: (event) => event.key === "Tab",
-            run: (event) => {
-                const drawer = drawerRef.current;
-
-                if (!drawer) {
-                    return false;
-                }
-
-                const entries = [
-                    ...drawer.querySelectorAll<HTMLElement>(focusableSelector),
-                ];
-
-                const first = entries[0];
-                const last = entries.at(-1);
-
-                if (!first || !last) {
-                    drawer.focus();
-
-                    return;
-                }
-
-                if (event.shiftKey && document.activeElement === first) {
-                    last.focus();
-                } else if (!event.shiftKey && document.activeElement === last) {
-                    first.focus();
-                } else {
-                    return false;
-                }
-            },
-        },
-        isOpen,
-    );
+    useFocusTrap(drawerRef, isOpen);
 
     const borderClass = props.placement === "left" ? "border-r" : "border-l";
     const edgeClass = props.placement === "left" ? "left-0" : "right-0";
