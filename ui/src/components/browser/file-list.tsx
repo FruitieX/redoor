@@ -576,15 +576,16 @@ function FileEntryActions(props: {
                     >
                         Cancel
                     </Button>
-                    <a
+                    <Button
+                        as="a"
                         href={downloadUrl}
                         download={downloadName}
                         onClick={() => setIsDownloadDialogOpen(false)}
-                        className="inline-flex items-center gap-2 rounded bg-blue-600 px-4 py-2 font-semibold text-white hover:bg-blue-500"
+                        className="font-semibold"
                     >
                         <Download className="h-4 w-4" />
                         Download .tar.gz
-                    </a>
+                    </Button>
                 </DialogActions>
             </Dialog>
             <DeletePathsDialog

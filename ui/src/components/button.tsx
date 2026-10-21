@@ -1,9 +1,10 @@
 import React from "react";
 import { twMerge } from "tailwind-merge";
 
-type ButtonVariant = "primary" | "secondary" | "danger" | "warning" | "subtle";
+export type ButtonVariant =
+    "primary" | "secondary" | "danger" | "warning" | "subtle";
 
-type ButtonSize = "sm" | "md" | "lg";
+export type ButtonSize = "sm" | "md" | "lg";
 
 type ButtonProps = {
     variant?: ButtonVariant;
@@ -36,15 +37,28 @@ const sizeClasses = {
 } satisfies Record<ButtonSize, string>;
 
 /**
- * Keeps ordinary actions consistent while retaining native button and link semantics.
+ * Builds the shared button look in one place, so anything that must look like a button
+ * without being a `<button>`, such as a router link, cannot drift from the real one.
  */
-export function Button(props: NativeButtonProps | AnchorButtonProps) {
-    const className = twMerge(
+export function getButtonClassName(props: {
+    variant?: ButtonVariant;
+    size?: ButtonSize;
+    className?: string;
+}): string {
+    return twMerge(
         "inline-flex items-center justify-center gap-2 rounded font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[props.variant ?? "primary"],
         sizeClasses[props.size ?? "md"],
         props.className,
     );
+}
+
+/**
+ * Keeps ordinary actions consistent while retaining native button and link semantics.
+ * Use `as="a"` for plain anchors such as downloads, and `LinkButton` for in-app navigation.
+ */
+export function Button(props: NativeButtonProps | AnchorButtonProps) {
+    const className = getButtonClassName(props);
 
     if (props.as === "a") {
         const anchorProps: Partial<AnchorButtonProps> = { ...props };

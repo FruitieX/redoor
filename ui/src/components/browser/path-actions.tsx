@@ -805,19 +805,21 @@ export function PersistentPathActions(props: {
     const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = React.useState(false);
 
     const downloadLink = (
-        <a
+        <Button
+            as="a"
             href={props.downloadUrl}
             download={props.downloadName}
             aria-label="Download"
+            variant={props.secondaryDownload ? "subtle" : "primary"}
             className={
                 props.secondaryDownload
-                    ? "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-white/5 hover:text-white"
-                    : "inline-flex items-center gap-2 rounded-md bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm shadow-blue-950/30 transition-colors hover:bg-blue-500"
+                    ? "rounded-md px-3 text-slate-200 hover:bg-white/5 hover:text-white"
+                    : "rounded-md px-3.5 font-semibold shadow-sm shadow-blue-950/30"
             }
         >
             <Download className="h-4 w-4" aria-hidden="true" />
             <span className="hidden sm:inline">Download</span>
-        </a>
+        </Button>
     );
 
     return (
