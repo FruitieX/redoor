@@ -48,9 +48,9 @@ function LoginPage() {
     const [username, setUsername] = React.useState("");
     const [password, setPassword] = React.useState("");
 
-    const [firstRunMessage, setFirstRunMessage] = React.useState<string | null>(
-        null,
-    );
+    // The hint lives in the URL fragment, which the router does not parse and which never
+    // changes on this page, so reading it once on mount is enough.
+    const [firstRunMessage] = React.useState(messageFromLocationHash);
 
     const loginMutation = useMutation({
         mutationFn: (credentials: { username: string; password: string }) =>
@@ -62,10 +62,6 @@ function LoginPage() {
             setPassword("");
         },
     });
-
-    React.useEffect(() => {
-        setFirstRunMessage(messageFromLocationHash());
-    }, []);
 
     /** Keeps the password out of URLs and clears it immediately after either outcome. */
     const submit = (event: React.FormEvent<HTMLFormElement>) => {
