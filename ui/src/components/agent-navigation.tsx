@@ -342,7 +342,13 @@ function DeviceBlock(props: {
                                     aria-hidden="true"
                                 />
                             </IconButton>
-                        ) : null}
+                        ) : (
+                            // Reserve the fold control's space so every device icon lines up.
+                            <span
+                                aria-hidden="true"
+                                className="ml-1 w-5.5 shrink-0"
+                            />
+                        )}
                         <Link
                             to={target}
                             onClick={props.onClose}
