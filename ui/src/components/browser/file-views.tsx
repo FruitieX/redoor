@@ -5,6 +5,7 @@ import { type ShouldBlockFn, useBlocker } from "@tanstack/react-router";
 import {
     ClipboardCopy,
     Download,
+    Image as ImageIcon,
     LoaderCircle,
     MoreHorizontal,
     RefreshCw,
@@ -24,6 +25,7 @@ import {
 } from "#ui/bottom-drawer-state";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
+import { ViewCardHeader } from "#ui/components/view-card-header";
 import { Button } from "#ui/components/button";
 import { BookmarkMenuButton } from "#ui/components/browser/bookmark-action";
 import {
@@ -39,10 +41,8 @@ import {
     PersistentPathActions,
     SelectPathMenuButton,
 } from "#ui/components/browser/path-actions";
-import {
-    getErrorMessage,
-    getImmediateParentPath,
-} from "#ui/components/browser/utils";
+import { getImmediateParentPath } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
@@ -416,7 +416,11 @@ function FileEditorSecondaryActions(props: {
     );
 }
 
-/** Makes browser save invoke the editor unless another interactive surface owns it. */
+/**
+ * The single owner of Mod-S, whether or not CodeMirror has focus, so the browser's save-page
+ * dialog never opens over the editor. The capture phase runs before the editor's own handlers,
+ * which is why CodeMirror needs no binding of its own. The terminal keeps its keystrokes.
+ */
 function useFileSaveShortcut(onSave: () => void) {
     React.useEffect(() => {
         const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -433,12 +437,14 @@ function useFileSaveShortcut(onSave: () => void) {
             }
 
             event.preventDefault();
+            event.stopPropagation();
             onSave();
         };
 
-        window.addEventListener("keydown", handleSaveShortcut);
+        window.addEventListener("keydown", handleSaveShortcut, true);
 
-        return () => window.removeEventListener("keydown", handleSaveShortcut);
+        return () =>
+            window.removeEventListener("keydown", handleSaveShortcut, true);
     }, [onSave]);
 }
 
@@ -457,6 +463,7 @@ function FileEditorSurface(props: {
     preview: boolean;
     scrollToLine?: number;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
+    isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
     onChange: (content: string) => void;
     onFocus: () => void;
@@ -494,6 +501,7 @@ function FileEditorSurface(props: {
                     onSave={props.onSave}
                     onSelectionChange={props.onSelectionChange}
                     searchHandleRef={props.searchHandleRef}
+                    isSearchOpen={props.isSearchOpen}
                     onSearchOpenChange={props.onSearchOpenChange}
                     captureFindKeys={!props.preview}
                 />
@@ -895,6 +903,7 @@ export function FileEditView(props: FileEditViewProps) {
                         onSave={handleSave}
                         onSelectionChange={setSelection}
                         searchHandleRef={searchHandleRef}
+                        isSearchOpen={isSearchOpen}
                         onSearchOpenChange={setIsSearchOpen}
                         onClosePreview={() => props.onPreviewChange(false)}
                     />
@@ -914,7 +923,6 @@ export function FileEditView(props: FileEditViewProps) {
                     }}
                 />
             ) : null}
-
             <EditorConfirmations
                 reloadOpen={reloadConfirmationOpen}
                 navigationOpen={navigationBlocker.status === "blocked"}
@@ -996,29 +1004,22 @@ export function FileImageView(props: {
 }) {
     return (
         <BrowserViewCard>
-            <header className="border-b border-slate-800 p-6 md:p-8">
-                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">
-                    Image
-                </p>
-                <div className="flex flex-wrap items-center gap-3">
-                    <h1
-                        aria-label="File name"
-                        className="min-w-0 break-all text-2xl font-bold tracking-tight text-slate-50 md:text-3xl"
-                    >
-                        {props.fileName}
-                    </h1>
-                    <div className="ml-auto shrink-0">
-                        <PersistentPathActions
-                            agent={props.agent}
-                            path={props.path}
-                            currentName={props.fileName}
-                            entryType="file"
-                            downloadUrl={props.downloadUrl}
-                            downloadName={props.fileName}
-                        />
-                    </div>
-                </div>
-            </header>
+            <ViewCardHeader
+                icon={<ImageIcon className="h-5 w-5" aria-hidden="true" />}
+                eyebrow="Image"
+                title={props.fileName}
+                titleAriaLabel="File name"
+                actions={
+                    <PersistentPathActions
+                        agent={props.agent}
+                        path={props.path}
+                        currentName={props.fileName}
+                        entryType="file"
+                        downloadUrl={props.downloadUrl}
+                        downloadName={props.fileName}
+                    />
+                }
+            />
 
             <div className="flex items-center justify-center p-4 md:p-6">
                 <img

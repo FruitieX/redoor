@@ -3,8 +3,8 @@ import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { bbedit } from "@uiw/codemirror-theme-bbedit";
 import { tokyoNight } from "@uiw/codemirror-theme-tokyo-night";
 import { search } from "@codemirror/search";
-import { Prec, type EditorState } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import type { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { vim, Vim } from "@replit/codemirror-vim";
 import {
     EditorSearch,
@@ -13,6 +13,7 @@ import {
 import { vimYankHighlightExtension } from "./vim-yank-highlight";
 import { languageFromFileName } from "#ui/utils/editor-language";
 import { isTerminalInputTarget, isUnmodifiedAltKey } from "#ui/utils/keyboard";
+import { getBaseName } from "#ui/utils/path";
 import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
 
 /** Carries only the editor selection details needed by actions outside CodeMirror. */
@@ -106,57 +107,6 @@ function editorSelectionFromState(state: EditorState): EditorSelection | null {
     };
 }
 
-/**
- * Keeps find bindings from swallowing native page search when the editor is hidden.
- */
-function editorSearchKeyBindings(
-    searchHandleRef: React.RefObject<EditorSearchHandle | null>,
-    captureFindKeysRef: React.RefObject<boolean>,
-) {
-    const runFind = (command: () => boolean | undefined) => {
-        if (!captureFindKeysRef.current) {
-            return false;
-        }
-
-        return command() ?? false;
-    };
-
-    return [
-        {
-            key: "Mod-f",
-            run: () => {
-                if (!captureFindKeysRef.current) {
-                    return false;
-                }
-
-                searchHandleRef.current?.open();
-
-                return true;
-            },
-        },
-        {
-            key: "Mod-g",
-            run: () => runFind(() => searchHandleRef.current?.findNext()),
-        },
-        {
-            key: "Shift-Mod-g",
-            run: () => runFind(() => searchHandleRef.current?.findPrevious()),
-        },
-        {
-            key: "F3",
-            run: () => runFind(() => searchHandleRef.current?.findNext()),
-        },
-        {
-            key: "Shift-F3",
-            run: () => runFind(() => searchHandleRef.current?.findPrevious()),
-        },
-        {
-            key: "Escape",
-            run: () => searchHandleRef.current?.close() ?? false,
-        },
-    ];
-}
-
 /** Applies inbound ?line= once the view exists so typing and saves do not re-scroll. */
 function useInboundScrollToLine(
     view: EditorView | null,
@@ -188,7 +138,9 @@ export function CodeEditor(props: {
     onSave: () => void;
     onSelectionChange: (selection: EditorSelection | null) => void;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
+    isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
+    /** Leaves find keys to the browser while the editor is hidden behind a preview. */
     captureFindKeys: boolean;
 }) {
     const resolvedTheme = useResolvedTheme();
@@ -203,8 +155,6 @@ export function CodeEditor(props: {
 
     vimWriteRef.current = saveFromEditor;
     const editorRef = React.useRef<ReactCodeMirrorRef>(null);
-    const captureFindKeysRef = React.useRef(props.captureFindKeys);
-    captureFindKeysRef.current = props.captureFindKeys;
     const onFocusRef = React.useRef(props.onFocus);
     onFocusRef.current = props.onFocus;
     const hasReceivedFocusRef = React.useRef(false);
@@ -219,7 +169,7 @@ export function CodeEditor(props: {
         firstLineEnd === -1 ? props.value.length : firstLineEnd,
     );
 
-    const baseName = props.fileName.split("/").pop() ?? props.fileName;
+    const baseName = getBaseName(props.fileName);
 
     const languageContent =
         baseName.lastIndexOf(".") <= 0 && firstLine.startsWith("#!")
@@ -269,32 +219,9 @@ export function CodeEditor(props: {
                     padding: "0",
                 },
             }),
-            Prec.highest(
-                keymap.of([
-                    {
-                        key: "Mod-s",
-                        run: () => {
-                            onSaveRef.current();
-                            editorRef.current?.view?.focus();
-
-                            return true;
-                        },
-                    },
-                    ...editorSearchKeyBindings(
-                        props.searchHandleRef,
-                        captureFindKeysRef,
-                    ),
-                ]),
-            ),
             ...(language === undefined ? [] : [language]),
         ];
-    }, [
-        languageContent,
-        props.fileName,
-        props.searchHandleRef,
-        props.vimMode,
-        props.wrapLines,
-    ]);
+    }, [languageContent, props.fileName, props.vimMode, props.wrapLines]);
 
     useFocusEditorShortcut(view);
     useInboundScrollToLine(view, props.scrollToLine);
@@ -306,6 +233,7 @@ export function CodeEditor(props: {
                 editable={props.editable}
                 documentRevision={documentRevision}
                 handleRef={props.searchHandleRef}
+                open={props.isSearchOpen}
                 onOpenChange={props.onSearchOpenChange}
                 captureFindKeys={props.captureFindKeys}
             />

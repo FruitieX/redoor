@@ -31,17 +31,21 @@ export type EditorSearchHandle = {
 
 /**
  * Replaces CodeMirror's unstyled search panel with app-styled find/replace above the editor.
+ * Whether the panel is open belongs to the owner, which also shows it on the toolbar, so it
+ * is passed in rather than mirrored back through an effect.
  */
 export function EditorSearch(props: {
     view: EditorView | null;
     editable: boolean;
     documentRevision: number;
     handleRef: React.RefObject<EditorSearchHandle | null>;
+    open: boolean;
     onOpenChange: (open: boolean) => void;
     captureFindKeys: boolean;
 }) {
     const searchInputRef = React.useRef<HTMLInputElement>(null);
-    const [open, setOpen] = React.useState(false);
+    const open = props.open;
+    const onOpenChange = props.onOpenChange;
     const [advanced, setAdvanced] = React.useState(false);
     const [focusNonce, setFocusNonce] = React.useState(0);
     const [search, setSearch] = React.useState("");
@@ -102,21 +106,21 @@ export function EditorSearch(props: {
             }
         }
 
-        setOpen(true);
+        onOpenChange(true);
         setFocusNonce((nonce) => nonce + 1);
-    }, [props.view]);
+    }, [onOpenChange, props.view]);
 
     const closeSearch = React.useCallback(() => {
         if (!open) {
             return false;
         }
 
-        setOpen(false);
+        onOpenChange(false);
         setAdvanced(false);
         props.view?.focus();
 
         return true;
-    }, [open, props.view]);
+    }, [onOpenChange, open, props.view]);
 
     const findNextMatch = React.useCallback(() => {
         const view = props.view;
@@ -174,17 +178,6 @@ export function EditorSearch(props: {
         applySearchQuery(props.view, query);
     }, [open, props.view, query]);
 
-    /** The toolbar tooltip names close vs open, so unmount and Escape must clear that state. */
-    React.useEffect(() => {
-        props.onOpenChange(open);
-
-        return () => {
-            if (open) {
-                props.onOpenChange(false);
-            }
-        };
-    }, [open, props.onOpenChange]);
-
     React.useLayoutEffect(() => {
         if (!open || focusNonce === 0) {
             return;
@@ -208,12 +201,17 @@ export function EditorSearch(props: {
         findPreviousMatch,
     });
 
-    props.handleRef.current = {
-        open: openSearch,
-        close: closeSearch,
-        findNext: findNextMatch,
-        findPrevious: findPreviousMatch,
-    };
+    // The owner drives search from the toolbar through this handle, so it follows the commands.
+    React.useImperativeHandle(
+        props.handleRef,
+        () => ({
+            open: openSearch,
+            close: closeSearch,
+            findNext: findNextMatch,
+            findPrevious: findPreviousMatch,
+        }),
+        [closeSearch, findNextMatch, findPreviousMatch, openSearch],
+    );
 
     if (!open) {
         return null;
@@ -275,7 +273,9 @@ export function EditorSearch(props: {
 }
 
 /**
- * Intercepts editor-wide find keys even when CodeMirror is not focused.
+ * The single owner of the editor-wide find keys, whether or not CodeMirror has focus.
+ * The listener runs in the capture phase and consumes the key, so it also beats the editor's
+ * own handlers, such as Vim's Ctrl-F paging, and no second binding inside CodeMirror is needed.
  * Markdown preview keeps the editor mounted and hidden, so capture must turn
  * off there or native Cmd/Ctrl+F never reaches the browser.
  */
@@ -307,6 +307,7 @@ function useEditorSearchWindowShortcuts(props: {
                 event.key.toLowerCase() === "f"
             ) {
                 event.preventDefault();
+                event.stopPropagation();
                 commands.openSearch();
 
                 return;
@@ -318,6 +319,7 @@ function useEditorSearchWindowShortcuts(props: {
                 event.key === "F3"
             ) {
                 event.preventDefault();
+                event.stopPropagation();
 
                 if (event.shiftKey) {
                     commands.findPreviousMatch();
@@ -336,12 +338,13 @@ function useEditorSearchWindowShortcuts(props: {
                 }
 
                 event.preventDefault();
+                event.stopPropagation();
             }
         };
 
-        window.addEventListener("keydown", handleKeyDown);
+        window.addEventListener("keydown", handleKeyDown, true);
 
-        return () => window.removeEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown, true);
     }, []);
 }
 
