@@ -6,6 +6,7 @@ import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
 import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
+import { DetailCard } from "./detail-card";
 import { InputControl } from "./input-control";
 import { getErrorMessage } from "#ui/utils/error";
 
@@ -104,26 +105,17 @@ export function UpgradeButton(props: UpgradeButtonProps) {
     };
 
     return (
-        <section
-            aria-labelledby="agent-upgrade-title"
-            className="rounded-lg border border-slate-800 bg-surface p-4"
-        >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2
-                    id="agent-upgrade-title"
-                    className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-300"
-                >
-                    <PackageOpen
-                        className="h-5 w-5 text-slate-400"
-                        aria-hidden="true"
-                    />
-                    Upgrade
-                </h2>
-                <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                    Published release
-                </span>
-            </div>
-            <div className="mt-4 flex flex-col gap-4 border-t border-slate-800 pt-4 lg:flex-row lg:items-center">
+        <>
+            <DetailCard
+                title="Upgrade"
+                icon={<PackageOpen className="h-5 w-5" aria-hidden="true" />}
+                actions={
+                    <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                        Published release
+                    </span>
+                }
+                bodyClassName="flex flex-col gap-4 border-t border-slate-800 pt-4 lg:flex-row lg:items-center"
+            >
                 <div className="shrink-0 lg:w-40">
                     <label
                         htmlFor="agent-upgrade-target-version"
@@ -224,7 +216,7 @@ export function UpgradeButton(props: UpgradeButtonProps) {
                         </p>
                     ) : null}
                 </div>
-            </div>
+            </DetailCard>
             <ConfirmationDialog
                 isOpen={action !== null}
                 title={
@@ -250,6 +242,6 @@ export function UpgradeButton(props: UpgradeButtonProps) {
                 onClose={close}
                 onConfirm={upgrade}
             />
-        </section>
+        </>
     );
 }

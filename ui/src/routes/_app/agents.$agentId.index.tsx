@@ -33,6 +33,7 @@ import {
 } from "#ui/components/agent-lifecycle";
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
 import { CopyablePath } from "#ui/components/copyable-code-row";
+import { DetailCard } from "#ui/components/detail-card";
 import { LinkButton } from "#ui/components/link-button";
 import { AgentRestartButton } from "#ui/components/agent-restart-button";
 import { UpgradeButton } from "#ui/components/upgrade-button";
@@ -459,25 +460,6 @@ function AgentDetailsHeader(props: {
             <p className="mt-1 text-sm text-slate-500">
                 ID: {props.details.id}
             </p>
-        </div>
-    );
-}
-
-/** Groups related detail values into a consistent visual card. */
-function DetailCard(props: {
-    title: string;
-    icon: React.ReactNode;
-    children: React.ReactNode;
-}) {
-    return (
-        <div className="rounded-lg border border-slate-800 bg-surface p-4">
-            <div className="mb-3 flex items-center gap-2 font-semibold text-slate-300">
-                {props.icon}
-                <h3 className="text-sm uppercase tracking-wide">
-                    {props.title}
-                </h3>
-            </div>
-            <div className="space-y-2">{props.children}</div>
         </div>
     );
 }
