@@ -2,10 +2,9 @@ import React from "react";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-    getRouteApi,
     type ShouldBlockFn,
     useBlocker,
-    useLocation,
+    useNavigate,
 } from "@tanstack/react-router";
 import {
     ClipboardCopy,
@@ -58,14 +57,13 @@ import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { fileContentQueryOptions } from "#ui/queries";
+import { useAgentSearchNavigation } from "#ui/search-navigation";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
 import { unpinFile, useUserState } from "#ui/user-state";
 import { unselectFileAtom } from "#ui/selected-files";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { MarkdownPreview } from "#ui/components/browser/markdown-preview";
-
-const agentRoute = getRouteApi("/agents/$agentId");
 
 /** Keeps save state and editor mutations inside the representation they affect. */
 function FileEditActions(props: {
@@ -89,8 +87,7 @@ function FileEditActions(props: {
     onToggleSearch: () => void;
     onPreviewChange?: (preview: boolean) => void;
 }) {
-    const navigate = agentRoute.useNavigate();
-    const location = useLocation();
+    const { updateSearch } = useAgentSearchNavigation();
 
     const copyMutation = useMutation({
         mutationFn: async () => {
@@ -182,13 +179,10 @@ ${props.selection.text}
                             return;
                         }
 
-                        const params = new URLSearchParams(location.searchStr);
-                        params.set("q", props.selection.text);
-                        params.set("mode", "content");
-                        params.set("gitroot", "true");
-                        void navigate({
-                            to: `${location.pathname}?${params.toString()}${location.hash}`,
-                            replace: true,
+                        void updateSearch({
+                            q: props.selection.text,
+                            mode: "content",
+                            gitroot: true,
                         });
                     }}
                     className="h-9 w-9 rounded-md p-0 font-semibold"
@@ -567,7 +561,7 @@ function EditorDeleteConfirmation(props: {
     onClose: () => void;
     onDeleted: () => void;
 }) {
-    const navigate = agentRoute.useNavigate();
+    const navigate = useNavigate();
     const [, setUserState] = useUserState();
     const unselectFile = useSetAtom(unselectFileAtom);
 
