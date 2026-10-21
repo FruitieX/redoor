@@ -29,9 +29,8 @@ import {
 } from "#ui/queries";
 import { useAgents } from "#ui/use-agents";
 import { formatAgentRecency, useNow } from "#ui/utils/agent-time";
-import { Route as RootRoute } from "./__root";
 
-export const Route = createFileRoute("/agents/")({
+export const Route = createFileRoute("/_app/agents/")({
     component: AgentManagement,
 });
 
@@ -108,7 +107,7 @@ function useAgentLifecycleRequests() {
 function AgentManagement() {
     const queryClient = useQueryClient();
     const setStartStates = useSetAtom(agentStartStatesAtom);
-    const { api } = RootRoute.useRouteContext();
+    const { api } = Route.useRouteContext();
     const agents = useAgents();
     const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
 
@@ -334,7 +333,7 @@ function AgentActionsMenu(props: {
     onShutdown: (agent: Agent) => void;
 }) {
     const queryClient = useQueryClient();
-    const { api } = RootRoute.useRouteContext();
+    const { api } = Route.useRouteContext();
 
     return (
         <ActionMenu

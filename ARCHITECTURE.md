@@ -914,6 +914,43 @@ invalidating query keys, so a view never needs a separate reload signal.
   `onMutate`, restore only the changed fields on error, and invalidate the agent afterwards.
   One-time download tokens live in the cached file metadata.
 
+### Browser application shell
+
+The route tree separates the authenticated application from the public login form.
+
+- **`__root`** only supplies the router context (`api`, `queryClient`) and the developer
+  tools. It never branches on the page.
+- **`_app`** is a pathless layout route that holds the whole authenticated application.
+  Its loader primes the inventory, transfers, server info and user state, and its component
+  is `AppShell`: the menus, the top bar, the shared bottom drawer and the global handlers.
+  `/login` is a sibling of `_app`, so it loads nothing and renders no chrome. A 401 from any
+  request reloads into `/login?redirect=...` (`main.tsx`); the shell never mounts without a
+  valid session.
+- **Session-scoped work lives in the shell's lifecycle.** `AppShell` starts the
+  `RefreshListener` (the UI event socket) in an effect and stops it on unmount, and also
+  hosts the upload scheduler, the clipboard and drag-and-drop import handler and the
+  Escape-to-blur key handler. Because they only exist below `_app`, they cannot run while
+  signed out.
+- **Context comes from the router, not from pathnames.** `useDisplayedAgentId` reads the
+  `agentId` param of the committed agent route, `useAgentViewContext` picks the top bar's
+  views from the leaf route id, and `useBrowserLocation` is the one selector over the browser
+  route's loader data (requested path, whether it is a file or directory, canonical path).
+  The top bar, search scope, file import and remembered tab location all use the committed
+  matches, so they describe one consistent page. Controls that must follow a click at once,
+  the sidebar highlight and the terminal shortcut, use `useTargetAgentId`, which also sees
+  the pending matches of a navigation whose loaders are still running, so a slow agent does
+  not leave them pointed at the previous device.
+- **Menus own their open state.** `SideMenu` reads and closes the `openSideMenuAtom` itself
+  and returns focus to whatever opened it, so the shell passes no props, refs or callbacks
+  to the menus or the top bar.
+- **The bottom drawer isolates fast-changing leaves.** The drawer's tabs take nodes as badges
+  and each pane reads its own queries. The transfer badge runs an animation-frame clock
+  (`useTransferClock`, shared with the per-row progress cell), so it is a leaf component;
+  otherwise every frame would rerender the terminals.
+- **Search state is typed URL state.** `agentSearchSchema` validates the search keys on
+  `/agents/$agentId`, and `useAgentSearchNavigation` changes them with the router's typed
+  `search` updater, so the path, hash and the child view's own keys survive.
+
 ## Authentication and trust
 
 Redoor has a single user account. Each kind of client has its own credential, and each

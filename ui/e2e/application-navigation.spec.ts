@@ -458,4 +458,44 @@ test.describe("Application navigation", () => {
             })
             .toBe(true);
     });
+
+    test("shows page not found inside the application chrome", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/no-such-page`);
+
+        // Unknown addresses must say so rather than render a blank or default page.
+        await expect(
+            page.getByRole("heading", { name: "Page not found" }),
+        ).toBeVisible();
+
+        // The menus stay around the message, so the user is one click from a real page.
+        const applicationNavigation = page.getByRole("navigation", {
+            name: "Application",
+        });
+
+        await expect(applicationNavigation).toBeVisible();
+        await page.getByRole("link", { name: "Server home" }).first().click();
+        // The way back must land on the server home.
+        await expect(page).toHaveURL(`${WEB_BASE_URL}/`);
+    });
+
+    test("marks only the current destination in the application menu", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/transfers`);
+
+        const applicationNavigation = page.getByRole("navigation", {
+            name: "Application",
+        });
+
+        // The router's active matching must flag the page being viewed.
+        await expect(
+            applicationNavigation.getByRole("link", { name: "Transfers" }),
+        ).toHaveAttribute("aria-current", "page");
+        // Home is an exact match, so it must not light up for other pages.
+        await expect(
+            applicationNavigation.getByRole("link", { name: "Server home" }),
+        ).not.toHaveAttribute("aria-current", "page");
+    });
 });

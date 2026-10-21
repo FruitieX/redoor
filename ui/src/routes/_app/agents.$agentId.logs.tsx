@@ -1,6 +1,7 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { AlertCircle, HardDrive } from "lucide-react";
 
+import { LinkButton } from "#ui/components/link-button";
 import { LogViewer } from "#ui/components/log-viewer";
 import {
     agentLoggingLevelQueryOptions,
@@ -9,7 +10,7 @@ import {
 } from "#ui/queries";
 import { useRequiredAgent } from "#ui/use-agents";
 
-export const Route = createFileRoute("/agents/$agentId/logs")({
+export const Route = createFileRoute("/_app/agents/$agentId/logs")({
     loader: async ({ params, context }) => {
         const agent = await loadAgent(context, params.agentId);
 
@@ -39,14 +40,14 @@ function AgentLogsPage() {
                         Start the Redoor agent on this device to view its live
                         logs.
                     </p>
-                    <Link
+                    <LinkButton
                         to="/agents/$agentId"
                         params={{ agentId: agent.id }}
-                        className="mt-6 inline-flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-500"
+                        className="mt-6"
                     >
                         <HardDrive className="h-4 w-4" />
                         Device
-                    </Link>
+                    </LinkButton>
                 </section>
             </div>
         );

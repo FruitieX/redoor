@@ -7,7 +7,7 @@ import {
 } from "#ui/components/managed-agent-form";
 import { agentsQueryOptions, serverInfoQueryOptions } from "#ui/queries";
 
-export const Route = createFileRoute("/agents/new")({
+export const Route = createFileRoute("/_app/agents/new")({
     component: NewManagedAgentPage,
 });
 

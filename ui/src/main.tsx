@@ -35,14 +35,22 @@ const router = createRouter({
     defaultErrorComponent: RouteError,
 });
 
+// Any 401 means the session ended, so reload into the login form with the current URL as the
+// return path. The reload also drops cached server state that belongs to the old session.
 api.setUnauthorizedHandler(() => {
-    if (window.location.pathname === "/login") {
+    // The login form's own requests answer 401 for wrong credentials, which must not loop.
+    if (router.matchRoute({ to: "/login" })) {
         return;
     }
 
     const returnPath = `${window.location.pathname}${window.location.search}`;
-    const search = new URLSearchParams({ redirect: returnPath });
-    window.location.replace(`/login?${search.toString()}`);
+
+    window.location.replace(
+        router.buildLocation({
+            to: "/login",
+            search: { redirect: returnPath },
+        }).href,
+    );
 });
 
 // Register the router instance for type safety

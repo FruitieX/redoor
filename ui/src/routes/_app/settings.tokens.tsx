@@ -8,7 +8,6 @@ import type {
     DeviceScope,
     Permission,
 } from "#ui/api-client";
-import { Route as RootRoute } from "./__root";
 import { accessTokensQueryOptions, queryKeys } from "#ui/queries";
 import { useAgents } from "#ui/use-agents";
 import { Button } from "#ui/components/button";
@@ -23,7 +22,7 @@ import { TextField } from "#ui/components/text-field";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
 
-export const Route = createFileRoute("/settings/tokens")({
+export const Route = createFileRoute("/_app/settings/tokens")({
     loader: async ({ context }) => {
         await context.queryClient.ensureQueryData(
             accessTokensQueryOptions(context.api),
@@ -88,7 +87,7 @@ function formatTimestamp(value: string | null): string {
 
 /** Owns transient secrets only while their modal is open and keeps them outside Query caches. */
 function AccessTokenSettingsPage() {
-    const { api } = RootRoute.useRouteContext();
+    const { api } = Route.useRouteContext();
     const agents = useAgents();
     const queryClient = useQueryClient();
     const tokensQuery = useQuery(accessTokensQueryOptions(api));
@@ -419,7 +418,7 @@ function TokenDialog(
         | { token: AccessTokenResponse; onUpdated: () => Promise<void> }
     ),
 ) {
-    const { api } = RootRoute.useRouteContext();
+    const { api } = Route.useRouteContext();
     const [name, setName] = React.useState(props.token?.name ?? "");
     const [expiry, setExpiry] = React.useState("90");
 

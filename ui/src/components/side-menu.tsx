@@ -3,30 +3,59 @@ import { X } from "lucide-react";
 import { useAtom } from "jotai";
 import { IconButton } from "#ui/components/icon-button";
 import { isSortableDragActive } from "#ui/components/sortable-list";
-import { sidebarWidthsAtom, usePersistentSideMenus } from "#ui/side-menu-state";
+import {
+    openSideMenuAtom,
+    sideMenuDrawerIds,
+    sidebarWidthsAtom,
+    usePersistentSideMenus,
+    type SideMenuId,
+} from "#ui/side-menu-state";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 
 const focusableSelector =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-/** Provides the shared wide-screen sidebar and responsive drawer behavior for either edge. */
+/**
+ * Provides the shared wide-screen sidebar and responsive drawer behavior for either edge.
+ * The menu reads and closes its own open state from the shared atom, so the shell and the
+ * controls that open it never have to pass state or focus targets around.
+ */
 export function SideMenu(props: {
+    menu: SideMenuId;
     placement: "left" | "right";
     label: string;
-    drawerId: string;
-    isOpen: boolean;
-    triggerRef: React.RefObject<HTMLButtonElement | null>;
-    onClose: () => void;
     children: React.ReactNode;
 }) {
     const drawerRef = React.useRef<HTMLElement>(null);
     const resize = useSideMenuResize(props.placement);
     const panelId = React.useId();
+    const [openMenu, setOpenMenu] = useAtom(openSideMenuAtom);
+    const isPersistent = usePersistentSideMenus();
+    const drawerId = sideMenuDrawerIds[props.menu];
+    const isOpen = openMenu === props.menu;
+
+    const onClose = React.useCallback(() => setOpenMenu(null), [setOpenMenu]);
 
     React.useEffect(() => {
-        if (!props.isOpen) {
+        // A persistent sidebar replaces the drawer, so a request left over from a narrower
+        // window must not pop the drawer open again when the window shrinks.
+        if (isPersistent && isOpen) {
+            onClose();
+        }
+    }, [isPersistent, isOpen, onClose]);
+
+    React.useEffect(() => {
+        if (!isOpen) {
             return;
         }
+
+        // Return focus to the control that declares it opens this drawer. Looking it up, rather
+        // than remembering document.activeElement, keeps the target right when the drawer was
+        // opened programmatically or by a browser that does not focus clicked buttons, and
+        // when another drawer was closing and had just moved focus.
+        const opener = document.querySelector<HTMLElement>(
+            `[aria-controls="${drawerId}"]`,
+        );
 
         const drawer = drawerRef.current;
 
@@ -44,7 +73,7 @@ export function SideMenu(props: {
                 }
 
                 event.preventDefault();
-                props.onClose();
+                onClose();
 
                 return;
             }
@@ -80,11 +109,10 @@ export function SideMenu(props: {
 
         return () => {
             document.removeEventListener("keydown", handleDrawerKeyDown);
-            props.triggerRef.current?.focus();
+            opener?.focus();
         };
-    }, [props.isOpen, props.onClose, props.triggerRef]);
+    }, [isOpen, onClose, drawerId]);
 
-    const isPersistent = usePersistentSideMenus();
     const borderClass = props.placement === "left" ? "border-r" : "border-l";
     const edgeClass = props.placement === "left" ? "left-0" : "right-0";
 
@@ -118,7 +146,7 @@ export function SideMenu(props: {
                     />
                 ) : null}
             </aside>
-            {!isPersistent && props.isOpen ? (
+            {!isPersistent && isOpen ? (
                 <div
                     className="fixed inset-0 z-[70] bg-black/60"
                     role="dialog"
@@ -126,13 +154,13 @@ export function SideMenu(props: {
                     aria-label={props.label}
                     onMouseDown={(event) => {
                         if (event.target === event.currentTarget) {
-                            props.onClose();
+                            onClose();
                         }
                     }}
                 >
                     <aside
                         ref={drawerRef}
-                        id={props.drawerId}
+                        id={drawerId}
                         tabIndex={-1}
                         className={`absolute ${edgeClass} flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto ${borderClass} border-slate-700 bg-[#11141b] p-3 shadow-2xl shadow-black/50`}
                     >
@@ -143,7 +171,7 @@ export function SideMenu(props: {
                                 type="button"
                                 label={`Close ${props.label.toLowerCase()}`}
                                 tooltip={false}
-                                onClick={props.onClose}
+                                onClick={onClose}
                                 className="rounded p-2 text-slate-400 hover:bg-white/10 hover:text-slate-100"
                             >
                                 <X className="h-4 w-4" />

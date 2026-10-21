@@ -21,118 +21,18 @@ import { formatSize, formatSpeed } from "#ui/utils/path";
 import {
     formatRemainingTime,
     getAnimatedTransferProgress,
-    getLastEstimatedTransferProgress,
     getTransferSpeedBytesPerSecond,
 } from "#ui/utils/transfer-progress";
+import { useTransferClock } from "#ui/utils/use-transfer-clock";
 
-type TransferAnimationFrame = {
-    transfer: TransferProgressEntry;
-    refreshedAtMilliseconds: number;
-    elapsedSeconds: number;
-};
-
-/** Restarts projection from each API snapshot and advances it at animation-frame cadence. */
-function useTransferAnimation(
-    transfer: TransferProgressEntry,
-): TransferAnimationFrame {
-    const [animationFrame, setAnimationFrame] = React.useState(() => ({
-        transfer,
-        refreshedAtMilliseconds: Date.now(),
-        elapsedSeconds: 0,
-    }));
-
-    React.useEffect(() => {
-        const refreshedAtMilliseconds = Date.now();
-        let frameRequest: number;
-
-        const updateAnimation = () => {
-            setAnimationFrame({
-                transfer,
-                refreshedAtMilliseconds,
-                elapsedSeconds: (Date.now() - refreshedAtMilliseconds) / 1000,
-            });
-
-            if (transfer.state === "active") {
-                frameRequest = window.requestAnimationFrame(updateAnimation);
-            }
-        };
-
-        frameRequest = window.requestAnimationFrame(updateAnimation);
-
-        return () => window.cancelAnimationFrame(frameRequest);
-    }, [transfer]);
-
-    if (animationFrame.transfer !== transfer) {
-        return {
-            transfer,
-            refreshedAtMilliseconds: Date.now(),
-            elapsedSeconds: 0,
-        };
-    }
-
-    return animationFrame;
-}
-
-/** Animates the header from the transfer whose ETA determines when all transfers finish. */
-export function useLastEstimatedTransferPercentage(
-    transfers: TransferProgressEntry[],
-): number | null {
-    const [animationFrame, setAnimationFrame] = React.useState(() => ({
-        transfers,
-        refreshedAtMilliseconds: Date.now(),
-        elapsedSeconds: 0,
-    }));
-
-    React.useEffect(() => {
-        const refreshedAtMilliseconds = Date.now();
-
-        if (
-            getLastEstimatedTransferProgress(
-                transfers,
-                0,
-                refreshedAtMilliseconds,
-            ) === null
-        ) {
-            return;
-        }
-
-        let frameRequest: number;
-
-        const updateAnimation = () => {
-            setAnimationFrame({
-                transfers,
-                refreshedAtMilliseconds,
-                elapsedSeconds: (Date.now() - refreshedAtMilliseconds) / 1000,
-            });
-            frameRequest = window.requestAnimationFrame(updateAnimation);
-        };
-
-        frameRequest = window.requestAnimationFrame(updateAnimation);
-
-        return () => window.cancelAnimationFrame(frameRequest);
-    }, [transfers]);
-
-    const currentFrame =
-        animationFrame.transfers === transfers
-            ? animationFrame
-            : {
-                  transfers,
-                  refreshedAtMilliseconds: Date.now(),
-                  elapsedSeconds: 0,
-              };
-
-    const progress = getLastEstimatedTransferProgress(
-        transfers,
-        currentFrame.elapsedSeconds,
-        currentFrame.refreshedAtMilliseconds,
-    );
-
-    return progress === null ? null : Math.round(progress.percentage);
+/** Keeps the pie animating only while the API reports the transfer as still moving. */
+function isTransferActive(transfer: TransferProgressEntry): boolean {
+    return transfer.state === "active";
 }
 
 /** Shows projected bytes and a pie whose full state only comes from the API. */
 function TransferProgressCell(props: { transfer: TransferProgressEntry }) {
-    const animationFrame = useTransferAnimation(props.transfer);
+    const animationFrame = useTransferClock(props.transfer, isTransferActive);
 
     const progress = getAnimatedTransferProgress(
         props.transfer,

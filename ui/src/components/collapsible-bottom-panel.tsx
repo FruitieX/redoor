@@ -10,7 +10,8 @@ export type BottomDrawerTab = {
     id: BottomDrawerTabId;
     label: string;
     icon?: React.ReactNode;
-    badge?: string;
+    /** A node rather than text so a fast-changing badge can live in its own leaf component. */
+    badge?: React.ReactNode;
     content: React.ReactNode;
 };
 
@@ -253,8 +254,14 @@ function useDrawerSlideContentVisibility(props: {
 }
 
 /** Builds the compact tooltip from the same label and badge the wide tabs already show. */
-function tabDetails(tab: BottomDrawerTab): string {
-    return tab.badge ? `${tab.label} ${tab.badge}` : tab.label;
+function tabDetails(tab: BottomDrawerTab): React.ReactNode {
+    return tab.badge ? (
+        <>
+            {tab.label} {tab.badge}
+        </>
+    ) : (
+        tab.label
+    );
 }
 
 /** Hides label text on small screens while keeping the tab name available to assistive tech. */
@@ -297,7 +304,10 @@ function BottomDrawerTabButton(props: {
     }
 
     return (
-        <Tooltip content={`Show ${tabDetails(props.tab)}`} className="shrink-0">
+        <Tooltip
+            content={<>Show {tabDetails(props.tab)}</>}
+            className="shrink-0"
+        >
             {button}
         </Tooltip>
     );

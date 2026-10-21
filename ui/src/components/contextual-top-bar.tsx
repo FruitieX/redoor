@@ -8,41 +8,38 @@ import {
     Settings,
     Trash2,
 } from "lucide-react";
+import { useAtom } from "jotai";
 import type * as React from "react";
 
-import type { Agent } from "#ui/api-client";
 import { IconButton } from "#ui/components/icon-button";
 import {
     getViewSwitchItemClass,
     ViewSwitch,
 } from "#ui/components/browser/navigation";
 import { ThemeToggle } from "#ui/components/theme-toggle";
-import { usePersistentSideMenus } from "#ui/side-menu-state";
+import {
+    openSideMenuAtom,
+    sideMenuDrawerIds,
+    usePersistentSideMenus,
+} from "#ui/side-menu-state";
+import {
+    useAgentViewContext,
+    type AgentViewContext,
+} from "#ui/agent-view-context";
 import { SearchButton } from "#ui/components/search-button";
 
-export type AgentViewContext =
-    | { kind: "agent"; agent: Agent }
-    | { kind: "logs"; agent: Agent }
-    | { kind: "configuration"; agent: Agent }
-    | { kind: "trash"; agent: Agent }
-    | { kind: "directory"; agent: Agent; path: string }
-    | { kind: "file"; agent: Agent; path: string }
-    | null;
-
-/** Turns the global top slot into route-specific representation navigation and mobile menu access. */
-export function ContextualTopBar(props: {
-    context: AgentViewContext;
-    isApplicationMenuOpen: boolean;
-    isAgentMenuOpen: boolean;
-    applicationTriggerRef: React.RefObject<HTMLButtonElement | null>;
-    agentTriggerRef: React.RefObject<HTMLButtonElement | null>;
-    onOpenApplicationMenu: () => void;
-    onOpenAgentMenu: () => void;
-}) {
+/**
+ * Turns the global top slot into route-specific representation navigation and mobile menu
+ * access. It derives its context from the router and opens menus through the shared atom, so
+ * the shell passes it nothing.
+ */
+export function ContextualTopBar() {
+    const context = useAgentViewContext();
+    const [openMenu, setOpenMenu] = useAtom(openSideMenuAtom);
     const isPersistent = usePersistentSideMenus();
 
     const isFilesystemContext =
-        props.context?.kind === "directory" || props.context?.kind === "file";
+        context?.kind === "directory" || context?.kind === "file";
 
     return (
         <header
@@ -51,36 +48,34 @@ export function ContextualTopBar(props: {
         >
             {isPersistent ? null : (
                 <IconButton
-                    ref={props.applicationTriggerRef}
                     type="button"
                     label="Open application menu"
                     tooltip={false}
                     aria-haspopup="dialog"
-                    aria-controls="application-menu-drawer"
-                    aria-expanded={props.isApplicationMenuOpen}
-                    onClick={props.onOpenApplicationMenu}
+                    aria-controls={sideMenuDrawerIds.application}
+                    aria-expanded={openMenu === "application"}
+                    onClick={() => setOpenMenu("application")}
                     className="rounded p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100"
                 >
                     <PanelLeftOpen className="h-5 w-5" aria-hidden="true" />
                 </IconButton>
             )}
             <div className="flex min-w-0 flex-1 self-stretch items-end overflow-x-auto overscroll-x-contain">
-                <ContextualViewSwitch context={props.context} />
+                <ContextualViewSwitch context={context} />
             </div>
-            {props.context && !isFilesystemContext ? (
+            {context && !isFilesystemContext ? (
                 <SearchButton className="rounded p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100" />
             ) : null}
             <ThemeToggle />
             {isPersistent ? null : (
                 <IconButton
-                    ref={props.agentTriggerRef}
                     type="button"
                     label="Open device menu"
                     tooltip={false}
                     aria-haspopup="dialog"
-                    aria-controls="agent-menu-drawer"
-                    aria-expanded={props.isAgentMenuOpen}
-                    onClick={props.onOpenAgentMenu}
+                    aria-controls={sideMenuDrawerIds.agents}
+                    aria-expanded={openMenu === "agents"}
+                    onClick={() => setOpenMenu("agents")}
                     className="rounded p-2 text-slate-400 hover:bg-white/5 hover:text-slate-100"
                 >
                     <PanelRightOpen className="h-5 w-5" aria-hidden="true" />

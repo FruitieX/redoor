@@ -107,7 +107,7 @@ function lineFromLocationSearch(searchStr: string): number | undefined {
     return value === null ? undefined : browserLineSchema.parse(value);
 }
 
-export const Route = createFileRoute("/agents/$agentId/browser/$")({
+export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
     validateSearch: (search): BrowserSearch => ({
         view:
             search.view === "details" ||

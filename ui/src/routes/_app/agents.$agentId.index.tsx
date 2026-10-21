@@ -41,6 +41,7 @@ import {
 } from "#ui/components/agent-lifecycle";
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
 import { CopyablePath } from "#ui/components/copyable-code-row";
+import { LinkButton } from "#ui/components/link-button";
 import { RestartButton, waitForRestart } from "#ui/components/restart-button";
 import { UpgradeButton } from "#ui/components/upgrade-button";
 import { provisioningStatusStoreAtom } from "#ui/provisioning-status";
@@ -72,7 +73,7 @@ const HIDDEN_MOUNT_TYPES = new Set([
     "binfmt_misc",
 ]);
 
-export const Route = createFileRoute("/agents/$agentId/")({
+export const Route = createFileRoute("/_app/agents/$agentId/")({
     component: AgentBoundary,
 });
 
@@ -174,6 +175,9 @@ function AgentDetailsContent(props: {
     const provisioningNowMs =
         props.agent.connectedAt !== null ? props.agent.connectedAt * 1000 : now;
 
+    // Navigation here follows the agent becoming connected, which arrives as a pushed
+    // inventory change after the start request has returned. No mutation or loader runs at
+    // that moment, so the page that is already showing the details has to react to it.
     React.useEffect(() => {
         if (!startState?.autoRedirect || props.agent.cwd === null) return;
 
@@ -527,19 +531,18 @@ function AgentDetailsHeader(props: {
                             }, "Agent did not come back after restart")
                         }
                     />
-                    <Link
+                    <LinkButton
                         to="/agents/$agentId/logs"
                         params={{ agentId: props.details.id }}
-                        className="flex items-center gap-2 rounded border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-white/5"
+                        variant="secondary"
                     >
                         <ScrollText className="h-4 w-4" /> View logs
-                    </Link>
-                    <Link
+                    </LinkButton>
+                    <LinkButton
                         to={getBrowserUrl(props.details.id, props.details.cwd)}
-                        className="flex items-center gap-2 rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500"
                     >
                         <FolderOpen className="h-4 w-4" /> Browse Files
-                    </Link>
+                    </LinkButton>
                 </div>
             </div>
             <p className="mt-1 text-sm text-slate-500">

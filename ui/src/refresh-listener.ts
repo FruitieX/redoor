@@ -1,4 +1,5 @@
-import type { QueryClient } from "@tanstack/react-query";
+import * as React from "react";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
@@ -182,4 +183,20 @@ export class RefreshListener {
             }
         });
     }
+}
+
+/**
+ * Ties the UI event connection to the authenticated shell: it opens when the shell mounts,
+ * after the loaders have proven the session valid, and closes when the shell unmounts, so
+ * the login page never holds an event socket.
+ */
+export function useRefreshListener(api: ApiClient) {
+    const queryClient = useQueryClient();
+
+    React.useEffect(() => {
+        const refreshListener = new RefreshListener(api, queryClient);
+        refreshListener.start();
+
+        return () => refreshListener.stop();
+    }, [api, queryClient]);
 }

@@ -33,7 +33,7 @@ import { useRequiredAgent } from "#ui/use-agents";
 
 type TrashRow = TrashItem & { locationId: string; locationPath: string };
 
-export const Route = createFileRoute("/agents/$agentId/trash")({
+export const Route = createFileRoute("/_app/agents/$agentId/trash")({
     loader: async ({ context, params }) => {
         const agent = await loadAgent(context, params.agentId);
 
@@ -68,14 +68,21 @@ function formatDeletedAt(timestampSeconds: number): string {
     }).format(new Date(timestampSeconds * 1000));
 }
 
-/** Restores one opaque trash item to the user-confirmed destination path. */
+/**
+ * Restores one opaque trash item to the user-confirmed destination path. The parent keys it by
+ * item, so choosing another item mounts a fresh form instead of this dialog resetting its own
+ * state when the prop changes.
+ */
 function RestoreTrashDialog(props: {
     agent: Agent;
     item: TrashRow | null;
     onClose: () => void;
 }) {
     const queryClient = useQueryClient();
-    const [destinationPath, setDestinationPath] = React.useState("");
+
+    const [destinationPath, setDestinationPath] = React.useState(
+        props.item?.original_path ?? "",
+    );
 
     const mutation = useMutation({
         mutationFn: (item: TrashRow) =>
@@ -90,12 +97,6 @@ function RestoreTrashDialog(props: {
             props.onClose();
         },
     });
-
-    React.useEffect(() => {
-        if (!props.item) return;
-        setDestinationPath(props.item.original_path ?? "");
-        mutation.reset();
-    }, [props.item]);
 
     /** Submits through the form so keyboard and button activation share validation. */
     const restore = (event: React.FormEvent<HTMLFormElement>) => {
@@ -180,9 +181,11 @@ function EmptyTrashDialog(props: {
         },
     });
 
-    React.useEffect(() => {
-        if (props.isOpen) mutation.reset();
-    }, [props.isOpen]);
+    /** Forgets a failed attempt on close, so reopening never shows a stale error. */
+    const close = () => {
+        mutation.reset();
+        props.onClose();
+    };
 
     return (
         <ConfirmationDialog
@@ -198,7 +201,7 @@ function EmptyTrashDialog(props: {
                     : null
             }
             onClose={() => {
-                if (!mutation.isPending) props.onClose();
+                if (!mutation.isPending) close();
             }}
             onConfirm={() => mutation.mutate()}
         />
@@ -383,6 +386,11 @@ function TrashInventoryPage(props: { agent: Agent }) {
                 )}
             </div>
             <RestoreTrashDialog
+                key={
+                    restoreItem
+                        ? `${restoreItem.locationId}:${restoreItem.id}`
+                        : "none"
+                }
                 agent={props.agent}
                 item={restoreItem}
                 onClose={() => setRestoreItem(null)}

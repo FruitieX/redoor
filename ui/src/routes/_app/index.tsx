@@ -23,11 +23,14 @@ import {
 } from "#ui/components/copyable-code-row";
 import { Tooltip } from "#ui/components/tooltip";
 import { serverInfoQueryOptions } from "#ui/queries";
-import { openSideMenuAtom, usePersistentSideMenus } from "#ui/side-menu-state";
+import {
+    openSideMenuAtom,
+    sideMenuDrawerIds,
+    usePersistentSideMenus,
+} from "#ui/side-menu-state";
 import { useAgents } from "#ui/use-agents";
-import { Route as RootRoute } from "./__root";
 
-export const Route = createFileRoute("/")({
+export const Route = createFileRoute("/_app/")({
     component: Index,
 });
 
@@ -139,7 +142,7 @@ function OpenAgentSidebarButton() {
                 variant="subtle"
                 aria-label="Open device sidebar"
                 aria-haspopup="dialog"
-                aria-controls="agent-menu-drawer"
+                aria-controls={sideMenuDrawerIds.agents}
                 aria-expanded={openMenu === "agents"}
                 onClick={() => setOpenMenu("agents")}
                 className="mt-2 inline-flex items-center gap-1.5 rounded border border-slate-800 bg-[#11141b] px-2 py-0.5 text-sm font-normal text-slate-200 hover:border-slate-600 hover:bg-white/5"
@@ -153,7 +156,7 @@ function OpenAgentSidebarButton() {
 
 /** Shows a compact agent name grid first, then server identity and runtime details. */
 function Index() {
-    const { api } = RootRoute.useRouteContext();
+    const { api } = Route.useRouteContext();
     const agents = useAgents();
     const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
 

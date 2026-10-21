@@ -1,6 +1,11 @@
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+    getRouteApi,
+    Link,
+    useLocation,
+    useRouter,
+} from "@tanstack/react-router";
 import {
     ArrowLeftRight,
     Home,
@@ -12,7 +17,7 @@ import {
     X,
 } from "lucide-react";
 
-import { getBrowserUrl, type ApiClient } from "#ui/api-client";
+import { getBrowserUrl } from "#ui/api-client";
 import { Button } from "#ui/components/button";
 import { IconButton } from "#ui/components/icon-button";
 import { RestartButton, waitForRestart } from "#ui/components/restart-button";
@@ -25,6 +30,7 @@ import {
     queryKeys,
     serverInfoQueryOptions,
 } from "#ui/queries";
+import { useCloseSideMenu } from "#ui/side-menu-state";
 import { useAgents } from "#ui/use-agents";
 import {
     getPinnedFileKey,
@@ -34,64 +40,55 @@ import {
     type PinnedFile,
 } from "#ui/user-state";
 
+const rootRouteApi = getRouteApi("__root__");
+
 /** Places application-level destinations in the shared left-side presentation. */
-export function ApplicationNavigation(props: {
-    pathname: string;
-    isOpen: boolean;
-    isLoggingOut: boolean;
-    triggerRef: React.RefObject<HTMLButtonElement | null>;
-    onClose: () => void;
-    onLogout: () => void;
-    api: ApiClient;
-}) {
+export function ApplicationNavigation() {
     return (
-        <SideMenu
-            placement="left"
-            label="Application menu"
-            drawerId="application-menu-drawer"
-            isOpen={props.isOpen}
-            triggerRef={props.triggerRef}
-            onClose={props.onClose}
-        >
+        <SideMenu menu="application" placement="left" label="Application menu">
             <BrandMark />
-            <ApplicationMenu
-                pathname={props.pathname}
-                isLoggingOut={props.isLoggingOut}
-                api={props.api}
-                onClose={props.onClose}
-                onLogout={props.onLogout}
-            />
+            <ApplicationMenu />
         </SideMenu>
     );
 }
 
 /** Shares application destinations, server restart, and logout between desktop and mobile menus. */
-function ApplicationMenu(props: {
-    pathname: string;
-    isLoggingOut: boolean;
-    api: ApiClient;
-    onClose: () => void;
-    onLogout: () => void;
-}) {
+function ApplicationMenu() {
+    const { api } = rootRouteApi.useRouteContext();
+    const closeMenu = useCloseSideMenu();
     const queryClient = useQueryClient();
     const [userState, setUserState] = useUserState();
     const agents = useAgents();
 
     const menuItems = [
-        { to: "/", label: "Home", ariaLabel: "Server home", icon: Home },
+        {
+            to: "/",
+            label: "Home",
+            ariaLabel: "Server home",
+            icon: Home,
+            exact: true,
+        },
         {
             to: "/agents",
             label: "Devices",
             ariaLabel: "Manage devices",
             icon: Users,
+            exact: true,
         },
-        { to: "/logs", label: "Server logs", icon: ScrollText },
-        { to: "/transfers", label: "Transfers", icon: ArrowLeftRight },
+        { to: "/logs", label: "Server logs", icon: ScrollText, exact: true },
+        // The history page has no children today, but keeps highlighting if one is added.
+        {
+            to: "/transfers",
+            label: "Transfers",
+            icon: ArrowLeftRight,
+            exact: false,
+        },
         {
             to: "/settings/tokens",
             label: "Access tokens",
             ariaLabel: "Manage access tokens",
             icon: KeyRound,
+            exact: true,
         },
     ] as const;
 
@@ -101,11 +98,6 @@ function ApplicationMenu(props: {
             className="mt-3 flex min-h-0 flex-1 flex-col gap-1"
         >
             {menuItems.map((item) => {
-                const isActive =
-                    item.to === "/transfers"
-                        ? props.pathname.startsWith(item.to)
-                        : props.pathname === item.to;
-
                 const Icon = item.icon;
 
                 return (
@@ -115,13 +107,14 @@ function ApplicationMenu(props: {
                         aria-label={
                             "ariaLabel" in item ? item.ariaLabel : undefined
                         }
-                        aria-current={isActive ? "page" : undefined}
-                        onClick={props.onClose}
-                        className={`flex items-center gap-2.5 rounded px-3 py-2.5 text-sm transition-colors ${
-                            isActive
-                                ? "bg-white/5 text-slate-100"
-                                : "text-slate-300 hover:bg-white/5 hover:text-slate-100"
-                        }`}
+                        activeOptions={{ exact: item.exact }}
+                        activeProps={{ className: "bg-white/5 text-slate-100" }}
+                        inactiveProps={{
+                            className:
+                                "text-slate-300 hover:bg-white/5 hover:text-slate-100",
+                        }}
+                        onClick={closeMenu}
+                        className="flex items-center gap-2.5 rounded px-3 py-2.5 text-sm transition-colors"
                     >
                         <Icon
                             className="h-4 w-4 shrink-0 text-slate-400"
@@ -133,12 +126,10 @@ function ApplicationMenu(props: {
             })}
             {userState.pinnedFiles.length > 0 ? (
                 <PinnedFiles
-                    pathname={props.pathname}
                     pinnedFiles={userState.pinnedFiles}
                     deviceNameByAgentId={
                         new Map(agents.map((agent) => [agent.id, agent.name]))
                     }
-                    onClose={props.onClose}
                     onRemove={(file) => {
                         setUserState((current) => ({
                             ...current,
@@ -174,14 +165,14 @@ function ApplicationMenu(props: {
                     ariaLabel="Restart server"
                     className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm text-slate-300 hover:bg-white/5 hover:text-slate-100"
                     description="The server will restart and re-read its configuration. Connected agents reconnect automatically. In-flight transfers and terminals are interrupted."
-                    restart={() => props.api.restartServer()}
+                    restart={() => api.restartServer()}
                     waitUntilReady={() => {
                         let oldServerClosed = false;
 
                         return waitForRestart(async () => {
                             try {
                                 await queryClient.fetchQuery({
-                                    ...serverInfoQueryOptions(props.api),
+                                    ...serverInfoQueryOptions(api),
                                     staleTime: 0,
                                 });
                             } catch (error) {
@@ -206,37 +197,57 @@ function ApplicationMenu(props: {
                         }, "Server did not come back after restart");
                     }}
                 />
-                <Button
-                    type="button"
-                    variant="subtle"
-                    onClick={props.onLogout}
-                    disabled={props.isLoggingOut}
-                    className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm font-normal text-slate-300 hover:bg-white/5 hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
-                >
-                    {props.isLoggingOut ? (
-                        <LoaderCircle
-                            className="h-4 w-4 shrink-0 animate-spin text-slate-400"
-                            aria-hidden="true"
-                        />
-                    ) : (
-                        <LogOut
-                            className="h-4 w-4 shrink-0 text-slate-400"
-                            aria-hidden="true"
-                        />
-                    )}
-                    {props.isLoggingOut ? "Logging out…" : "Log out"}
-                </Button>
+                <LogoutButton />
             </div>
         </nav>
     );
 }
 
+/**
+ * Ends the session and reloads into the login page, so no cached server state or open
+ * socket outlives the user's credentials.
+ */
+function LogoutButton() {
+    const { api } = rootRouteApi.useRouteContext();
+    const router = useRouter();
+
+    const logoutMutation = useMutation({
+        mutationFn: () => api.logout(),
+        onSuccess: () => {
+            window.location.replace(
+                router.buildLocation({ to: "/login" }).href,
+            );
+        },
+    });
+
+    return (
+        <Button
+            type="button"
+            variant="subtle"
+            onClick={() => logoutMutation.mutate()}
+            disabled={logoutMutation.isPending}
+            className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm font-normal text-slate-300 hover:bg-white/5 hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
+        >
+            {logoutMutation.isPending ? (
+                <LoaderCircle
+                    className="h-4 w-4 shrink-0 animate-spin text-slate-400"
+                    aria-hidden="true"
+                />
+            ) : (
+                <LogOut
+                    className="h-4 w-4 shrink-0 text-slate-400"
+                    aria-hidden="true"
+                />
+            )}
+            {logoutMutation.isPending ? "Logging out…" : "Log out"}
+        </Button>
+    );
+}
+
 /** Lists pinned files under Transfers so they stay available from every route. */
 function PinnedFiles(props: {
-    pathname: string;
     pinnedFiles: PinnedFile[];
     deviceNameByAgentId: Map<string, string>;
-    onClose: () => void;
     onRemove: (file: PinnedFile) => void;
     onClear: () => void;
     onMove: (move: { activeId: string; overId: string }) => void;
@@ -282,12 +293,10 @@ function PinnedFiles(props: {
                         <PinnedFileRow
                             key={getPinnedFileKey(file)}
                             file={file}
-                            pathname={props.pathname}
                             deviceName={
                                 props.deviceNameByAgentId.get(file.agentId) ??
                                 file.agentName
                             }
-                            onClose={props.onClose}
                             onRemove={props.onRemove}
                         />
                     ))}
@@ -300,13 +309,13 @@ function PinnedFiles(props: {
 /** Lets the row sort after a deliberate drag while a normal click still opens the file. */
 function PinnedFileRow(props: {
     file: PinnedFile;
-    pathname: string;
     deviceName: string;
-    onClose: () => void;
     onRemove: (file: PinnedFile) => void;
 }) {
+    const closeMenu = useCloseSideMenu();
+    const pathname = useLocation({ select: (location) => location.pathname });
     const href = getBrowserUrl(props.file.agentId, props.file.path);
-    const isActive = props.pathname === href;
+    const isActive = pathname === href;
     const itemId = getPinnedFileKey(props.file);
 
     return (
@@ -337,7 +346,7 @@ function PinnedFileRow(props: {
                             to={href}
                             aria-label={props.file.name}
                             aria-current={isActive ? "page" : undefined}
-                            onClick={props.onClose}
+                            onClick={closeMenu}
                             className="block w-full min-w-0 px-3 py-1"
                         >
                             <span className="block truncate text-sm">

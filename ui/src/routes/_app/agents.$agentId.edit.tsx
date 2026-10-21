@@ -21,7 +21,7 @@ import {
 } from "#ui/queries";
 import { useAgent } from "#ui/use-agents";
 
-export const Route = createFileRoute("/agents/$agentId/edit")({
+export const Route = createFileRoute("/_app/agents/$agentId/edit")({
     loader: async ({ context, params }) => {
         const agent = await loadAgent(context, params.agentId);
 

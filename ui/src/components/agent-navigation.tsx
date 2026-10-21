@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useLocation } from "@tanstack/react-router";
 import { useAtom, useAtomValue } from "jotai";
 import {
     Bookmark,
@@ -32,40 +32,36 @@ import {
     type Bookmark as BookmarkEntry,
 } from "#ui/user-state";
 import type { ItemMove } from "#ui/utils/reorder";
-import { foldedBookmarkAgentsAtom } from "#ui/side-menu-state";
+import {
+    foldedBookmarkAgentsAtom,
+    useCloseSideMenu,
+} from "#ui/side-menu-state";
+import { useTargetAgentId } from "#ui/use-active-agent";
+import { useAgents } from "#ui/use-agents";
 
 /** Places agent selection and management actions in the shared right-side presentation. */
-export function AgentNavigation(props: {
-    agents: Agent[];
-    pathname: string;
-    isOpen: boolean;
-    triggerRef: React.RefObject<HTMLButtonElement | null>;
-    onClose: () => void;
-}) {
+export function AgentNavigation() {
+    const agents = useAgents();
+
+    // The name order is the fallback for devices the user has not placed by hand.
+    const sortedAgents = React.useMemo(
+        () =>
+            [...agents].sort((left, right) =>
+                left.name.localeCompare(right.name),
+            ),
+        [agents],
+    );
+
     return (
-        <SideMenu
-            placement="right"
-            label="Device menu"
-            drawerId="agent-menu-drawer"
-            isOpen={props.isOpen}
-            triggerRef={props.triggerRef}
-            onClose={props.onClose}
-        >
-            <AgentMenu
-                agents={props.agents}
-                pathname={props.pathname}
-                onClose={props.onClose}
-            />
+        <SideMenu menu="agents" placement="right" label="Device menu">
+            <AgentMenu agents={sortedAgents} />
         </SideMenu>
     );
 }
 
 /** Preserves remembered filesystem destinations while keeping agent selection side-effect free. */
-function AgentMenu(props: {
-    agents: Agent[];
-    pathname: string;
-    onClose: () => void;
-}) {
+function AgentMenu(props: { agents: Agent[] }) {
+    const closeMenu = useCloseSideMenu();
     const agentTabLocations = useAtomValue(agentTabLocationsAtom);
     const [userState, setUserState] = useUserState();
     const [foldedAgents, setFoldedAgents] = useAtom(foldedBookmarkAgentsAtom);
@@ -149,7 +145,7 @@ function AgentMenu(props: {
                         <Link
                             to="/agents/new"
                             aria-label="Add device"
-                            onClick={props.onClose}
+                            onClick={closeMenu}
                         />
                     </AddButton>
                 </div>
@@ -194,7 +190,6 @@ function AgentMenu(props: {
                             <DeviceBlock
                                 key={agent.id}
                                 agent={agent}
-                                pathname={props.pathname}
                                 rememberedTarget={
                                     agent.status === "connected" &&
                                     agent.cwd !== null
@@ -220,7 +215,6 @@ function AgentMenu(props: {
                                             : [...current, agent.id],
                                     )
                                 }
-                                onClose={props.onClose}
                                 onMoveBookmarks={(move) => {
                                     setUserState((current) => {
                                         const bookmarks = reorderBookmarks(
@@ -286,21 +280,17 @@ function ConnectedDevicesToggle() {
 /** Moves a device and its bookmarks together without making bookmarks outer draggables. */
 function DeviceBlock(props: {
     agent: Agent;
-    pathname: string;
     rememberedTarget: string;
     bookmarks: BookmarkEntry[];
     bookmarksFolded: boolean;
     onToggleBookmarks: () => void;
-    onClose: () => void;
     onMoveBookmarks: (move: ItemMove) => void;
     onRemoveBookmark: (bookmark: BookmarkEntry) => void;
 }) {
     const bookmarksId = React.useId();
+    const closeMenu = useCloseSideMenu();
     const agentPrefix = `/agents/${encodeURIComponent(props.agent.id)}`;
-
-    const isActive =
-        props.pathname === agentPrefix ||
-        props.pathname.startsWith(`${agentPrefix}/`);
+    const isActive = useTargetAgentId() === props.agent.id;
 
     const canBrowse =
         props.agent.status === "connected" && props.agent.cwd !== null;
@@ -351,7 +341,7 @@ function DeviceBlock(props: {
                         )}
                         <Link
                             to={target}
-                            onClick={props.onClose}
+                            onClick={closeMenu}
                             aria-label={`${props.agent.name}, ${props.agent.status}`}
                             aria-current={isActive ? "page" : undefined}
                             className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2.5 text-slate-300 group-hover:text-slate-100"
@@ -379,7 +369,7 @@ function DeviceBlock(props: {
                                     to="/agents/$agentId/edit"
                                     params={{ agentId: props.agent.id }}
                                     aria-label={`Edit ${props.agent.name}`}
-                                    onClick={props.onClose}
+                                    onClick={closeMenu}
                                     className="mr-1 rounded p-1.5 text-slate-500 hover:bg-white/10 hover:text-slate-200"
                                 >
                                     <Pencil
@@ -395,8 +385,6 @@ function DeviceBlock(props: {
                             id={bookmarksId}
                             agent={props.agent}
                             bookmarks={props.bookmarks}
-                            pathname={props.pathname}
-                            onClose={props.onClose}
                             onMove={props.onMoveBookmarks}
                             onRemove={props.onRemoveBookmark}
                         />
@@ -412,8 +400,6 @@ function AgentBookmarks(props: {
     id: string;
     agent: Agent;
     bookmarks: BookmarkEntry[];
-    pathname: string;
-    onClose: () => void;
     onMove: (move: ItemMove) => void;
     onRemove: (bookmark: BookmarkEntry) => void;
 }) {
@@ -445,8 +431,6 @@ function AgentBookmarks(props: {
                         key={getBookmarkKey(bookmark)}
                         agent={props.agent}
                         bookmark={bookmark}
-                        pathname={props.pathname}
-                        onClose={props.onClose}
                         onRemove={props.onRemove}
                     />
                 ))}
@@ -459,14 +443,12 @@ function AgentBookmarks(props: {
 function BookmarkRow(props: {
     agent: Agent;
     bookmark: BookmarkEntry;
-    pathname: string;
-    onClose: () => void;
     onRemove: (bookmark: BookmarkEntry) => void;
 }) {
+    const closeMenu = useCloseSideMenu();
+    const pathname = useLocation({ select: (location) => location.pathname });
     const href = props.agent.getBrowserUrl(props.bookmark.path);
-
-    const isActive =
-        props.pathname === href || props.pathname.startsWith(`${href}/`);
+    const isActive = pathname === href || pathname.startsWith(`${href}/`);
 
     return (
         <SortableItem id={getBookmarkKey(props.bookmark)}>
@@ -494,7 +476,7 @@ function BookmarkRow(props: {
                     >
                         <Link
                             to={href}
-                            onClick={props.onClose}
+                            onClick={closeMenu}
                             aria-current={isActive ? "page" : undefined}
                             className="flex w-full min-w-0 items-center gap-1.5 px-1.5 py-1 text-xs"
                         >

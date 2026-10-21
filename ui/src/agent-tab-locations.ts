@@ -1,4 +1,8 @@
-import { atom } from "jotai";
+import * as React from "react";
+import { useRouterState } from "@tanstack/react-router";
+import { atom, useSetAtom } from "jotai";
+
+import { useBrowserLocation } from "#ui/use-browser-location";
 import { atomWithLocalStorage } from "./utils/local-storage-atom";
 
 export type AgentTabLocations = Record<string, string>;
@@ -53,4 +57,33 @@ export function getAgentTabLocation(
     }
 
     return fallback;
+}
+
+/**
+ * Remembers the file-browser location of the connected agent on screen, so switching away
+ * from a device and back returns to where the user was. Only browser routes of a connected
+ * agent qualify, because other pages are cheap to reach again.
+ */
+export function useRememberAgentTabLocation() {
+    const rememberAgentTabLocation = useSetAtom(rememberAgentTabLocationAtom);
+    const browser = useBrowserLocation();
+
+    // The resolved location changes together with the matched routes. The live location moves
+    // first, which would pair the next page's path with the previous page's agent.
+    const pathname = useRouterState({
+        select: (state) => state.resolvedLocation?.pathname,
+    });
+
+    // The browser location comes from the same committed matches as the pathname, so the two
+    // always describe the same page. A browser route that loaded for a disconnected agent
+    // shows the lifecycle screen instead and is not worth returning to.
+    const agentId = browser?.isConnected ? browser.agentId : null;
+
+    React.useEffect(() => {
+        if (agentId === null || pathname === undefined) {
+            return;
+        }
+
+        rememberAgentTabLocation({ agentId, pathname });
+    }, [agentId, pathname, rememberAgentTabLocation]);
 }
