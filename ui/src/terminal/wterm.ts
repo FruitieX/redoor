@@ -35,6 +35,20 @@ function loadWTermModules(): Promise<WTermModules> {
     return moduleLoad;
 }
 
+/** Lets macOS layouts commit Option text instead of wterm encoding it as Escape-prefixed input. */
+function preserveOptionText(event: KeyboardEvent): void {
+    if (
+        event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        (event.key === "Dead" || Array.from(event.key).length === 1)
+    ) {
+        // Keep the native default action so input/composition events deliver the resolved text.
+        // Capture on the textarea itself because wterm's listener is on the same element.
+        event.stopImmediatePropagation();
+    }
+}
+
 /** Creates one initialized DOM renderer and its dedicated Ghostty-backed core. */
 export async function createWTerm(
     options: CreateWTermOptions,
@@ -58,6 +72,13 @@ export async function createWTerm(
 
     try {
         await terminal.init();
+
+        if (navigator.platform.startsWith("Mac")) {
+            const input = options.host.querySelector("textarea");
+            // These listeners live on wterm's textarea and are released with it on teardown.
+            input?.addEventListener("keydown", preserveOptionText, true);
+            input?.addEventListener("keyup", preserveOptionText, true);
+        }
 
         return { terminal, core };
     } catch (error) {

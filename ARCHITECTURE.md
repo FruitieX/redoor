@@ -832,6 +832,10 @@ sequenceDiagram
   so an exit always follows the output that preceded it.
 - Browser input that arrives before the PTY is ready is buffered, within a frame and byte
   limit. Setup is abandoned if the agent does not report ready in time.
+- On macOS, printable Option combinations and dead keys use the browser's native input
+  and composition events so keyboard layouts can produce characters such as Finnish `|`.
+  The wterm adapter bypasses Escape-prefix encoding for these keys; non-text Alt keys
+  continue through the terminal's normal key encoder.
 - Live logs (`log_stream_open`) send NDJSON `LogEvent` lines that may span frames; the bridge
   reassembles each line (bounded by the largest valid event) and validates it before
   relaying it to the browser.

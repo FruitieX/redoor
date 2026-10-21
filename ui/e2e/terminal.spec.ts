@@ -178,6 +178,62 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await expect.poll(() => terminalOutput).toContain("terminal-ok");
     });
 
+    test("types Finnish macOS Option characters without terminal escape prefixes", async ({
+        page,
+    }) => {
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "platform", {
+                get: () => "MacIntel",
+            });
+        });
+        const inputFrames: string[] = [];
+        page.on("websocket", (socket) => {
+            if (socket.url().includes("/terminal/ws")) {
+                socket.on("framesent", (event) => {
+                    inputFrames.push(terminalFrameSchema.parse(event.payload));
+                });
+            }
+        });
+        await page.goto(ctx.agentBrowserUrl);
+        await page.getByRole("tab", { name: "Terminal" }).click();
+        await page
+            .getByRole("button", { name: "New terminal", exact: true })
+            .click();
+        // Wait for PTY readiness so the character cannot be discarded during setup.
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+
+        const terminalInput = page
+            .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+            .locator("textarea");
+
+        await terminalInput.focus();
+        const cdp = await page.context().newCDPSession(page);
+
+        // Chromium on Linux needs explicit layout-resolved text to emulate Finnish Option+7.
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: "|",
+            code: "Digit7",
+            text: "|",
+            modifiers: 1,
+        });
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "|",
+            code: "Digit7",
+            modifiers: 1,
+        });
+        // The PTY must receive the literal pipe once, with no Escape prefix.
+        await expect
+            .poll(() => inputFrames.filter((frame) => !frame.startsWith("{")))
+            .toEqual(["|"]);
+        await terminalInput.press("Alt+ArrowLeft");
+        // Non-text Alt combinations must still reach terminal applications as navigation.
+        await expect.poll(() => inputFrames.at(-1)).toBe("\x1b[1;3D");
+    });
+
     test("expands the terminal to the full window without replacing its session", async ({
         page,
     }) => {
