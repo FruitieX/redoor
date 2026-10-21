@@ -268,6 +268,8 @@ export type SpawnAgentArgs = {
 export type SpawnServerArgs = {
     log?: string;
     config?: string;
+    /** Isolates durable server state while allowing restart tests to reuse the same home. */
+    home?: string;
 };
 
 /** Groups optional process settings so callers cannot confuse cwd and environment. */
@@ -383,12 +385,14 @@ password = "${TEST_PASSWORD}"
             cliArgs.push("--log", args.log);
         }
 
-        mkdirSync(TEST_SERVER_HOME, { recursive: true });
+        const serverHome = args.home ?? TEST_SERVER_HOME;
+
+        mkdirSync(serverHome, { recursive: true });
 
         return this.spawn(SERVER_PATH, cliArgs, {
             cwd: PROJECT_ROOT,
             env: {
-                HOME: TEST_SERVER_HOME,
+                HOME: serverHome,
                 REDOOR_APP_NAME: TEST_APP_NAME,
             },
         });

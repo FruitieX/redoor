@@ -17,7 +17,6 @@ import {
     createAccessToken,
     TEST_APP_NAME,
     TEST_PASSWORD,
-    TEST_SERVER_HOME,
     TEST_USERNAME,
     VITEST_SERVER_PORT,
     waitForAgentReady,
@@ -42,6 +41,9 @@ const endpoint = `${baseUrl}/mcp`;
 const allowedOrigin = "https://allowed-mcp-client.example";
 
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "redoor-mcp-test-"));
+
+// Operation quotas include persisted history, so each suite needs fresh state across runs.
+const serverHome = join(temporaryDirectory, "server-home");
 
 const configPath = join(temporaryDirectory, "config.toml");
 
@@ -172,7 +174,10 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
 `,
     );
     process.env.REDOOR_PORT = VITEST_SERVER_PORT.toString();
-    serverPid = processManager.spawnServer({ config: configPath });
+    serverPid = processManager.spawnServer({
+        config: configPath,
+        home: serverHome,
+    });
     await waitForPort(VITEST_SERVER_PORT);
     await api.login(TEST_USERNAME, TEST_PASSWORD);
     // A read-only token limited to the dormant managed device.
@@ -548,7 +553,7 @@ describe("stateless authenticated MCP", () => {
         sourceRoot: agentRoot,
         destinationRoot: secondAgentRoot,
         metadataPath: join(
-            TEST_SERVER_HOME,
+            serverHome,
             ".local/share",
             TEST_APP_NAME,
             "mcp-operations/operations.json",
@@ -814,7 +819,10 @@ describe("stateless authenticated MCP", () => {
         if (operationId === undefined)
             throw new Error("Crash-ambiguity operation missing");
         await processManager.killAndWait(serverPid);
-        serverPid = processManager.spawnServer({ config: configPath });
+        serverPid = processManager.spawnServer({
+            config: configPath,
+            home: serverHome,
+        });
         await waitForPort(VITEST_SERVER_PORT);
 
         const recovered = await createMcpTestClient({
@@ -1083,7 +1091,7 @@ describe("stateless authenticated MCP", () => {
 
         const stored = readFileSync(
             join(
-                TEST_SERVER_HOME,
+                serverHome,
                 ".local/share",
                 TEST_APP_NAME,
                 "tokens/access-tokens.json",
