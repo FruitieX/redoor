@@ -1,7 +1,6 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
-import { z } from "zod";
 import { useSetAtom } from "jotai";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import {
@@ -10,13 +9,25 @@ import {
     type LsDirectoryResponse,
     type LsFileResponse,
 } from "#ui/api-client";
-import { isLsDirectoryResponse, isLsFileResponse } from "#ui/ls-response";
+import {
+    isLsDirectoryResponse,
+    isLsFileResponse,
+    type LsResponse,
+} from "#ui/ls-response";
+import {
+    browserLineSchema,
+    browserSearchSchema,
+    type BrowserSearch,
+    type FileSortColumn,
+} from "#ui/browser-search";
+import { optionalBooleanSchema } from "#ui/agent-search";
 import { useUserState } from "#ui/user-state";
 import { AgentLifecycle } from "#ui/components/agent-lifecycle";
 import { RouteError } from "#ui/components/route-error";
 import {
     BrowserHeader,
     UnavailablePathState,
+    type BrowserView,
 } from "#ui/components/browser/navigation";
 import { MissingPathCreationForm } from "#ui/components/browser/missing-path";
 import { DirectoryFilesActions } from "#ui/components/browser/directory-actions";
@@ -34,6 +45,8 @@ import {
     getImmediateParentPath,
     getPathLoadError,
     sortFileEntries,
+    type FileSort,
+    type PathLoadError,
 } from "#ui/components/browser/utils";
 import {
     agentAccountsQueryOptions,
@@ -53,48 +66,9 @@ import { useBrowserRefreshTriggers } from "#ui/components/browser/refresh";
 import type { MetadataResponse } from "#bindings/MetadataResponse";
 import type { MountPoint } from "#bindings/MountPoint";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
+import type { GitDiffMode } from "#bindings/GitDiffMode";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
-
-type BrowserSearch = {
-    view?: "details" | "sync" | "git";
-    line?: number;
-    preview?: boolean;
-};
-
-type BrowserFullSearch = BrowserSearch & {
-    q?: string;
-    mode?: "content";
-    context?: number;
-    timeout?: number;
-    hidden?: boolean;
-    gitignore?: boolean;
-    regex?: boolean;
-    gitroot?: boolean;
-    case?: "smart" | "sensitive" | "insensitive";
-};
-
-/** Accepts booleans from router navigation and directly entered query strings. */
-const optionalBooleanSchema = z
-    .union([
-        z.boolean(),
-        z.literal("true").transform(() => true),
-        z.literal("false").transform(() => false),
-    ])
-    .optional()
-    .catch(undefined);
-
-/** Accepts only 1-based whole line numbers so garbage query values cannot drive the editor. */
-const browserLineSchema = z
-    .union([
-        z.number().int().gte(1),
-        z
-            .string()
-            .regex(/^[1-9][0-9]*$/)
-            .transform(Number)
-            .pipe(z.number().int().gte(1)),
-    ])
-    .optional()
-    .catch(undefined);
+import { getBaseName } from "#ui/utils/path";
 
 /** Reads line from the raw query so the loader can preserve it without adding line to loaderDeps. */
 function lineFromLocationSearch(searchStr: string): number | undefined {
@@ -107,29 +81,73 @@ function lineFromLocationSearch(searchStr: string): number | undefined {
     return value === null ? undefined : browserLineSchema.parse(value);
 }
 
+/** The route's own parameters, which every redirect needs to stay on the same entry. */
+type BrowserParams = { agentId: string; _splat?: string };
+
+/** What the route knows while its agent cannot serve paths yet, so only the URL is retained. */
+function lifecycleData(agent: Agent, path: string) {
+    return {
+        kind: "lifecycle" as const,
+        agentId: agent.id,
+        path,
+        lsResult: null,
+    };
+}
+
+/** What the route renders for a path that resolved to a file or a directory. */
+function resolvedData(agent: Agent, path: string, lsResult: LsResponse) {
+    return {
+        kind: "connected" as const,
+        agentId: agent.id,
+        path,
+        lsResult,
+        pathError: null,
+    };
+}
+
+/**
+ * What the route renders for a path that did not resolve. It carries the error and no
+ * listing, so breadcrumbs stay available to correct the path.
+ */
+function unresolvedData(agent: Agent, path: string, pathError: PathLoadError) {
+    return {
+        kind: "connected" as const,
+        agentId: agent.id,
+        path,
+        lsResult: null,
+        pathError,
+    };
+}
+
+/** Leaves the Git view of a path that is outside every repository, which has nothing to show. */
+function redirectOutsideWorktree(
+    params: BrowserParams,
+    view: BrowserSearch["view"],
+    gitContext: GitContextResponse,
+) {
+    if (view === "git" && gitContext.status === "outside_worktree") {
+        throw redirect({
+            to: "/agents/$agentId/browser/$",
+            params,
+            search: {},
+            replace: true,
+        });
+    }
+}
+
 export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
-    validateSearch: (search): BrowserSearch => ({
-        view:
-            search.view === "details" ||
-            search.view === "sync" ||
-            search.view === "git"
-                ? search.view
-                : undefined,
-        line: browserLineSchema.parse(search.line),
-        preview: optionalBooleanSchema.parse(search.preview),
+    validateSearch: browserSearchSchema,
+    loaderDeps: ({ search }) => ({
+        view: search.view,
+        diffMode: search.diffMode,
     }),
-    loaderDeps: ({ search }) => ({ view: search.view }),
     loader: async ({ context, deps, params, location }) => {
         const agent = await loadAgent(context, params.agentId);
+        const path = `/${params._splat ?? ""}`;
 
         if (agent.status !== "connected" || agent.cwd === null) {
             // Retain the full URL until the agent connects and the path can be resolved.
-            return {
-                kind: "lifecycle" as const,
-                agentId: agent.id,
-                path: `/${params._splat ?? ""}`,
-                lsResult: null,
-            };
+            return lifecycleData(agent, path);
         }
 
         const rawSearch = new URLSearchParams(
@@ -149,8 +167,6 @@ export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
                 replace: true,
             });
         }
-
-        const path = `/${params._splat ?? ""}`;
 
         const gitContextPromise = fetchQueryUncancelled(context.queryClient, {
             ...gitContextQueryOptions(agent, path),
@@ -177,17 +193,7 @@ export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
                 detailsPromise,
             ]);
 
-            if (
-                deps.view === "git" &&
-                gitContext.status === "outside_worktree"
-            ) {
-                throw redirect({
-                    to: "/agents/$agentId/browser/$",
-                    params,
-                    search: {},
-                    replace: true,
-                });
-            }
+            redirectOutsideWorktree(params, deps.view, gitContext);
 
             // Canonicalize the cache identity so aliases refresh the listing the route actually displays.
             context.queryClient.setQueryData(
@@ -245,19 +251,17 @@ export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
                     });
                 } else {
                     await fetchQueryUncancelled(context.queryClient, {
-                        ...gitDiffQueryOptions(agent, [lsResult.path], "full"),
+                        ...gitDiffQueryOptions(
+                            agent,
+                            [lsResult.path],
+                            deps.diffMode ?? "full",
+                        ),
                         staleTime: 0,
                     });
                 }
             }
 
-            return {
-                kind: "connected" as const,
-                agentId: agent.id,
-                path,
-                lsResult,
-                pathError: null,
-            };
+            return resolvedData(agent, path, lsResult);
         } catch (error) {
             const pathError = getPathLoadError(error);
 
@@ -277,38 +281,20 @@ export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
                 gitContext.tracking_state === "deleted"
             ) {
                 await fetchQueryUncancelled(context.queryClient, {
-                    ...gitDiffQueryOptions(agent, [path], "full"),
+                    ...gitDiffQueryOptions(
+                        agent,
+                        [path],
+                        deps.diffMode ?? "full",
+                    ),
                     staleTime: 0,
                 });
 
-                return {
-                    kind: "connected" as const,
-                    agentId: agent.id,
-                    path,
-                    lsResult: null,
-                    pathError,
-                };
+                return unresolvedData(agent, path, pathError);
             }
 
-            if (
-                deps.view === "git" &&
-                gitContext.status === "outside_worktree"
-            ) {
-                throw redirect({
-                    to: "/agents/$agentId/browser/$",
-                    params,
-                    search: {},
-                    replace: true,
-                });
-            }
+            redirectOutsideWorktree(params, deps.view, gitContext);
 
-            return {
-                kind: "connected" as const,
-                agentId: agent.id,
-                path,
-                lsResult: null,
-                pathError,
-            };
+            return unresolvedData(agent, path, pathError);
         }
     },
     component: FileBrowser,
@@ -318,11 +304,10 @@ export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
 /** Fixes browser navigation chrome in one route-level frame for every path type and view. */
 function BrowserRouteShell(props: {
     agent: Agent;
-    agentId: string;
     path: string;
     parentPath: string | null;
     entryType: "directory" | "file";
-    activeView: "files" | "details" | "view" | "sync" | "git";
+    activeView: BrowserView;
     gitAvailable: boolean;
     editable?: boolean;
     /** Bounds the route to the overlay viewport so CodeMirror, not the page, scrolls. */
@@ -341,7 +326,6 @@ function BrowserRouteShell(props: {
         >
             <BrowserHeader
                 agent={props.agent}
-                agentId={props.agentId}
                 path={props.path}
                 parentPath={props.parentPath}
                 entryType={props.entryType}
@@ -421,11 +405,12 @@ function ConnectedFileBrowser(props: {
         });
     }, [data.agentId, setStartStates]);
     const { api } = Route.useRouteContext();
-    const { agentId, path, lsResult, pathError } = data;
+    const { path, lsResult, pathError } = data;
     const search = Route.useSearch();
+    const diffMode = useGitDiffMode();
     // Keep the presentation mode while keyed editors reset their per-file buffers.
     const [isEditorFullWindow, setIsEditorFullWindow] = useState(false);
-    useBrowserRefreshTriggers(agentId);
+    useBrowserRefreshTriggers(agent.id);
 
     // The loader primed this, and refreshes replace it in place without reloading the route.
     const { data: gitContext } = useSuspenseQuery(
@@ -445,14 +430,19 @@ function ConnectedFileBrowser(props: {
         return (
             <BrowserRouteShell
                 agent={agent}
-                agentId={agentId}
                 path={path}
                 parentPath={parentPath}
                 entryType="file"
                 activeView="git"
                 gitAvailable
             >
-                <GitFileView agent={agent} path={path} context={gitContext} />
+                <GitFileView
+                    agent={agent}
+                    path={path}
+                    context={gitContext}
+                    mode={diffMode.mode}
+                    onModeChange={diffMode.setMode}
+                />
             </BrowserRouteShell>
         );
     }
@@ -461,7 +451,6 @@ function ConnectedFileBrowser(props: {
         return (
             <BrowserRouteShell
                 agent={agent}
-                agentId={agentId}
                 path={path}
                 parentPath={parentPath}
                 entryType="directory"
@@ -488,28 +477,27 @@ function ConnectedFileBrowser(props: {
         );
     }
 
-    if (isLsDirectoryResponse(lsResult)) {
+    if (lsResult !== null && isLsDirectoryResponse(lsResult)) {
         return (
             <DirectoryBrowserPage
                 api={api}
                 agent={agent}
                 path={path}
                 parentPath={parentPath}
-                lsResult={lsResult}
-                view={search.view}
+                loadedListing={lsResult}
                 gitAvailable={gitAvailable}
             />
         );
     }
 
-    if (isLsFileResponse(lsResult)) {
+    if (lsResult !== null && isLsFileResponse(lsResult)) {
         return (
             <FileBrowserPage
                 api={api}
                 agent={agent}
                 path={path}
                 parentPath={parentPath}
-                lsResult={lsResult}
+                loadedListing={lsResult}
                 gitContext={gitContext}
                 isEditorFullWindow={isEditorFullWindow}
                 onToggleEditorFullWindow={() =>
@@ -522,42 +510,78 @@ function ConnectedFileBrowser(props: {
     return null;
 }
 
+/**
+ * Keeps the Git comparison in the URL: the loader reads it to prefetch the right diff, and
+ * switching it replaces the history entry because it is a view of the same page. Full is the
+ * default, so it is omitted from the URL.
+ */
+function useGitDiffMode() {
+    const navigate = Route.useNavigate();
+    const search = Route.useSearch();
+
+    return {
+        mode: search.diffMode ?? "full",
+        setMode: (mode: GitDiffMode) =>
+            navigate({
+                search: (previous) => ({
+                    ...previous,
+                    diffMode: mode === "full" ? undefined : mode,
+                }),
+                replace: true,
+            }),
+    };
+}
+
+/**
+ * Reads the listing the loader resolved from the query cache, so a refresh or an edit made
+ * elsewhere reaches the page without reloading the route. The loader's copy only identifies
+ * the entry and covers the moment before the cache has anything newer.
+ */
+function useLiveListing<T extends LsResponse>(
+    agent: Agent,
+    loaded: T,
+    isExpected: (listing: LsResponse) => listing is T,
+): T {
+    const { data } = useQuery(browserListingQueryOptions(agent, loaded.path));
+
+    return data !== undefined && isExpected(data) ? data : loaded;
+}
+
 /** Picks the view for one file from its live metadata, which shares the route's cache. */
 function FileBrowserPage(props: {
     api: ApiClient;
     agent: Agent;
     path: string;
     parentPath: string | null;
-    lsResult: LsFileResponse;
+    loadedListing: LsFileResponse;
     gitContext: GitContextResponse;
     isEditorFullWindow: boolean;
     onToggleEditorFullWindow: () => void;
 }) {
     const agent = props.agent;
-    const lsResult = props.lsResult;
     const path = props.path;
     const navigate = Route.useNavigate();
     const search = Route.useSearch();
+    const diffMode = useGitDiffMode();
     const agents = useAgents();
+
+    const lsResult = useLiveListing(
+        agent,
+        props.loadedListing,
+        isLsFileResponse,
+    );
 
     const { data: metadata } = useSuspenseQuery(
         metadataQueryOptions(agent, lsResult.path),
     );
 
-    const fileName = path.split("/").pop() || lsResult.path;
+    const fileName = getBaseName(path);
     const downloadUrl = agent.getRawUrl(lsResult.path);
     const editable = metadata.editable;
     const viewableImage = metadata.viewable_image;
 
-    const activeView =
-        search.view === "git"
-            ? "git"
-            : search.view === "sync"
-              ? "sync"
-              : search.view === "details"
-                ? "details"
-                : "view";
-
+    // A file's default representation is its content, named "view" in the tab strip.
+    const activeView = search.view ?? "view";
     const isEditView = activeView === "view" && editable;
 
     const content =
@@ -566,6 +590,8 @@ function FileBrowserPage(props: {
                 agent={agent}
                 path={lsResult.path}
                 context={props.gitContext}
+                mode={diffMode.mode}
+                onModeChange={diffMode.setMode}
             />
         ) : activeView === "sync" ? (
             <SyncView
@@ -613,6 +639,7 @@ function FileBrowserPage(props: {
             />
         ) : (
             <FileDetailView
+                key={lsResult.path}
                 agent={agent}
                 path={path}
                 fileName={fileName}
@@ -624,7 +651,6 @@ function FileBrowserPage(props: {
     return (
         <BrowserRouteShell
             agent={agent}
-            agentId={agent.id}
             path={path}
             parentPath={props.parentPath}
             entryType="file"
@@ -644,25 +670,23 @@ function DirectoryBrowserPage(props: {
     agent: Agent;
     path: string;
     parentPath: string | null;
-    lsResult: LsDirectoryResponse;
-    view?: "details" | "sync" | "git";
+    loadedListing: LsDirectoryResponse;
     gitAvailable: boolean;
 }) {
     const [userState, setUserState] = useUserState();
     const agents = useAgents();
+    const navigate = Route.useNavigate();
+    const search = Route.useSearch();
 
     const { data: details } = useSuspenseQuery(
         agentDetailsQueryOptions(props.agent),
     );
 
-    const listingQuery = useQuery(
-        browserListingQueryOptions(props.agent, props.lsResult.path),
+    const lsResult = useLiveListing(
+        props.agent,
+        props.loadedListing,
+        isLsDirectoryResponse,
     );
-
-    const lsResult =
-        listingQuery.data && isLsDirectoryResponse(listingQuery.data)
-            ? listingQuery.data
-            : props.lsResult;
 
     const showHiddenFiles = userState.showHiddenFiles;
 
@@ -674,19 +698,34 @@ function DirectoryBrowserPage(props: {
         lsResult.files.filter((file) => file.type === "file"),
     );
 
-    const activeView =
-        props.view === "git"
-            ? "git"
-            : props.view === "details"
-              ? "details"
-              : props.view === "sync"
-                ? "sync"
-                : "files";
+    // A directory's default representation is its listing.
+    const activeView = search.view ?? "files";
+
+    const sort: FileSort | null =
+        search.sort === undefined
+            ? null
+            : { column: search.sort, direction: search.order ?? "ascending" };
+
+    /** Keeps the order in the URL so it survives a reload and can be shared. */
+    const changeSort = (column: FileSortColumn) => {
+        const direction =
+            sort?.column === column && sort.direction === "ascending"
+                ? "descending"
+                : "ascending";
+
+        void navigate({
+            search: (previous) => ({
+                ...previous,
+                sort: column,
+                order: direction === "descending" ? direction : undefined,
+            }),
+            replace: true,
+        });
+    };
 
     return (
         <BrowserRouteShell
             agent={props.agent}
-            agentId={props.agent.id}
             path={props.path}
             parentPath={props.parentPath}
             entryType="directory"
@@ -697,11 +736,10 @@ function DirectoryBrowserPage(props: {
                 <GitDirectoryView agent={props.agent} path={lsResult.path} />
             ) : activeView === "details" ? (
                 <DirectoryDetailView
+                    key={lsResult.path}
                     agent={props.agent}
                     path={props.path}
-                    directoryName={
-                        props.path.split("/").filter(Boolean).pop() ?? "/"
-                    }
+                    directoryName={getBaseName(props.path)}
                     lsResult={lsResult}
                 />
             ) : activeView === "sync" ? (
@@ -731,11 +769,11 @@ function DirectoryBrowserPage(props: {
                     <FileList
                         key={lsResult.path}
                         agent={props.agent}
-                        agentId={props.agent.id}
-                        agentName={props.agent.name}
                         directoryPath={lsResult.path}
                         files={[...directories, ...regularFiles]}
                         showHiddenFiles={showHiddenFiles}
+                        sort={sort}
+                        onSort={changeSort}
                         mountPoint={getMountPointForPath(
                             details.mount_points,
                             lsResult.path,
@@ -768,7 +806,7 @@ function wantsFileContentView(view: BrowserSearch["view"]) {
 
 /** Replaces history so a content URL for a file without viewable content does not stay on the stack. */
 function replaceUnsupportedFileView(
-    params: { agentId: string; _splat?: string },
+    params: BrowserParams,
     view: BrowserSearch["view"],
     metadata: MetadataResponse | null,
 ) {
@@ -787,13 +825,13 @@ function replaceUnsupportedFileView(
 
 /** Makes rendered markdown the canonical first view while line bookmarks stay in the editor. */
 function replaceDefaultMarkdownPreview(options: {
-    params: { agentId: string; _splat?: string };
+    params: BrowserParams;
     view: BrowserSearch["view"];
     filePath: string;
     metadata: MetadataResponse | null;
     line: BrowserSearch["line"];
     preview: BrowserSearch["preview"];
-    currentSearch: BrowserFullSearch;
+    currentSearch: BrowserSearch;
 }) {
     if (
         !wantsFileContentView(options.view) ||

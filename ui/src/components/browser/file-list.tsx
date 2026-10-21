@@ -29,17 +29,19 @@ import {
 } from "#ui/selected-files";
 import {
     compareFileEntries,
-    type FileSortColumn,
-    type FileSortDirection,
+    type FileSort,
     formatModifiedAge,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import type { FileSortColumn } from "#ui/browser-search";
+import { browserRoute } from "#ui/browser-route";
 import { formatSize } from "#ui/utils/path";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
 import {
     buildUnarchiveCommand,
     getArchiveInfo,
+    getDirectoryArchiveName,
     getCustomArchiveDirectoryError,
     type UnarchiveDestination,
 } from "#ui/utils/archive";
@@ -86,24 +88,20 @@ function useFileListShortcuts(props: {
 /** Filters only the loaded directory entries so recursive search remains in the shared dialog. */
 export function FileList(props: {
     agent: Agent;
-    agentId: string;
-    agentName: string;
     directoryPath: string;
     actions: React.ReactNode;
     files: LsEntry[];
     showHiddenFiles: boolean;
     mountPoint: MountPoint | null;
+    /** Comes from the URL so the order survives a reload; null keeps the listing order. */
+    sort: FileSort | null;
+    onSort: (column: FileSortColumn) => void;
 }) {
     const navigate = useNavigate();
     const agent = props.agent;
     const [filterFocusPath, setFilterFocusPath] = useAtom(filterFocusPathAtom);
     const filterInputRef = React.useRef<HTMLInputElement>(null);
     const [filter, setFilter] = React.useState("");
-
-    const [sort, setSort] = React.useState<{
-        column: FileSortColumn;
-        direction: FileSortDirection;
-    } | null>(null);
 
     const normalizedFilter = filter.toLowerCase();
     // A leading dot is a hidden-name query, so include those entries without flipping the toggle.
@@ -117,6 +115,8 @@ export function FileList(props: {
         entry.name.toLowerCase().includes(normalizedFilter),
     );
 
+    const sort = props.sort;
+
     const displayedFiles = sort
         ? [...filteredFiles].sort((left, right) => {
               return compareFileEntries(left, right, sort);
@@ -128,16 +128,6 @@ export function FileList(props: {
         filter,
         setFilter,
     });
-
-    const changeSort = (column: FileSortColumn) => {
-        setSort((current) => ({
-            column,
-            direction:
-                current?.column === column && current.direction === "ascending"
-                    ? "descending"
-                    : "ascending",
-        }));
-    };
 
     React.useEffect(() => {
         if (filterFocusPath !== props.directoryPath) {
@@ -165,9 +155,7 @@ export function FileList(props: {
 
         event.preventDefault();
         setFilterFocusPath(destinationPath);
-        await navigate({
-            to: agent.getBrowserUrl(destinationPath),
-        });
+        await navigate(browserRoute(agent.id, destinationPath));
     };
 
     return (
@@ -191,12 +179,10 @@ export function FileList(props: {
             </div>
             <FileTable
                 agent={props.agent}
-                agentId={props.agentId}
-                agentName={props.agentName}
                 directoryPath={props.directoryPath}
                 files={displayedFiles}
                 sort={sort}
-                onSort={changeSort}
+                onSort={props.onSort}
             />
             <FilesystemFooter mountPoint={props.mountPoint} />
         </div>
@@ -240,11 +226,9 @@ function FilesystemFooter(props: { mountPoint: MountPoint | null }) {
 /** Owns keyboard focus for the currently visible local file entries. */
 function FileTable(props: {
     agent: Agent;
-    agentId: string;
-    agentName: string;
     directoryPath: string;
     files: LsEntry[];
-    sort: { column: FileSortColumn; direction: FileSortDirection } | null;
+    sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
 }) {
     const tableRef = React.useRef<HTMLTableElement>(null);
@@ -313,11 +297,8 @@ function FileTable(props: {
                         <FileEntry
                             key={entry.name}
                             agent={props.agent}
-                            agentId={props.agentId}
-                            agentName={props.agentName}
                             directoryPath={props.directoryPath}
                             entry={entry}
-                            isParent={false}
                         />
                     ))}
                 </tbody>
@@ -330,7 +311,7 @@ function FileTable(props: {
 function SortableFileColumnHeader(props: {
     label: string;
     column: FileSortColumn;
-    sort: { column: FileSortColumn; direction: FileSortDirection } | null;
+    sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
 }) {
     const direction =
@@ -351,15 +332,16 @@ function SortableFileColumnHeader(props: {
             aria-sort={direction ?? "none"}
             className="p-0.5 text-left text-sm font-medium text-slate-400"
         >
-            <button
+            <Button
                 type="button"
+                variant="subtle"
                 onClick={() => props.onSort(props.column)}
                 aria-label={`Sort by ${props.label} ${nextDirection}`}
-                className="flex w-full items-center gap-1.5 rounded px-1.5 py-1.5 text-left transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="flex w-full justify-start gap-1.5 px-1.5 py-1.5 text-left font-medium text-slate-400 hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
                 {props.label}
                 <SortIcon className="h-3.5 w-3.5" />
-            </button>
+            </Button>
         </th>
     );
 }
@@ -500,7 +482,6 @@ function UnarchiveDialog(props: {
 /** Keeps mutations and download confirmation behind one compact row menu. */
 function FileEntryActions(props: {
     agent: Agent;
-    agentId: string;
     entryName: string;
     fullPath: string;
     directoryPath: string;
@@ -521,7 +502,7 @@ function FileEntryActions(props: {
     });
 
     const downloadName = props.isDirectory
-        ? `${props.entryName}.tar.gz`
+        ? getDirectoryArchiveName(props.entryName)
         : props.entryName;
 
     const archive = props.isDirectory ? null : getArchiveInfo(props.entryName);
@@ -599,19 +580,16 @@ function FileEntryActions(props: {
 /** Renders one metadata-rich path row and its selection state. */
 function FileEntry(props: {
     agent: Agent;
-    agentId: string;
-    agentName: string;
     directoryPath: string;
     entry: LsEntry;
-    isParent: boolean;
 }) {
     const toggleSelectedFile = useSetAtom(toggleSelectedFileAtom);
     const selectedFileKeys = useAtomValue(selectedFileKeysAtom);
-    const { agentId, agentName, directoryPath, entry, isParent } = props;
-    const isDirectory = entry.type === "directory" || isParent;
-    const fullPath = joinBrowserPath(directoryPath, entry.name);
-    const agent = props.agent;
-    const isSelected = selectedFileKeys.has(`${agentId}:${fullPath}`);
+    const entry = props.entry;
+    const isDirectory = entry.type === "directory";
+    const fullPath = joinBrowserPath(props.directoryPath, entry.name);
+    const isSelected = selectedFileKeys.has(`${props.agent.id}:${fullPath}`);
+    const entryType = isDirectory ? "directory" : "file";
 
     return (
         <tr
@@ -623,17 +601,17 @@ function FileEntry(props: {
                     role="checkbox"
                     label={
                         isSelected
-                            ? `Unselect ${isDirectory ? "directory" : "file"} ${entry.name}`
-                            : `Select ${isDirectory ? "directory" : "file"} ${entry.name}`
+                            ? `Unselect ${entryType} ${entry.name}`
+                            : `Select ${entryType} ${entry.name}`
                     }
                     checked={isSelected}
                     onCheckedChange={() =>
                         toggleSelectedFile({
-                            agentId,
-                            agentName,
+                            agentId: props.agent.id,
+                            agentName: props.agent.name,
                             path: fullPath,
                             fileName: entry.name,
-                            entryType: isDirectory ? "directory" : "file",
+                            entryType,
                         })
                     }
                 />
@@ -647,7 +625,7 @@ function FileEntry(props: {
             </td>
             <td className="p-1.5 sm:p-2">
                 <Link
-                    to={agent.getBrowserUrl(fullPath)}
+                    {...browserRoute(props.agent.id, fullPath)}
                     data-keyboard-focus-entry="true"
                     className="block min-w-0 truncate font-medium text-blue-400 hover:underline"
                 >
@@ -689,11 +667,10 @@ function FileEntry(props: {
             </td>
             <td className="p-1.5 text-right sm:p-2">
                 <FileEntryActions
-                    agent={agent}
-                    agentId={agentId}
+                    agent={props.agent}
                     entryName={entry.name}
                     fullPath={fullPath}
-                    directoryPath={directoryPath}
+                    directoryPath={props.directoryPath}
                     isDirectory={isDirectory}
                 />
             </td>

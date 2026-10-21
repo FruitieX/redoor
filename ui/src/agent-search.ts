@@ -19,7 +19,7 @@ const searchContextSchema = z.coerce
     .catch(undefined);
 
 /** Accepts booleans from both router navigation and directly entered query strings. */
-const optionalBooleanSchema = z
+export const optionalBooleanSchema = z
     .union([
         z.boolean(),
         z.literal("true").transform(() => true),

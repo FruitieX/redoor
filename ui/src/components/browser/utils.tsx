@@ -1,5 +1,6 @@
 import type { LsEntry } from "#bindings/LsEntry";
-import { ApiError, type Agent } from "#ui/api-client";
+import { ApiError } from "#ui/api-client";
+import type { FileSortColumn, FileSortDirection } from "#ui/browser-search";
 
 export function getImmediateParentPath(path: string): string | null {
     const normalizedPath = path.replace(/\/+$/, "");
@@ -8,10 +9,6 @@ export function getImmediateParentPath(path: string): string | null {
     const lastSlashIndex = normalizedPath.lastIndexOf("/");
 
     return lastSlashIndex === 0 ? "/" : normalizedPath.slice(0, lastSlashIndex);
-}
-
-export function getBrowserPathHref(agent: Agent, path: string) {
-    return agent.getBrowserUrl(path);
 }
 
 export type PathLoadError = {
@@ -54,10 +51,11 @@ export function sortFileEntries<T extends { name: string }>(entries: T[]): T[] {
     });
 }
 
-export type FileSortColumn =
-    "type" | "name" | "size" | "modified" | "owner" | "group";
-
-export type FileSortDirection = "ascending" | "descending";
+/** Pairs a listing column with its direction, which together decide the displayed order. */
+export type FileSort = {
+    column: FileSortColumn;
+    direction: FileSortDirection;
+};
 
 /** Formats the complete minute-level age used by modification-time tooltips. */
 export function formatModifiedAge(modifiedAt: number, now: number): string {
@@ -87,7 +85,7 @@ export function formatModifiedAge(modifiedAt: number, now: number): string {
 export function compareFileEntries(
     left: LsEntry,
     right: LsEntry,
-    sort: { column: FileSortColumn; direction: FileSortDirection },
+    sort: FileSort,
 ): number {
     let comparison = 0;
 
@@ -141,12 +139,4 @@ export function isBrowserPathInside(parentPath: string, candidatePath: string) {
     const prefix = parentPath.endsWith("/") ? parentPath : `${parentPath}/`;
 
     return candidatePath.startsWith(prefix);
-}
-
-export function getErrorMessage(cause: unknown, fallbackMessage: string) {
-    if (cause instanceof Error) {
-        return cause.message;
-    }
-
-    return fallbackMessage;
 }

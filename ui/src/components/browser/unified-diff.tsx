@@ -4,6 +4,8 @@ import { parse as parseDiff } from "diff2html";
 import { ColorSchemeType, LineType } from "diff2html/lib/types";
 import { Diff2HtmlUI } from "diff2html/lib/ui/js/diff2html-ui-base";
 import "diff2html/bundles/css/diff2html.min.css";
+import { getBrowserUrl } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import {
     HIGHLIGHT_LANGUAGE_NAMES,
@@ -102,9 +104,11 @@ function appendEditorLineLinks(root: HTMLElement, editorHref: string) {
 export function UnifiedDiff(props: {
     unifiedDiff: string;
     emptyMessage?: string;
-    /** Browser path for the current file so trailing Open links can jump with ?line=. */
-    editorHref?: string;
+    /** The current file, so trailing Open links can jump to it with ?line=. */
+    editorFile?: { agentId: string; path: string };
 }) {
+    const editorAgentId = props.editorFile?.agentId;
+    const editorPath = props.editorFile?.path;
     const targetRef = React.useRef<HTMLDivElement>(null);
     const resolvedTheme = useResolvedTheme();
     const navigate = useNavigate();
@@ -157,11 +161,12 @@ export function UnifiedDiff(props: {
 
         diffUi.draw();
 
-        const editorHref = props.editorHref;
-
-        if (editorHref === undefined) {
+        if (editorAgentId === undefined || editorPath === undefined) {
             return;
         }
+
+        // The anchors are plain DOM nodes, so they need a real href for new tabs and copying.
+        const editorHref = getBrowserUrl(editorAgentId, editorPath);
 
         linkDiffFileNames(target, editorHref);
         appendEditorLineLinks(target, editorHref);
@@ -188,7 +193,7 @@ export function UnifiedDiff(props: {
 
                 event.preventDefault();
                 void navigate({
-                    to: editorHref,
+                    ...browserRoute(editorAgentId, editorPath),
                     search: { line },
                 });
 
@@ -203,7 +208,7 @@ export function UnifiedDiff(props: {
 
             event.preventDefault();
             void navigate({
-                to: editorHref,
+                ...browserRoute(editorAgentId, editorPath),
                 search: {},
             });
         };
@@ -213,7 +218,7 @@ export function UnifiedDiff(props: {
         return () => {
             target.removeEventListener("click", handleEditorLinkClick);
         };
-    }, [props.unifiedDiff, props.editorHref, resolvedTheme, navigate]);
+    }, [props.unifiedDiff, editorAgentId, editorPath, resolvedTheme, navigate]);
 
     if (props.unifiedDiff === "") {
         return (
