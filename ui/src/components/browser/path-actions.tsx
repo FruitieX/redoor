@@ -1,6 +1,6 @@
 import React from "react";
-import { useMutation } from "@tanstack/react-query";
-import { getRouteApi, useNavigate, useRouter } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useAtomValue, useSetAtom } from "jotai";
 import {
     ArchiveRestore,
@@ -30,6 +30,7 @@ import {
     joinBrowserPath,
 } from "#ui/components/browser/utils";
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
+import { invalidateAgentData } from "#ui/queries";
 import {
     selectedFileKeysAtom,
     toggleSelectedFileAtom,
@@ -70,7 +71,7 @@ function RenamePathDialog(props: {
     onClose: () => void;
 }) {
     const navigate = useNavigate();
-    const router = useRouter();
+    const queryClient = useQueryClient();
     const [name, setName] = React.useState(props.currentName);
 
     const [validationError, setValidationError] = React.useState<string | null>(
@@ -101,7 +102,7 @@ function RenamePathDialog(props: {
             props.onClose();
 
             if (!props.navigateAfterRename) {
-                await router.invalidate();
+                await invalidateAgentData(queryClient, props.agent.id);
 
                 return;
             }
@@ -280,7 +281,7 @@ function DuplicatePathDialog(props: {
     onClose: () => void;
 }) {
     const { api } = rootRouteApi.useRouteContext();
-    const router = useRouter();
+    const queryClient = useQueryClient();
     const [name, setName] = React.useState(props.currentName);
 
     const [validationError, setValidationError] = React.useState<string | null>(
@@ -307,7 +308,7 @@ function DuplicatePathDialog(props: {
         },
         onSuccess: async () => {
             props.onClose();
-            await router.invalidate();
+            await invalidateAgentData(queryClient, props.agent.id);
         },
     });
 

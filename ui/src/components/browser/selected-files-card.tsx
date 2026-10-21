@@ -1,8 +1,8 @@
 import type { ResumeMode } from "#bindings/ResumeMode";
 import React from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import { useMutation } from "@tanstack/react-query";
-import { useRouter, useRouterState } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRouterState } from "@tanstack/react-router";
 import {
     Copy,
     Files,
@@ -22,6 +22,7 @@ import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
 import type { Agent, ApiClient, CopyExistingMode } from "#ui/api-client";
+import { invalidateAgentData } from "#ui/queries";
 import {
     selectedFilesAtom,
     clearSelectedFilesAtom,
@@ -586,7 +587,7 @@ export function SelectedFilesCard(props: {
     directoryPath: string;
     destinationFileNames: string[];
 }) {
-    const router = useRouter();
+    const queryClient = useQueryClient();
     const selectedFiles = useAtomValue(selectedFilesAtom);
     const unselectFile = useSetAtom(unselectFileAtom);
     const clearSelectedFiles = useSetAtom(clearSelectedFilesAtom);
@@ -742,7 +743,19 @@ export function SelectedFilesCard(props: {
                             });
                         }
                     });
-                    await router.invalidate();
+
+                    // Deleted items may live on several agents, including this directory's.
+                    const agentIds = new Set(
+                        targets.flatMap((target) =>
+                            target.agent ? [target.agent.id] : [],
+                        ),
+                    );
+
+                    await Promise.all(
+                        [...agentIds].map((agentId) =>
+                            invalidateAgentData(queryClient, agentId),
+                        ),
+                    );
                 }}
             >
                 <AffectedPathsList

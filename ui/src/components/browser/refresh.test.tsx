@@ -23,7 +23,7 @@ function RefreshHarness(props: { isDirty: boolean }) {
         path: "/workspace/file.txt",
         isDirty: props.isDirty,
     });
-    useBrowserRefreshTriggers();
+    useBrowserRefreshTriggers("agent-1");
 
     return (
         <>
@@ -85,7 +85,7 @@ test("refreshes the listing and a clean editor when terminal focus leaves", asyn
     // Creating a file can navigate while this git refresh is already fetching.
     expect(mocks.invalidateQueries).toHaveBeenCalledWith(
         {
-            queryKey: ["server-state", "git"],
+            queryKey: ["server-state", "agent", "agent-1", "git"],
         },
         {
             cancelRefetch: false,
@@ -96,8 +96,10 @@ test("refreshes the listing and a clean editor when terminal focus leaves", asyn
         {
             queryKey: [
                 "server-state",
-                "file-content",
+                "agent",
                 "agent-1",
+                "filesystem",
+                "content",
                 "/workspace/file.txt",
             ],
             type: "all",
@@ -125,7 +127,7 @@ test("keeps an unsaved editor while refreshing the listing", async () => {
     // Git still refreshes for a dirty editor, but must not abort an in-flight loader fetch.
     expect(mocks.invalidateQueries).toHaveBeenCalledWith(
         {
-            queryKey: ["server-state", "git"],
+            queryKey: ["server-state", "agent", "agent-1", "git"],
         },
         {
             cancelRefetch: false,
@@ -136,8 +138,10 @@ test("keeps an unsaved editor while refreshing the listing", async () => {
         expect.objectContaining({
             queryKey: [
                 "server-state",
-                "file-content",
+                "agent",
                 "agent-1",
+                "filesystem",
+                "content",
                 "/workspace/file.txt",
             ],
         }),

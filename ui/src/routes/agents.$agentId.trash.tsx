@@ -1,10 +1,18 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import {
+    useMutation,
+    useQueryClient,
+    useSuspenseQuery,
+} from "@tanstack/react-query";
+import {
+    createFileRoute,
+    Link,
+    Navigate,
+    redirect,
+} from "@tanstack/react-router";
 import { ArchiveRestore, Trash2 } from "lucide-react";
 
 import type { TrashItem } from "#bindings/TrashItem";
-import type { TrashListResponse } from "#bindings/TrashListResponse";
 import type { Agent } from "#ui/api-client";
 import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
@@ -15,37 +23,38 @@ import { TextField } from "#ui/components/text-field";
 import { Tooltip } from "#ui/components/tooltip";
 import { getErrorMessage, joinBrowserPath } from "#ui/components/browser/utils";
 import {
+    agentDetailsQueryOptions,
     fetchQueryUncancelled,
-    queryKeys,
+    invalidateAgentData,
+    loadAgent,
     trashQueryOptions,
 } from "#ui/queries";
+import { useRequiredAgent } from "#ui/use-agents";
 
 type TrashRow = TrashItem & { locationId: string; locationPath: string };
 
 export const Route = createFileRoute("/agents/$agentId/trash")({
-    loader: async ({ context, params, parentMatchPromise }) => {
-        const agentMatch = await parentMatchPromise;
-        const loaderData = agentMatch.loaderData;
+    loader: async ({ context, params }) => {
+        const agent = await loadAgent(context, params.agentId);
 
-        if (!loaderData || loaderData.kind !== "connected") {
+        if (agent.status !== "connected") {
             throw redirect({
                 to: "/agents/$agentId",
                 params: { agentId: params.agentId },
             });
         }
 
-        const agent = loaderData.agent;
-
-        if (!agent.supportsTrash) {
-            return { agent, os: loaderData.details.os, trash: null };
-        }
-
-        const trash = await fetchQueryUncancelled(
+        await fetchQueryUncancelled(
             context.queryClient,
-            trashQueryOptions(agent),
+            agentDetailsQueryOptions(agent),
         );
 
-        return { agent, os: loaderData.details.os, trash };
+        if (agent.supportsTrash) {
+            await fetchQueryUncancelled(
+                context.queryClient,
+                trashQueryOptions(agent),
+            );
+        }
     },
     component: TrashPage,
     errorComponent: RouteError,
@@ -76,9 +85,8 @@ function RestoreTrashDialog(props: {
                 destination_path: destinationPath.trim(),
             }),
         onSuccess: async () => {
-            await queryClient.invalidateQueries({
-                queryKey: queryKeys.trash(props.agent.id),
-            });
+            // A restored item reappears in listings, not only in the trash inventory.
+            await invalidateAgentData(queryClient, props.agent.id);
             props.onClose();
         },
     });
@@ -167,9 +175,7 @@ function EmptyTrashDialog(props: {
     const mutation = useMutation({
         mutationFn: () => props.agent.emptyTrash(),
         onSuccess: async () => {
-            await queryClient.invalidateQueries({
-                queryKey: queryKeys.trash(props.agent.id),
-            });
+            await invalidateAgentData(queryClient, props.agent.id);
             props.onClose();
         },
     });
@@ -199,11 +205,25 @@ function EmptyTrashDialog(props: {
     );
 }
 
-/** Lists all provider locations as one globally newest-first restore queue. */
+/** Leaves the page when the agent disconnects, since trash can only be read from a live agent. */
 function TrashPage() {
-    const { agent, os, trash: initialTrash } = Route.useLoaderData();
+    const { agentId } = Route.useParams();
+    const agent = useRequiredAgent(agentId);
 
-    if (!initialTrash) {
+    if (agent.status !== "connected") {
+        return <Navigate to="/agents/$agentId" params={{ agentId }} />;
+    }
+
+    return <TrashAvailability agent={agent} />;
+}
+
+/** Explains platforms without a restorable trash instead of an empty inventory. */
+function TrashAvailability(props: { agent: Agent }) {
+    const { data: details } = useSuspenseQuery(
+        agentDetailsQueryOptions(props.agent),
+    );
+
+    if (!props.agent.supportsTrash) {
         return (
             <main className="flex h-full items-center justify-center p-6">
                 <section className="max-w-lg rounded-lg border border-slate-800 bg-[#11141b] px-8 py-12 text-center">
@@ -215,27 +235,21 @@ function TrashPage() {
                         Trash inventory is not available
                     </h1>
                     <p className="mt-2 text-sm text-slate-400">
-                        {agent.supportsMoveToTrash
-                            ? `Items can be moved to the native ${os} Trash from file delete dialogs, but Redoor cannot list or restore them here.`
-                            : `Trash operations are not available on ${os}. Permanent deletion remains available from file delete dialogs.`}
+                        {props.agent.supportsMoveToTrash
+                            ? `Items can be moved to the native ${details.os} Trash from file delete dialogs, but Redoor cannot list or restore them here.`
+                            : `Trash operations are not available on ${details.os}. Permanent deletion remains available from file delete dialogs.`}
                     </p>
                 </section>
             </main>
         );
     }
 
-    return <TrashInventoryPage agent={agent} initialTrash={initialTrash} />;
+    return <TrashInventoryPage agent={props.agent} />;
 }
 
-/** Keeps supported-platform query hooks separate from the static unsupported state. */
-function TrashInventoryPage(props: {
-    agent: Agent;
-    initialTrash: TrashListResponse;
-}) {
-    const { data: trash } = useQuery({
-        ...trashQueryOptions(props.agent),
-        initialData: props.initialTrash,
-    });
+/** Lists all provider locations as one globally newest-first restore queue. */
+function TrashInventoryPage(props: { agent: Agent }) {
+    const { data: trash } = useSuspenseQuery(trashQueryOptions(props.agent));
 
     const [restoreItem, setRestoreItem] = React.useState<TrashRow | null>(null);
     const [isEmptyDialogOpen, setIsEmptyDialogOpen] = React.useState(false);

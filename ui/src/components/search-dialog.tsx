@@ -32,7 +32,11 @@ import { IconButton } from "#ui/components/icon-button";
 import { InputControl } from "#ui/components/input-control";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { Tooltip } from "#ui/components/tooltip";
-import { contentGrepQueryOptions, fileSearchQueryOptions } from "#ui/queries";
+import {
+    contentGrepQueryOptions,
+    fileSearchQueryOptions,
+    gitContextQueryOptions,
+} from "#ui/queries";
 import { useUserState } from "#ui/user-state";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
@@ -67,40 +71,50 @@ function gitRootFromContext(gitContext: GitContextResponse | undefined) {
         : null;
 }
 
-/** Derives the agent-wide search scope from browser loader data, with cwd as fallback. */
-function useSearchScope(agent: Agent): {
-    directory: string | null;
-    gitRoot: string | null;
-} {
-    return useMatches({
+/** Derives the agent-wide search scope from the browsed location, with cwd as fallback. */
+function useSearchScope(agent: Agent) {
+    const location = useMatches({
         select: (matches) => {
             const browserMatch = matches.find(
                 (match) => match.routeId === "/agents/$agentId/browser/$",
             );
 
-            const lsResult = browserMatch?.loaderData?.lsResult;
+            const loaderData = browserMatch?.loaderData;
+            const lsResult = loaderData?.lsResult;
 
-            const gitRoot = gitRootFromContext(
-                browserMatch?.loaderData?.gitContext,
-            );
+            // The browser route caches repository discovery under its requested path.
+            const gitContextPath =
+                loaderData?.kind === "connected" ? loaderData.path : null;
 
             if (lsResult && isLsDirectoryResponse(lsResult)) {
-                return { directory: lsResult.path, gitRoot };
+                return { directory: lsResult.path, gitContextPath };
             }
 
             if (lsResult && isLsFileResponse(lsResult)) {
                 return {
                     directory: getImmediateParentPath(lsResult.path) ?? "/",
-                    gitRoot,
+                    gitContextPath,
                 };
             }
 
             return {
                 directory: agent.status === "connected" ? agent.cwd : null,
-                gitRoot: null,
+                gitContextPath: null,
             };
         },
     });
+
+    // Reading the cached context means searching never probes git again.
+    const gitRootQuery = useQuery({
+        ...gitContextQueryOptions(agent, location.gitContextPath ?? ""),
+        enabled: location.gitContextPath !== null,
+        select: gitRootFromContext,
+    });
+
+    return {
+        directory: location.directory,
+        gitRoot: gitRootQuery.data ?? null,
+    };
 }
 
 type SearchChanges = Record<string, string | number | boolean | undefined>;

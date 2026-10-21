@@ -923,6 +923,7 @@ export class ApiClient {
     private sessionCookie: string | null = null;
     private accessToken: string | null = null;
     private unauthorizedHandler: (() => void) | undefined;
+    private agentClients = new WeakMap<AgentInfoResponse, Agent>();
 
     constructor(baseUrl: string) {
         this.baseUrl = baseUrl;
@@ -1044,16 +1045,44 @@ export class ApiClient {
         );
     }
 
-    async listAgents(): Promise<Agent[]> {
+    /**
+     * Fetches the plain inventory snapshot that the UI keeps in its query cache. Plain JSON
+     * lets TanStack Query structurally share unchanged agents across refetches, which class
+     * instances would defeat.
+     */
+    async listAgentInfos(): Promise<AgentInfoResponse[]> {
         const response = await apiRequest<AgentListResponse>(
             `${this.baseUrl}/api/v1/agents`,
             undefined,
             this.requestContext(),
         );
 
-        return response.agents.map(
-            (info) => new Agent(this.baseUrl, info, this.requestContext()),
-        );
+        return response.agents;
+    }
+
+    /**
+     * Returns the request client for one inventory snapshot. Memoizing on the snapshot object
+     * keeps the client's identity stable for as long as the cache keeps that object, so memos
+     * and effects that depend on an agent only rerun when its data really changed.
+     */
+    agentFor(info: AgentInfoResponse): Agent {
+        const existing = this.agentClients.get(info);
+
+        if (existing) {
+            return existing;
+        }
+
+        const agent = new Agent(this.baseUrl, info, this.requestContext());
+        this.agentClients.set(info, agent);
+
+        return agent;
+    }
+
+    /** Lists agent request clients for scripts and tests that do not use the query cache. */
+    async listAgents(): Promise<Agent[]> {
+        const infos = await this.listAgentInfos();
+
+        return infos.map((info) => this.agentFor(info));
     }
 
     /** Persists and dynamically registers one dormant SSH-backed managed agent. */

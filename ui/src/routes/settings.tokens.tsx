@@ -10,6 +10,7 @@ import type {
 } from "#ui/api-client";
 import { Route as RootRoute } from "./__root";
 import { accessTokensQueryOptions, queryKeys } from "#ui/queries";
+import { useAgents } from "#ui/use-agents";
 import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
@@ -88,7 +89,7 @@ function formatTimestamp(value: string | null): string {
 /** Owns transient secrets only while their modal is open and keeps them outside Query caches. */
 function AccessTokenSettingsPage() {
     const { api } = RootRoute.useRouteContext();
-    const { agents } = RootRoute.useLoaderData();
+    const agents = useAgents();
     const queryClient = useQueryClient();
     const tokensQuery = useQuery(accessTokensQueryOptions(api));
     const [createOpen, setCreateOpen] = React.useState(false);

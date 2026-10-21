@@ -3,6 +3,8 @@ import {
     queryOptions,
     isCancelledError,
     type FetchQueryOptions,
+    type InvalidateOptions,
+    type Query,
     type QueryClient,
     type QueryKey,
 } from "@tanstack/react-query";
@@ -10,6 +12,10 @@ import {
 import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import type { Agent, ApiClient } from "#ui/api-client";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
+import type {
+    ManagedAgentFormConfiguration,
+    ManagedAgentKind,
+} from "#ui/components/managed-agent-form";
 
 /**
  * Keeps cache refreshes from turning an otherwise valid route load into an error.
@@ -36,10 +42,79 @@ export async function fetchQueryUncancelled<
     }
 }
 
-/** Centralizes cache keys so loaders, components, and mutations share server state. */
+/** The router context route loaders receive, which is enough to prime the query cache. */
+export type QueryContext = { api: ApiClient; queryClient: QueryClient };
+
+/**
+ * Tags query data that is a user's working copy rather than a mirror of the server.
+ * Agent-wide invalidation skips it so a refresh can never overwrite unsaved editor text.
+ */
+const EDITOR_BUFFER_META = { editorBuffer: true } as const;
+
+/** Describes the filters shared by recursive file search keys and options. */
+export type FileSearchParams = {
+    query: string;
+    timeoutSeconds: number;
+    includeHidden: boolean;
+    respectGitignore: boolean;
+    caseSensitivity: CaseSensitivity;
+};
+
+/** Extends file search with the line-oriented options only content grep has. */
+export type ContentGrepParams = FileSearchParams & {
+    regex: boolean;
+    contextSize: number;
+};
+
+/**
+ * Centralizes cache keys so loaders, components, and mutations share server state.
+ *
+ * Everything that belongs to one agent lives under `agent(id)`, so one prefix refreshes or
+ * drops a whole agent. The inventory list is deliberately a sibling (`agents()`) and not
+ * the parent: refreshing the list must not mark every agent's files stale.
+ */
 export const queryKeys = {
     all: ["server-state"] as const,
+    /** The inventory list of all agents, kept as plain `AgentInfoResponse` data. */
     agents: () => [...queryKeys.all, "agents"] as const,
+    /** Prefix of every agent's subtree, for refreshing all agents at once. */
+    allAgentData: () => [...queryKeys.all, "agent"] as const,
+    /** Prefix of everything cached for one agent. */
+    agent: (agentId: string) => [...queryKeys.allAgentData(), agentId] as const,
+    agentDetails: (agentId: string) =>
+        [...queryKeys.agent(agentId), "details"] as const,
+    /** Editable TOML settings of a managed agent. */
+    agentConfiguration: (agentId: string) =>
+        [...queryKeys.agent(agentId), "configuration"] as const,
+    agentLoggingLevel: (agentId: string) =>
+        [...queryKeys.agent(agentId), "logging-level"] as const,
+    accounts: (agentId: string) =>
+        [...queryKeys.agent(agentId), "accounts"] as const,
+    trash: (agentId: string) => [...queryKeys.agent(agentId), "trash"] as const,
+    /** Prefix of everything addressed by a filesystem path on one agent. */
+    filesystem: (agentId: string) =>
+        [...queryKeys.agent(agentId), "filesystem"] as const,
+    /** Prefix of every cached directory or file `ls` result of one agent. */
+    browserListings: (agentId: string) =>
+        [...queryKeys.filesystem(agentId), "listing"] as const,
+    browserListing: (agentId: string, path: string) =>
+        [...queryKeys.browserListings(agentId), path] as const,
+    metadata: (agentId: string, path: string) =>
+        [...queryKeys.filesystem(agentId), "metadata", path] as const,
+    /** Editor bytes; their query options carry `EDITOR_BUFFER_META`. */
+    fileContent: (agentId: string, path: string) =>
+        [...queryKeys.filesystem(agentId), "content", path] as const,
+    git: (agentId: string) => [...queryKeys.agent(agentId), "git"] as const,
+    gitContext: (agentId: string, path: string) =>
+        [...queryKeys.git(agentId), "context", path] as const,
+    gitStatus: (agentId: string, path: string) =>
+        [...queryKeys.git(agentId), "status", path] as const,
+    gitDiff: (agentId: string, files: string[], mode: GitDiffMode) =>
+        [...queryKeys.git(agentId), "diff", files, mode] as const,
+    fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
+        [...queryKeys.agent(agentId), "file-search", path, search] as const,
+    contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
+        [...queryKeys.agent(agentId), "content-grep", path, search] as const,
     transfers: () => [...queryKeys.all, "transfers"] as const,
     /** Resumable partials, rediscovered from the connected destination agents. */
     partials: () => [...queryKeys.all, "partials"] as const,
@@ -50,84 +125,128 @@ export const queryKeys = {
     accessTokens: () => [...queryKeys.all, "access-tokens"] as const,
     serverLoggingLevel: () =>
         [...queryKeys.all, "server-logging-level"] as const,
-    agentLoggingLevel: (agentId: string) =>
-        [...queryKeys.all, "agents", agentId, "logging-level"] as const,
-    /**
-     * Editor bytes are a one-shot buffer, not agent inventory. Nesting under
-     * `agents()` would let RefreshListener prefix-match and mark the file stale.
-     */
-    fileContent: (agentId: string, path: string) =>
-        [...queryKeys.all, "file-content", agentId, path] as const,
-    browserListing: (agentId: string, path: string) =>
-        [...queryKeys.all, "agents", agentId, "browser-listing", path] as const,
-    git: () => [...queryKeys.all, "git"] as const,
-    gitContext: (agentId: string, path: string) =>
-        [...queryKeys.git(), agentId, "context", path] as const,
-    gitStatus: (agentId: string, path: string) =>
-        [...queryKeys.git(), agentId, "status", path] as const,
-    gitDiff: (agentId: string, files: string[], mode: GitDiffMode) =>
-        [...queryKeys.git(), agentId, "diff", files, mode] as const,
-    trash: (agentId: string) =>
-        [...queryKeys.all, "agents", agentId, "trash"] as const,
-    accounts: (agentId: string) =>
-        [...queryKeys.all, "agents", agentId, "accounts"] as const,
-    fileSearch: (
-        agentId: string,
-        path: string,
-        search: {
-            query: string;
-            timeoutSeconds: number;
-            includeHidden: boolean;
-            respectGitignore: boolean;
-            caseSensitivity: CaseSensitivity;
-        },
-    ) =>
-        [
-            ...queryKeys.all,
-            "agents",
-            agentId,
-            "file-search",
-            path,
-            search.query,
-            search.timeoutSeconds,
-            search.includeHidden,
-            search.respectGitignore,
-            search.caseSensitivity,
-        ] as const,
-    contentGrep: (
-        agentId: string,
-        path: string,
-        search: {
-            query: string;
-            timeoutSeconds: number;
-            includeHidden: boolean;
-            respectGitignore: boolean;
-            regex: boolean;
-            contextSize: number;
-            caseSensitivity: CaseSensitivity;
-        },
-    ) =>
-        [
-            ...queryKeys.all,
-            "agents",
-            agentId,
-            "content-grep",
-            path,
-            search.query,
-            search.timeoutSeconds,
-            search.includeHidden,
-            search.respectGitignore,
-            search.caseSensitivity,
-            search.regex,
-            search.contextSize,
-        ] as const,
 };
 
-/** Shares the retained agent inventory between navigation and status refreshes. */
+/** Tells server mirrors, which a refresh may replace, from editor working copies. */
+function isServerMirror(query: Query): boolean {
+    return query.meta?.editorBuffer !== true;
+}
+
+/**
+ * Marks one agent's cached data stale and refetches whatever is on screen. Mutations and
+ * server events share this single entry point after changing an agent's state, so no
+ * caller has to know which keys a change might touch. Editor buffers are excluded: only
+ * the editor decides when its clean text may be replaced.
+ */
+export function invalidateAgentData(
+    queryClient: QueryClient,
+    agentId: string,
+    options?: InvalidateOptions,
+): Promise<void> {
+    return queryClient.invalidateQueries(
+        {
+            queryKey: queryKeys.agent(agentId),
+            predicate: isServerMirror,
+        },
+        options,
+    );
+}
+
+/** Refreshes every agent's cached data when a change cannot be attributed to one agent. */
+export function invalidateAllAgentData(
+    queryClient: QueryClient,
+): Promise<void> {
+    return queryClient.invalidateQueries({
+        queryKey: queryKeys.allAgentData(),
+        predicate: isServerMirror,
+    });
+}
+
+/**
+ * How long the inventory is trusted without a refetch. Server events invalidate it, so
+ * this only bounds how long a missed event can leave outdated state on screen.
+ */
+const AGENTS_STALE_MS = 30_000;
+
+/** Load and uptime drift continuously, but not fast enough to refetch on every mount. */
+const AGENT_DETAILS_STALE_MS = 10_000;
+
+/** Trash changes only through user actions or other tools, so a short window is enough. */
+const TRASH_STALE_MS = 5_000;
+
+/** How often the inventory refreshes while a managed agent starts, which pushes no event. */
+const MANAGED_STARTUP_POLL_MS = 1000;
+
+/**
+ * Shares the retained agent inventory between navigation and status refreshes.
+ * While a managed agent is starting, its provisioning steps change without a server
+ * event, so the list polls until startup settles.
+ */
 export function agentsQueryOptions(api: ApiClient) {
     return queryOptions({
         queryKey: queryKeys.agents(),
-        queryFn: () => api.listAgents(),
+        queryFn: () => api.listAgentInfos(),
+        staleTime: AGENTS_STALE_MS,
+        refetchInterval: (query) =>
+            query.state.data?.some(
+                (agent) => agent.managed && agent.status === "starting",
+            )
+                ? MANAGED_STARTUP_POLL_MS
+                : false,
+    });
+}
+
+/**
+ * Resolves one agent's request client from the inventory cache, fetching it when absent or
+ * stale. Loaders use this instead of reading a parent route's data so every route depends
+ * on the query cache alone.
+ */
+export async function loadAgent(
+    context: QueryContext,
+    agentId: string,
+): Promise<Agent> {
+    const infos = await fetchQueryUncancelled(
+        context.queryClient,
+        agentsQueryOptions(context.api),
+    );
+
+    const info = infos.find((entry) => entry.id === agentId);
+
+    if (!info) {
+        throw new Error(`Agent not found: ${agentId}`);
+    }
+
+    return context.api.agentFor(info);
+}
+
+/** Shares live agent facts (load, uptime, mounts) between route loaders and pages. */
+export function agentDetailsQueryOptions(agent: Agent) {
+    return queryOptions({
+        queryKey: queryKeys.agentDetails(agent.id),
+        queryFn: () => agent.getDetails(),
+        staleTime: AGENT_DETAILS_STALE_MS,
+    });
+}
+
+/** Shares a managed agent's TOML settings between the edit loader and its form. */
+export function agentConfigurationQueryOptions(
+    api: ApiClient,
+    agentId: string,
+    kind: ManagedAgentKind,
+) {
+    return queryOptions({
+        queryKey: queryKeys.agentConfiguration(agentId),
+        queryFn: async (): Promise<ManagedAgentFormConfiguration> =>
+            kind === "local"
+                ? {
+                      kind,
+                      value: await api.getLocalAgentConfiguration(agentId),
+                  }
+                : {
+                      kind,
+                      value: await api.getSshAgentConfiguration(agentId),
+                  },
+        staleTime: Number.POSITIVE_INFINITY,
     });
 }
 
@@ -192,6 +311,7 @@ export function agentLoggingLevelQueryOptions(agent: Agent) {
  * Reads editable text once so the loader and textarea share a cached buffer.
  * Infinite staleTime keeps later fetchQuery/preload/invalidation off the wire.
  * The editor opts into window-focus refetch while clean; Save writes the cache.
+ * The editor-buffer meta keeps agent-wide invalidation from replacing unsaved text.
  */
 export function fileContentQueryOptions(agent: Agent, path: string) {
     return queryOptions({
@@ -202,6 +322,7 @@ export function fileContentQueryOptions(agent: Agent, path: string) {
             return response.text();
         },
         staleTime: Number.POSITIVE_INFINITY,
+        meta: EDITOR_BUFFER_META,
     });
 }
 
@@ -210,6 +331,15 @@ export function browserListingQueryOptions(agent: Agent, path: string) {
     return queryOptions({
         queryKey: queryKeys.browserListing(agent.id, path),
         queryFn: () => agent.ls(path),
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/** Shares a file's open-mode facts and download tokens between its loader and detail views. */
+export function metadataQueryOptions(agent: Agent, path: string) {
+    return queryOptions({
+        queryKey: queryKeys.metadata(agent.id, path),
+        queryFn: () => agent.metadata(path),
         staleTime: Number.POSITIVE_INFINITY,
     });
 }
@@ -259,6 +389,7 @@ export function trashQueryOptions(agent: Agent) {
     return queryOptions({
         queryKey: queryKeys.trash(agent.id),
         queryFn: () => agent.listTrash(),
+        staleTime: TRASH_STALE_MS,
     });
 }
 
@@ -266,13 +397,7 @@ export function trashQueryOptions(agent: Agent) {
 export function fileSearchQueryOptions(
     agent: Agent,
     path: string,
-    search: {
-        query: string;
-        timeoutSeconds: number;
-        includeHidden: boolean;
-        respectGitignore: boolean;
-        caseSensitivity: CaseSensitivity;
-    },
+    search: FileSearchParams,
 ) {
     return queryOptions({
         queryKey: queryKeys.fileSearch(agent.id, path, search),
@@ -293,15 +418,7 @@ export function fileSearchQueryOptions(
 export function contentGrepQueryOptions(
     agent: Agent,
     path: string,
-    search: {
-        query: string;
-        timeoutSeconds: number;
-        includeHidden: boolean;
-        respectGitignore: boolean;
-        regex: boolean;
-        contextSize: number;
-        caseSensitivity: CaseSensitivity;
-    },
+    search: ContentGrepParams,
 ) {
     return queryOptions({
         queryKey: queryKeys.contentGrep(agent.id, path, search),

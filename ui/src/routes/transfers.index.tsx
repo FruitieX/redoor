@@ -1,26 +1,24 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ArrowLeftRight } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { useSuspenseQuery } from "@tanstack/react-query";
 
 import { Route as RootRoute } from "./__root";
 import { TransferList } from "#ui/components/transfer-list";
 import { ResumableTransfers } from "#ui/components/resumable-transfers";
 import { transfersQueryOptions } from "#ui/queries";
+import { useAgents } from "#ui/use-agents";
 
 export const Route = createFileRoute("/transfers/")({
     component: TransfersPage,
 });
 
 function TransfersPage() {
-    const { agents, transferProgress: initialTransferProgress } =
-        RootRoute.useLoaderData();
-
     const { api } = RootRoute.useRouteContext();
+    const agents = useAgents();
 
-    const { data: transferProgress } = useQuery({
-        ...transfersQueryOptions(api),
-        initialData: initialTransferProgress,
-    });
+    const { data: transferProgress } = useSuspenseQuery(
+        transfersQueryOptions(api),
+    );
 
     return (
         <div className="p-4 sm:p-8">

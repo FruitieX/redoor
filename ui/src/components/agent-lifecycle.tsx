@@ -1,6 +1,5 @@
 import * as React from "react";
-import { useMutation } from "@tanstack/react-query";
-import { useRouter } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAtomValue, useSetAtom } from "jotai";
 import { HardDrive, LoaderCircle } from "lucide-react";
 
@@ -12,6 +11,7 @@ import {
 import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { Tooltip } from "#ui/components/tooltip";
+import { queryKeys } from "#ui/queries";
 import {
     formatAgentRecency,
     formatElapsedSecsMs,
@@ -26,7 +26,7 @@ export function AgentLifecycle(props: {
     agent: Agent;
     preserveDestination?: boolean;
 }) {
-    const router = useRouter();
+    const queryClient = useQueryClient();
     const startStates = useAtomValue(agentStartStatesAtom);
     const setStartStates = useSetAtom(agentStartStatesAtom);
     const state = startStates[props.agent.id];
@@ -35,6 +35,13 @@ export function AgentLifecycle(props: {
 
     const shouldAppearStarting =
         props.agent.status === "starting" || state?.starting === true;
+
+    /** Shows the lifecycle change a request caused without waiting for the server event. */
+    const refreshAgents = () =>
+        queryClient.invalidateQueries({
+            queryKey: queryKeys.agents(),
+            exact: true,
+        });
 
     const startMutation = useMutation({
         mutationFn: () => props.agent.start(),
@@ -48,7 +55,7 @@ export function AgentLifecycle(props: {
                 },
             }));
         },
-        onSuccess: () => router.invalidate(),
+        onSuccess: refreshAgents,
         onError: (error) => {
             setStartStates((states) => ({
                 ...states,
@@ -75,7 +82,7 @@ export function AgentLifecycle(props: {
                 },
             }));
         },
-        onSuccess: () => router.invalidate(),
+        onSuccess: refreshAgents,
         onError: (error) => {
             setStartStates((states) => ({
                 ...states,
@@ -100,7 +107,7 @@ export function AgentLifecycle(props: {
 
                 return next;
             });
-            await router.invalidate();
+            await refreshAgents();
         },
     });
 

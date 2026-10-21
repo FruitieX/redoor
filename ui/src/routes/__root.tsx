@@ -4,7 +4,6 @@ import {
     Link,
     useLocation,
     useMatches,
-    useRouter,
     useRouterState,
     createRootRouteWithContext,
 } from "@tanstack/react-router";
@@ -14,11 +13,15 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import { ArrowUpDown, Files, SquareTerminal, X } from "lucide-react";
 import {
     ApiClient,
+    type Agent,
     type TransferProgressEntry,
-    type ServerInfoResponse,
 } from "#ui/api-client";
 import { isLsDirectoryResponse, isLsFileResponse } from "#ui/ls-response";
-import { useMutation, useQuery, type QueryClient } from "@tanstack/react-query";
+import {
+    useMutation,
+    useSuspenseQuery,
+    type QueryClient,
+} from "@tanstack/react-query";
 
 import {
     selectedFilesAtom,
@@ -41,6 +44,7 @@ import { rememberAgentTabLocationAtom } from "#ui/agent-tab-locations";
 import {
     agentsQueryOptions,
     fetchQueryUncancelled,
+    invalidateAllAgentData,
     serverInfoQueryOptions,
     transfersQueryOptions,
 } from "#ui/queries";
@@ -54,7 +58,6 @@ import {
     isVimEditorTarget,
 } from "#ui/utils/keyboard";
 import { RefreshListener } from "#ui/refresh-listener";
-import { emptyServerInfo } from "#ui/empty-server-info";
 import { OverlayChromeLayout } from "#ui/components/overlay-chrome-layout";
 import { ApplicationNavigation } from "#ui/components/application-navigation";
 import { AgentNavigation } from "#ui/components/agent-navigation";
@@ -68,6 +71,7 @@ import {
     bottomDrawerActiveTabAtom,
 } from "#ui/bottom-drawer-state";
 import { openSideMenuAtom, usePersistentSideMenus } from "#ui/side-menu-state";
+import { useAgents } from "#ui/use-agents";
 
 interface AppRouterContext {
     api: ApiClient;
@@ -76,30 +80,15 @@ interface AppRouterContext {
 
 export const ding = () => {};
 
-export type RootLoaderData = {
-    agents: Awaited<ReturnType<ApiClient["listAgents"]>>;
-    transferProgress: Awaited<ReturnType<ApiClient["getTransferProgress"]>>;
-    serverInfo: ServerInfoResponse;
-};
-
-export function getAgentFromRootLoaderData(
-    loaderData: RootLoaderData,
-    agentId: string,
-) {
-    return loaderData.agents.find((agent) => agent.id === agentId);
-}
-
 export const Route = createRootRouteWithContext<AppRouterContext>()({
+    // The shell only primes the cache; components read the same queries, so server events
+    // and mutations refresh the UI by invalidating query keys instead of reloading routes.
     loader: async ({ context, location }) => {
         if (location.pathname === "/login") {
-            return {
-                agents: [],
-                transferProgress: { transfers: [] },
-                serverInfo: emptyServerInfo,
-            } satisfies RootLoaderData;
+            return;
         }
 
-        const [agents, transferProgress, serverInfo] = await Promise.all([
+        await Promise.all([
             fetchQueryUncancelled(
                 context.queryClient,
                 agentsQueryOptions(context.api),
@@ -117,12 +106,6 @@ export const Route = createRootRouteWithContext<AppRouterContext>()({
                 userStateQueryOptions(context.api),
             ),
         ]);
-
-        return {
-            agents,
-            transferProgress,
-            serverInfo,
-        } satisfies RootLoaderData;
     },
     component: RootRouteLayout,
 });
@@ -136,8 +119,8 @@ function RootRouteLayout() {
 
 /** Derives contextual view navigation strictly from already loaded route and agent data. */
 function useAgentViewContext(
-    agents: RootLoaderData["agents"],
-    activeAgent: RootLoaderData["agents"][number] | undefined,
+    agents: Agent[],
+    activeAgent: Agent | undefined,
     pathname: string,
 ) {
     const browserViewLocation = useMatches({
@@ -228,34 +211,6 @@ function useAgentViewContext(
     return null;
 }
 
-/** Polls only while managed startup can change shell navigation without a refresh event. */
-function useManagedAgentRefresh(
-    agents: RootLoaderData["agents"],
-    router: ReturnType<typeof useRouter>,
-) {
-    React.useEffect(() => {
-        if (
-            !agents.some(
-                (agent) => agent.managed && agent.status === "starting",
-            )
-        ) {
-            return;
-        }
-
-        let invalidating = false;
-
-        const timer = window.setInterval(() => {
-            if (invalidating) return;
-            invalidating = true;
-            void router.invalidate().finally(() => {
-                invalidating = false;
-            });
-        }, 1000);
-
-        return () => window.clearInterval(timer);
-    }, [agents, router]);
-}
-
 /** Resolves the closest useful shell directory from the active route's loaded data. */
 function useTerminalCwd() {
     return useMatches({
@@ -277,23 +232,15 @@ function useTerminalCwd() {
                     : browserMatch.loaderData.path;
             }
 
-            const detailsMatch = matches.find(
-                (match) => match.routeId === "/agents/$agentId",
-            );
-
-            return detailsMatch?.loaderData?.kind === "connected"
-                ? detailsMatch.loaderData.agent.cwd
-                : null;
+            // Outside the browser the shell falls back to the active agent's own cwd.
+            return null;
         },
     });
 }
 
 function RootLayout() {
-    const { agents, transferProgress: initialTransferProgress } =
-        Route.useLoaderData();
-
+    const agents = useAgents();
     const location = useLocation();
-    const router = useRouter();
     const { api, queryClient } = Route.useRouteContext();
     const [openMenu, setOpenMenu] = useAtom(openSideMenuAtom);
 
@@ -304,10 +251,9 @@ function RootLayout() {
     const applicationMenuTriggerRef = React.useRef<HTMLButtonElement>(null);
     const agentMenuTriggerRef = React.useRef<HTMLButtonElement>(null);
 
-    const { data: transferProgress } = useQuery({
-        ...transfersQueryOptions(api),
-        initialData: initialTransferProgress,
-    });
+    const { data: transferProgress } = useSuspenseQuery(
+        transfersQueryOptions(api),
+    );
 
     const rememberAgentTabLocation = useSetAtom(rememberAgentTabLocationAtom);
 
@@ -381,11 +327,11 @@ function RootLayout() {
     });
 
     React.useEffect(() => {
-        const refreshListener = new RefreshListener(api, router, queryClient);
+        const refreshListener = new RefreshListener(api, queryClient);
         refreshListener.start();
 
         return () => refreshListener.stop();
-    }, [api, queryClient, router]);
+    }, [api, queryClient]);
 
     React.useEffect(() => {
         if (
@@ -401,8 +347,6 @@ function RootLayout() {
             pathname: location.pathname,
         });
     }, [activeAgent, location.pathname, rememberAgentTabLocation]);
-
-    useManagedAgentRefresh(agents, router);
 
     React.useEffect(() => {
         if (isPersistentSideMenus) {
@@ -443,7 +387,7 @@ function RootLayout() {
             <GlobalFileImportHandler destination={importDestination} />
             <UploadQueueManager
                 agents={agents}
-                onUploadsChanged={() => router.invalidate()}
+                onUploadsChanged={() => invalidateAllAgentData(queryClient)}
             />
             <ApplicationNavigation
                 pathname={location.pathname}
@@ -503,10 +447,10 @@ function RootLayout() {
 
 /** Owns shared tool state so the application shell only supplies loaded context. */
 function ApplicationBottomDrawer(props: {
-    agents: RootLoaderData["agents"];
+    agents: Agent[];
     transfers: TransferProgressEntry[];
     activeTerminalTarget: {
-        agent: RootLoaderData["agents"][number];
+        agent: Agent;
         cwd: string;
     } | null;
     isTerminalFullWindow: boolean;
@@ -649,7 +593,7 @@ function SelectedFilesPanelActions(props: {
 
 /** Displays selected paths in their scan-friendly order with per-item removal controls. */
 function SelectedFilesTable(props: {
-    agents: RootLoaderData["agents"];
+    agents: Agent[];
     selectedFiles: SelectedPath[];
     onUnselectFile: (file: Pick<SelectedPath, "agentId" | "path">) => void;
 }) {
@@ -781,7 +725,7 @@ function SelectedFilesTable(props: {
 /**
  * Shows globally selected items inside the shared drawer without owning its chrome.
  */
-function SelectedFilesPane(props: { agents: RootLoaderData["agents"] }) {
+function SelectedFilesPane(props: { agents: Agent[] }) {
     const selectedFiles = useAtomValue(selectedFilesAtom);
     const unselectFile = useSetAtom(unselectFileAtom);
     const clearSelectedFiles = useSetAtom(clearSelectedFilesAtom);
@@ -882,7 +826,7 @@ function getTransferSummary(transfers: TransferProgressEntry[]) {
 
 /** Shows active transfers inside the shared drawer while history remains on its route. */
 function TransferProgressPane(props: {
-    agents: Awaited<ReturnType<ApiClient["listAgents"]>>;
+    agents: Agent[];
     transfers: TransferProgressEntry[];
 }) {
     const { api } = Route.useRouteContext();

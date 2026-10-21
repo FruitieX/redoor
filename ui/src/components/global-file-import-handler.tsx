@@ -4,7 +4,7 @@ import { useSetAtom } from "jotai";
 import { ClipboardPaste, Upload } from "lucide-react";
 import { ApiError, type Agent } from "#ui/api-client";
 import { joinBrowserPath } from "#ui/components/browser/utils";
-import { browserListingQueryOptions } from "#ui/queries";
+import { invalidateAgentData } from "#ui/queries";
 import { focusAndSelectFileNameStem } from "#ui/utils/file-name";
 import {
     enqueueUploadBatchAtom,
@@ -314,9 +314,7 @@ function usePastedContentImport(props: {
             return request.destination;
         },
         onSuccess: (destination) => {
-            void queryClient.invalidateQueries(
-                browserListingQueryOptions(destination.agent, destination.path),
-            );
+            void invalidateAgentData(queryClient, destination.agent.id);
         },
     });
 

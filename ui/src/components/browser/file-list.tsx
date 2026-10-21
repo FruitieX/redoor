@@ -1,6 +1,7 @@
 import React from "react";
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
-import { Link, useNavigate, useRouter } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
     ArrowDownUp,
     ChevronDown,
@@ -35,6 +36,7 @@ import {
     formatModifiedAge,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import { invalidateAgentData } from "#ui/queries";
 import { formatSize } from "#ui/utils/path";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
@@ -507,7 +509,7 @@ function FileEntryActions(props: {
     directoryPath: string;
     isDirectory: boolean;
 }) {
-    const router = useRouter();
+    const queryClient = useQueryClient();
     const unselectFile = useSetAtom(unselectFileAtom);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
 
@@ -602,7 +604,7 @@ function FileEntryActions(props: {
                         agentId: props.agentId,
                         path: props.fullPath,
                     });
-                    await router.invalidate();
+                    await invalidateAgentData(queryClient, props.agent.id);
                 }}
             >
                 <p className="overflow-x-auto whitespace-nowrap rounded-md border border-slate-800 bg-[#0b0d12] px-3 py-2.5 font-mono text-sm text-slate-300">

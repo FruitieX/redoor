@@ -1,6 +1,6 @@
 import * as React from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useRouter } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import {
     ArrowLeftRight,
     Home,
@@ -20,7 +20,12 @@ import { SidebarModeToggle } from "#ui/components/sidebar-mode-toggle";
 import { SideMenu } from "#ui/components/side-menu";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import { Tooltip } from "#ui/components/tooltip";
-import { agentsQueryOptions, serverInfoQueryOptions } from "#ui/queries";
+import {
+    invalidateAllAgentData,
+    queryKeys,
+    serverInfoQueryOptions,
+} from "#ui/queries";
+import { useAgents } from "#ui/use-agents";
 import {
     getPinnedFileKey,
     reorderPinnedFiles,
@@ -68,11 +73,9 @@ function ApplicationMenu(props: {
     onClose: () => void;
     onLogout: () => void;
 }) {
-    const router = useRouter();
     const queryClient = useQueryClient();
     const [userState, setUserState] = useUserState();
-    const agentsQuery = useQuery(agentsQueryOptions(props.api));
-    const agents = agentsQuery.data ?? [];
+    const agents = useAgents();
 
     const menuItems = [
         { to: "/", label: "Home", ariaLabel: "Server home", icon: Home },
@@ -192,7 +195,14 @@ function ApplicationMenu(props: {
                                 );
                             }
 
-                            await router.invalidate();
+                            // A new server process may report different agents and files.
+                            await Promise.all([
+                                queryClient.invalidateQueries({
+                                    queryKey: queryKeys.agents(),
+                                    exact: true,
+                                }),
+                                invalidateAllAgentData(queryClient),
+                            ]);
                         }, "Server did not come back after restart");
                     }}
                 />

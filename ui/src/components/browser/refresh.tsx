@@ -34,12 +34,16 @@ export function useEditorRefreshRegistration(state: EditorRefreshState) {
 }
 
 /**
- * Reloads ls/metadata, and the editor buffer only when the editor is still clean.
- * Automatic triggers and the More menu share this so dirty edits are never overwritten.
+ * Reloads the route, whose loader refetches the listing and metadata, plus the agent's git
+ * state, and the editor buffer only when the editor is still clean. Automatic triggers and
+ * the More menu share this so dirty edits are never overwritten. The route is reloaded
+ * because the query cache cannot tell whether the entry at this URL changed kind, such as a
+ * missing path that now exists.
  */
 export async function refreshBrowserPath(options: {
     router: BrowserRouter;
     queryClient: QueryClient;
+    agentId: string;
     fileContent?: { agentId: string; path: string };
     isEditorDirty?: boolean;
 }) {
@@ -72,10 +76,11 @@ export async function refreshBrowserPath(options: {
         );
     }
 
-    // Git state can change outside redoor without changing the directory listing.
+    // Git state can change outside redoor without changing the directory listing, and only
+    // the loader's own queries are refetched by the route reload below.
     await options.queryClient.invalidateQueries(
         {
-            queryKey: queryKeys.git(),
+            queryKey: queryKeys.git(options.agentId),
         },
         {
             // Creating a file navigates while this refresh may already be in flight.
@@ -86,7 +91,7 @@ export async function refreshBrowserPath(options: {
 }
 
 /** Serializes browser reload triggers so one focus transition cannot duplicate requests. */
-export function useRefreshBrowserPath() {
+export function useRefreshBrowserPath(agentId: string) {
     const router = useRouter();
     const queryClient = useQueryClient();
     const refreshPromiseRef = React.useRef<Promise<void> | null>(null);
@@ -99,6 +104,7 @@ export function useRefreshBrowserPath() {
         const refreshPromise = refreshBrowserPath({
             router,
             queryClient,
+            agentId,
         }).finally(() => {
             if (refreshPromiseRef.current === refreshPromise) {
                 refreshPromiseRef.current = null;
@@ -108,12 +114,12 @@ export function useRefreshBrowserPath() {
         refreshPromiseRef.current = refreshPromise;
 
         return refreshPromise;
-    }, [queryClient, router]);
+    }, [agentId, queryClient, router]);
 }
 
 /** Reloads the browser after returning to the window or leaving a terminal. */
-export function useBrowserRefreshTriggers() {
-    const refreshBrowser = useRefreshBrowserPath();
+export function useBrowserRefreshTriggers(agentId: string) {
+    const refreshBrowser = useRefreshBrowserPath(agentId);
 
     React.useEffect(() => {
         const refresh = () => {

@@ -1,6 +1,10 @@
 import React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "@tanstack/react-router";
+import {
+    useMutation,
+    useQuery,
+    useQueryClient,
+    useSuspenseQuery,
+} from "@tanstack/react-query";
 import { Check, Copy, Download, File, Folder } from "lucide-react";
 import type {
     Agent,
@@ -21,7 +25,14 @@ import { formatSize } from "#ui/utils/path";
 import { Select } from "#ui/components/select";
 import { Tooltip } from "#ui/components/tooltip";
 import { Toast } from "#ui/components/toast";
-import { agentAccountsQueryOptions, queryKeys } from "#ui/queries";
+import type { LsResponse } from "#ui/ls-response";
+import {
+    agentAccountsQueryOptions,
+    browserListingQueryOptions,
+    invalidateAgentData,
+    metadataQueryOptions,
+    queryKeys,
+} from "#ui/queries";
 
 /** Converts permission bits to the compact notation people expect from Unix tools. */
 function formatSymbolicPermissions(permissions: number): string {
@@ -303,128 +314,123 @@ function OwnershipSelect(props: {
     );
 }
 
-/** Keeps owner/mode UI on the last successful server values so stale loader props cannot roll them back. */
-function useDetailsOwnershipState(props: {
-    agent: Agent;
-    path: string;
-    metadata: FilesystemMetadata;
-}) {
-    const router = useRouter();
+/** Shows ownership and mode from the cached listing, which the mutations below edit optimistically. */
+function useDetailsOwnershipState(props: { agent: Agent; path: string }) {
     const queryClient = useQueryClient();
-    const serverPermissionsRef = React.useRef(props.metadata.permissions);
-    const serverOwnerRef = React.useRef(props.metadata.owner);
-    const serverGroupRef = React.useRef(props.metadata.group);
-    const chmodInFlightRef = React.useRef(false);
-    const chownInFlightRef = React.useRef(false);
-
-    const [displayedPermissions, setDisplayedPermissions] = React.useState(
-        props.metadata.permissions,
-    );
-
-    const [displayedOwner, setDisplayedOwner] = React.useState(
-        props.metadata.owner,
-    );
-
-    const [displayedGroup, setDisplayedGroup] = React.useState(
-        props.metadata.group,
-    );
-
-    const [displayedUid, setDisplayedUid] = React.useState(props.metadata.uid);
-    const [displayedGid, setDisplayedGid] = React.useState(props.metadata.gid);
+    const listingKey = queryKeys.browserListing(props.agent.id, props.path);
 
     const [feedback, setFeedback] = React.useState<{
         tone: "success" | "error";
         message: string;
     } | null>(null);
 
+    // Ownership lives in the same listing the browser shows, so edits made here and
+    // refreshes from anywhere else land in one place instead of a component-local copy.
+    const { data: displayed } = useSuspenseQuery({
+        ...browserListingQueryOptions(props.agent, props.path),
+        select: (listing): FilesystemMetadata => ({
+            owner: listing.owner,
+            group: listing.group,
+            uid: listing.uid,
+            gid: listing.gid,
+            permissions: listing.permissions,
+        }),
+    });
+
     const accountsQuery = useQuery({
         ...agentAccountsQueryOptions(props.agent),
         enabled: props.agent.isRoot,
     });
 
-    const displayedMetadata: FilesystemMetadata = {
-        owner: displayedOwner,
-        group: displayedGroup,
-        uid: displayedUid,
-        gid: displayedGid,
-        permissions: displayedPermissions,
+    /** Edits only the metadata fields so a concurrent listing refresh keeps its entries. */
+    const patchListing = (patch: Partial<FilesystemMetadata>) => {
+        queryClient.setQueryData<LsResponse>(listingKey, (listing) =>
+            listing ? { ...listing, ...patch } : listing,
+        );
     };
 
-    const refreshDetails = async () => {
-        await queryClient.invalidateQueries({
-            queryKey: [
-                ...queryKeys.all,
-                "agents",
-                props.agent.id,
-                "browser-listing",
-            ],
-        });
-        await router.invalidate();
+    /** Applies an edit before the server answers and returns what to restore on failure. */
+    const applyOptimistically = async (patch: Partial<FilesystemMetadata>) => {
+        // A refetch landing mid-request would flash the old value back over the edit.
+        await queryClient.cancelQueries({ queryKey: listingKey });
+
+        const previous: FilesystemMetadata = displayed;
+        patchListing(patch);
+
+        return { previous };
     };
 
     const chownMutation = useMutation({
         mutationFn: (request: Partial<ChownPathRequest>) =>
             props.agent.chown(props.path, request),
-        onSuccess: async (response) => {
-            serverOwnerRef.current = response.owner;
-            serverGroupRef.current = response.group;
-            setDisplayedOwner(response.owner);
-            setDisplayedGroup(response.group);
-            setDisplayedUid(response.uid);
-            setDisplayedGid(response.gid);
+        onMutate: (request) =>
+            applyOptimistically({
+                owner: request.owner ?? displayed.owner,
+                group: request.group ?? displayed.group,
+            }),
+        onSuccess: (response) => {
+            patchListing({
+                owner: response.owner,
+                group: response.group,
+                uid: response.uid,
+                gid: response.gid,
+            });
             setFeedback({
                 tone: "success",
                 message: "Ownership updated",
             });
-            await refreshDetails();
         },
-        onError: (error) => {
-            setDisplayedOwner(serverOwnerRef.current);
-            setDisplayedGroup(serverGroupRef.current);
+        onError: (error, _request, context) => {
+            if (context) {
+                patchListing({
+                    owner: context.previous.owner,
+                    group: context.previous.group,
+                });
+            }
+
             setFeedback({
                 tone: "error",
                 message: getErrorMessage(error, "Could not change ownership"),
             });
         },
-        onSettled: () => {
-            chownInFlightRef.current = false;
-        },
+        // Parent listings and metadata elsewhere show the same fields.
+        onSettled: () => invalidateAgentData(queryClient, props.agent.id),
     });
 
     const chmodMutation = useMutation({
         mutationFn: (permissions: number) =>
             props.agent.chmod(props.path, permissions),
-        onSuccess: async (response) => {
-            serverPermissionsRef.current = response.permissions;
-            setDisplayedPermissions(response.permissions);
+        onMutate: (permissions) => applyOptimistically({ permissions }),
+        onSuccess: (response) => {
+            patchListing({ permissions: response.permissions });
             setFeedback({
                 tone: "success",
                 message: "Permissions updated",
             });
-            await refreshDetails();
         },
-        onError: (error) => {
-            setDisplayedPermissions(serverPermissionsRef.current);
+        onError: (error, _permissions, context) => {
+            if (context) {
+                patchListing({ permissions: context.previous.permissions });
+            }
+
             setFeedback({
                 tone: "error",
                 message: getErrorMessage(error, "Could not change permissions"),
             });
         },
-        onSettled: () => {
-            chmodInFlightRef.current = false;
-        },
+        onSettled: () => invalidateAgentData(queryClient, props.agent.id),
     });
 
     return {
-        displayed: displayedMetadata,
-        canChmod: props.agent.isRoot || props.agent.uid === displayedUid,
+        displayed,
+        canChmod: props.agent.isRoot || props.agent.uid === displayed.uid,
         showOwnerSelect: props.agent.isRoot && accountsQuery.data !== undefined,
         ownerOptions: ownerSelectOptions(
-            displayedMetadata,
+            displayed,
             accountsQuery.data?.users ?? [],
         ),
         groupOptions: groupSelectOptions(
-            displayedMetadata,
+            displayed,
             accountsQuery.data?.groups ?? [],
         ),
         chownPending: chownMutation.isPending,
@@ -441,34 +447,28 @@ function useDetailsOwnershipState(props: {
             void accountsQuery.refetch();
         },
         togglePermissionBit: (bit: number, enabled: boolean) => {
-            if (chmodInFlightRef.current) {
+            if (chmodMutation.isPending) {
                 return;
             }
 
-            const nextPermissions = enabled
-                ? displayedPermissions | bit
-                : displayedPermissions & ~bit;
-
-            chmodInFlightRef.current = true;
-            setDisplayedPermissions(nextPermissions);
-            chmodMutation.mutate(nextPermissions);
+            chmodMutation.mutate(
+                enabled
+                    ? displayed.permissions | bit
+                    : displayed.permissions & ~bit,
+            );
         },
         changeOwner: (owner: string) => {
-            if (chownInFlightRef.current) {
+            if (chownMutation.isPending) {
                 return;
             }
 
-            chownInFlightRef.current = true;
-            setDisplayedOwner(owner);
             chownMutation.mutate({ owner });
         },
         changeGroup: (group: string) => {
-            if (chownInFlightRef.current) {
+            if (chownMutation.isPending) {
                 return;
             }
 
-            chownInFlightRef.current = true;
-            setDisplayedGroup(group);
             chownMutation.mutate({ group });
         },
     };
@@ -478,7 +478,6 @@ function useDetailsOwnershipState(props: {
 function FilesystemMetadataSections(props: {
     agent: Agent;
     path: string;
-    metadata: FilesystemMetadata;
     size?: number;
     sizeLabel?: string;
     sizeAction?: React.ReactNode;
@@ -488,7 +487,6 @@ function FilesystemMetadataSections(props: {
     const ownership = useDetailsOwnershipState({
         agent: props.agent,
         path: props.path,
-        metadata: props.metadata,
     });
 
     const headingIdPrefix = props.headingPrefix.toLowerCase();
@@ -726,7 +724,6 @@ export function DirectoryDetailView(props: {
                 key={props.lsResult.path}
                 agent={props.agent}
                 path={props.lsResult.path}
-                metadata={props.lsResult}
                 size={directorySizeMutation.data?.size}
                 sizeLabel="Directory size value"
                 sizeAction={
@@ -777,27 +774,44 @@ export function FileDetailView(props: {
     fileName: string;
     lsResult: LsFileResponse;
     downloadUrl: string;
-    initialOneTimeTokens: Array<string>;
 }) {
+    const queryClient = useQueryClient();
+
+    const metadataOptions = metadataQueryOptions(
+        props.agent,
+        props.lsResult.path,
+    );
+
     const [copiedCommand, setCopiedCommand] = React.useState<string | null>(
         null,
     );
 
-    const [oneTimeTokens, setOneTimeTokens] = React.useState(
-        props.initialOneTimeTokens,
-    );
+    // The server owns the token list, so refreshes and new links share one cache entry.
+    const { data: oneTimeTokens } = useSuspenseQuery({
+        ...metadataOptions,
+        select: (metadata) => metadata.one_time_tokens,
+    });
 
     const createShareableLinkMutation = useMutation({
         mutationFn: () => props.agent.createOneTimeToken(props.lsResult.path),
         onSuccess: (response) => {
-            setOneTimeTokens((tokens) => [...tokens, response.one_time_token]);
+            queryClient.setQueryData(metadataOptions.queryKey, (metadata) =>
+                metadata
+                    ? {
+                          ...metadata,
+                          one_time_tokens: [
+                              ...metadata.one_time_tokens,
+                              response.one_time_token,
+                          ],
+                      }
+                    : metadata,
+            );
         },
     });
 
     React.useEffect(() => {
-        setOneTimeTokens(props.initialOneTimeTokens);
         createShareableLinkMutation.reset();
-    }, [props.path, props.initialOneTimeTokens]);
+    }, [props.path]);
 
     const copyToClipboard = async (text: string, commandType: string) => {
         try {
@@ -834,7 +848,6 @@ export function FileDetailView(props: {
                 key={props.lsResult.path}
                 agent={props.agent}
                 path={props.lsResult.path}
-                metadata={props.lsResult}
                 size={props.lsResult.size}
                 headingPrefix="file"
             />

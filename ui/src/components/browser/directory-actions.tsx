@@ -492,7 +492,7 @@ export function DirectoryFilesActions(props: {
     showHiddenFiles: boolean;
     onToggleHiddenFiles: () => void;
 }) {
-    const refreshBrowser = useRefreshBrowserPath();
+    const refreshBrowser = useRefreshBrowserPath(props.agent.id);
     const [isReloading, setIsReloading] = React.useState(false);
 
     const directoryName =

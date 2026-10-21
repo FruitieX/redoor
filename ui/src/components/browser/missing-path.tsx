@@ -1,11 +1,12 @@
 import React from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { FilePlus, FolderPlus } from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { Button } from "#ui/components/button";
 import { TextField } from "#ui/components/text-field";
+import { invalidateAgentData } from "#ui/queries";
 import {
     getErrorMessage,
     getImmediateParentPath,
@@ -18,6 +19,7 @@ type EntryType = "file" | "directory";
 export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
     const navigate = useNavigate();
     const router = useRouter();
+    const queryClient = useQueryClient();
     const initialName = props.path.split("/").filter(Boolean).pop() ?? "";
     const [fileName, setFileName] = React.useState(initialName);
 
@@ -52,7 +54,11 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
         },
         onSuccess: async (_, entry) => {
             if (entry.path === props.path) {
-                await router.invalidate();
+                // The route must resolve again to turn this missing path into the new entry.
+                await Promise.all([
+                    invalidateAgentData(queryClient, props.agent.id),
+                    router.invalidate(),
+                ]);
 
                 return;
             }

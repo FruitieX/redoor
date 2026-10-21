@@ -1,5 +1,9 @@
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import {
+    useQuery,
+    useQueryClient,
+    useSuspenseQuery,
+} from "@tanstack/react-query";
 import {
     createFileRoute,
     Link,
@@ -40,11 +44,16 @@ import { CopyablePath } from "#ui/components/copyable-code-row";
 import { RestartButton, waitForRestart } from "#ui/components/restart-button";
 import { UpgradeButton } from "#ui/components/upgrade-button";
 import { provisioningStatusStoreAtom } from "#ui/provisioning-status";
-import { agentsQueryOptions } from "#ui/queries";
+import { RouteError } from "#ui/components/route-error";
+import {
+    agentDetailsQueryOptions,
+    agentsQueryOptions,
+    invalidateAgentData,
+    serverInfoQueryOptions,
+} from "#ui/queries";
+import { useRequiredAgent } from "#ui/use-agents";
 import { formatAgentRecency, useNow } from "#ui/utils/agent-time";
 import { formatSize } from "#ui/utils/path";
-import { Route as RootRoute } from "./__root";
-import { Route as AgentRoute } from "./agents.$agentId";
 
 const HIDDEN_MOUNT_TYPES = new Set([
     "devpts",
@@ -81,15 +90,19 @@ function matchesServerIdentity(
     );
 }
 
-/** Renders retained lifecycle state without issuing connected-only commands prematurely. */
+/**
+ * Chooses between retained lifecycle state and live details from the inventory itself, so
+ * the page follows a connect or disconnect without reloading the route.
+ */
 function AgentBoundary() {
-    const data = AgentRoute.useLoaderData();
+    const { agentId } = Route.useParams();
+    const agent = useRequiredAgent(agentId);
 
-    if (data.kind === "connected") {
-        return <AgentDetails agent={data.agent} details={data.details} />;
+    if (agent.status === "connected") {
+        return <AgentDetails agent={agent} />;
     }
 
-    return <AgentLifecycle agent={data.agent} />;
+    return <AgentLifecycle agent={agent} />;
 }
 
 /** Shows the last remembered start attempt after the lifecycle page unmounts. */
@@ -116,8 +129,38 @@ function LastProvisioningCard(props: {
     );
 }
 
+/**
+ * Loads the connected-only details, which are not cached yet when the agent has just
+ * connected on this page, before rendering the cards that depend on them.
+ */
+function AgentDetails(props: { agent: Agent }) {
+    const detailsQuery = useQuery(agentDetailsQueryOptions(props.agent));
+
+    if (detailsQuery.data) {
+        return (
+            <AgentDetailsContent
+                agent={props.agent}
+                details={detailsQuery.data}
+            />
+        );
+    }
+
+    if (detailsQuery.isError) {
+        return <RouteError error={detailsQuery.error} />;
+    }
+
+    return (
+        <p role="status" className="p-8 text-sm text-slate-400">
+            Loading device details...
+        </p>
+    );
+}
+
 /** Preserves the existing connected detail cards while displaying live connection duration. */
-function AgentDetails(props: { agent: Agent; details: AgentDetailsResponse }) {
+function AgentDetailsContent(props: {
+    agent: Agent;
+    details: AgentDetailsResponse;
+}) {
     const router = useRouter();
     const startStates = useAtomValue(agentStartStatesAtom);
     const setStartStates = useSetAtom(agentStartStatesAtom);
@@ -284,10 +327,9 @@ function AgentUpgradeControls(props: {
     agent: Agent;
     details: AgentDetailsResponse;
 }) {
-    const router = useRouter();
     const queryClient = useQueryClient();
     const { api } = Route.useRouteContext();
-    const { serverInfo } = RootRoute.useLoaderData();
+    const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
 
     return (
         <div className="md:col-span-2">
@@ -312,7 +354,7 @@ function AgentUpgradeControls(props: {
                             (agent) =>
                                 agent.id === props.agent.id &&
                                 agent.status === "connected" &&
-                                agent.connectionId !==
+                                agent.connection_id !==
                                     props.agent.connectionId &&
                                 agent.binary?.version === targetVersion,
                         );
@@ -333,7 +375,7 @@ function AgentUpgradeControls(props: {
                             );
                         }
 
-                        await router.invalidate();
+                        await invalidateAgentData(queryClient, props.agent.id);
                     }, "Agent did not come back after upgrade")
                 }
             />
@@ -439,7 +481,6 @@ function AgentDetailsHeader(props: {
     agent: Agent;
     details: AgentDetailsResponse;
 }) {
-    const router = useRouter();
     const queryClient = useQueryClient();
     const { api } = Route.useRouteContext();
 
@@ -469,7 +510,7 @@ function AgentDetailsHeader(props: {
                                     (agent) =>
                                         agent.id === props.agent.id &&
                                         agent.status === "connected" &&
-                                        agent.connectionId !==
+                                        agent.connection_id !==
                                             props.agent.connectionId,
                                 );
 
@@ -479,7 +520,10 @@ function AgentDetailsHeader(props: {
                                     );
                                 }
 
-                                await router.invalidate();
+                                await invalidateAgentData(
+                                    queryClient,
+                                    props.agent.id,
+                                );
                             }, "Agent did not come back after restart")
                         }
                     />

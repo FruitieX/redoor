@@ -1,12 +1,11 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 
 import {
     ManagedAgentForm,
     type ManagedAgentSubmitRequest,
 } from "#ui/components/managed-agent-form";
-import { agentsQueryOptions } from "#ui/queries";
-import { Route as RootRoute } from "./__root";
+import { agentsQueryOptions, serverInfoQueryOptions } from "#ui/queries";
 
 export const Route = createFileRoute("/agents/new")({
     component: NewManagedAgentPage,
@@ -15,7 +14,7 @@ export const Route = createFileRoute("/agents/new")({
 /** Persists a new managed local or SSH agent and opens its newly registered tab. */
 function NewManagedAgentPage() {
     const { api, queryClient } = Route.useRouteContext();
-    const { serverInfo } = RootRoute.useLoaderData();
+    const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
     const router = useRouter();
 
     const createMutation = useMutation({
@@ -28,7 +27,6 @@ function NewManagedAgentPage() {
         },
         onSuccess: async (response) => {
             await queryClient.invalidateQueries(agentsQueryOptions(api));
-            await router.invalidate();
             await router.navigate({
                 to: "/agents/$agentId",
                 params: { agentId: response.agent.id },

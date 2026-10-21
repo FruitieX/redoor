@@ -847,9 +847,16 @@ sequenceDiagram
 
 - `UiEvent` has three variants with no payload: `agents_changed`, `routes_changed` and
   `transfers_changed`. The UI's `RefreshListener` turns them into TanStack Query
-  invalidations (agents, transfers, partials) and router loader invalidations. REST stays the
-  single source of truth, so there are no deltas to keep consistent, and a missed event only
-  means a view refreshes later.
+  invalidations and nothing else. REST stays the single source of truth, so there are no
+  deltas to keep consistent, and a missed event only means a view refreshes later. When the
+  socket reconnects, the listener also invalidates the agent inventory, transfers, partials
+  and agent data, because events may have been missed meanwhile.
+  - `agents_changed` refetches the inventory, then refreshes the cached data of every agent
+    whose status or connection id changed. Lifecycle chatter, such as provisioning steps,
+    does not refetch open file views.
+  - `routes_changed` (an upload, edit or copy finished) refreshes the cached data of every
+    agent: listings, metadata, git state and trash.
+  - `transfers_changed` refreshes the transfer list.
 - Agent events go out immediately on connect, disconnect and lifecycle changes. Transfer
   events are throttled to one every 5 s while progress is ticking. They go out immediately
   when a transfer starts, starts canceling or ends.
@@ -862,12 +869,50 @@ sequenceDiagram
 - Rows end as `Completed`, `Errored` or `Canceled` and stay as history (at most 1000 rows, for
   an hour). A paused copy's row is dropped, because its partial is now its record. The store
   lives in memory only.
-- Things that produce no event are polled: protocol mismatches every 10 s and partials every
-  5 s.
+- Things that produce no event are polled: protocol mismatches every 10 s, partials every
+  5 s and the agent inventory every second while a managed agent is starting.
 - `DELETE /api/v1/transfers/{id}` cancels and `POST /api/v1/transfers/{id}/pause` pauses.
   - Cancel is idempotent and returns at once. The row becomes `Canceled` when the agent
     acknowledges.
   - Pause returns only after the destination has made the partial durable.
+
+### Browser server state
+
+The TanStack Query cache is the single place the UI keeps server state. Route loaders only
+prime it (`fetchQueryUncancelled`) so a navigation renders with data, and components read the
+same queries (`useQuery`, `useSuspenseQuery`). Events and mutations refresh the UI by
+invalidating query keys, so a view never needs a separate reload signal.
+
+- **Plain data in the cache.** The agent inventory is stored as plain `AgentInfoResponse`
+  JSON. TanStack Query structurally shares plain data, so a refetch that changes one agent
+  keeps every other agent's object identical. The request client for an agent (`Agent`) is
+  built by `ApiClient.agentFor(info)`, which memoizes per snapshot object, so a client keeps
+  its identity until its data changes. The `useAgents` / `useAgent` hooks and the
+  `loadAgent` loader helper both go through it, which makes memos and effects keyed on an
+  agent stable.
+- **One key hierarchy.** Everything about one agent lives under `queryKeys.agent(id)`
+  (details, configuration, accounts, trash, listings, metadata, git, searches, editor
+  buffers). The inventory list is a sibling key, so refreshing it does not touch any agent's
+  files. `invalidateAgentData` is the single entry point mutations and events use after
+  changing an agent.
+- **Editor buffers are not server mirrors.** The editor's file content is tagged with query
+  `meta: { editorBuffer: true }`. `invalidateAgentData` and `invalidateAllAgentData` skip it,
+  so an agent-wide refresh can never replace unsaved text. Only the editor refetches it, and
+  only while clean.
+- **Stale times follow the events.** The inventory is trusted for 30 s because
+  `agents_changed` invalidates it, and it polls every second only while a managed agent is
+  starting, which pushes no event. Listings, git state and metadata never go stale on their
+  own; the loaders force a refetch on navigation, events and mutations invalidate them, and
+  the window-focus refresh reloads the route and invalidates git state.
+- **What still reloads the route.** A loader also decides which kind of entry lives at a URL
+  and applies redirects, which the cache cannot express. The route is therefore reloaded
+  (`router.invalidate`) only when that can have changed: the window-focus refresh, creating
+  the entry at a missing path, a browser URL that was opened while its agent was offline and
+  whose agent has since connected, and the route error retry. Disconnecting needs no reload:
+  views choose the lifecycle screen from the live inventory.
+- **Optimistic edits** go through the cache. Chmod and chown update the cached listing in
+  `onMutate`, restore only the changed fields on error, and invalidate the agent afterwards.
+  One-time download tokens live in the cached file metadata.
 
 ## Authentication and trust
 

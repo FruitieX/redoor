@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
 import { Button } from "#ui/components/button";
@@ -7,44 +7,42 @@ import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import {
     ManagedAgentForm,
-    type ManagedAgentFormConfiguration,
+    type ManagedAgentKind,
     type ManagedAgentSubmitRequest,
 } from "#ui/components/managed-agent-form";
 import { Tooltip } from "#ui/components/tooltip";
-import { agentsQueryOptions } from "#ui/queries";
-import { holdRouteInvalidation } from "#ui/refresh-listener";
-import { Route as RootRoute } from "./__root";
+import {
+    agentConfigurationQueryOptions,
+    agentsQueryOptions,
+    fetchQueryUncancelled,
+    loadAgent,
+    queryKeys,
+    serverInfoQueryOptions,
+} from "#ui/queries";
+import { useAgent } from "#ui/use-agents";
 
 export const Route = createFileRoute("/agents/$agentId/edit")({
-    loader: async ({ context, params, parentMatchPromise }) => {
-        const parentMatch = await parentMatchPromise;
-        const agent = parentMatch.loaderData?.agent;
-
-        // Missing parent data is a transient rename gap, not a reason to leave /edit.
-        if (!agent) {
-            throw new Error(`Agent not found: ${params.agentId}`);
-        }
+    loader: async ({ context, params }) => {
+        const agent = await loadAgent(context, params.agentId);
 
         if (!agent.configurationEditable) {
             throw redirect({ to: "/agents" });
         }
 
-        const configuration: ManagedAgentFormConfiguration =
-            agent.sshTarget === null
-                ? {
-                      kind: "local",
-                      value: await context.api.getLocalAgentConfiguration(
-                          params.agentId,
-                      ),
-                  }
-                : {
-                      kind: "ssh",
-                      value: await context.api.getSshAgentConfiguration(
-                          params.agentId,
-                      ),
-                  };
+        const kind: ManagedAgentKind =
+            agent.sshTarget === null ? "local" : "ssh";
 
-        return { configuration };
+        // The form's initial values must reflect the TOML as it is now, not an earlier visit.
+        await fetchQueryUncancelled(context.queryClient, {
+            ...agentConfigurationQueryOptions(
+                context.api,
+                params.agentId,
+                kind,
+            ),
+            staleTime: 0,
+        });
+
+        return { kind };
     },
     component: EditManagedAgentPage,
 });
@@ -53,40 +51,43 @@ export const Route = createFileRoute("/agents/$agentId/edit")({
 function EditManagedAgentPage() {
     const { api, queryClient } = Route.useRouteContext();
     const { agentId } = Route.useParams();
-    const { configuration } = Route.useLoaderData();
-    const { agents, serverInfo } = RootRoute.useLoaderData();
-    const agent = agents.find((entry) => entry.id === agentId);
+    const { kind } = Route.useLoaderData();
+    const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
+
+    const { data: configuration } = useSuspenseQuery(
+        agentConfigurationQueryOptions(api, agentId, kind),
+    );
+
+    // Absent for a moment after a rename, until the page follows to the new id.
+    const agent = useAgent(agentId);
     const router = useRouter();
     const [isDeleteOpen, setIsDeleteOpen] = React.useState(false);
     const isRunning = agent?.status !== "stopped";
 
     const updateMutation = useMutation({
         mutationFn: async (submission: ManagedAgentSubmitRequest) => {
-            const release = holdRouteInvalidation();
+            const response =
+                submission.kind === "local"
+                    ? await api.updateLocalAgent(agentId, submission.request)
+                    : await api.updateSshAgent(agentId, submission.request);
 
-            try {
-                const response =
-                    submission.kind === "local"
-                        ? await api.updateLocalAgent(
-                              agentId,
-                              submission.request,
-                          )
-                        : await api.updateSshAgent(agentId, submission.request);
+            await queryClient.invalidateQueries(agentsQueryOptions(api));
 
-                await queryClient.invalidateQueries(agentsQueryOptions(api));
-                // Move off the old identity before any route reload can 404 it.
-                await router.navigate({
-                    to: "/agents/$agentId/edit",
-                    params: { agentId: response.agent.id },
+            // A renamed agent's settings are loaded under its new id by the navigation below.
+            if (response.agent.id === agentId) {
+                await queryClient.invalidateQueries({
+                    queryKey: queryKeys.agentConfiguration(agentId),
                 });
-
-                return response;
-            } finally {
-                release();
             }
-        },
-        onSuccess: async () => {
-            await router.invalidate();
+
+            // A rename drops the old id from the inventory above; this page tolerates that
+            // gap and moves to the new identity here.
+            await router.navigate({
+                to: "/agents/$agentId/edit",
+                params: { agentId: response.agent.id },
+            });
+
+            return response;
         },
     });
 
@@ -94,7 +95,6 @@ function EditManagedAgentPage() {
         mutationFn: () => api.deleteManagedAgent(agentId, configuration.kind),
         onSuccess: async () => {
             await queryClient.invalidateQueries(agentsQueryOptions(api));
-            await router.invalidate();
             await router.navigate({ to: "/agents" });
         },
     });

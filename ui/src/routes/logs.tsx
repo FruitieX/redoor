@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { LogViewer } from "#ui/components/log-viewer";
+import { useAgents } from "#ui/use-agents";
 import { Route as RootRoute } from "./__root";
 import { queryKeys, serverLoggingLevelQueryOptions } from "#ui/queries";
 
@@ -16,7 +17,7 @@ export const Route = createFileRoute("/logs")({
 /** Keeps server logs available while exposing deterministic links to connected agent streams. */
 function ServerLogsPage() {
     const { api } = RootRoute.useRouteContext();
-    const { agents } = RootRoute.useLoaderData();
+    const agents = useAgents();
 
     const connectedAgents = agents
         .filter((agent) => agent.status === "connected")

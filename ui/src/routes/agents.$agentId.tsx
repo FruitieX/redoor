@@ -7,6 +7,12 @@ import { z } from "zod";
 import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import { SearchDialog } from "#ui/components/search-dialog";
 import { RouteError } from "#ui/components/route-error";
+import {
+    agentDetailsQueryOptions,
+    fetchQueryUncancelled,
+    loadAgent,
+} from "#ui/queries";
+import { useAgent } from "#ui/use-agents";
 
 export type AgentSearch = {
     q?: string;
@@ -72,55 +78,49 @@ export const Route = createFileRoute("/agents/$agentId")({
         gitroot: optionalBooleanSchema.parse(search.gitroot),
         case: caseSensitivitySchema.parse(search.case),
     }),
-    loader: async ({ params, parentMatchPromise }) => {
-        const rootMatch = await parentMatchPromise;
-        const agents = rootMatch.loaderData?.agents ?? [];
-        const agent = agents.find((entry) => entry.id === params.agentId);
+    loader: async ({ context, params }) => {
+        const agent = await loadAgent(context, params.agentId);
 
-        if (!agent) throw new Error(`Agent not found: ${params.agentId}`);
-
-        if (agent.status !== "connected") {
-            return { kind: "lifecycle" as const, agent, agents };
+        if (agent.status === "connected") {
+            await fetchQueryUncancelled(
+                context.queryClient,
+                agentDetailsQueryOptions(agent),
+            );
         }
-
-        return {
-            kind: "connected" as const,
-            agent,
-            agents,
-            details: await agent.getDetails(),
-        };
     },
     component: AgentRouteLayout,
     errorComponent: RouteError,
 });
 
-/** Shares one agent-details command across status and filesystem child routes. */
+/** Hosts the agent's child views and the search dialog that every one of them shares. */
 function AgentRouteLayout() {
-    const data = Route.useLoaderData();
+    const { agentId } = Route.useParams();
+    // Tolerates a missing agent: a rename removes the old id from the inventory before the
+    // edit page has navigated to the new one, and the page must stay up until it does.
+    const agent = useAgent(agentId);
 
     const rememberProvisioningStatus = useSetAtom(
         rememberProvisioningStatusAtom,
     );
 
+    const agentName = agent?.name;
+    const provisioningStatus = agent?.provisioningStatus;
+
     React.useEffect(() => {
-        if (data.agent.provisioningStatus.length === 0) {
+        if (agentName === undefined || !provisioningStatus?.length) {
             return;
         }
 
         rememberProvisioningStatus({
-            agentName: data.agent.name,
-            messages: data.agent.provisioningStatus,
+            agentName,
+            messages: provisioningStatus,
         });
-    }, [
-        data.agent.name,
-        data.agent.provisioningStatus,
-        rememberProvisioningStatus,
-    ]);
+    }, [agentName, provisioningStatus, rememberProvisioningStatus]);
 
     return (
         <>
             <Outlet />
-            <SearchDialog agent={data.agent} />
+            {agent ? <SearchDialog agent={agent} /> : null}
         </>
     );
 }

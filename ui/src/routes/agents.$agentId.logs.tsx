@@ -2,33 +2,30 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { AlertCircle, HardDrive } from "lucide-react";
 
 import { LogViewer } from "#ui/components/log-viewer";
-import { agentLoggingLevelQueryOptions, queryKeys } from "#ui/queries";
+import {
+    agentLoggingLevelQueryOptions,
+    loadAgent,
+    queryKeys,
+} from "#ui/queries";
+import { useRequiredAgent } from "#ui/use-agents";
 
 export const Route = createFileRoute("/agents/$agentId/logs")({
-    loader: async ({ parentMatchPromise, context }) => {
-        const agentMatch = await parentMatchPromise;
-        const loaderData = agentMatch.loaderData;
-
-        if (!loaderData) {
-            throw new Error("Device loader data is unavailable");
-        }
-
-        const agent = loaderData.agent;
+    loader: async ({ params, context }) => {
+        const agent = await loadAgent(context, params.agentId);
 
         if (agent.status === "connected") {
             await context.queryClient.ensureQueryData(
                 agentLoggingLevelQueryOptions(agent),
             );
         }
-
-        return { agent };
     },
     component: AgentLogsPage,
 });
 
 /** Avoids opening a retrying live socket when retained inventory says the agent is disconnected. */
 function AgentLogsPage() {
-    const { agent } = Route.useLoaderData();
+    const { agentId } = Route.useParams();
+    const agent = useRequiredAgent(agentId);
 
     if (agent.status !== "connected") {
         return (
