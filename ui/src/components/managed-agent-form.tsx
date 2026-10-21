@@ -1,12 +1,10 @@
 import * as React from "react";
 import { LoaderCircle, Server, TerminalSquare } from "lucide-react";
 
-import type {
-    CreateLocalAgentRequest,
-    CreateSshAgentRequest,
-    ManagedLocalAgentConfigurationResponse,
-    ManagedSshAgentConfigurationResponse,
-} from "#ui/api-client";
+import type { CreateLocalAgentRequest } from "#bindings/CreateLocalAgentRequest";
+import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
+import type { ManagedLocalAgentConfigurationResponse } from "#bindings/ManagedLocalAgentConfigurationResponse";
+import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
 import { Button } from "#ui/components/button";
 import { Password } from "#ui/components/password";
 import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";

@@ -25,7 +25,8 @@ import {
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
-import type { Agent, ApiClient, CopyExistingMode } from "#ui/api-client";
+import type { Agent, ApiClient } from "#ui/api-client";
+import type { CopyExistingMode } from "#bindings/CopyExistingMode";
 import { invalidateAgentData } from "#ui/queries";
 import { waitForTransfers } from "#ui/transfer-wait";
 import {

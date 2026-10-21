@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isMap, isNode, parseDocument, stringify, type Node } from "yaml";
-import { getBrowserUrl } from "#ui/api-client";
+import { getBrowserUrl } from "#ui/api-paths";
 import { FoldingSection } from "#ui/components/folding-section";
 import { syntaxHighlighter } from "#ui/utils/syntax-highlighting";
 

@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vites
 import { $ } from "zx";
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import { ApiClient, type Permission } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import type { Permission } from "#bindings/Permission";
 import {
     ALL_PERMISSIONS,
     ProcessManager,

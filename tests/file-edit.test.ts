@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { ApiClient, Agent, encodeFilesystemPath } from "#ui/api-client";
-import type { TransferProgressEntry } from "#ui/api-client";
+import { ApiClient, Agent } from "#ui/api-client";
+import { encodeFilesystemPath } from "#ui/api-paths";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import {
     ProcessManager,
     TempFileManager,

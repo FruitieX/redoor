@@ -16,7 +16,8 @@ import {
     startServerAndAgent,
     waitForValue,
 } from "./test-utils";
-import type { Agent, TerminalServerMessage } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { TerminalServerMessage } from "#bindings/TerminalServerMessage";
 
 const processManager = new ProcessManager();
 

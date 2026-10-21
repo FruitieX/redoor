@@ -8,7 +8,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { ApiClient, Agent } from "#ui/api-client";
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import fs from "node:fs/promises";
 
 import {

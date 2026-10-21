@@ -2,11 +2,9 @@ import type { WTerm } from "@wterm/dom";
 import type { GhosttyCore } from "@wterm/ghostty";
 import { z } from "zod";
 
-import type {
-    Agent,
-    TerminalClientMessage,
-    TerminalServerMessage,
-} from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { TerminalClientMessage } from "#bindings/TerminalClientMessage";
+import type { TerminalServerMessage } from "#bindings/TerminalServerMessage";
 import type { OneShotTerminalCommand } from "#ui/terminal/one-shot-command";
 import { applyTerminalTheme } from "#ui/terminal/theme";
 import { createWTerm } from "#ui/terminal/wterm";

@@ -1,6 +1,7 @@
 import { QueryObserver, type QueryClient } from "@tanstack/react-query";
 
-import type { ApiClient, TransferProgressEntry } from "#ui/api-client";
+import type { ApiClient } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import { watchedTransfersQueryOptions } from "#ui/queries";
 
 /** Describes what a wait needs: where to read transfers, and when they are done. */

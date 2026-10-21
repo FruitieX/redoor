@@ -3,7 +3,8 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { ApiClient, encodeFilesystemPath } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import { encodeFilesystemPath } from "#ui/api-paths";
 import { testPorts } from "#test-ports";
 
 export { encodeFilesystemPath };

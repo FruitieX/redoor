@@ -1,6 +1,7 @@
 import { CalendarClock, GitCommitHorizontal, Hammer, Tag } from "lucide-react";
 
-import type { BinaryIdentity, ServerBuildMode } from "#ui/api-client";
+import type { BinaryIdentity } from "#bindings/BinaryIdentity";
+import type { ServerBuildMode } from "#bindings/ServerBuildMode";
 import { Tooltip } from "./tooltip";
 
 /** Human-readable cargo profile name. */

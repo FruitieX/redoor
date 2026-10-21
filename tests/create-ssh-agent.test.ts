@@ -10,7 +10,8 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
 import type { UpdateSshAgentRequest } from "#bindings/UpdateSshAgentRequest";
-import { ApiClient, ApiError } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import {
     ProcessManager,
     TempFileManager,

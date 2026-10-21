@@ -3,12 +3,9 @@ import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
-import {
-    type ApiClient,
-    type Agent,
-    type LsDirectoryResponse,
-    type LsFileResponse,
-} from "#ui/api-client";
+import { type ApiClient, type Agent } from "#ui/api-client";
+import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
+import type { LsFileResponse } from "#bindings/LsFileResponse";
 import {
     isLsDirectoryResponse,
     isLsFileResponse,

@@ -8,12 +8,9 @@ import {
     LoaderCircle,
     RefreshCw,
 } from "lucide-react";
-import type {
-    ApiClient,
-    Agent,
-    CopyExistingMode,
-    TransferProgressEntry,
-} from "#ui/api-client";
+import type { ApiClient, Agent } from "#ui/api-client";
+import type { CopyExistingMode } from "#bindings/CopyExistingMode";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";

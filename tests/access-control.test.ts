@@ -3,13 +3,10 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import {
-    Agent,
-    ApiClient,
-    ApiError,
-    type DeviceScope,
-    type Permission,
-} from "#ui/api-client";
+import { Agent, ApiClient } from "#ui/api-client";
+import type { DeviceScope } from "#bindings/DeviceScope";
+import type { Permission } from "#bindings/Permission";
+import { ApiError } from "#ui/api-transport";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import {

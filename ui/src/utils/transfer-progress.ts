@@ -1,4 +1,4 @@
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 
 /** Shares one projected snapshot so the pie, percent, and ETA cannot drift apart. */
 export type AnimatedTransferProgress = {

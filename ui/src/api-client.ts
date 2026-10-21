@@ -6,9 +6,7 @@ import type { PartialActionRequest } from "#bindings/PartialActionRequest";
 import type { ResumePartialResponse } from "#bindings/ResumePartialResponse";
 import type { DiscardPartialResponse } from "#bindings/DiscardPartialResponse";
 import type { PauseTransferResponse } from "#bindings/PauseTransferResponse";
-import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
 import type { ProtocolMismatchListResponse } from "#bindings/ProtocolMismatchListResponse";
-import type { LsFileResponse } from "#bindings/LsFileResponse";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import type { EchoRequest } from "#bindings/EchoRequest";
@@ -18,12 +16,8 @@ import type { AgentConnectionStatus } from "#bindings/AgentConnectionStatus";
 import type { StartAgentResponse } from "#bindings/StartAgentResponse";
 import type { RetryAgentStartResponse } from "#bindings/RetryAgentStartResponse";
 import type { ShutdownAgentResponse } from "#bindings/ShutdownAgentResponse";
-import type { TransferDirection } from "#bindings/TransferDirection";
-import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import type { TransferProgressListResponse } from "#bindings/TransferProgressListResponse";
-import type { TransferProgressState } from "#bindings/TransferProgressState";
 import type { CancelTransferResponse } from "#bindings/CancelTransferResponse";
-import type { UiEvent } from "#bindings/UiEvent";
 import type { RawDeleteResponse } from "#bindings/RawDeleteResponse";
 import type { RawUploadResponse } from "#bindings/RawUploadResponse";
 import type { FileEditResponse } from "#bindings/FileEditResponse";
@@ -40,8 +34,6 @@ import type { CopyExistingMode } from "#bindings/CopyExistingMode";
 import type { MoveFileRequest } from "#bindings/MoveFileRequest";
 import type { MoveFileResponse } from "#bindings/MoveFileResponse";
 import type { TerminalSize } from "#bindings/TerminalSize";
-import type { TerminalClientMessage } from "#bindings/TerminalClientMessage";
-import type { TerminalServerMessage } from "#bindings/TerminalServerMessage";
 import type { LoginRequest } from "#bindings/LoginRequest";
 import type { LoginResponse } from "#bindings/LoginResponse";
 import type { LogoutResponse } from "#bindings/LogoutResponse";
@@ -49,22 +41,15 @@ import type { MetadataResponse } from "#bindings/MetadataResponse";
 import type { CreateOneTimeTokenResponse } from "#bindings/CreateOneTimeTokenResponse";
 import type { OpenPathResponse } from "#bindings/OpenPathResponse";
 import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
-import type { ServerAuthMode } from "#bindings/ServerAuthMode";
-import type { ServerBuildMode } from "#bindings/ServerBuildMode";
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { RestartResponse } from "#bindings/RestartResponse";
 import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import type { UpgradeAgentRequest } from "#bindings/UpgradeAgentRequest";
-import type { LogEvent } from "#bindings/LogEvent";
-import type { LogEntry } from "#bindings/LogEntry";
-import type { LogErrorDetails } from "#bindings/LogErrorDetails";
 import type { RenamePathRequest } from "#bindings/RenamePathRequest";
 import type { RenamePathResponse } from "#bindings/RenamePathResponse";
 import type { FileSearchResponse } from "#bindings/FileSearchResponse";
-import type { FileSearchEntry } from "#bindings/FileSearchEntry";
 import type { FindRequest } from "#bindings/FindRequest";
 import type { GrepRequest } from "#bindings/GrepRequest";
-import type { ContentGrepMatch } from "#bindings/ContentGrepMatch";
 import type { ContentGrepResponse } from "#bindings/ContentGrepResponse";
 import type { DiffEndpoint } from "#bindings/DiffEndpoint";
 import type { DiffFilesRequest } from "#bindings/DiffFilesRequest";
@@ -101,8 +86,6 @@ import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
 import type { AccessTokenSecretResponse } from "#bindings/AccessTokenSecretResponse";
 import type { CreateAccessTokenRequest } from "#bindings/CreateAccessTokenRequest";
 import type { DeleteAccessTokenResponse } from "#bindings/DeleteAccessTokenResponse";
-import type { DeviceScope } from "#bindings/DeviceScope";
-import type { Permission } from "#bindings/Permission";
 import type { UpdateAccessTokenRequest } from "#bindings/UpdateAccessTokenRequest";
 import {
     apiRequest,
@@ -115,92 +98,6 @@ import * as apiPaths from "#ui/api-paths";
 import type { LsResponse } from "#ui/ls-response";
 
 const { appendFilesystemPath, encodeFilesystemPath, getBrowserUrl } = apiPaths;
-
-export { ApiError } from "#ui/api-transport";
-
-export { encodeFilesystemPath, getBrowserUrl };
-
-export type {
-    LsDirectoryResponse,
-    LsFileResponse,
-    MetadataResponse,
-    CreateOneTimeTokenResponse,
-    DirectorySizeResponse,
-    RawDeleteResponse,
-    RawUploadResponse,
-    TrashListResponse,
-    EmptyTrashResponse,
-    RestoreTrashItemRequest,
-    RestoreTrashItemResponse,
-    CreateDirectoryResponse,
-    CreationOwnershipOptions,
-    TransferDirection,
-    TransferProgressEntry,
-    TransferProgressListResponse,
-    TransferProgressState,
-    CancelTransferResponse,
-    UiEvent,
-    CopyFileRequest,
-    CopyFileResponse,
-    CopyEndpoint,
-    CopyExistingMode,
-    MoveFileRequest,
-    MoveFileResponse,
-    TerminalSize,
-    TerminalClientMessage,
-    TerminalServerMessage,
-    ServerInfoResponse,
-    ServerAuthMode,
-    ServerBuildMode,
-    BinaryIdentity,
-    RestartResponse,
-    UpgradeAgentResponse,
-    UpgradeAgentRequest,
-    LogEvent,
-    LogEntry,
-    LogErrorDetails,
-    AgentConnectionStatus,
-    StartAgentResponse,
-    RetryAgentStartResponse,
-    ShutdownAgentResponse,
-    RenamePathRequest,
-    RenamePathResponse,
-    FileSearchResponse,
-    FileSearchEntry,
-    ContentGrepMatch,
-    ContentGrepResponse,
-    DiffEndpoint,
-    DiffFilesRequest,
-    DiffFilesResponse,
-    CreateSshAgentRequest,
-    CreateSshAgentResponse,
-    ManagedSshAgentConfigurationResponse,
-    UpdateSshAgentResponse,
-    UpdateSshAgentRequest,
-    CreateLocalAgentRequest,
-    CreateLocalAgentResponse,
-    ManagedLocalAgentConfigurationResponse,
-    UpdateLocalAgentResponse,
-    UpdateLocalAgentRequest,
-    DeleteManagedAgentResponse,
-    UpdateUserStateRequest,
-    UserStateResponse,
-    GitContextResponse,
-    GitStatusResponse,
-    GitDiffResponse,
-    GitDiffMode,
-    Level,
-    LoggingLevelRequest,
-    LoggingLevelResponse,
-    AccessTokenListResponse,
-    AccessTokenResponse,
-    AccessTokenSecretResponse,
-    CreateAccessTokenRequest,
-    DeleteAccessTokenResponse,
-    DeviceScope,
-    Permission,
-    UpdateAccessTokenRequest,
-};
 
 export class Agent {
     private baseUrl: string;

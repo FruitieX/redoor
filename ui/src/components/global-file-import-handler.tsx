@@ -1,7 +1,8 @@
 import React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ClipboardPaste, Upload } from "lucide-react";
-import { ApiError, type Agent } from "#ui/api-client";
+import { type Agent } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import { joinBrowserPath } from "#ui/components/browser/utils";
 import { invalidateAgentData } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";

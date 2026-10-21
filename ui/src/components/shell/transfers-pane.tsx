@@ -1,7 +1,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { getRouteApi, Link } from "@tanstack/react-router";
 
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import { TransferList } from "#ui/components/transfer-list";
 import { transfersQueryOptions } from "#ui/queries";
 import { useAgents } from "#ui/use-agents";

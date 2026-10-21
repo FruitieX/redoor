@@ -10,7 +10,8 @@ import {
 } from "vitest";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
-import { ApiError, type Agent, type ApiClient } from "#ui/api-client";
+import { type Agent, type ApiClient } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import { FakeAgent } from "./fake-agent";
 import {
     ProcessManager,

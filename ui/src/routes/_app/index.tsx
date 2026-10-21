@@ -13,7 +13,8 @@ import {
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 
-import type { Agent, ServerAuthMode } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { ServerAuthMode } from "#bindings/ServerAuthMode";
 import { AgentStatusDot } from "#ui/components/agent-status-dot";
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
 import { Button } from "#ui/components/button";

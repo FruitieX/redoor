@@ -3,11 +3,9 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 
-import type {
-    AccessTokenResponse,
-    DeviceScope,
-    Permission,
-} from "#ui/api-client";
+import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
+import type { DeviceScope } from "#bindings/DeviceScope";
+import type { Permission } from "#bindings/Permission";
 import { accessTokensQueryOptions, queryKeys } from "#ui/queries";
 import { useAgents } from "#ui/use-agents";
 import { Button } from "#ui/components/button";

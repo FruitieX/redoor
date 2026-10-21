@@ -4,7 +4,7 @@ import { parse as parseDiff } from "diff2html";
 import { ColorSchemeType, LineType } from "diff2html/lib/types";
 import { Diff2HtmlUI } from "diff2html/lib/ui/js/diff2html-ui-base";
 import "diff2html/bundles/css/diff2html.min.css";
-import { getBrowserUrl } from "#ui/api-client";
+import { getBrowserUrl } from "#ui/api-paths";
 import { browserRoute } from "#ui/browser-route";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import {

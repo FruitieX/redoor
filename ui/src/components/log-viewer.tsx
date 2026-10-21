@@ -3,12 +3,10 @@ import { ScrollText } from "lucide-react";
 import { z } from "zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type {
-    Level,
-    LogEntry,
-    LogEvent,
-    LoggingLevelResponse,
-} from "#ui/api-client";
+import type { Level } from "#bindings/Level";
+import type { LogEntry } from "#bindings/LogEntry";
+import type { LogEvent } from "#bindings/LogEvent";
+import type { LoggingLevelResponse } from "#bindings/LoggingLevelResponse";
 import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
 import { CopyableCodeRow } from "#ui/components/copyable-code-row";

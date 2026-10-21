@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ApiClient, ApiError, type Agent } from "#ui/api-client";
+import { ApiClient, type Agent } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import {
     ProcessManager,
     TempFileManager,

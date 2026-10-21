@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
-import type { RestartResponse } from "#ui/api-client";
+import type { RestartResponse } from "#bindings/RestartResponse";
 
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";

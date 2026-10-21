@@ -10,7 +10,7 @@ import type { CreateDirectoryResponse } from "#bindings/CreateDirectoryResponse"
 import type { RawDeleteResponse } from "#bindings/RawDeleteResponse";
 import type { FileSearchResponse } from "#bindings/FileSearchResponse";
 import type { ContentGrepResponse } from "#bindings/ContentGrepResponse";
-import type { Permission } from "#ui/api-client";
+import type { Permission } from "#bindings/Permission";
 import {
     ALL_PERMISSIONS,
     ProcessManager,

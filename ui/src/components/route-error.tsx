@@ -2,7 +2,7 @@ import * as React from "react";
 import { AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
 import { useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { z } from "zod";
-import { ApiError } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import { Button } from "#ui/components/button";
 
 /** True for browser network failures that never received an HTTP response. */

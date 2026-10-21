@@ -11,7 +11,8 @@ import { z } from "zod";
 import { useSetAtom } from "jotai";
 import { MoreHorizontal, Pencil, Play, Power, FolderOpen } from "lucide-react";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
-import type { Agent, BinaryIdentity } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { ProtocolMismatchAttempt } from "#bindings/ProtocolMismatchAttempt";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import {

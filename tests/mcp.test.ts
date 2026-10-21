@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, onTestFinished } from "vitest";
 
-import { ApiClient, type Permission } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import type { Permission } from "#bindings/Permission";
 import {
     ALL_PERMISSIONS,
     ProcessManager,

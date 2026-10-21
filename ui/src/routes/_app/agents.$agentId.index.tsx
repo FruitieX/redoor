@@ -19,7 +19,8 @@ import {
     ScrollText,
     Package,
 } from "lucide-react";
-import { getBrowserUrl, type Agent } from "#ui/api-client";
+import { type Agent } from "#ui/api-client";
+import { getBrowserUrl } from "#ui/api-paths";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import {

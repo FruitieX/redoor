@@ -1,5 +1,5 @@
 import type { LsEntry } from "#bindings/LsEntry";
-import { ApiError } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import type { FileSortColumn, FileSortDirection } from "#ui/browser-search";
 
 export function getImmediateParentPath(path: string): string | null {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import {
     formatRemainingTime,
     getAnimatedTransferProgress,

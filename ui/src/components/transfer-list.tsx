@@ -11,7 +11,8 @@ import {
     Pause,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { type ApiClient, type TransferProgressEntry } from "#ui/api-client";
+import { type ApiClient } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import { Tooltip } from "#ui/components/tooltip";
 import { IconButton } from "#ui/components/icon-button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";

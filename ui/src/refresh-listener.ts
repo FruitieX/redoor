@@ -3,7 +3,8 @@ import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
-import { type ApiClient, type UiEvent } from "#ui/api-client";
+import { type ApiClient } from "#ui/api-client";
+import type { UiEvent } from "#bindings/UiEvent";
 import {
     invalidateAgentData,
     invalidateAllAgentData,

@@ -3,7 +3,9 @@ import { getRouteApi } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
-import type { Agent, BinaryIdentity, ServerInfoResponse } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { BinaryIdentity } from "#bindings/BinaryIdentity";
+import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
 import { agentsQueryOptions, invalidateAgentData } from "#ui/queries";
 import { waitForRestart } from "#ui/utils/wait-for-restart";
 

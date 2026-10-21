@@ -6,11 +6,9 @@ import {
     useSuspenseQuery,
 } from "@tanstack/react-query";
 import { Check, Copy, Download, File, Folder } from "lucide-react";
-import type {
-    Agent,
-    LsDirectoryResponse,
-    LsFileResponse,
-} from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
+import type { LsFileResponse } from "#bindings/LsFileResponse";
 import type { AgentAccountGroup } from "#bindings/AgentAccountGroup";
 import type { AgentAccountUser } from "#bindings/AgentAccountUser";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";

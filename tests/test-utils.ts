@@ -9,14 +9,11 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import {
-    ApiClient,
-    Agent,
-    ApiError,
-    type AccessTokenResponse,
-    type DeviceScope,
-    type Permission,
-} from "#ui/api-client";
+import { ApiClient, Agent } from "#ui/api-client";
+import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
+import type { DeviceScope } from "#bindings/DeviceScope";
+import type { Permission } from "#bindings/Permission";
+import { ApiError } from "#ui/api-transport";
 import { onTestFinished } from "vitest";
 import { Toxiproxy } from "toxiproxy-node-client";
 import type Proxy from "toxiproxy-node-client/dist/Proxy";

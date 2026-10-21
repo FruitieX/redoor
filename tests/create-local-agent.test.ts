@@ -11,7 +11,8 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { CreateLocalAgentRequest } from "#bindings/CreateLocalAgentRequest";
 import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
 import type { UpdateLocalAgentRequest } from "#bindings/UpdateLocalAgentRequest";
-import { ApiClient, ApiError } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import {
     ProcessManager,
     TempFileManager,

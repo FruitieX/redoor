@@ -9,7 +9,7 @@ import {
 import WebSocket from "ws";
 import { z } from "zod";
 import type { Agent, ApiClient } from "#ui/api-client";
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import type { ExecEvent } from "#bindings/ExecEvent";
 import {
     ProcessManager,

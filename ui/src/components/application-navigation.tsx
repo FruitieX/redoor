@@ -17,7 +17,7 @@ import {
     X,
 } from "lucide-react";
 
-import { getBrowserUrl } from "#ui/api-client";
+import { getBrowserUrl } from "#ui/api-paths";
 import { Button } from "#ui/components/button";
 import { IconButton } from "#ui/components/icon-button";
 import { RestartButton } from "#ui/components/restart-button";

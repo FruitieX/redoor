@@ -4,7 +4,8 @@ import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { ApiClient, ApiError } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
 import { createMcpTestClient } from "./mcp-client";
 import {

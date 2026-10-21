@@ -2,7 +2,8 @@ import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { PackageOpen } from "lucide-react";
 
-import type { ServerInfoResponse, UpgradeAgentResponse } from "#ui/api-client";
+import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
+import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
 import { InputControl } from "./input-control";
