@@ -1,23 +1,18 @@
 import React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useSetAtom } from "jotai";
 import { ClipboardPaste, Upload } from "lucide-react";
 import { ApiError, type Agent } from "#ui/api-client";
 import { joinBrowserPath } from "#ui/components/browser/utils";
 import { invalidateAgentData } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
 import { focusAndSelectFileNameStem } from "#ui/utils/file-name";
-import {
-    enqueueUploadBatchAtom,
-    type UploadSourceFile,
-} from "#ui/upload-queue";
+import type { UploadSourceFile } from "#ui/upload-queue";
+import { useUploads } from "#ui/use-uploads";
 import { Button } from "./button";
 import { Dialog } from "./dialog";
 import { DialogActions } from "./dialog-actions";
 import { InputControl } from "./input-control";
 import { Toast } from "./toast";
-
-export const REQUEST_CLIPBOARD_PASTE_EVENT = "redoor:request-clipboard-paste";
 
 /** Identifies the agent directory that can accept imported files. */
 type DirectoryDestination = {
@@ -31,9 +26,23 @@ type ImportState =
     | { type: "success"; message: string }
     | { type: "error"; message: string };
 
-/** Requests a clipboard import from controls outside the global handler. */
-export function requestClipboardPaste() {
-    window.dispatchEvent(new Event(REQUEST_CLIPBOARD_PASTE_EVENT));
+/**
+ * Lets controls outside the handler, such as the toolbar's Paste button, start the same
+ * permission-gated clipboard import. The handler owns the destination and the dialogs the
+ * import may open, so it hands the control a direct call instead of the control signalling
+ * it through the window.
+ */
+const ClipboardImportContext = React.createContext<(() => void) | null>(null);
+
+/** Returns the function that imports from the clipboard into the directory on screen. */
+export function useClipboardImport(): () => void {
+    const importFromClipboard = React.useContext(ClipboardImportContext);
+
+    if (importFromClipboard === null) {
+        throw new Error("Missing GlobalFileImportHandler");
+    }
+
+    return importFromClipboard;
 }
 
 /** Avoids replacing the browser's normal paste behavior while the user is editing. */
@@ -205,7 +214,7 @@ async function readDroppedFiles(dataTransfer: DataTransfer) {
 
 /** Enqueues source manifests for the active destination. */
 function useFileUploader(props: { destination: DirectoryDestination | null }) {
-    const enqueue = useSetAtom(enqueueUploadBatchAtom);
+    const uploads = useUploads();
 
     const [importState, setImportState] = React.useState<ImportState>({
         type: "idle",
@@ -233,7 +242,7 @@ function useFileUploader(props: { destination: DirectoryDestination | null }) {
 
             const destination = props.destination;
 
-            const result = enqueue({
+            const result = uploads.enqueue({
                 agentId: destination.agent.id,
                 destinationPath: destination.path,
                 files,
@@ -254,7 +263,7 @@ function useFileUploader(props: { destination: DirectoryDestination | null }) {
                 message: `Queued ${result.fileCount} ${result.fileCount === 1 ? "file" : "files"}.`,
             });
         },
-        [enqueue, props.destination, showMissingDirectoryError],
+        [uploads, props.destination, showMissingDirectoryError],
     );
 
     return {
@@ -519,7 +528,6 @@ function useClipboardImporter(props: {
 /** Registers page-wide drag, drop, and paste handlers while tracking the drop overlay. */
 function useGlobalImportEvents(props: {
     destination: DirectoryDestination | null;
-    importFromClipboard: () => Promise<void>;
     openImageFileDialog: (images: File[]) => void;
     openTextFileDialog: (text: string) => void;
     showMissingDirectoryError: () => void;
@@ -652,20 +660,11 @@ function useGlobalImportEvents(props: {
             props.openTextFileDialog(text);
         };
 
-        /** Lets toolbar controls request the permission-gated Clipboard API workflow. */
-        const handleClipboardRequest = () => {
-            void props.importFromClipboard();
-        };
-
         window.addEventListener("dragenter", handleDragEnter);
         window.addEventListener("dragover", handleDragOver);
         window.addEventListener("dragleave", handleDragLeave);
         window.addEventListener("drop", handleDrop);
         window.addEventListener("paste", handlePaste);
-        window.addEventListener(
-            REQUEST_CLIPBOARD_PASTE_EVENT,
-            handleClipboardRequest,
-        );
 
         return () => {
             window.removeEventListener("dragenter", handleDragEnter);
@@ -673,14 +672,9 @@ function useGlobalImportEvents(props: {
             window.removeEventListener("dragleave", handleDragLeave);
             window.removeEventListener("drop", handleDrop);
             window.removeEventListener("paste", handlePaste);
-            window.removeEventListener(
-                REQUEST_CLIPBOARD_PASTE_EVENT,
-                handleClipboardRequest,
-            );
         };
     }, [
         props.destination,
-        props.importFromClipboard,
         props.openImageFileDialog,
         props.openTextFileDialog,
         props.showMissingDirectoryError,
@@ -820,6 +814,7 @@ function FileImportToast(props: {
  */
 export function GlobalFileImportHandler(props: {
     destination: DirectoryDestination | null;
+    children: React.ReactNode;
 }) {
     const uploader = useFileUploader({ destination: props.destination });
 
@@ -840,15 +835,19 @@ export function GlobalFileImportHandler(props: {
 
     const isDraggingFiles = useGlobalImportEvents({
         destination: props.destination,
-        importFromClipboard,
         openImageFileDialog: pastedContentImport.openImageFileDialog,
         openTextFileDialog: pastedContentImport.openTextFileDialog,
         showMissingDirectoryError: uploader.showMissingDirectoryError,
         uploadFiles: uploader.uploadFiles,
     });
 
+    const requestClipboardImport = React.useCallback(() => {
+        void importFromClipboard();
+    }, [importFromClipboard]);
+
     return (
-        <>
+        <ClipboardImportContext value={requestClipboardImport}>
+            {props.children}
             <FileImportDropOverlay
                 destination={props.destination}
                 isDraggingFiles={isDraggingFiles}
@@ -870,6 +869,6 @@ export function GlobalFileImportHandler(props: {
                 setFileName={pastedContentImport.setFileName}
                 setFileNameError={pastedContentImport.setFileNameError}
             />
-        </>
+        </ClipboardImportContext>
     );
 }

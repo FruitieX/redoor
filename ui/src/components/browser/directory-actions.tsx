@@ -1,5 +1,4 @@
 import React from "react";
-import { useSetAtom } from "jotai";
 import { useMutation } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -17,29 +16,30 @@ import { Button } from "#ui/components/button";
 import { FileInput, type FileInputHandle } from "#ui/components/file-input";
 import { PathNameDialog } from "#ui/components/browser/path-name-dialog";
 import { browserRoute } from "#ui/browser-route";
-import { requestClipboardPaste } from "#ui/components/global-file-import-handler";
+import { useClipboardImport } from "#ui/components/global-file-import-handler";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
 import type { Agent } from "#ui/api-client";
 import { joinBrowserPath } from "#ui/components/browser/utils";
-import { enqueueUploadBatchAtom } from "#ui/upload-queue";
+import { useUploads } from "#ui/use-uploads";
 import { getDirectoryArchiveName } from "#ui/utils/archive";
-import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { isPlainKey } from "#ui/utils/keyboard";
 import { getBaseName } from "#ui/utils/path";
 import { PersistentPathActions } from "#ui/components/browser/path-actions";
 import { useRefreshBrowserPath } from "#ui/components/browser/refresh";
 
 /** Sends file and directory selections through the same bounded global queue. */
 function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
-    const enqueue = useSetAtom(enqueueUploadBatchAtom);
+    const uploads = useUploads();
     const fileInputRef = React.useRef<FileInputHandle>(null);
     const directoryInputRef = React.useRef<FileInputHandle>(null);
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
     /** Queues the picked files, keeping directory structure when the browser reports it. */
     const handleFileSelection = (selectedFiles: File[]) => {
-        const result = enqueue({
+        const result = uploads.enqueue({
             agentId: props.agent.id,
             destinationPath: props.directoryPath,
             files: selectedFiles.map((file) => ({
@@ -217,30 +217,30 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
         "file" | "directory" | null
     >(null);
 
-    React.useEffect(() => {
-        /** Opens file or directory creation from the file list without intercepting text entry. */
-        const handleShortcut = (event: KeyboardEvent) => {
-            if (dialogType !== null || shouldIgnoreKeyboardShortcut(event)) {
-                return;
-            }
+    // A dialog is already open, or about to be, so the keys must not stack a second one.
+    useShortcut(
+        {
+            name: "new-file",
+            phase: "bubble",
+            priority: shortcutPriority.view,
+            skipTypingTargets: true,
+            match: (event) => isPlainKey(event, "n", { allowShift: true }),
+            run: () => setDialogType("file"),
+        },
+        dialogType === null,
+    );
 
-            if (event.key === "n") {
-                event.preventDefault();
-                setDialogType("file");
-
-                return;
-            }
-
-            if (event.key === "d") {
-                event.preventDefault();
-                setDialogType("directory");
-            }
-        };
-
-        window.addEventListener("keydown", handleShortcut);
-
-        return () => window.removeEventListener("keydown", handleShortcut);
-    }, [dialogType]);
+    useShortcut(
+        {
+            name: "new-directory",
+            phase: "bubble",
+            priority: shortcutPriority.view,
+            skipTypingTargets: true,
+            match: (event) => isPlainKey(event, "d", { allowShift: true }),
+            run: () => setDialogType("directory"),
+        },
+        dialogType === null,
+    );
 
     return (
         <>
@@ -308,6 +308,7 @@ export function DirectoryFilesActions(props: {
     onToggleHiddenFiles: () => void;
 }) {
     const refreshBrowser = useRefreshBrowserPath(props.agent.id);
+    const importFromClipboard = useClipboardImport();
     const [isReloading, setIsReloading] = React.useState(false);
 
     const directoryName = getBaseName(props.directoryPath);
@@ -362,7 +363,7 @@ export function DirectoryFilesActions(props: {
                     <Button
                         type="button"
                         variant="subtle"
-                        onClick={requestClipboardPaste}
+                        onClick={importFromClipboard}
                         aria-label="Paste files or text"
                         className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-white/5 hover:text-white"
                     >

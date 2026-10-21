@@ -12,6 +12,8 @@ import { ApiClient } from "#ui/api-client";
 import { RouteError } from "#ui/components/route-error";
 import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
 import { TerminalSessions } from "#ui/terminal/terminal-sessions";
+import { findCachedAgent, invalidateAllAgentData } from "#ui/queries";
+import { UploadQueue } from "#ui/upload-queue";
 
 // The API lives on the same origin as the page: the redoor binary
 // embeds the UI alongside the API on a single port, and during local
@@ -30,6 +32,17 @@ const store = createStore();
 // come and go. Logging out or losing the session reloads the page, which ends them.
 const terminals = new TerminalSessions(queryClient, store);
 
+// Uploads outlive the page being browsed, so the queue lives with the application and only
+// the views that enqueue into it or show it subscribe.
+const uploads = new UploadQueue({
+    queryClient,
+    resolveAgent: (agentId) => findCachedAgent(queryClient, api, agentId),
+    onSettled: () => {
+        void invalidateAllAgentData(queryClient);
+    },
+    unloadTarget: window,
+});
+
 // One registry owns every window-level shortcut, so the order in which commands claim a key
 // is decided by explicit priority instead of by whichever component registered first.
 const shortcuts = new ShortcutRegistry(window);
@@ -41,6 +54,7 @@ const router = createRouter({
         api,
         queryClient,
         terminals,
+        uploads,
     },
     defaultPreload: "intent",
     scrollRestoration: true,

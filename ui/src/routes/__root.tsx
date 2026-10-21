@@ -5,12 +5,15 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import type { ApiClient } from "#ui/api-client";
 import type { TerminalSessions } from "#ui/terminal/terminal-sessions";
+import type { UploadQueue } from "#ui/upload-queue";
 
 interface AppRouterContext {
     api: ApiClient;
     queryClient: QueryClient;
     /** Owns every terminal shell, so tabs outlive routes and components. */
     terminals: TerminalSessions;
+    /** Owns the upload queue, so uploads continue while the user navigates. */
+    uploads: UploadQueue;
 }
 
 /**

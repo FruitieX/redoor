@@ -1,13 +1,12 @@
-import { useAtomValue } from "jotai";
 import { Clock3 } from "lucide-react";
-import { uploadQueueAtom } from "#ui/upload-queue";
+import { useUploadQueueSnapshot } from "#ui/use-uploads";
 
 /** Shows only uploads waiting for a scheduler slot above their destination file list. */
-export function UploadQueue(props: {
+export function WaitingUploads(props: {
     agentId: string;
     destinationPath: string;
 }) {
-    const queue = useAtomValue(uploadQueueAtom);
+    const queue = useUploadQueueSnapshot();
 
     const items = queue.items.filter(
         (item) =>

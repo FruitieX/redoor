@@ -33,7 +33,7 @@ import { MissingPathCreationForm } from "#ui/components/browser/missing-path";
 import { DirectoryFilesActions } from "#ui/components/browser/directory-actions";
 import { SelectedFilesCard } from "#ui/components/browser/selected-files-card";
 import { FileList } from "#ui/components/browser/file-list";
-import { UploadQueue } from "#ui/components/browser/upload-queue";
+import { WaitingUploads } from "#ui/components/browser/upload-queue";
 import {
     DirectoryDetailView,
     FileDetailView,
@@ -753,7 +753,7 @@ function DirectoryBrowserPage(props: {
                 />
             ) : (
                 <>
-                    <UploadQueue
+                    <WaitingUploads
                         agentId={props.agent.id}
                         destinationPath={lsResult.path}
                     />

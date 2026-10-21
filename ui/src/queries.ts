@@ -219,6 +219,23 @@ export async function loadAgent(
     return context.api.agentFor(info);
 }
 
+/**
+ * Resolves an agent's request client from the cached inventory, for long-lived owners such
+ * as the upload queue that run outside components and loaders. Undefined while the agent is
+ * absent from the inventory.
+ */
+export function findCachedAgent(
+    queryClient: QueryClient,
+    api: ApiClient,
+    agentId: string,
+): Agent | undefined {
+    const info = queryClient
+        .getQueryData(agentsQueryOptions(api).queryKey)
+        ?.find((entry) => entry.id === agentId);
+
+    return info ? api.agentFor(info) : undefined;
+}
+
 /** Shares live agent facts (load, uptime, mounts) between route loaders and pages. */
 export function agentDetailsQueryOptions(agent: Agent) {
     return queryOptions({
