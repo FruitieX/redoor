@@ -267,6 +267,29 @@ export function transfersQueryOptions(api: ApiClient) {
     });
 }
 
+/**
+ * How often a transfer someone is waiting on is rechecked between server events. The events
+ * are throttled to every few seconds while bytes move, which is too coarse for a progress
+ * readout or for noticing completion promptly.
+ */
+export const WATCHED_TRANSFER_POLL_MS = 500;
+
+/**
+ * The transfers list for a surface that follows one operation it just started. It is the same
+ * cache entry the shell and `transfers_changed` use, so server events refresh it at once, and
+ * a short poll fills the gaps. Retries are off so a failed read reaches the surface at once
+ * instead of leaving it waiting.
+ */
+export function watchedTransfersQueryOptions(api: ApiClient) {
+    return queryOptions({
+        ...transfersQueryOptions(api),
+        staleTime: 0,
+        retry: false,
+        refetchInterval: WATCHED_TRANSFER_POLL_MS,
+        refetchIntervalInBackground: true,
+    });
+}
+
 /** How often the device list rechecks for refused agents, which push no UI events. */
 const PROTOCOL_MISMATCH_POLL_MS = 10_000;
 
