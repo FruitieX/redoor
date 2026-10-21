@@ -1,5 +1,4 @@
-import * as React from "react";
-
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import {
     isEditorInputTarget,
     isTerminalInputTarget,
@@ -13,28 +12,26 @@ import {
  * could not be exited.
  */
 export function useEscapeBlursTextControls() {
-    React.useEffect(() => {
-        /** Blurs the focused text control unless it needs Escape for its own purposes. */
-        const handleGlobalFocusKeys = (event: KeyboardEvent) => {
+    useShortcut({
+        name: "escape-blurs-text-controls",
+        // Bubble, so a control that used Escape itself, such as a menu, keeps it.
+        phase: "bubble",
+        priority: shortcutPriority.app,
+        match: (event) =>
+            event.key === "Escape" &&
+            (isTextEntryElement(document.activeElement) ||
+                isEditorInputTarget(document.activeElement)) &&
+            !isVimEditorTarget(document.activeElement) &&
+            !isVimEditorTarget(event.target) &&
+            !isTerminalInputTarget(document.activeElement),
+        run: () => {
             const activeElement = document.activeElement;
 
-            if (
-                event.key === "Escape" &&
-                (isTextEntryElement(activeElement) ||
-                    isEditorInputTarget(activeElement)) &&
-                !isVimEditorTarget(activeElement) &&
-                !isVimEditorTarget(event.target) &&
-                !isTerminalInputTarget(activeElement) &&
-                activeElement instanceof HTMLElement
-            ) {
-                event.preventDefault();
-                activeElement.blur();
+            if (!(activeElement instanceof HTMLElement)) {
+                return false;
             }
-        };
 
-        window.addEventListener("keydown", handleGlobalFocusKeys);
-
-        return () =>
-            window.removeEventListener("keydown", handleGlobalFocusKeys);
-    }, []);
+            activeElement.blur();
+        },
+    });
 }

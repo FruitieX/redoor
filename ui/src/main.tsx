@@ -10,6 +10,7 @@ import { routeTree } from "./routeTree.gen";
 import "./styles.css";
 import { ApiClient } from "#ui/api-client";
 import { RouteError } from "#ui/components/route-error";
+import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
 
 // The API lives on the same origin as the page: the redoor binary
 // embeds the UI alongside the API on a single port, and during local
@@ -19,6 +20,10 @@ import { RouteError } from "#ui/components/route-error";
 export const api = new ApiClient(window.location.origin);
 
 export const queryClient = new QueryClient();
+
+// One registry owns every window-level shortcut, so the order in which commands claim a key
+// is decided by explicit priority instead of by whichever component registered first.
+const shortcuts = new ShortcutRegistry(window);
 
 // Create a new router instance
 const router = createRouter({
@@ -68,9 +73,11 @@ if (rootElement && !rootElement.innerHTML) {
     root.render(
         <StrictMode>
             <Provider>
-                <QueryClientProvider client={queryClient}>
-                    <RouterProvider router={router} />
-                </QueryClientProvider>
+                <ShortcutRegistryContext value={shortcuts}>
+                    <QueryClientProvider client={queryClient}>
+                        <RouterProvider router={router} />
+                    </QueryClientProvider>
+                </ShortcutRegistryContext>
             </Provider>
         </StrictMode>,
     );

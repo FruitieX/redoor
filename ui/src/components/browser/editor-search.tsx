@@ -20,6 +20,7 @@ import { Button } from "#ui/components/button";
 import { InputControl } from "#ui/components/input-control";
 import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
 
 export type EditorSearchHandle = {
@@ -286,66 +287,52 @@ function useEditorSearchWindowShortcuts(props: {
     findNextMatch: () => boolean;
     findPreviousMatch: () => boolean;
 }) {
-    const propsRef = React.useRef(props);
-    propsRef.current = props;
+    /** Leaves the key alone while the editor is hidden, or the terminal or another handler owns it. */
+    const canClaim = (event: KeyboardEvent) =>
+        props.captureFindKeys &&
+        !event.defaultPrevented &&
+        !isTerminalInputTarget(event.target) &&
+        !event.altKey;
 
-    React.useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (
-                event.defaultPrevented ||
-                isTerminalInputTarget(event.target) ||
-                event.altKey ||
-                !propsRef.current.captureFindKeys
-            ) {
-                return;
+    const isMod = (event: KeyboardEvent) => event.ctrlKey || event.metaKey;
+
+    useShortcut({
+        name: "editor-find",
+        phase: "capture",
+        priority: shortcutPriority.editor,
+        effect: "swallow",
+        match: (event) =>
+            canClaim(event) && isMod(event) && event.key.toLowerCase() === "f",
+        run: props.openSearch,
+    });
+
+    useShortcut({
+        name: "editor-find-next-previous",
+        phase: "capture",
+        priority: shortcutPriority.editor,
+        effect: "swallow",
+        match: (event) =>
+            canClaim(event) &&
+            ((isMod(event) && event.key.toLowerCase() === "g") ||
+                event.key === "F3"),
+        run: (event) => {
+            if (event.shiftKey) {
+                props.findPreviousMatch();
+            } else {
+                props.findNextMatch();
             }
+        },
+    });
 
-            const commands = propsRef.current;
-
-            if (
-                (event.ctrlKey || event.metaKey) &&
-                event.key.toLowerCase() === "f"
-            ) {
-                event.preventDefault();
-                event.stopPropagation();
-                commands.openSearch();
-
-                return;
-            }
-
-            if (
-                ((event.ctrlKey || event.metaKey) &&
-                    event.key.toLowerCase() === "g") ||
-                event.key === "F3"
-            ) {
-                event.preventDefault();
-                event.stopPropagation();
-
-                if (event.shiftKey) {
-                    commands.findPreviousMatch();
-
-                    return;
-                }
-
-                commands.findNextMatch();
-
-                return;
-            }
-
-            if (event.key === "Escape") {
-                if (!commands.closeSearch()) {
-                    return;
-                }
-
-                event.preventDefault();
-                event.stopPropagation();
-            }
-        };
-
-        window.addEventListener("keydown", handleKeyDown, true);
-
-        return () => window.removeEventListener("keydown", handleKeyDown, true);
-    }, []);
+    // Escape is only claimed when it closes the panel; otherwise Vim still needs it.
+    useShortcut({
+        name: "editor-find-close",
+        phase: "capture",
+        priority: shortcutPriority.editor,
+        effect: "swallow",
+        match: (event) => canClaim(event) && event.key === "Escape",
+        run: () => props.closeSearch(),
+    });
 }
 
 /**

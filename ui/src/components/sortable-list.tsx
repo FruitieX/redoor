@@ -22,15 +22,9 @@ import {
     verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS, type Transform } from "@dnd-kit/utilities";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 import type { ItemMove } from "#ui/utils/reorder";
-
-let activeSortableDrags = 0;
-
-/** Lets the drawer ignore Escape while a child sort is still cancelling. */
-export function isSortableDragActive() {
-    return activeSortableDrags > 0;
-}
 
 type SortableOrientation = "vertical" | "horizontal";
 
@@ -239,7 +233,7 @@ function collectionAnnouncements(
     };
 }
 
-/** Tracks active child sorting even when a drawer's Escape listener runs first. */
+/** Tracks whether this list is mid-drag so the click that ends a drag cannot activate a row. */
 function useDragSession() {
     const draggingRef = React.useRef(false);
     const suppressClickRef = React.useRef(false);
@@ -251,17 +245,32 @@ function useDragSession() {
 
         draggingRef.current = true;
         suppressClickRef.current = true;
-        activeSortableDrags += 1;
     }, []);
 
     const markInactive = React.useCallback(() => {
-        if (!draggingRef.current) {
-            return;
-        }
-
         draggingRef.current = false;
-        activeSortableDrags -= 1;
     }, []);
+
+    /** Forgets a stale suppression so the next real click after a cancelled drag still works. */
+    const resetForNextInteraction = React.useCallback(() => {
+        if (!draggingRef.current) {
+            suppressClickRef.current = false;
+        }
+    }, []);
+
+    // A key press starts a new interaction too. The observer tier sees every key, even the
+    // ones another binding claims.
+    useShortcut({
+        name: "sortable-reset-click-suppression",
+        phase: "capture",
+        priority: shortcutPriority.observer,
+        match: () => true,
+        run: () => {
+            resetForNextInteraction();
+
+            return false;
+        },
+    });
 
     React.useEffect(() => markInactive, [markInactive]);
     React.useEffect(() => {
@@ -273,16 +282,9 @@ function useDragSession() {
             }
         };
 
-        const resetForNextInteraction = () => {
-            if (!draggingRef.current) {
-                suppressClickRef.current = false;
-            }
-        };
-
         document.addEventListener("click", suppressDragClick, true);
         document.addEventListener("mousedown", resetForNextInteraction, true);
         document.addEventListener("touchstart", resetForNextInteraction, true);
-        document.addEventListener("keydown", resetForNextInteraction, true);
 
         return () => {
             document.removeEventListener("click", suppressDragClick, true);
@@ -296,43 +298,44 @@ function useDragSession() {
                 resetForNextInteraction,
                 true,
             );
-            document.removeEventListener(
-                "keydown",
-                resetForNextInteraction,
-                true,
-            );
         };
-    }, []);
+    }, [resetForNextInteraction]);
 
     return { markActive, markInactive };
 }
 
-/** Consumes drag cancellation before drawers while leaving modified and text-entry keys alone. */
+/**
+ * Claims drag cancellation before drawers and menus see it, and hides modified and
+ * text-entry keys from the page while a keyboard sort is in progress. Escape keeps
+ * propagating so dnd-kit's own sensor can cancel the drag; it is claimed, so no drawer or
+ * page shortcut treats the same press as a dismissal.
+ */
 function useSortableKeys(activeId: string | null) {
-    React.useEffect(() => {
-        if (!activeId) {
-            return;
-        }
+    const isDragging = activeId !== null;
 
-        // Capture runs before the drawer's bubble listener, which is registered earlier.
-        const consumeKeys = (event: KeyboardEvent) => {
-            if (event.key === "Escape") {
-                event.preventDefault();
+    useShortcut(
+        {
+            name: "sortable-cancel-drag",
+            phase: "capture",
+            priority: shortcutPriority.interaction,
+            match: (event) => event.key === "Escape",
+            run: () => true,
+        },
+        isDragging,
+    );
 
-                return;
-            }
-
-            if (shouldIgnoreKeyboardShortcut(event)) {
-                event.stopPropagation();
-            }
-        };
-
-        document.addEventListener("keydown", consumeKeys, true);
-
-        return () => {
-            document.removeEventListener("keydown", consumeKeys, true);
-        };
-    }, [activeId]);
+    useShortcut(
+        {
+            name: "sortable-shield-keys",
+            phase: "capture",
+            priority: shortcutPriority.interaction,
+            effect: "shield",
+            match: (event) =>
+                event.key !== "Escape" && shouldIgnoreKeyboardShortcut(event),
+            run: () => true,
+        },
+        isDragging,
+    );
 }
 
 /** Invalidates a gesture permanently if its membership changes before the drop. */

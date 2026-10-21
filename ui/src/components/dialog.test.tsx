@@ -3,6 +3,7 @@
 import React from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
 import { Dialog } from "./dialog";
 
 afterEach(() => {
@@ -66,12 +67,14 @@ function renderAnchoredDialog(anchor: {
     vi.stubGlobal("innerWidth", 1_000);
     vi.stubGlobal("innerHeight", 800);
     render(
-        <AnchoredDialog
-            anchorTop={anchor.top}
-            anchorBottom={anchor.bottom}
-            anchorLeft={anchor.left ?? 400}
-            anchorRight={anchor.right ?? 440}
-        />,
+        <ShortcutRegistryContext value={new ShortcutRegistry(window)}>
+            <AnchoredDialog
+                anchorTop={anchor.top}
+                anchorBottom={anchor.bottom}
+                anchorLeft={anchor.left ?? 400}
+                anchorRight={anchor.right ?? 440}
+            />
+        </ShortcutRegistryContext>,
     );
 
     const panel = screen.getByRole("dialog", {

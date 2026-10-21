@@ -2,6 +2,7 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { IconButton } from "#ui/components/icon-button";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 
 /**
  * Provides consistent modal structure and dismissal behavior for UI workflows.
@@ -200,25 +201,19 @@ function useDialogBehavior(props: {
         left: number;
     } | null>(null);
 
-    React.useEffect(() => {
-        if (!props.isOpen || !props.isAnchored || props.isBusy) {
-            return;
-        }
-
-        /** Capture so Escape dismisses the menu before a focused terminal consumes it. */
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                props.onClose();
-            }
-        };
-
-        document.addEventListener("keydown", handleKeyDown, true);
-
-        return () =>
-            document.removeEventListener("keydown", handleKeyDown, true);
-    }, [props.isAnchored, props.isBusy, props.isOpen, props.onClose]);
+    // Modal tier and capture, so Escape dismisses the menu before a focused terminal or an
+    // editor panel beneath it can consume the key.
+    useShortcut(
+        {
+            name: "anchored-dialog-dismiss",
+            phase: "capture",
+            priority: shortcutPriority.modal,
+            effect: "swallow",
+            match: (event) => event.key === "Escape",
+            run: props.onClose,
+        },
+        props.isOpen && props.isAnchored && !props.isBusy,
+    );
 
     React.useEffect(() => {
         const dialog = props.dialogRef.current;

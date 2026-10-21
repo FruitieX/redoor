@@ -22,7 +22,8 @@ import { Tooltip } from "#ui/components/tooltip";
 import { SearchButton } from "#ui/components/search-button";
 import type { PathLoadError } from "#ui/components/browser/utils";
 import { browserRoute } from "#ui/browser-route";
-import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { isPlainKey } from "#ui/utils/keyboard";
 import { expandHomePath } from "#ui/utils/path";
 
 /** Names the representations of a path that the view tabs switch between. */
@@ -219,42 +220,36 @@ export function BrowserHeader(props: {
     const navigate = useNavigate();
     const pathUnavailable = props.pathUnavailable === true;
 
-    React.useEffect(() => {
-        /** Returns alternate directory views to the list before moving to the parent. */
-        const handleBackspace = (event: KeyboardEvent) => {
-            if (
-                event.key !== "Backspace" ||
-                shouldIgnoreKeyboardShortcut(event)
-            ) {
-                return;
-            }
+    /** Returns alternate directory views to the list before moving to the parent. */
+    const goUp = () => {
+        if (
+            props.entryType === "directory" &&
+            props.activeView !== "files" &&
+            !pathUnavailable
+        ) {
+            void navigate({
+                ...browserRoute(props.agent.id, props.path),
+                search: {},
+            });
 
-            if (
-                props.entryType === "directory" &&
-                props.activeView !== "files" &&
-                !pathUnavailable
-            ) {
-                event.preventDefault();
-                void navigate({
-                    ...browserRoute(props.agent.id, props.path),
-                    search: {},
-                });
+            return;
+        }
 
-                return;
-            }
+        if (props.parentPath === null) {
+            return false;
+        }
 
-            if (props.parentPath === null) {
-                return;
-            }
+        void navigate(browserRoute(props.agent.id, props.parentPath));
+    };
 
-            event.preventDefault();
-            void navigate(browserRoute(props.agent.id, props.parentPath));
-        };
-
-        window.addEventListener("keydown", handleBackspace);
-
-        return () => window.removeEventListener("keydown", handleBackspace);
-    }, [navigate, pathUnavailable, props]);
+    useShortcut({
+        name: "browser-go-up",
+        phase: "bubble",
+        priority: shortcutPriority.view,
+        skipTypingTargets: true,
+        match: (event) => isPlainKey(event, "Backspace", { allowShift: true }),
+        run: goUp,
+    });
 
     return (
         <BrowserPageHeader

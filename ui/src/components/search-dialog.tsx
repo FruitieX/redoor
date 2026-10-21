@@ -39,7 +39,8 @@ import {
     type BrowserLocation,
 } from "#ui/use-browser-location";
 import { useUserState } from "#ui/user-state";
-import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { isPlainKey } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
 
 const agentRoute = getRouteApi("/_app/agents/$agentId");
@@ -131,34 +132,36 @@ function useSearchQuery(urlQuery: string | undefined) {
 function useOpenSearchShortcut(isOpen: boolean) {
     const { openSearch } = useAgentSearchNavigation();
 
-    React.useEffect(() => {
-        const openSearchOnShortcut = (event: KeyboardEvent) => {
-            if (isOpen) {
-                return;
-            }
+    const open = () => {
+        void openSearch();
+    };
 
-            const isCommandK =
+    useShortcut(
+        {
+            name: "open-search-command-k",
+            phase: "bubble",
+            priority: shortcutPriority.app,
+            match: (event) =>
                 event.key.toLowerCase() === "k" &&
                 !event.altKey &&
                 !event.shiftKey &&
-                (event.metaKey || event.ctrlKey);
+                (event.metaKey || event.ctrlKey),
+            run: open,
+        },
+        !isOpen,
+    );
 
-            const isUnmodifiedS =
-                event.key === "s" && !shouldIgnoreKeyboardShortcut(event);
-
-            if (!isCommandK && !isUnmodifiedS) {
-                return;
-            }
-
-            event.preventDefault();
-            void openSearch();
-        };
-
-        window.addEventListener("keydown", openSearchOnShortcut);
-
-        return () =>
-            window.removeEventListener("keydown", openSearchOnShortcut);
-    }, [isOpen, openSearch]);
+    useShortcut(
+        {
+            name: "open-search-s",
+            phase: "bubble",
+            priority: shortcutPriority.app,
+            skipTypingTargets: true,
+            match: (event) => isPlainKey(event, "s", { allowShift: true }),
+            run: open,
+        },
+        !isOpen,
+    );
 }
 
 /** Names where a search result leads, with the line a content match should reveal. */
@@ -249,7 +252,7 @@ export function SearchDialog(props: { agent: Agent }) {
         [],
     );
 
-    useArrayKeyboardFocus(getResults, isOpen);
+    useArrayKeyboardFocus(getResults, isOpen, shortcutPriority.modal);
 
     /** Snapshots the typed query onto this history entry so Back can restore the search. */
     const openSelectedResult = async (target: SearchResultTarget) => {

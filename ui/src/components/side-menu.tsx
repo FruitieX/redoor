@@ -2,7 +2,7 @@ import * as React from "react";
 import { X } from "lucide-react";
 import { useAtom } from "jotai";
 import { IconButton } from "#ui/components/icon-button";
-import { isSortableDragActive } from "#ui/components/sortable-list";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import {
     openSideMenuAtom,
     sideMenuDrawerIds,
@@ -64,54 +64,62 @@ export function SideMenu(props: {
 
         focusable?.item(0).focus();
 
-        /** Keeps keyboard interaction inside the modal drawer and supports conventional dismissal. */
-        const handleDrawerKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape") {
-                // The sortable sensor cancels in a later bubble listener, so a live drag must win.
-                if (event.defaultPrevented || isSortableDragActive()) {
+        return () => {
+            opener?.focus();
+        };
+    }, [isOpen, drawerId]);
+
+    // The open drawer is the topmost layer, so dismissing it wins over page shortcuts. A
+    // keyboard sort inside it claims Escape first, at a higher tier in the capture phase.
+    useShortcut(
+        {
+            name: "side-menu-dismiss",
+            phase: "bubble",
+            priority: shortcutPriority.modal,
+            match: (event) => event.key === "Escape",
+            run: onClose,
+        },
+        isOpen,
+    );
+
+    // Keeps Tab inside the modal drawer by wrapping focus at either end.
+    useShortcut(
+        {
+            name: "side-menu-focus-trap",
+            phase: "bubble",
+            priority: shortcutPriority.modal,
+            match: (event) => event.key === "Tab",
+            run: (event) => {
+                const drawer = drawerRef.current;
+
+                if (!drawer) {
+                    return false;
+                }
+
+                const entries = [
+                    ...drawer.querySelectorAll<HTMLElement>(focusableSelector),
+                ];
+
+                const first = entries[0];
+                const last = entries.at(-1);
+
+                if (!first || !last) {
+                    drawer.focus();
+
                     return;
                 }
 
-                event.preventDefault();
-                onClose();
-
-                return;
-            }
-
-            if (event.key !== "Tab" || !drawer) {
-                return;
-            }
-
-            const entries = [
-                ...drawer.querySelectorAll<HTMLElement>(focusableSelector),
-            ];
-
-            const first = entries[0];
-            const last = entries.at(-1);
-
-            if (!first || !last) {
-                event.preventDefault();
-                drawer.focus();
-
-                return;
-            }
-
-            if (event.shiftKey && document.activeElement === first) {
-                event.preventDefault();
-                last.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-                event.preventDefault();
-                first.focus();
-            }
-        };
-
-        document.addEventListener("keydown", handleDrawerKeyDown);
-
-        return () => {
-            document.removeEventListener("keydown", handleDrawerKeyDown);
-            opener?.focus();
-        };
-    }, [isOpen, onClose, drawerId]);
+                if (event.shiftKey && document.activeElement === first) {
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    first.focus();
+                } else {
+                    return false;
+                }
+            },
+        },
+        isOpen,
+    );
 
     const borderClass = props.placement === "left" ? "border-r" : "border-l";
     const edgeClass = props.placement === "left" ? "left-0" : "right-0";

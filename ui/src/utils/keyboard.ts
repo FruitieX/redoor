@@ -47,6 +47,37 @@ export function isUnmodifiedAltKey(event: KeyboardEvent, key: string) {
     );
 }
 
+/**
+ * Identifies targets that consume ordinary typing: text controls, the terminal and the
+ * editor. Unmodified application shortcuts must stay out of them.
+ */
+export function isTypingTarget(target: EventTarget | null): boolean {
+    return (
+        isTextEntryElement(target) ||
+        isTerminalInputTarget(target) ||
+        isEditorInputTarget(target)
+    );
+}
+
+/**
+ * Matches a key pressed without Ctrl, Alt or Meta, so browser and OS chords keep working.
+ * Shift is rejected unless the shortcut explicitly tolerates it, because most shortcut keys
+ * are lowercase letters whose Shift form is a different command.
+ */
+export function isPlainKey(
+    event: KeyboardEvent,
+    key: string,
+    options?: { allowShift?: boolean },
+): boolean {
+    return (
+        event.key === key &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        (options?.allowShift === true || !event.shiftKey)
+    );
+}
+
 /** Keeps unmodified application shortcuts separate from browser and text-editing keys. */
 export function shouldIgnoreKeyboardShortcut(
     event: KeyboardEvent,
@@ -57,8 +88,6 @@ export function shouldIgnoreKeyboardShortcut(
         event.ctrlKey ||
         event.metaKey ||
         (options?.shift === true && event.shiftKey) ||
-        isTextEntryElement(event.target) ||
-        isTerminalInputTarget(event.target) ||
-        isEditorInputTarget(event.target)
+        isTypingTarget(event.target)
     );
 }
