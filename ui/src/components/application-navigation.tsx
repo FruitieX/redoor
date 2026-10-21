@@ -20,7 +20,8 @@ import {
 import { getBrowserUrl } from "#ui/api-client";
 import { Button } from "#ui/components/button";
 import { IconButton } from "#ui/components/icon-button";
-import { RestartButton, waitForRestart } from "#ui/components/restart-button";
+import { RestartButton } from "#ui/components/restart-button";
+import { waitForRestart } from "#ui/utils/wait-for-restart";
 import { SidebarModeToggle } from "#ui/components/sidebar-mode-toggle";
 import { SideMenu } from "#ui/components/side-menu";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";

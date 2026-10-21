@@ -20,15 +20,16 @@ import {
     VersionValue,
 } from "#ui/components/binary-identity";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
-import { RestartButton, waitForRestart } from "#ui/components/restart-button";
+import { AgentRestartButton } from "#ui/components/agent-restart-button";
 import {
     agentsQueryOptions,
-    invalidateAgentData,
     protocolMismatchesQueryOptions,
     serverInfoQueryOptions,
 } from "#ui/queries";
 import { useAgents } from "#ui/use-agents";
+import { sortAgentsByName } from "#ui/utils/agents";
 import { formatAgentRecency, useNow } from "#ui/utils/agent-time";
+import { getErrorMessage } from "#ui/utils/error";
 
 export const Route = createFileRoute("/_app/agents/")({
     component: AgentManagement,
@@ -91,11 +92,12 @@ function useAgentLifecycleRequests() {
         if (request.status === "error") {
             errors.set(
                 agentId,
-                request.error instanceof Error
-                    ? request.error.message
-                    : request.action === "start"
-                      ? "Failed to start agent"
-                      : "Failed to shut down agent",
+                getErrorMessage(
+                    request.error,
+                    request.action === "start"
+                        ? "Failed to start agent"
+                        : "Failed to shut down agent",
+                ),
             );
         }
     }
@@ -120,12 +122,7 @@ function AgentManagement() {
     );
 
     const sortedAgents = React.useMemo(
-        () =>
-            [...agents].sort(
-                (left, right) =>
-                    left.name.localeCompare(right.name) ||
-                    left.id.localeCompare(right.id),
-            ),
+        () => sortAgentsByName(agents),
         [agents],
     );
 
@@ -332,9 +329,6 @@ function AgentActionsMenu(props: {
     onStart: (agent: Agent) => void;
     onShutdown: (agent: Agent) => void;
 }) {
-    const queryClient = useQueryClient();
-    const { api } = Route.useRouteContext();
-
     return (
         <ActionMenu
             label="Actions"
@@ -361,38 +355,7 @@ function AgentActionsMenu(props: {
                     ) : null}
                     {props.agent.status === "connected" ? (
                         <ActionMenuButton asChild>
-                            <RestartButton
-                                target={`agent ${props.agent.name}`}
-                                description="The agent will restart with the same arguments. In-flight transfers and terminals are interrupted."
-                                restart={() => props.agent.restart()}
-                                waitUntilReady={() =>
-                                    waitForRestart(async () => {
-                                        const restartedAgent = (
-                                            await queryClient.fetchQuery({
-                                                ...agentsQueryOptions(api),
-                                                staleTime: 0,
-                                            })
-                                        ).find(
-                                            (entry) =>
-                                                entry.id === props.agent.id &&
-                                                entry.status === "connected" &&
-                                                entry.connection_id !==
-                                                    props.agent.connectionId,
-                                        );
-
-                                        if (!restartedAgent) {
-                                            throw new Error(
-                                                "Agent is still restarting",
-                                            );
-                                        }
-
-                                        await invalidateAgentData(
-                                            queryClient,
-                                            props.agent.id,
-                                        );
-                                    }, "Agent did not come back after restart")
-                                }
-                            />
+                            <AgentRestartButton agent={props.agent} />
                         </ActionMenuButton>
                     ) : null}
                     {props.agent.managed &&

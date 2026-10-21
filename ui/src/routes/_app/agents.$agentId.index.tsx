@@ -1,9 +1,5 @@
 import * as React from "react";
-import {
-    useQuery,
-    useQueryClient,
-    useSuspenseQuery,
-} from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import {
     createFileRoute,
     Link,
@@ -23,12 +19,7 @@ import {
     ScrollText,
     Package,
 } from "lucide-react";
-import {
-    getBrowserUrl,
-    type Agent,
-    type BinaryIdentity,
-    type ServerInfoResponse,
-} from "#ui/api-client";
+import { getBrowserUrl, type Agent } from "#ui/api-client";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import {
@@ -42,16 +33,12 @@ import {
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
 import { CopyablePath } from "#ui/components/copyable-code-row";
 import { LinkButton } from "#ui/components/link-button";
-import { RestartButton, waitForRestart } from "#ui/components/restart-button";
+import { AgentRestartButton } from "#ui/components/agent-restart-button";
 import { UpgradeButton } from "#ui/components/upgrade-button";
 import { provisioningStatusStoreAtom } from "#ui/provisioning-status";
 import { RouteError } from "#ui/components/route-error";
-import {
-    agentDetailsQueryOptions,
-    agentsQueryOptions,
-    invalidateAgentData,
-    serverInfoQueryOptions,
-} from "#ui/queries";
+import { agentDetailsQueryOptions, serverInfoQueryOptions } from "#ui/queries";
+import { useAgentReconnect } from "#ui/use-agent-reconnect";
 import { useRequiredAgent } from "#ui/use-agents";
 import { formatAgentRecency, useNow } from "#ui/utils/agent-time";
 import { formatSize } from "#ui/utils/path";
@@ -76,20 +63,6 @@ const HIDDEN_MOUNT_TYPES = new Set([
 export const Route = createFileRoute("/_app/agents/$agentId/")({
     component: AgentBoundary,
 });
-
-/** Proves a force-installed agent loaded the exact executable running the server. */
-function matchesServerIdentity(
-    binary: BinaryIdentity,
-    server: ServerInfoResponse,
-): boolean {
-    return (
-        binary.git_rev === server.git_rev &&
-        binary.git_dirty === server.git_dirty &&
-        binary.version_dirty === server.version_dirty &&
-        binary.build_mode === server.build_mode &&
-        binary.build_date === server.build_date
-    );
-}
 
 /**
  * Chooses between retained lifecycle state and live details from the inventory itself, so
@@ -331,9 +304,9 @@ function AgentUpgradeControls(props: {
     agent: Agent;
     details: AgentDetailsResponse;
 }) {
-    const queryClient = useQueryClient();
     const { api } = Route.useRouteContext();
     const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
+    const { waitForAgentUpgrade } = useAgentReconnect(props.agent);
 
     return (
         <div className="md:col-span-2">
@@ -348,39 +321,10 @@ function AgentUpgradeControls(props: {
                     props.agent.forceInstallRunningBinary()
                 }
                 waitUntilReady={(targetVersion, requireServerIdentity) =>
-                    waitForRestart(async () => {
-                        const upgradedAgent = (
-                            await queryClient.fetchQuery({
-                                ...agentsQueryOptions(api),
-                                staleTime: 0,
-                            })
-                        ).find(
-                            (agent) =>
-                                agent.id === props.agent.id &&
-                                agent.status === "connected" &&
-                                agent.connection_id !==
-                                    props.agent.connectionId &&
-                                agent.binary?.version === targetVersion,
-                        );
-
-                        if (!upgradedAgent?.binary) {
-                            throw new Error("Agent is still upgrading");
-                        }
-
-                        if (
-                            requireServerIdentity &&
-                            !matchesServerIdentity(
-                                upgradedAgent.binary,
-                                serverInfo,
-                            )
-                        ) {
-                            throw new Error(
-                                "Agent has not loaded the running server binary",
-                            );
-                        }
-
-                        await invalidateAgentData(queryClient, props.agent.id);
-                    }, "Agent did not come back after upgrade")
+                    waitForAgentUpgrade(
+                        targetVersion,
+                        requireServerIdentity ? serverInfo : null,
+                    )
                 }
             />
         </div>
@@ -485,9 +429,6 @@ function AgentDetailsHeader(props: {
     agent: Agent;
     details: AgentDetailsResponse;
 }) {
-    const queryClient = useQueryClient();
-    const { api } = Route.useRouteContext();
-
     return (
         <div className="mb-6">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -499,38 +440,7 @@ function AgentDetailsHeader(props: {
                     <span className="truncate">{props.details.name}</span>
                 </h1>
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <RestartButton
-                        target={`agent ${props.details.name}`}
-                        description="The agent will restart with the same arguments. In-flight transfers and terminals are interrupted."
-                        restart={() => props.agent.restart()}
-                        waitUntilReady={() =>
-                            waitForRestart(async () => {
-                                const restartedAgent = (
-                                    await queryClient.fetchQuery({
-                                        ...agentsQueryOptions(api),
-                                        staleTime: 0,
-                                    })
-                                ).find(
-                                    (agent) =>
-                                        agent.id === props.agent.id &&
-                                        agent.status === "connected" &&
-                                        agent.connection_id !==
-                                            props.agent.connectionId,
-                                );
-
-                                if (!restartedAgent) {
-                                    throw new Error(
-                                        "Agent is still restarting",
-                                    );
-                                }
-
-                                await invalidateAgentData(
-                                    queryClient,
-                                    props.agent.id,
-                                );
-                            }, "Agent did not come back after restart")
-                        }
-                    />
+                    <AgentRestartButton agent={props.agent} />
                     <LinkButton
                         to="/agents/$agentId/logs"
                         params={{ agentId: props.details.id }}
