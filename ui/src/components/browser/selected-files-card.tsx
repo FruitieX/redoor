@@ -1,7 +1,11 @@
 import type { ResumeMode } from "#bindings/ResumeMode";
 import React from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+    useMutation,
+    useQueryClient,
+    type QueryClient,
+} from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
 import {
     Copy,
@@ -23,6 +27,7 @@ import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
 import type { Agent, ApiClient, CopyExistingMode } from "#ui/api-client";
 import { invalidateAgentData } from "#ui/queries";
+import { waitForTransfers } from "#ui/transfer-wait";
 import {
     selectedFilesAtom,
     clearSelectedFilesAtom,
@@ -30,10 +35,10 @@ import {
     type SelectedPath,
 } from "#ui/selected-files";
 import {
-    getErrorMessage,
     isBrowserPathInside,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import {
     SelectedFilesTransferTrigger,
     type SelectedFilesTransferOperation,
@@ -66,10 +71,11 @@ const transferActionMove = {
 };
 
 /**
- * Polls public transfer rows so only finished items are unselected. Returns
- * false when the run was aborted and the caller must not update UI state.
+ * Waits on the shared transfers query so only finished items are unselected. Returns false
+ * when the run was aborted and the caller must not update UI state.
  */
 async function waitForPendingTransfers(props: {
+    queryClient: QueryClient;
     api: ApiClient;
     pendingTransfers: Map<number, SelectedPath>;
     completedFiles: SelectedPath[];
@@ -80,71 +86,75 @@ async function waitForPendingTransfers(props: {
     failedLabel: string;
     signal: AbortSignal;
 }): Promise<boolean> {
-    try {
-        while (props.pendingTransfers.size > 0 && !props.signal.aborted) {
-            // Read the public list directly so a transfers_changed invalidation
-            // cannot abort this wait as a TanStack Query CancelledError.
-            const progress = await props.api.getTransferProgress();
-
-            if (props.signal.aborted) {
-                return false;
-            }
-
-            for (const transfer of progress.transfers) {
-                const file = props.pendingTransfers.get(transfer.request_id);
-
-                if (!file) continue;
-
-                if (transfer.state === "completed") {
-                    props.completedFiles.push(file);
-                    props.pendingTransfers.delete(transfer.request_id);
-                } else if (transfer.state === "errored") {
-                    props.failures.push(transfer.error ?? props.failedLabel);
-                    props.pendingTransfers.delete(transfer.request_id);
-                }
-            }
-
-            const visibleIds = new Set(
-                progress.transfers.map((transfer) => transfer.request_id),
-            );
-
-            const missingTransfers = [...props.pendingTransfers].filter(
-                ([id]) => !visibleIds.has(id),
-            );
-
-            if (missingTransfers.length > 0) {
-                const inventory = await props.api.listPartials();
-
-                for (const [id, file] of missingTransfers) {
-                    const paused = inventory.partials.some(
-                        (partial) =>
-                            partial.source.agent === file.agentId &&
-                            partial.source.path === file.path &&
-                            partial.dest_agent_id ===
-                                props.destinationAgentId &&
-                            partial.dest.path ===
-                                joinBrowserPath(
-                                    props.directoryPath,
-                                    file.fileName,
-                                ),
-                    );
-
-                    if (paused) {
-                        props.pausedFiles.push(file);
-                        props.pendingTransfers.delete(id);
-                    }
-                }
-            }
-
-            if (props.pendingTransfers.size > 0) {
-                await new Promise((resolve) => window.setTimeout(resolve, 500));
-            }
-        }
-    } catch (error) {
-        props.failures.push(error);
+    if (props.pendingTransfers.size === 0) {
+        return !props.signal.aborted;
     }
 
-    return !props.signal.aborted;
+    try {
+        return await waitForTransfers({
+            queryClient: props.queryClient,
+            api: props.api,
+            signal: props.signal,
+            isSettled: async (transfers) => {
+                for (const transfer of transfers) {
+                    const file = props.pendingTransfers.get(
+                        transfer.request_id,
+                    );
+
+                    if (!file) continue;
+
+                    if (transfer.state === "completed") {
+                        props.completedFiles.push(file);
+                        props.pendingTransfers.delete(transfer.request_id);
+                    } else if (transfer.state === "errored") {
+                        props.failures.push(
+                            transfer.error ?? props.failedLabel,
+                        );
+                        props.pendingTransfers.delete(transfer.request_id);
+                    }
+                }
+
+                const visibleIds = new Set(
+                    transfers.map((transfer) => transfer.request_id),
+                );
+
+                const missingTransfers = [...props.pendingTransfers].filter(
+                    ([id]) => !visibleIds.has(id),
+                );
+
+                if (missingTransfers.length > 0) {
+                    // A paused copy drops its row, so its kept partial is the only trace.
+                    const inventory = await props.api.listPartials();
+
+                    for (const [id, file] of missingTransfers) {
+                        const paused = inventory.partials.some(
+                            (partial) =>
+                                partial.source.agent === file.agentId &&
+                                partial.source.path === file.path &&
+                                partial.dest_agent_id ===
+                                    props.destinationAgentId &&
+                                partial.dest.path ===
+                                    joinBrowserPath(
+                                        props.directoryPath,
+                                        file.fileName,
+                                    ),
+                        );
+
+                        if (paused) {
+                            props.pausedFiles.push(file);
+                            props.pendingTransfers.delete(id);
+                        }
+                    }
+                }
+
+                return props.pendingTransfers.size === 0;
+            },
+        });
+    } catch (error) {
+        props.failures.push(error);
+
+        return !props.signal.aborted;
+    }
 }
 
 /**
@@ -267,6 +277,7 @@ function TransferSelectedFilesAction(props: {
     onTransferringChange: (isTransferring: boolean) => void;
     children: (trigger: SelectedFilesTransferTriggerApi) => React.ReactNode;
 }) {
+    const queryClient = useQueryClient();
     const selectedFiles = useAtomValue(selectedFilesAtom);
     const unselectFile = useSetAtom(unselectFileAtom);
 
@@ -355,6 +366,7 @@ function TransferSelectedFilesAction(props: {
             );
 
             const stillActive = await waitForPendingTransfers({
+                queryClient,
                 api: props.api,
                 pendingTransfers,
                 completedFiles,
@@ -608,6 +620,12 @@ export function SelectedFilesCard(props: {
     const canDelete = hasSelection;
     const selectionSummary = `${fileCount} ${fileCount === 1 ? "file" : "files"}, ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} selected`;
 
+    // Clearing the selection dismisses the delete prompt. Resetting while rendering keeps it from
+    // reappearing when something is selected again.
+    if (isDeleteDialogOpen && !hasSelection) {
+        setIsDeleteDialogOpen(false);
+    }
+
     /** Opens confirm from both the desktop Delete button and the mobile Actions menu. */
     const openDeleteDialog = () => {
         setIsDeleteDialogOpen(true);
@@ -619,12 +637,6 @@ export function SelectedFilesCard(props: {
         agent: agentsById.get(file.agentId) ?? null,
         path: file.path,
     }));
-
-    React.useEffect(() => {
-        if (isDeleteDialogOpen && !hasSelection) {
-            setIsDeleteDialogOpen(false);
-        }
-    }, [hasSelection, isDeleteDialogOpen]);
 
     return (
         <>
@@ -711,60 +723,64 @@ export function SelectedFilesCard(props: {
                     </TransferSelectedFilesAction>
                 )}
             </TransferSelectedFilesAction>
-            <DeletePathsDialog
-                isOpen={isDeleteDialogOpen}
-                title={`Delete ${selectedFiles.length === 1 ? "this selected item" : "these selected items"}?`}
-                description={`Move ${fileCount} ${fileCount === 1 ? "file" : "files"} and ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} to trash.`}
-                targets={deleteTargets}
-                trashConfirmLabel={
-                    selectedFiles.length === 1
-                        ? "Move selected item to trash"
-                        : `Move ${selectedFiles.length} selected items to trash`
-                }
-                permanentConfirmLabel={
-                    selectedFiles.length === 1
-                        ? "Delete selected item"
-                        : `Delete ${selectedFiles.length} selected items`
-                }
-                requiredConfirmationText="DELETE"
-                onClose={() => setIsDeleteDialogOpen(false)}
-                onDeleted={async (targets) => {
-                    targets.forEach((target) => {
-                        const selected = selectedFiles.find(
-                            (file) =>
-                                file.path === target.path &&
-                                file.agentId === target.agent?.id,
+            {isDeleteDialogOpen && hasSelection ? (
+                <DeletePathsDialog
+                    title={`Delete ${selectedFiles.length === 1 ? "this selected item" : "these selected items"}?`}
+                    description={`Move ${fileCount} ${fileCount === 1 ? "file" : "files"} and ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} to trash.`}
+                    targets={deleteTargets}
+                    trashConfirmLabel={
+                        selectedFiles.length === 1
+                            ? "Move selected item to trash"
+                            : `Move ${selectedFiles.length} selected items to trash`
+                    }
+                    permanentConfirmLabel={
+                        selectedFiles.length === 1
+                            ? "Delete selected item"
+                            : `Delete ${selectedFiles.length} selected items`
+                    }
+                    requiredConfirmationText="DELETE"
+                    onClose={() => setIsDeleteDialogOpen(false)}
+                    onDeleted={async (targets) => {
+                        targets.forEach((target) => {
+                            const selected = selectedFiles.find(
+                                (file) =>
+                                    file.path === target.path &&
+                                    file.agentId === target.agent?.id,
+                            );
+
+                            if (selected) {
+                                unselectFile({
+                                    agentId: selected.agentId,
+                                    path: selected.path,
+                                });
+                            }
+                        });
+
+                        // Deleted items may live on several agents, including this directory's.
+                        const agentIds = new Set(
+                            targets.flatMap((target) =>
+                                target.agent ? [target.agent.id] : [],
+                            ),
                         );
 
-                        if (selected) {
+                        await Promise.all(
+                            [...agentIds].map((agentId) =>
+                                invalidateAgentData(queryClient, agentId),
+                            ),
+                        );
+                    }}
+                >
+                    <AffectedPathsList
+                        paths={selectedFiles}
+                        onDeselect={(path) =>
                             unselectFile({
-                                agentId: selected.agentId,
-                                path: selected.path,
-                            });
+                                agentId: path.agentId,
+                                path: path.path,
+                            })
                         }
-                    });
-
-                    // Deleted items may live on several agents, including this directory's.
-                    const agentIds = new Set(
-                        targets.flatMap((target) =>
-                            target.agent ? [target.agent.id] : [],
-                        ),
-                    );
-
-                    await Promise.all(
-                        [...agentIds].map((agentId) =>
-                            invalidateAgentData(queryClient, agentId),
-                        ),
-                    );
-                }}
-            >
-                <AffectedPathsList
-                    paths={selectedFiles}
-                    onDeselect={(path) =>
-                        unselectFile({ agentId: path.agentId, path: path.path })
-                    }
-                />
-            </DeletePathsDialog>
+                    />
+                </DeletePathsDialog>
+            ) : null}
         </>
     );
 }

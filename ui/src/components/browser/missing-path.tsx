@@ -6,12 +6,14 @@ import type { Agent } from "#ui/api-client";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { Button } from "#ui/components/button";
 import { TextField } from "#ui/components/text-field";
+import { browserRoute } from "#ui/browser-route";
 import { invalidateAgentData } from "#ui/queries";
 import {
-    getErrorMessage,
     getImmediateParentPath,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
+import { getBaseName, validatePathComponent } from "#ui/utils/path";
 
 type EntryType = "file" | "directory";
 
@@ -20,7 +22,7 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
     const navigate = useNavigate();
     const router = useRouter();
     const queryClient = useQueryClient();
-    const initialName = props.path.split("/").filter(Boolean).pop() ?? "";
+    const initialName = getBaseName(props.path);
     const [fileName, setFileName] = React.useState(initialName);
 
     const [validationError, setValidationError] = React.useState<string | null>(
@@ -64,7 +66,7 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
             }
 
             await navigate({
-                to: props.agent.getBrowserUrl(entry.path),
+                ...browserRoute(props.agent.id, entry.path),
                 search: {},
             });
         },
@@ -72,14 +74,10 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
 
     /** Validates the filename before choosing the corresponding remote creation API. */
     const createEntry = (type: EntryType) => {
-        if (!createdPath) {
-            setValidationError("File name is required");
+        const nameError = validatePathComponent(trimmedFileName, "File");
 
-            return;
-        }
-
-        if (trimmedFileName.includes("/")) {
-            setValidationError("File name cannot contain a slash");
+        if (nameError !== null || !createdPath) {
+            setValidationError(nameError ?? "File name is required");
 
             return;
         }

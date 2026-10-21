@@ -1,11 +1,7 @@
 import React from "react";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-    type ShouldBlockFn,
-    useBlocker,
-    useNavigate,
-} from "@tanstack/react-router";
+import { type ShouldBlockFn, useBlocker } from "@tanstack/react-router";
 import {
     ClipboardCopy,
     Download,
@@ -47,7 +43,7 @@ import {
     getErrorMessage,
     getImmediateParentPath,
 } from "#ui/components/browser/utils";
-import { DeletePathsDialog } from "#ui/components/browser/delete-paths-dialog";
+import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { FullWindowToggle } from "#ui/components/full-window-toggle";
@@ -60,8 +56,7 @@ import { fileContentQueryOptions } from "#ui/queries";
 import { useAgentSearchNavigation } from "#ui/search-navigation";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
-import { unpinFile, useUserState } from "#ui/user-state";
-import { unselectFileAtom } from "#ui/selected-files";
+import { useUserState } from "#ui/user-state";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { MarkdownPreview } from "#ui/components/browser/markdown-preview";
 
@@ -552,8 +547,7 @@ function getFileEditorStatus(props: {
 }
 
 /** Makes file removal confirm draft loss for both trash and permanent deletion. */
-function EditorDeleteConfirmation(props: {
-    isOpen: boolean;
+function EditorDeleteDialog(props: {
     agent: Agent;
     filePath: string;
     fileName: string;
@@ -561,55 +555,22 @@ function EditorDeleteConfirmation(props: {
     onClose: () => void;
     onDeleted: () => void;
 }) {
-    const navigate = useNavigate();
-    const [, setUserState] = useUserState();
-    const unselectFile = useSetAtom(unselectFileAtom);
-
     return (
-        <DeletePathsDialog
-            isOpen={props.isOpen}
-            title="Delete this file?"
-            description={
-                props.agent.supportsTrash
-                    ? `Move ${props.fileName} to trash. You can restore it later from the Trash tab.`
-                    : `Move ${props.fileName} to the device's native Trash.`
-            }
-            targets={[{ agent: props.agent, path: props.filePath }]}
-            trashConfirmLabel="Move to trash"
-            permanentConfirmLabel="Delete file"
+        <DeletePathDialog
+            agent={props.agent}
+            path={props.filePath}
+            name={props.fileName}
+            entryType="file"
+            leaveToParent
             onClose={props.onClose}
-            onDeleted={async () => {
-                const target = {
-                    agentId: props.agent.id,
-                    path: props.filePath,
-                };
-
-                // Removed files must disappear from navigation and pending selection actions.
-                unselectFile(target);
-                setUserState((current) => ({
-                    ...current,
-                    pinnedFiles: unpinFile(current.pinnedFiles, target),
-                }));
-                props.onDeleted();
-                const parentPath = getImmediateParentPath(props.filePath);
-
-                if (parentPath !== null) {
-                    await navigate({
-                        to: props.agent.getBrowserUrl(parentPath),
-                        replace: true,
-                    });
-                }
-            }}
+            onDeleted={props.onDeleted}
         >
-            <p className="break-all font-mono text-sm text-slate-300">
-                {props.filePath}
-            </p>
             {props.isDirty ? (
                 <p className="mt-3 text-sm text-amber-300">
                     Unsaved edits will be discarded if you remove this file.
                 </p>
             ) : null}
-        </DeletePathsDialog>
+        </DeletePathDialog>
     );
 }
 
@@ -939,19 +900,21 @@ export function FileEditView(props: FileEditViewProps) {
                     />
                 </div>
             </article>
-            <EditorDeleteConfirmation
-                isOpen={deleteConfirmationOpen}
-                agent={props.agent}
-                filePath={props.filePath}
-                fileName={props.fileName}
-                isDirty={isDirty}
-                onClose={() => setDeleteConfirmationOpen(false)}
-                onDeleted={() => {
-                    // Deletion already confirms losing the buffer; do not ask again while leaving.
-                    isDeletedRef.current = true;
-                    setDraft(null);
-                }}
-            />
+            {deleteConfirmationOpen ? (
+                <EditorDeleteDialog
+                    agent={props.agent}
+                    filePath={props.filePath}
+                    fileName={props.fileName}
+                    isDirty={isDirty}
+                    onClose={() => setDeleteConfirmationOpen(false)}
+                    onDeleted={() => {
+                        // Deletion already confirms losing the buffer; do not ask again while leaving.
+                        isDeletedRef.current = true;
+                        setDraft(null);
+                    }}
+                />
+            ) : null}
+
             <EditorConfirmations
                 reloadOpen={reloadConfirmationOpen}
                 navigationOpen={navigationBlocker.status === "blocked"}

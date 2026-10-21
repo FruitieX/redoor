@@ -14,38 +14,31 @@ import {
 } from "lucide-react";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { Button } from "#ui/components/button";
-import { Dialog } from "#ui/components/dialog";
-import { DialogActions } from "#ui/components/dialog-actions";
-import { TextField } from "#ui/components/text-field";
+import { FileInput, type FileInputHandle } from "#ui/components/file-input";
+import { PathNameDialog } from "#ui/components/browser/path-name-dialog";
+import { browserRoute } from "#ui/browser-route";
 import { requestClipboardPaste } from "#ui/components/global-file-import-handler";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
 import type { Agent } from "#ui/api-client";
-import { getErrorMessage, joinBrowserPath } from "#ui/components/browser/utils";
+import { joinBrowserPath } from "#ui/components/browser/utils";
 import { enqueueUploadBatchAtom } from "#ui/upload-queue";
+import { getDirectoryArchiveName } from "#ui/utils/archive";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import { getBaseName } from "#ui/utils/path";
 import { PersistentPathActions } from "#ui/components/browser/path-actions";
 import { useRefreshBrowserPath } from "#ui/components/browser/refresh";
 
 /** Sends file and directory selections through the same bounded global queue. */
 function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
     const enqueue = useSetAtom(enqueueUploadBatchAtom);
-    const fileInputId = React.useId();
-    const directoryInputId = React.useId();
-    const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-    const directoryInputRef = React.useRef<HTMLInputElement | null>(null);
+    const fileInputRef = React.useRef<FileInputHandle>(null);
+    const directoryInputRef = React.useRef<FileInputHandle>(null);
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
-    const handleFileSelection = (
-        event: React.ChangeEvent<HTMLInputElement>,
-    ) => {
-        const selectedFiles = Array.from(event.target.files ?? []);
-
-        if (selectedFiles.length === 0) {
-            return;
-        }
-
+    /** Queues the picked files, keeping directory structure when the browser reports it. */
+    const handleFileSelection = (selectedFiles: File[]) => {
         const result = enqueue({
             agentId: props.agent.id,
             destinationPath: props.directoryPath,
@@ -55,43 +48,21 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
             })),
         });
 
-        event.target.value = "";
-
-        if (!result.ok) {
-            setErrorMessage(result.message);
-
-            return;
-        }
-
-        setErrorMessage(null);
+        setErrorMessage(result.ok ? null : result.message);
     };
 
     return (
         <div className="flex items-center gap-1">
-            <label htmlFor={fileInputId} className="sr-only">
-                Choose files to upload
-            </label>
-            <input
+            <FileInput
                 ref={fileInputRef}
-                id={fileInputId}
-                type="file"
-                multiple
-                className="sr-only"
-                onChange={handleFileSelection}
+                label="Choose files to upload"
+                onSelect={handleFileSelection}
             />
-            <label htmlFor={directoryInputId} className="sr-only">
-                Choose directory to upload
-            </label>
-            <input
-                ref={(element) => {
-                    directoryInputRef.current = element;
-                    element?.setAttribute("webkitdirectory", "");
-                }}
-                id={directoryInputId}
-                type="file"
-                multiple
-                className="sr-only"
-                onChange={handleFileSelection}
+            <FileInput
+                ref={directoryInputRef}
+                label="Choose directory to upload"
+                directory
+                onSelect={handleFileSelection}
             />
             <ActionMenu
                 label="Upload"
@@ -103,7 +74,7 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
                         <ActionMenuButton
                             onClick={() => {
                                 close();
-                                fileInputRef.current?.click();
+                                fileInputRef.current?.open();
                             }}
                         >
                             <Upload className="h-4 w-4 text-slate-400" />
@@ -112,7 +83,7 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
                         <ActionMenuButton
                             onClick={() => {
                                 close();
-                                directoryInputRef.current?.click();
+                                directoryInputRef.current?.open();
                             }}
                         >
                             <FolderPlus className="h-4 w-4 text-slate-400" />
@@ -139,262 +110,104 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
     );
 }
 
-/** Opens a focused dialog so directory creation does not crowd the toolbar. */
-function CreateDirectoryAction(props: {
+/**
+ * Names a new directory in the current one and opens it. The agent creates every missing
+ * parent, so the name may span several levels, such as `logs/2026`.
+ */
+function CreateDirectoryDialog(props: {
     agent: Agent;
     directoryPath: string;
-    isOpen: boolean;
     onClose: () => void;
 }) {
     const navigate = useNavigate();
-    const [directoryName, setDirectoryName] = React.useState("");
-
-    const [validationError, setValidationError] = React.useState<string | null>(
-        null,
-    );
 
     const createDirectoryMutation = useMutation({
-        mutationFn: (path: string) => props.agent.createDirectory(path),
-        onSuccess: async (_, path) => {
-            await navigate({
-                to: props.agent.getBrowserUrl(path),
-            });
-            resetDialog();
+        mutationFn: (name: string) =>
+            props.agent.createDirectory(
+                joinBrowserPath(props.directoryPath, name),
+            ),
+        onSuccess: async (_, name) => {
+            await navigate(
+                browserRoute(
+                    props.agent.id,
+                    joinBrowserPath(props.directoryPath, name),
+                ),
+            );
+            props.onClose();
         },
     });
 
-    const trimmedDirectoryName = directoryName.trim();
-
-    const createDirectoryPath = trimmedDirectoryName
-        ? joinBrowserPath(props.directoryPath, trimmedDirectoryName)
-        : null;
-
-    const isCreating = createDirectoryMutation.isPending;
-
-    const resetDialog = () => {
-        props.onClose();
-        setDirectoryName("");
-        setValidationError(null);
-        createDirectoryMutation.reset();
-    };
-
-    const closeDialog = () => {
-        if (isCreating) {
-            return;
-        }
-
-        resetDialog();
-    };
-
-    const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-
-        if (!createDirectoryPath) {
-            setValidationError("Directory name is required");
-
-            return;
-        }
-
-        setValidationError(null);
-        createDirectoryMutation.mutate(createDirectoryPath);
-    };
-
     return (
-        <Dialog
-            isOpen={props.isOpen}
+        <PathNameDialog
             title="Create directory"
             description="Create a new directory in the current location."
             closeAriaLabel="Close create directory dialog"
-            isBusy={isCreating}
-            errorMessage={
-                validationError ??
-                (createDirectoryMutation.isError
-                    ? getErrorMessage(
-                          createDirectoryMutation.error,
-                          "Create directory failed",
-                      )
-                    : null)
-            }
-            onClose={closeDialog}
-        >
-            <form noValidate onSubmit={handleSubmit} className="mt-4">
-                <TextField
-                    label="Directory name"
-                    value={directoryName}
-                    placeholder="logs"
-                    description="The name of the new directory."
-                    required
-                    autoFocus
-                    disabled={isCreating}
-                    onChange={(value) => {
-                        setDirectoryName(value);
-                        setValidationError(null);
-                        createDirectoryMutation.reset();
-                    }}
-                />
-
-                {createDirectoryPath ? (
-                    <div className="mt-4">
-                        <p className="mb-2 text-sm text-slate-400">
-                            Directory path
-                        </p>
-                        <p className="break-all rounded bg-[#0b0d12] px-3 py-2 font-mono text-sm text-slate-300">
-                            {createDirectoryPath}
-                        </p>
-                    </div>
-                ) : null}
-
-                <DialogActions>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={closeDialog}
-                        disabled={isCreating}
-                    >
-                        Cancel
-                    </Button>
-                    <Button type="submit" isLoading={isCreating}>
-                        <FolderPlus className="h-4 w-4" />
-                        {isCreating ? "Creating..." : "Create directory"}
-                    </Button>
-                </DialogActions>
-            </form>
-        </Dialog>
+            kind="Directory"
+            fieldLabel="Directory name"
+            placeholder="logs"
+            fieldDescription="The name of the new directory. Separate levels with a slash to create several at once."
+            initialName=""
+            allowNested
+            preview={{
+                label: "Directory path",
+                pathFor: (name) => joinBrowserPath(props.directoryPath, name),
+            }}
+            submitLabel="Create directory"
+            busyLabel="Creating..."
+            submitIcon={<FolderPlus className="h-4 w-4" />}
+            mutation={createDirectoryMutation}
+            onClose={props.onClose}
+        />
     );
 }
 
 /** Creates an empty text file and opens it immediately in the editor. */
-function CreateFileAction(props: {
+function CreateFileDialog(props: {
     agent: Agent;
     directoryPath: string;
-    isOpen: boolean;
     onClose: () => void;
 }) {
     const navigate = useNavigate();
-    const [fileName, setFileName] = React.useState("");
-
-    const [validationError, setValidationError] = React.useState<string | null>(
-        null,
-    );
 
     const createFileMutation = useMutation({
-        mutationFn: (file: { path: string; name: string }) =>
+        mutationFn: (name: string) =>
             props.agent.upload(
-                file.path,
-                new globalThis.File([""], file.name, {
+                joinBrowserPath(props.directoryPath, name),
+                new globalThis.File([""], name, {
                     type: "text/plain",
                 }),
             ),
-        onSuccess: async (_, file) => {
-            await navigate({
-                to: props.agent.getBrowserUrl(file.path),
-            });
-            resetDialog();
+        onSuccess: async (_, name) => {
+            await navigate(
+                browserRoute(
+                    props.agent.id,
+                    joinBrowserPath(props.directoryPath, name),
+                ),
+            );
+            props.onClose();
         },
     });
 
-    const trimmedFileName = fileName.trim();
-
-    const createFilePath = trimmedFileName
-        ? joinBrowserPath(props.directoryPath, trimmedFileName)
-        : null;
-
-    const isCreating = createFileMutation.isPending;
-
-    const resetDialog = () => {
-        props.onClose();
-        setFileName("");
-        setValidationError(null);
-        createFileMutation.reset();
-    };
-
-    const closeDialog = () => {
-        if (!isCreating) {
-            resetDialog();
-        }
-    };
-
-    const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-
-        if (!createFilePath) {
-            setValidationError("File name is required");
-
-            return;
-        }
-
-        if (trimmedFileName.includes("/")) {
-            setValidationError("File name cannot contain a slash");
-
-            return;
-        }
-
-        setValidationError(null);
-        createFileMutation.mutate({
-            path: createFilePath,
-            name: trimmedFileName,
-        });
-    };
-
     return (
-        <Dialog
-            isOpen={props.isOpen}
+        <PathNameDialog
             title="Create file"
             description="Create an empty text file and open it for editing."
             closeAriaLabel="Close create file dialog"
-            isBusy={isCreating}
-            errorMessage={
-                validationError ??
-                (createFileMutation.isError
-                    ? getErrorMessage(
-                          createFileMutation.error,
-                          "Create file failed",
-                      )
-                    : null)
-            }
-            onClose={closeDialog}
-        >
-            <form noValidate onSubmit={handleSubmit} className="mt-4">
-                <TextField
-                    label="File name"
-                    value={fileName}
-                    placeholder="notes.txt"
-                    description="The name of the new empty text file."
-                    required
-                    autoFocus
-                    disabled={isCreating}
-                    onChange={(value) => {
-                        setFileName(value);
-                        setValidationError(null);
-                        createFileMutation.reset();
-                    }}
-                />
-
-                {createFilePath ? (
-                    <div className="mt-4">
-                        <p className="mb-2 text-sm text-slate-400">File path</p>
-                        <p className="break-all rounded bg-[#0b0d12] px-3 py-2 font-mono text-sm text-slate-300">
-                            {createFilePath}
-                        </p>
-                    </div>
-                ) : null}
-
-                <DialogActions>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={closeDialog}
-                        disabled={isCreating}
-                    >
-                        Cancel
-                    </Button>
-                    <Button type="submit" isLoading={isCreating}>
-                        <FilePlus className="h-4 w-4" />
-                        {isCreating ? "Creating..." : "Create file"}
-                    </Button>
-                </DialogActions>
-            </form>
-        </Dialog>
+            kind="File"
+            fieldLabel="File name"
+            placeholder="notes.txt"
+            fieldDescription="The name of the new empty text file."
+            initialName=""
+            preview={{
+                label: "File path",
+                pathFor: (name) => joinBrowserPath(props.directoryPath, name),
+            }}
+            submitLabel="Create file"
+            busyLabel="Creating..."
+            submitIcon={<FilePlus className="h-4 w-4" />}
+            mutation={createFileMutation}
+            onClose={props.onClose}
+        />
     );
 }
 
@@ -469,18 +282,20 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
                     </>
                 )}
             </ActionMenu>
-            <CreateFileAction
-                agent={props.agent}
-                directoryPath={props.directoryPath}
-                isOpen={dialogType === "file"}
-                onClose={() => setDialogType(null)}
-            />
-            <CreateDirectoryAction
-                agent={props.agent}
-                directoryPath={props.directoryPath}
-                isOpen={dialogType === "directory"}
-                onClose={() => setDialogType(null)}
-            />
+            {dialogType === "file" ? (
+                <CreateFileDialog
+                    agent={props.agent}
+                    directoryPath={props.directoryPath}
+                    onClose={() => setDialogType(null)}
+                />
+            ) : null}
+            {dialogType === "directory" ? (
+                <CreateDirectoryDialog
+                    agent={props.agent}
+                    directoryPath={props.directoryPath}
+                    onClose={() => setDialogType(null)}
+                />
+            ) : null}
         </>
     );
 }
@@ -495,10 +310,7 @@ export function DirectoryFilesActions(props: {
     const refreshBrowser = useRefreshBrowserPath(props.agent.id);
     const [isReloading, setIsReloading] = React.useState(false);
 
-    const directoryName =
-        props.directoryPath.split("/").filter(Boolean).pop() ?? "/";
-
-    const archiveName = `${directoryName === "/" ? "archive" : directoryName}.tar.gz`;
+    const directoryName = getBaseName(props.directoryPath);
 
     /** Shares the same ls reload as returning to the tab. */
     const reloadListing = async () => {
@@ -574,7 +386,7 @@ export function DirectoryFilesActions(props: {
                     downloadUrl={props.agent.getRawUrl(props.directoryPath, {
                         download: true,
                     })}
-                    downloadName={archiveName}
+                    downloadName={getDirectoryArchiveName(directoryName)}
                     downloadTooltip="Downloads this directory as a .tar.gz archive."
                     secondaryDownload
                     afterDownload={

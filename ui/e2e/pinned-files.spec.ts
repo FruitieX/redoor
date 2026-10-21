@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import {
@@ -673,5 +674,87 @@ test.describe.serial("Pinned files", () => {
         await expect
             .poll(linkNames)
             .toEqual(["file3.txt", "file1.txt", "file2.txt"]);
+    });
+    test("removes the pin and the selection of a file deleted from its details view", async ({
+        page,
+    }) => {
+        const fileName = `delete-pinned-${Date.now()}.txt`;
+        const filePath = path.join(ctx.testDirPath, fileName);
+        await fs.writeFile(filePath, "pinned, selected, then deleted");
+
+        const pinnedFiles = page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("list", { name: "Pinned files" });
+
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+        );
+        await page
+            .getByRole("button", { name: "Pin file", exact: true })
+            .click();
+        // The sidebar entry proves the file is pinned before the delete starts.
+        await expect(
+            pinnedFiles.getByRole("link", { name: fileName, exact: true }),
+        ).toBeVisible();
+
+        await page
+            .getByLabel("File view")
+            .getByRole("link", { name: "Details", exact: true })
+            .click();
+        await page.getByRole("button", { name: "More", exact: true }).click();
+        await page
+            .getByRole("dialog", { name: "More" })
+            .getByRole("button", { name: "Select", exact: true })
+            .click();
+        // The drawer count proves the file is selected before the delete starts.
+        await expect(
+            page.getByRole("tab", { name: "Selected 1" }),
+        ).toBeVisible();
+
+        await page.getByRole("button", { name: "More", exact: true }).click();
+        await page
+            .getByRole("dialog", { name: "More" })
+            .getByRole("button", { name: "Delete file", exact: true })
+            .click();
+
+        const confirmation = page.getByRole("dialog", {
+            name: "Delete this file?",
+        });
+
+        const permanently = confirmation.getByRole("checkbox", {
+            name: "Delete permanently",
+        });
+
+        // Targets that cannot be trashed delete permanently without offering the choice.
+        if ((await permanently.count()) > 0) {
+            await permanently.click();
+        }
+
+        await confirmation
+            .getByRole("button", { name: "Delete file", exact: true })
+            .click();
+
+        // Leaving for the parent directory shows the delete finished.
+        await expect(page).toHaveURL(
+            new RegExp(`/browser/${encodeFilesystemPath(ctx.testDirPath)}$`),
+        );
+        await expect(fs.stat(filePath)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+        // A deleted file must not stay in the sidebar, where its link would lead to a missing path.
+        await expect(
+            pinnedFiles.getByRole("link", { name: fileName, exact: true }),
+        ).toHaveCount(0);
+        // A deleted file must not stay selected, where Copy or Move would act on a missing source.
+        await expect(
+            page.getByRole("tab", { name: "Selected 0" }),
+        ).toBeVisible();
+
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+        // The server's copy proves the unpin was persisted, not only hidden from the sidebar.
+        await expect
+            .poll(async () => (await api.getUserState()).state)
+            .toMatchObject({ pinnedFiles: [] });
     });
 });

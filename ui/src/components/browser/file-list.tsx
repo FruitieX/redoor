@@ -1,6 +1,5 @@
 import React from "react";
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
-import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
     ArrowDownUp,
@@ -17,7 +16,7 @@ import type { Agent } from "#ui/api-client";
 import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
 import { PathActionMenu } from "#ui/components/browser/path-actions";
-import { DeletePathsDialog } from "#ui/components/browser/delete-paths-dialog";
+import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
 import { InputControl } from "#ui/components/input-control";
 import { Dialog } from "#ui/components/dialog";
 import { DialogActions } from "#ui/components/dialog-actions";
@@ -27,7 +26,6 @@ import { Tooltip } from "#ui/components/tooltip";
 import {
     selectedFileKeysAtom,
     toggleSelectedFileAtom,
-    unselectFileAtom,
 } from "#ui/selected-files";
 import {
     compareFileEntries,
@@ -36,7 +34,6 @@ import {
     formatModifiedAge,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
-import { invalidateAgentData } from "#ui/queries";
 import { formatSize } from "#ui/utils/path";
 import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
@@ -509,8 +506,6 @@ function FileEntryActions(props: {
     directoryPath: string;
     isDirectory: boolean;
 }) {
-    const queryClient = useQueryClient();
-    const unselectFile = useSetAtom(unselectFileAtom);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
 
     const [isDownloadDialogOpen, setIsDownloadDialogOpen] =
@@ -588,30 +583,15 @@ function FileEntryActions(props: {
                     </Button>
                 </DialogActions>
             </Dialog>
-            <DeletePathsDialog
-                isOpen={isDeleteDialogOpen}
-                title={`Delete this ${entryType}?`}
-                description={
-                    props.agent.supportsTrash
-                        ? `Move ${props.entryName} to the device trash. You can restore it later from the Trash tab.`
-                        : `Move ${props.entryName} to the device's native Trash.`
-                }
-                targets={[{ agent: props.agent, path: props.fullPath }]}
-                trashConfirmLabel="Move to trash"
-                permanentConfirmLabel={`Delete ${entryType}`}
-                onClose={() => setIsDeleteDialogOpen(false)}
-                onDeleted={async () => {
-                    unselectFile({
-                        agentId: props.agentId,
-                        path: props.fullPath,
-                    });
-                    await invalidateAgentData(queryClient, props.agent.id);
-                }}
-            >
-                <p className="overflow-x-auto whitespace-nowrap rounded-md border border-slate-800 bg-[#0b0d12] px-3 py-2.5 font-mono text-sm text-slate-300">
-                    {props.fullPath}
-                </p>
-            </DeletePathsDialog>
+            {isDeleteDialogOpen ? (
+                <DeletePathDialog
+                    agent={props.agent}
+                    path={props.fullPath}
+                    name={props.entryName}
+                    entryType={entryType}
+                    onClose={() => setIsDeleteDialogOpen(false)}
+                />
+            ) : null}
         </>
     );
 }

@@ -5,7 +5,7 @@ import type { TrashListResponse } from "#bindings/TrashListResponse";
 import type { Agent } from "#ui/api-client";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import { TextField } from "#ui/components/text-field";
 import { queryKeys } from "#ui/queries";
 
@@ -34,9 +34,12 @@ function isTrashPayloadPath(
     );
 }
 
-/** Centralizes trash and permanent-delete behavior for every filesystem delete surface. */
+/**
+ * Centralizes trash and permanent-delete behavior for every filesystem delete surface.
+ * Callers mount it only while the confirmation is open, so every opening starts from a
+ * fresh choice, confirmation text and error instead of resetting them in an effect.
+ */
 export function DeletePathsDialog(props: {
-    isOpen: boolean;
     title: string;
     description: React.ReactNode;
     targets: DeletePathTarget[];
@@ -55,7 +58,9 @@ export function DeletePathsDialog(props: {
             !isTrashPayloadPath(target, queryClient),
     );
 
-    const [deletePermanently, setDeletePermanently] = React.useState(!canTrash);
+    // Only a user-chosen permanent delete is state; targets that cannot be trashed always are.
+    const [chosePermanent, setChosePermanent] = React.useState(false);
+    const deletePermanently = !canTrash || chosePermanent;
     const [confirmationText, setConfirmationText] = React.useState("");
 
     const mutation = useMutation({
@@ -105,13 +110,6 @@ export function DeletePathsDialog(props: {
         onSuccess: props.onClose,
     });
 
-    React.useEffect(() => {
-        if (!props.isOpen) return;
-        setDeletePermanently(!canTrash);
-        setConfirmationText("");
-        mutation.reset();
-    }, [props.isOpen, canTrash]);
-
     /** Keeps an in-flight filesystem operation attached to its visible status. */
     const close = () => {
         if (!mutation.isPending) props.onClose();
@@ -121,7 +119,7 @@ export function DeletePathsDialog(props: {
 
     return (
         <ConfirmationDialog
-            isOpen={props.isOpen}
+            isOpen={true}
             title={props.title}
             description={
                 canTrash
@@ -174,7 +172,7 @@ export function DeletePathsDialog(props: {
                     disabled={mutation.isPending}
                     className="mt-4"
                     onCheckedChange={(checked) => {
-                        setDeletePermanently(checked);
+                        setChosePermanent(checked);
                         mutation.reset();
                     }}
                 >
