@@ -1,8 +1,10 @@
 import * as React from "react";
 import { X } from "lucide-react";
+import { useAtom } from "jotai";
 import { IconButton } from "#ui/components/icon-button";
 import { isSortableDragActive } from "#ui/components/sortable-list";
-import { usePersistentSideMenus } from "#ui/side-menu-state";
+import { sidebarWidthsAtom, usePersistentSideMenus } from "#ui/side-menu-state";
+import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 
 const focusableSelector =
     'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -18,6 +20,8 @@ export function SideMenu(props: {
     children: React.ReactNode;
 }) {
     const drawerRef = React.useRef<HTMLElement>(null);
+    const resize = useSideMenuResize(props.placement);
+    const panelId = React.useId();
 
     React.useEffect(() => {
         if (!props.isOpen) {
@@ -87,10 +91,32 @@ export function SideMenu(props: {
     return (
         <>
             <aside
+                id={panelId}
                 aria-label={props.label}
-                className={`${isPersistent ? "flex" : "hidden"} w-56 shrink-0 flex-col ${borderClass} border-slate-800 bg-[#0f1218] p-3`}
+                style={{ width: resize.width }}
+                className={`${isPersistent ? "flex" : "hidden"} relative min-w-0 shrink-0 flex-col ${borderClass} border-slate-800 bg-[#0f1218] p-3`}
             >
                 {props.children}
+                {isPersistent ? (
+                    <div
+                        role="separator"
+                        aria-label={`Resize ${props.label.toLowerCase()}`}
+                        aria-controls={panelId}
+                        aria-orientation="vertical"
+                        aria-description="Drag or use the left and right arrow keys to resize"
+                        aria-valuemin={180}
+                        aria-valuemax={resize.maxWidth}
+                        aria-valuenow={Math.round(resize.width)}
+                        tabIndex={0}
+                        onPointerDown={resize.handleStart}
+                        onPointerMove={resize.handleMove}
+                        onPointerUp={resize.handleEnd}
+                        onPointerCancel={resize.handleEnd}
+                        onLostPointerCapture={resize.handleEnd}
+                        onKeyDown={resize.handleKeyDown}
+                        className={`absolute inset-y-0 z-20 w-2 touch-none cursor-col-resize select-none hover:bg-blue-400/25 focus:outline-none focus-visible:bg-blue-400/40 ${props.placement === "left" ? "-right-1" : "-left-1"} ${resize.isResizing ? "bg-blue-400/40" : ""}`}
+                    />
+                ) : null}
             </aside>
             {!isPersistent && props.isOpen ? (
                 <div
@@ -129,4 +155,110 @@ export function SideMenu(props: {
             ) : null}
         </>
     );
+}
+
+/** Shares edge-aware resizing while reserving space for the central route on smaller screens. */
+function useSideMenuResize(placement: "left" | "right") {
+    const [widths, setWidths] = useAtom(sidebarWidthsAtom);
+    const [viewportWidth, setViewportWidth] = React.useState(window.innerWidth);
+    const [isResizing, setIsResizing] = React.useState(false);
+
+    const drag = React.useRef<{
+        pointerId: number;
+        startX: number;
+        startWidth: number;
+    } | null>(null);
+
+    const maxWidth = Math.max(180, Math.min(480, viewportWidth * 0.35));
+    const storedWidth = widths[placement];
+
+    const width = Math.max(
+        180,
+        Math.min(maxWidth, Number.isFinite(storedWidth) ? storedWidth : 224),
+    );
+
+    const direction = placement === "left" ? 1 : -1;
+
+    React.useEffect(() => {
+        /** Re-clamps rendered widths when switching viewport sizes without losing the preference. */
+        const handleViewportResize = () => setViewportWidth(window.innerWidth);
+        window.addEventListener("resize", handleViewportResize);
+
+        return () => window.removeEventListener("resize", handleViewportResize);
+    }, []);
+
+    /** Uses one bound for pointer and keyboard input so neither can consume the entire shell. */
+    const updateWidth = (next: number) => {
+        setWidths((current) => ({
+            ...current,
+            [placement]: Math.max(180, Math.min(maxWidth, next)),
+        }));
+    };
+
+    /** Captures the pointer so dragging continues after leaving the narrow edge handle. */
+    const handleStart = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (event.button !== 0 || drag.current) {
+            return;
+        }
+
+        drag.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startWidth: width,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.currentTarget.focus();
+        setIsResizing(true);
+        event.preventDefault();
+    };
+
+    /** Mirrors drag direction on the right edge to keep movement attached to the pointer. */
+    const handleMove = (event: React.PointerEvent<HTMLDivElement>) => {
+        const active = drag.current;
+
+        if (active?.pointerId === event.pointerId) {
+            updateWidth(
+                active.startWidth + (event.clientX - active.startX) * direction,
+            );
+        }
+    };
+
+    /** Clears drag feedback even when capture is canceled by the browser. */
+    const handleEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (drag.current?.pointerId !== event.pointerId) {
+            return;
+        }
+
+        drag.current = null;
+        setIsResizing(false);
+
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+    };
+
+    /** Gives a focused separator the same physical edge movement as dragging. */
+    const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (
+            shouldIgnoreKeyboardShortcut(event.nativeEvent, { shift: true }) ||
+            (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
+        ) {
+            return;
+        }
+
+        event.preventDefault();
+        updateWidth(
+            width + (event.key === "ArrowRight" ? 24 : -24) * direction,
+        );
+    };
+
+    return {
+        width,
+        maxWidth,
+        isResizing,
+        handleStart,
+        handleMove,
+        handleEnd,
+        handleKeyDown,
+    };
 }

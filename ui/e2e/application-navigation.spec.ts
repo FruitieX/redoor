@@ -3,6 +3,90 @@ import { expect, test } from "@playwright/test";
 import { WEB_BASE_URL } from "./helpers";
 
 test.describe("Application navigation", () => {
+    test("resizes both sidebars independently and remembers their widths", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/`);
+
+        const application = page.getByRole("complementary", {
+            name: "Application menu",
+        });
+
+        const devices = page.getByRole("complementary", {
+            name: "Device menu",
+        });
+
+        for (const [panel, label, delta] of [
+            [application, "Resize application menu", 80],
+            [devices, "Resize device menu", -100],
+        ] as const) {
+            const handle = page.getByRole("separator", { name: label });
+            const box = await handle.boundingBox();
+
+            if (!box) {
+                throw new Error(`Missing resize handle: ${label}`);
+            }
+
+            await page.mouse.move(
+                box.x + box.width / 2,
+                box.y + box.height / 2,
+            );
+            await page.mouse.down();
+            await page.mouse.move(
+                box.x + box.width / 2 + delta,
+                box.y + box.height / 2,
+                { steps: 8 },
+            );
+            await page.mouse.up();
+            // Each inner edge follows the pointer, including the mirrored right sidebar.
+            await expect
+                .poll(async () => (await panel.boundingBox())?.width)
+                .toBe(224 + Math.abs(delta));
+        }
+
+        await page.reload();
+        // Reload restores both independent preferences without changing the opposite panel.
+        await expect
+            .poll(async () => (await application.boundingBox())?.width)
+            .toBe(304);
+        await expect
+            .poll(async () => (await devices.boundingBox())?.width)
+            .toBe(324);
+
+        const handle = page.getByRole("separator", {
+            name: "Resize device menu",
+        });
+
+        await handle.focus();
+        await handle.press("ArrowLeft");
+        // Keyboard movement mirrors the right edge just like pointer movement.
+        await expect
+            .poll(async () => (await devices.boundingBox())?.width)
+            .toBe(348);
+        await handle.press("Control+ArrowLeft");
+        // Browser and operating-system key combinations must retain their usual behavior.
+        await expect(handle).toHaveAttribute("aria-valuenow", "348");
+        await handle.hover();
+        // Hovering or focusing a drag border must not display a tooltip over the content.
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+        for (let step = 0; step < 20; step += 1) {
+            await handle.press("ArrowRight");
+        }
+
+        // Shrinking stops before navigation controls become unusably narrow.
+        await expect
+            .poll(async () => (await devices.boundingBox())?.width)
+            .toBe(180);
+        await page.setViewportSize({ width: 390, height: 844 });
+        // Responsive drawers retain their own mobile sizing and expose no persistent resize handle.
+        await expect(handle).toBeHidden();
+        await page.getByRole("button", { name: "Open device menu" }).click();
+        await expect(
+            page.getByRole("dialog", { name: "Device menu" }),
+        ).toBeVisible();
+    });
+
     test("keeps both side menus visible on desktop", async ({ page }) => {
         await page.goto(`${WEB_BASE_URL}/`);
 

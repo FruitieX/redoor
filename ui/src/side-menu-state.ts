@@ -23,6 +23,12 @@ export const sidebarModeAtom = atomWithSessionStorage<SidebarMode>(
     "auto",
 );
 
+/** Remembers each edge's preferred width independently across navigation and tab reloads. */
+export const sidebarWidthsAtom = atomWithSessionStorage(
+    "redoor.sidebar-widths",
+    { left: 224, right: 224 },
+);
+
 /** Resolves whether both edge menus should occupy layout space instead of drawers. */
 export function usePersistentSideMenus(): boolean {
     const mode = useAtomValue(sidebarModeAtom);
