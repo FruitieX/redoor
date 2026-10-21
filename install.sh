@@ -49,10 +49,10 @@ resolve_tag() {
 
     local api_url="https://api.github.com/repos/${REPO}/releases/latest"
     local tag
-    # Parse with cut rather than sed so the regex works on both BSD and GNU
-    # sed (BSD sed does not support \s in ERE). Field 4 of a "tag_name":
-    # "v0.0.3", line split on " is the tag value.
-    if ! tag=$(curl -fsSL "$api_url" | grep -m1 '"tag_name"' | tr -d ' ,' | cut -d'"' -f4); then
+    # Read the entire response even after finding the tag: exiting early can
+    # break curl's output pipe and fail the install under pipefail. Splitting
+    # on quotes works with both BSD and GNU awk without requiring a JSON tool.
+    if ! tag=$(curl -fsSL "$api_url" | awk -F'"' '/"tag_name"/ && !found { print $4; found = 1 }'); then
         err "failed to fetch latest release from $api_url"
         return 1
     fi
