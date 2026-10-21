@@ -1,4 +1,5 @@
 import React from "react";
+import { atom, useSetAtom, useStore } from "jotai";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
 import { queryKeys } from "#ui/queries";
@@ -7,30 +8,44 @@ type BrowserRouter = {
     invalidate: () => Promise<void>;
 };
 
+/** Names the open editor buffer and whether it holds unsaved text. */
 type EditorRefreshState = {
     agentId: string;
     path: string;
     isDirty: boolean;
 };
 
-let editorRefreshState: EditorRefreshState | null = null;
+/**
+ * Holds the editor that is open, so refresh triggers fired from anywhere (window focus,
+ * leaving the terminal, the More menu) know whether a buffer must be refetched or protected.
+ * It is an atom rather than a module variable, so it belongs to the store the application
+ * renders with and every test gets a fresh one.
+ */
+const editorRefreshStateAtom = atom<EditorRefreshState | null>(null);
 
 /**
  * Lets the mounted editor opt into shared browser reload triggers without a second listener.
  * Dirty buffers stay out of the refetch so unsaved text cannot be overwritten.
  */
 export function useEditorRefreshRegistration(state: EditorRefreshState) {
-    editorRefreshState = state;
+    const setEditorState = useSetAtom(editorRefreshStateAtom);
+
     React.useEffect(() => {
-        return () => {
-            if (
-                editorRefreshState?.agentId === state.agentId &&
-                editorRefreshState.path === state.path
-            ) {
-                editorRefreshState = null;
-            }
-        };
-    }, [state.agentId, state.path]);
+        setEditorState({
+            agentId: state.agentId,
+            path: state.path,
+            isDirty: state.isDirty,
+        });
+
+        return () =>
+            // Only clear our own registration, in case another editor has already replaced it.
+            setEditorState((current) =>
+                current?.agentId === state.agentId &&
+                current.path === state.path
+                    ? null
+                    : current,
+            );
+    }, [setEditorState, state.agentId, state.path, state.isDirty]);
 }
 
 /**
@@ -40,24 +55,18 @@ export function useEditorRefreshRegistration(state: EditorRefreshState) {
  * because the query cache cannot tell whether the entry at this URL changed kind, such as a
  * missing path that now exists.
  */
-export async function refreshBrowserPath(options: {
+async function refreshBrowserPath(options: {
     router: BrowserRouter;
     queryClient: QueryClient;
     agentId: string;
-    fileContent?: { agentId: string; path: string };
-    isEditorDirty?: boolean;
+    editor: EditorRefreshState | null;
 }) {
     const fileContent =
-        options.fileContent ??
-        (editorRefreshState === null
+        options.editor === null
             ? undefined
-            : {
-                  agentId: editorRefreshState.agentId,
-                  path: editorRefreshState.path,
-              });
+            : { agentId: options.editor.agentId, path: options.editor.path };
 
-    const isEditorDirty =
-        options.isEditorDirty ?? editorRefreshState?.isDirty === true;
+    const isEditorDirty = options.editor?.isDirty === true;
 
     // Pull editor bytes before invalidate so a remount cannot drop an inactive refetch.
     if (fileContent && !isEditorDirty) {
@@ -94,6 +103,7 @@ export async function refreshBrowserPath(options: {
 export function useRefreshBrowserPath(agentId: string) {
     const router = useRouter();
     const queryClient = useQueryClient();
+    const store = useStore();
     const refreshPromiseRef = React.useRef<Promise<void> | null>(null);
 
     return React.useCallback(() => {
@@ -105,6 +115,7 @@ export function useRefreshBrowserPath(agentId: string) {
             router,
             queryClient,
             agentId,
+            editor: store.get(editorRefreshStateAtom),
         }).finally(() => {
             if (refreshPromiseRef.current === refreshPromise) {
                 refreshPromiseRef.current = null;
@@ -114,7 +125,7 @@ export function useRefreshBrowserPath(agentId: string) {
         refreshPromiseRef.current = refreshPromise;
 
         return refreshPromise;
-    }, [agentId, queryClient, router]);
+    }, [agentId, queryClient, router, store]);
 }
 
 /** Reloads the browser after returning to the window or leaving a terminal. */
