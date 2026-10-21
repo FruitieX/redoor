@@ -109,7 +109,7 @@ test.describe("Application navigation", () => {
         expect(applicationBox?.x ?? 1).toBeLessThan(agentBox?.x ?? 0);
 
         const sidebarModeBox = await applicationNavigation
-            .getByRole("button", { name: "Sidebar mode: Auto" })
+            .getByRole("group", { name: "Sidebar mode" })
             .boundingBox();
 
         const restartBox = await applicationNavigation
@@ -246,24 +246,37 @@ test.describe("Application navigation", () => {
         ).toBeVisible();
     });
 
-    test("cycles sidebar visibility modes and keeps the choice in this tab", async ({
+    test("selects sidebar visibility modes and keeps the choice in this tab", async ({
         page,
     }) => {
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const autoButton = page.getByRole("button", {
-            name: "Sidebar mode: Auto",
-        });
+        const sidebarMode = page.getByRole("group", { name: "Sidebar mode" });
 
-        await autoButton.hover();
-        // The tooltip names the next layout, not the mode already applied.
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Click to always show the sidebars",
-        );
-        await autoButton.click();
+        // Auto is the default, and every mode is offered at once instead of cycling.
         await expect(
-            page.getByRole("button", { name: "Sidebar mode: Show" }),
-        ).toBeVisible();
+            sidebarMode.getByRole("button", { name: "Auto" }),
+        ).toHaveAttribute("aria-pressed", "true");
+        await expect(
+            sidebarMode.getByRole("button", { name: "Show" }),
+        ).toHaveAttribute("aria-pressed", "false");
+        await expect(
+            sidebarMode.getByRole("button", { name: "Hide" }),
+        ).toHaveAttribute("aria-pressed", "false");
+
+        await sidebarMode.getByRole("button", { name: "Show" }).hover();
+        // The tooltip explains what the segment does before it is chosen.
+        await expect(page.getByRole("tooltip")).toHaveText(
+            "Always show the sidebars",
+        );
+        await sidebarMode.getByRole("button", { name: "Show" }).click();
+        // Only the chosen segment is marked as selected.
+        await expect(
+            sidebarMode.getByRole("button", { name: "Show" }),
+        ).toHaveAttribute("aria-pressed", "true");
+        await expect(
+            sidebarMode.getByRole("button", { name: "Auto" }),
+        ).toHaveAttribute("aria-pressed", "false");
 
         await page.setViewportSize({ width: 390, height: 844 });
         // Show keeps both edge menus in the layout on a phone-sized viewport.
@@ -280,11 +293,8 @@ test.describe("Application navigation", () => {
             page.getByRole("button", { name: "Open device menu" }),
         ).toBeHidden();
 
-        await page.getByRole("button", { name: "Sidebar mode: Show" }).hover();
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Click to always hide the sidebars",
-        );
-        await page.getByRole("button", { name: "Sidebar mode: Show" }).click();
+        // Hide can be picked directly without passing through another mode.
+        await sidebarMode.getByRole("button", { name: "Hide" }).click();
 
         await page.setViewportSize({ width: 1280, height: 800 });
         // Hide keeps menus behind drawers even after returning to a wide viewport.
@@ -298,15 +308,10 @@ test.describe("Application navigation", () => {
             .getByRole("button", { name: "Open application menu" })
             .click();
 
-        const hideButton = page.getByRole("button", {
-            name: "Sidebar mode: Hide",
-        });
-
-        await expect(hideButton).toBeVisible();
-        await hideButton.hover();
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Click to automatically show the sidebars",
-        );
+        // The drawer copy of the control reflects the stored Hide preference.
+        await expect(
+            sidebarMode.getByRole("button", { name: "Hide" }),
+        ).toHaveAttribute("aria-pressed", "true");
 
         await page.reload();
         // Session storage must restore Hide after a reload in the same tab.
@@ -317,8 +322,8 @@ test.describe("Application navigation", () => {
             .getByRole("button", { name: "Open application menu" })
             .click();
         await expect(
-            page.getByRole("button", { name: "Sidebar mode: Hide" }),
-        ).toBeVisible();
+            sidebarMode.getByRole("button", { name: "Hide" }),
+        ).toHaveAttribute("aria-pressed", "true");
     });
 
     test("coordinates independently placed mobile drawers and restores focus", async ({
