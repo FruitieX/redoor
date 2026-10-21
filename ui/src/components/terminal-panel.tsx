@@ -79,31 +79,6 @@ export function TerminalPanel(props: {
 
     useTerminalShortcuts(terminals, props.activeTarget, snapshot.isPickerOpen);
 
-    /** Gives arrow keys browser-style selection across terminal tabs. */
-    const handleTabKeyDown = (
-        event: React.KeyboardEvent<HTMLButtonElement>,
-        tabIndex: number,
-    ) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
-            return;
-        }
-
-        const offset = event.key === "ArrowRight" ? 1 : -1;
-
-        const nextIndex =
-            (tabIndex + offset + snapshot.tabs.length) % snapshot.tabs.length;
-
-        const nextTab = snapshot.tabs[nextIndex];
-
-        if (!nextTab) {
-            return;
-        }
-
-        terminals.select(nextTab.id);
-        document.getElementById(`terminal-tab-${nextTab.id}`)?.focus();
-        event.preventDefault();
-    };
-
     return (
         <section
             aria-label="Terminal panel"
@@ -127,7 +102,6 @@ export function TerminalPanel(props: {
                     onMove={(move) => terminals.move(move)}
                     onRestart={(tabId) => terminals.restart(tabId)}
                     onSelect={(tabId) => terminals.select(tabId)}
-                    onTabKeyDown={handleTabKeyDown}
                 />
             </TerminalToolbar>
             <div

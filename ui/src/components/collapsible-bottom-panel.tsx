@@ -1,7 +1,7 @@
 import * as React from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { BottomDrawerTabId } from "#ui/bottom-drawer-state";
-import { Tooltip } from "#ui/components/tooltip";
+import { Tab, TabList } from "#ui/components/tabs";
 import { IconButton } from "#ui/components/icon-button";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
 
@@ -51,31 +51,6 @@ export function TabbedBottomDrawer(props: {
         props.onCollapsedChange(false);
     };
 
-    /** Gives the primary tab strip conventional horizontal arrow navigation. */
-    const handleTabKeyDown = (
-        event: React.KeyboardEvent<HTMLButtonElement>,
-        tabIndex: number,
-    ) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
-            return;
-        }
-
-        const offset = event.key === "ArrowRight" ? 1 : -1;
-
-        const nextIndex =
-            (tabIndex + offset + props.tabs.length) % props.tabs.length;
-
-        const nextTab = props.tabs[nextIndex];
-
-        if (!nextTab) {
-            return;
-        }
-
-        activateTab(nextTab.id);
-        document.getElementById(`bottom-drawer-tab-${nextTab.id}`)?.focus();
-        event.preventDefault();
-    };
-
     return (
         <div
             data-collapsed={props.isCollapsed}
@@ -123,23 +98,19 @@ export function TabbedBottomDrawer(props: {
                         hidden={props.isFullWindow}
                         className="flex min-w-0 shrink-0 items-center gap-1"
                     >
-                        <div
-                            role="tablist"
+                        <TabList
                             aria-label="Application tools"
                             className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overscroll-x-contain"
                         >
-                            {props.tabs.map((tab, tabIndex) => (
+                            {props.tabs.map((tab) => (
                                 <BottomDrawerTabButton
                                     key={tab.id}
                                     tab={tab}
                                     isActive={tab.id === props.activeTab}
                                     onActivate={() => activateTab(tab.id)}
-                                    onKeyDown={(event) =>
-                                        handleTabKeyDown(event, tabIndex)
-                                    }
                                 />
                             ))}
-                        </div>
+                        </TabList>
                         <div className="flex shrink-0 items-center gap-1">
                             <div className="mx-1 h-5 w-px bg-slate-800" />
                             <IconButton
@@ -270,20 +241,17 @@ function BottomDrawerTabButton(props: {
     tab: BottomDrawerTab;
     isActive: boolean;
     onActivate: () => void;
-    onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
 }) {
     const isBelowSm = useIsBelowBreakpoint("sm");
 
-    const button = (
-        <button
+    return (
+        <Tab
             id={`bottom-drawer-tab-${props.tab.id}`}
-            type="button"
-            role="tab"
-            aria-selected={props.isActive}
+            selected={props.isActive}
             aria-controls={`bottom-drawer-panel-${props.tab.id}`}
-            tabIndex={props.isActive ? 0 : -1}
+            tooltip={isBelowSm ? <>Show {tabDetails(props.tab)}</> : undefined}
+            tooltipClassName="shrink-0"
             onClick={props.onActivate}
-            onKeyDown={props.onKeyDown}
             className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors sm:px-3 ${
                 props.isActive
                     ? "bg-slate-800 text-slate-100"
@@ -297,20 +265,7 @@ function BottomDrawerTabButton(props: {
                     {props.tab.badge}
                 </span>
             ) : null}
-        </button>
-    );
-
-    if (!isBelowSm) {
-        return button;
-    }
-
-    return (
-        <Tooltip
-            content={<>Show {tabDetails(props.tab)}</>}
-            className="shrink-0"
-        >
-            {button}
-        </Tooltip>
+        </Tab>
     );
 }
 

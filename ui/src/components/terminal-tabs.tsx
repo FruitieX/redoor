@@ -21,6 +21,7 @@ import type {
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { IconButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
+import { Tab, TabList } from "#ui/components/tabs";
 import type { ItemMove } from "#ui/utils/reorder";
 
 /** Gives each terminal tab its own concise lifecycle label and color. */
@@ -49,10 +50,6 @@ export function TerminalTabActions(props: {
     onMove: (move: ItemMove) => void;
     onRestart: (tabId: number) => void;
     onSelect: (tabId: number) => void;
-    onTabKeyDown: (
-        event: React.KeyboardEvent<HTMLButtonElement>,
-        tabIndex: number,
-    ) => void;
 }) {
     const listRef = React.useRef<HTMLDivElement>(null);
 
@@ -73,25 +70,22 @@ export function TerminalTabActions(props: {
                 }
                 onMove={props.onMove}
             >
-                <div
+                <TabList
                     ref={listRef}
-                    role="tablist"
                     aria-label="Terminal tabs"
                     className="flex min-h-8 min-w-px items-center gap-1"
                 >
-                    {props.tabs.map((tab, tabIndex) => (
+                    {props.tabs.map((tab) => (
                         <TerminalTabControl
                             key={tab.id}
                             tab={tab}
-                            tabIndex={tabIndex}
                             isActive={tab.id === props.activeTabId}
                             onClose={props.onClose}
                             onRestart={props.onRestart}
                             onSelect={props.onSelect}
-                            onTabKeyDown={props.onTabKeyDown}
                         />
                     ))}
-                </div>
+                </TabList>
             </SortableList>
             {props.activeTarget ? (
                 <IconButton
@@ -158,15 +152,10 @@ export function TerminalTabActions(props: {
 /** Keeps sorting, activation, and lifecycle controls together for one terminal tab. */
 function TerminalTabControl(props: {
     tab: TerminalTabSnapshot;
-    tabIndex: number;
     isActive: boolean;
     onClose: (tabId: number) => void;
     onRestart: (tabId: number) => void;
     onSelect: (tabId: number) => void;
-    onTabKeyDown: (
-        event: React.KeyboardEvent<HTMLButtonElement>,
-        tabIndex: number,
-    ) => void;
 }) {
     const status = getTerminalStatus(props.tab.state);
 
@@ -191,18 +180,12 @@ function TerminalTabControl(props: {
                     }`}
                     title={`${props.tab.title}: ${props.tab.cwd}`}
                 >
-                    <button
-                        type="button"
+                    <Tab
                         id={`terminal-tab-${props.tab.id}`}
-                        role="tab"
                         aria-label={props.tab.title}
-                        aria-selected={props.isActive}
+                        selected={props.isActive}
                         aria-controls={`terminal-panel-${props.tab.id}`}
-                        tabIndex={props.isActive ? 0 : -1}
                         onClick={() => props.onSelect(props.tab.id)}
-                        onKeyDown={(event) =>
-                            props.onTabKeyDown(event, props.tabIndex)
-                        }
                         className={`flex h-8 items-center gap-2 px-2.5 text-xs font-medium transition-colors ${props.isActive ? "text-slate-100" : "text-slate-400 hover:bg-tint hover:text-slate-200"}`}
                     >
                         <span className="max-w-36 truncate whitespace-nowrap">
@@ -225,7 +208,7 @@ function TerminalTabControl(props: {
                                 <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
                             )}
                         </span>
-                    </button>
+                    </Tab>
                     {props.tab.state.type === "disconnected" ? (
                         <IconButton
                             type="button"
