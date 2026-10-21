@@ -18,9 +18,14 @@ import { Button } from "#ui/components/button";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { Checkbox } from "#ui/components/checkbox";
 import { IconButton } from "#ui/components/icon-button";
-import { CopyableCodeRow } from "#ui/components/copyable-code-row";
+import {
+    CopyableCodeRow,
+    useCopyFeedback,
+} from "#ui/components/copyable-code-row";
+import { ViewCardHeader } from "#ui/components/view-card-header";
 import { PersistentPathActions } from "#ui/components/browser/path-actions";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
+import { getDirectoryArchiveName } from "#ui/utils/archive";
 import { formatSize } from "#ui/utils/path";
 import { Select } from "#ui/components/select";
 import { Tooltip } from "#ui/components/tooltip";
@@ -602,86 +607,82 @@ function FilesystemMetadataSections(props: {
     );
 }
 
+/** Copies the full path and confirms it, reusing the shared clipboard feedback. */
+function CopyFullPathButton(props: { path: string }) {
+    const { isCopied, copy } = useCopyFeedback(props.path);
+
+    return (
+        <Button
+            type="button"
+            variant="subtle"
+            onClick={() => {
+                void copy();
+            }}
+            className="inline-flex items-center gap-1.5 p-0 text-xs font-medium text-slate-500 transition hover:text-slate-200"
+            aria-label="Copy full path"
+        >
+            {isCopied ? (
+                <Check className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+                <Copy className="h-3.5 w-3.5" />
+            )}
+            {isCopied ? "Copied" : "Copy"}
+        </Button>
+    );
+}
+
 /** Presents file and directory identity consistently while allowing file-only path copying. */
 function PathDetailHeader(props: {
     entryType: "file" | "directory";
     name: string;
     path: string;
-    pathCopied?: boolean;
-    onCopyPath?: () => void;
+    canCopyPath?: boolean;
     nameActions?: React.ReactNode;
 }) {
     const isDirectory = props.entryType === "directory";
     const typeLabel = isDirectory ? "Directory" : "File";
 
     return (
-        <header className="overflow-hidden border-b border-slate-800 p-4 sm:p-5">
-            <div className="flex min-w-0 items-start gap-2">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center text-blue-400">
-                    {isDirectory ? (
-                        <Folder className="h-5 w-5" />
-                    ) : (
-                        <File className="h-5 w-5" />
-                    )}
-                </div>
-                <div className="min-w-0 flex-1 pt-0.5">
-                    <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">
-                        {typeLabel} details
-                    </p>
-                    <div className="flex flex-wrap items-center gap-3">
-                        <h1
-                            aria-label={`${typeLabel} name`}
-                            className="break-all text-lg font-semibold text-slate-50"
-                        >
-                            {props.name}
-                        </h1>
-                        {props.nameActions ? (
-                            <div className="ml-auto shrink-0">
-                                {props.nameActions}
-                            </div>
-                        ) : null}
-                    </div>
-                </div>
-            </div>
+        <ViewCardHeader
+            icon={
+                isDirectory ? (
+                    <Folder className="h-5 w-5" />
+                ) : (
+                    <File className="h-5 w-5" />
+                )
+            }
+            eyebrow={`${typeLabel} details`}
+            title={props.name}
+            titleAriaLabel={`${typeLabel} name`}
+            actions={props.nameActions}
+        >
             <div className="mt-3">
                 <div className="mb-2 flex items-center justify-between gap-3">
                     <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
                         Full Path
                     </p>
-                    {props.onCopyPath ? (
-                        <Button
-                            type="button"
-                            variant="subtle"
-                            onClick={props.onCopyPath}
-                            className="inline-flex items-center gap-1.5 p-0 text-xs font-medium text-slate-500 transition hover:text-slate-200"
-                            aria-label="Copy full path"
-                        >
-                            {props.pathCopied ? (
-                                <Check className="h-3.5 w-3.5 text-emerald-400" />
-                            ) : (
-                                <Copy className="h-3.5 w-3.5" />
-                            )}
-                            {props.pathCopied ? "Copied" : "Copy"}
-                        </Button>
+                    {props.canCopyPath ? (
+                        <CopyFullPathButton path={props.path} />
                     ) : null}
                 </div>
                 <code className="block overflow-x-auto whitespace-nowrap rounded-md border border-slate-800/80 bg-slate-950/60 px-2 py-1.5 font-mono text-sm text-slate-300">
                     {props.path}
                 </code>
             </div>
-        </header>
+        </ViewCardHeader>
     );
 }
 
-/** Presents directory metadata while the query-selected details view replaces the file list. */
+/**
+ * Presents directory metadata while the query-selected details view replaces the file list.
+ * The route keys it by path, so each directory starts without the previous one's size result.
+ */
 export function DirectoryDetailView(props: {
     agent: Agent;
     path: string;
     directoryName: string;
     lsResult: LsDirectoryResponse;
 }) {
-    const archiveName = `${props.directoryName === "/" ? "archive" : props.directoryName}.tar.gz`;
-
     const [sizeWarningDismissed, setSizeWarningDismissed] =
         React.useState(false);
 
@@ -690,11 +691,6 @@ export function DirectoryDetailView(props: {
             props.agent.calculateDirectorySize(props.lsResult.path),
         onSuccess: () => setSizeWarningDismissed(false),
     });
-
-    React.useEffect(() => {
-        directorySizeMutation.reset();
-        setSizeWarningDismissed(false);
-    }, [props.lsResult.path]);
 
     const skippedEntryCount = directorySizeMutation.data?.errors.length ?? 0;
 
@@ -714,7 +710,9 @@ export function DirectoryDetailView(props: {
                         downloadUrl={props.agent.getRawUrl(props.path, {
                             download: true,
                         })}
-                        downloadName={archiveName}
+                        downloadName={getDirectoryArchiveName(
+                            props.directoryName,
+                        )}
                         downloadTooltip="Downloads this directory as a .tar.gz archive."
                     />
                 }
@@ -767,7 +765,10 @@ export function DirectoryDetailView(props: {
     );
 }
 
-/** Presents file metadata and destructive actions with clear visual separation. */
+/**
+ * Presents file metadata and destructive actions with clear visual separation. The route keys
+ * it by path, so each file starts without the previous one's link-creation error.
+ */
 export function FileDetailView(props: {
     agent: Agent;
     path: string;
@@ -780,10 +781,6 @@ export function FileDetailView(props: {
     const metadataOptions = metadataQueryOptions(
         props.agent,
         props.lsResult.path,
-    );
-
-    const [copiedCommand, setCopiedCommand] = React.useState<string | null>(
-        null,
     );
 
     // The server owns the token list, so refreshes and new links share one cache entry.
@@ -809,27 +806,13 @@ export function FileDetailView(props: {
         },
     });
 
-    React.useEffect(() => {
-        createShareableLinkMutation.reset();
-    }, [props.path]);
-
-    const copyToClipboard = async (text: string, commandType: string) => {
-        try {
-            await navigator.clipboard.writeText(text);
-            setCopiedCommand(commandType);
-            setTimeout(() => setCopiedCommand(null), 2000);
-        } catch (err) {
-            console.error("Failed to copy:", err);
-        }
-    };
-
     return (
         <BrowserViewCard>
             <PathDetailHeader
                 entryType="file"
                 name={props.fileName}
                 path={props.lsResult.path}
-                pathCopied={copiedCommand === "path"}
+                canCopyPath
                 nameActions={
                     <PersistentPathActions
                         agent={props.agent}
@@ -841,7 +824,6 @@ export function FileDetailView(props: {
                         downloadName={props.fileName}
                     />
                 }
-                onCopyPath={() => copyToClipboard(props.lsResult.path, "path")}
             />
 
             <FilesystemMetadataSections
@@ -864,9 +846,7 @@ export function FileDetailView(props: {
                           )
                         : null
                 }
-                copiedCommand={copiedCommand}
                 onCreate={() => createShareableLinkMutation.mutate()}
-                onCopy={copyToClipboard}
             />
         </BrowserViewCard>
     );
@@ -878,9 +858,7 @@ function ShareableLinksSection(props: {
     oneTimeTokens: Array<string>;
     isCreating: boolean;
     errorMessage: string | null;
-    copiedCommand: string | null;
     onCreate: () => void;
-    onCopy: (text: string, commandType: string) => void;
 }) {
     return (
         <section
@@ -931,8 +909,6 @@ function ShareableLinksSection(props: {
                             token={token}
                             linkNumber={index + 1}
                             downloadUrl={props.downloadUrl}
-                            copiedCommand={props.copiedCommand}
-                            onCopy={props.onCopy}
                         />
                     ))}
                 </div>
@@ -946,13 +922,11 @@ function ShareableLinkCard(props: {
     token: string;
     linkNumber: number;
     downloadUrl: string;
-    copiedCommand: string | null;
-    onCopy: (text: string, commandType: string) => void;
 }) {
     const shareableUrl = `${props.downloadUrl}?one_time_token=${encodeURIComponent(props.token)}`;
     const wgetCommand = `wget --content-disposition "${shareableUrl}"`;
     const curlCommand = `curl -JO "${shareableUrl}"`;
-    const copyKeyPrefix = `one-time-${props.token}`;
+    const { isCopied, copy } = useCopyFeedback(shareableUrl);
 
     return (
         <article
@@ -976,13 +950,13 @@ function ShareableLinkCard(props: {
                 <IconButton
                     type="button"
                     tooltipClassName="shrink-0"
-                    onClick={() =>
-                        props.onCopy(shareableUrl, `${copyKeyPrefix}-link`)
-                    }
+                    onClick={() => {
+                        void copy();
+                    }}
                     label={`Copy shareable link ${props.linkNumber}`}
                     className="shrink-0 rounded-md p-2 text-slate-400 transition hover:bg-white/5 hover:text-slate-100"
                 >
-                    {props.copiedCommand === `${copyKeyPrefix}-link` ? (
+                    {isCopied ? (
                         <Check className="h-4 w-4 text-emerald-400" />
                     ) : (
                         <Copy className="h-4 w-4" />

@@ -1,6 +1,6 @@
 import React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import {
     Copy,
     FolderInput,
@@ -8,7 +8,13 @@ import {
     LoaderCircle,
     RefreshCw,
 } from "lucide-react";
-import type { ApiClient, Agent, CopyExistingMode } from "#ui/api-client";
+import type {
+    ApiClient,
+    Agent,
+    CopyExistingMode,
+    TransferProgressEntry,
+} from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
@@ -16,25 +22,29 @@ import { InputControl } from "#ui/components/input-control";
 import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { Select } from "#ui/components/select";
 import { Tooltip } from "#ui/components/tooltip";
+import { ViewCardHeader } from "#ui/components/view-card-header";
 import { DestinationConflictDialog } from "#ui/components/browser/selected-files-transfer-dialog";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
+import { getPathLoadError } from "#ui/components/browser/utils";
 import {
-    getErrorMessage,
-    getPathLoadError,
-} from "#ui/components/browser/utils";
-import { transfersQueryOptions } from "#ui/queries";
-import { formatSize } from "#ui/utils/path";
+    WATCHED_TRANSFER_POLL_MS,
+    watchedTransfersQueryOptions,
+} from "#ui/queries";
+import { getErrorMessage } from "#ui/utils/error";
+import { expandHomePath, formatSize, getBaseName } from "#ui/utils/path";
+
+/** Names the destination a "view" link opens, so the router builds a real, typed link. */
+type ViewTarget = { agentId: string; path: string };
 
 /** Reuses the agent and path controls for cross-agent file operations. */
-export function AgentPathFields(props: {
+function AgentPathFields(props: {
     agents: Array<Agent>;
     agentId: string;
     path: string;
     disabled: boolean;
-    viewHref: string | null;
+    viewTarget: ViewTarget | null;
     onAgentChange: (agentId: string) => void;
     onPathChange: (path: string) => void;
-    onView: () => void;
 }) {
     return (
         <div className="grid items-end gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
@@ -70,7 +80,7 @@ export function AgentPathFields(props: {
                 />
             </label>
             <Tooltip content="Open the selected device and path">
-                {props.viewHref === null ? (
+                {props.viewTarget === null ? (
                     <span
                         aria-disabled="true"
                         className="pb-3 text-sm font-medium text-slate-600"
@@ -78,28 +88,16 @@ export function AgentPathFields(props: {
                         view
                     </span>
                 ) : (
-                    <a
-                        href={props.viewHref}
+                    <Link
+                        {...browserRoute(
+                            props.viewTarget.agentId,
+                            props.viewTarget.path,
+                        )}
+                        search={{}}
                         className="pb-3 text-sm font-medium text-blue-400 underline decoration-blue-400/50 underline-offset-4 transition-colors hover:text-blue-300 hover:decoration-blue-300 focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                        onClick={(event) => {
-                            // Keep unmodified left-click in-app; middle/modified clicks use the href.
-                            if (
-                                event.defaultPrevented ||
-                                event.button !== 0 ||
-                                event.metaKey ||
-                                event.altKey ||
-                                event.ctrlKey ||
-                                event.shiftKey
-                            ) {
-                                return;
-                            }
-
-                            event.preventDefault();
-                            props.onView();
-                        }}
                     >
                         view
-                    </a>
+                    </Link>
                 )}
             </Tooltip>
         </div>
@@ -114,21 +112,6 @@ type SyncEndpoint = {
     agent: Agent;
     path: string;
 };
-
-/** Expands the selected agent's home shorthand before paths reach APIs or routes. */
-function resolveSyncPath(agent: Agent, path: string): string {
-    if (agent.cwd === null || (path !== "~" && !path.startsWith("~/"))) {
-        return path;
-    }
-
-    if (path === "~") {
-        return agent.cwd;
-    }
-
-    return agent.cwd === "/"
-        ? `/${path.slice(2)}`
-        : `${agent.cwd.replace(/\/+$/, "")}/${path.slice(2)}`;
-}
 
 /** Keeps the editable path home-relative so another agent can resolve it against its own home. */
 function shortenSyncPath(agent: Agent, path: string): string {
@@ -209,7 +192,7 @@ function useSyncEndpointSelection(props: {
     const selectedEndpoint: SyncEndpoint | null = selectedAgent
         ? {
               agent: selectedAgent,
-              path: resolveSyncPath(selectedAgent, selectedPath),
+              path: expandHomePath(selectedAgent.cwd, selectedPath),
           }
         : null;
 
@@ -238,12 +221,23 @@ function useSyncEndpointSelection(props: {
     };
 }
 
-/** Polls only the active transfer and stops once the server reports a terminal state. */
-function useSyncTransferProgress(api: ApiClient, requestId: number | null) {
+/** What a Copy or Move button shows: nothing running, the request being sent, or bytes moving. */
+type OperationStatus = "idle" | "starting" | "running";
+
+/** Reports how a finished or failed transfer ended, ready to render as a status line. */
+type TransferOutcome =
+    | { kind: "completed"; label: string; transferredBytes: number }
+    | { kind: "failed"; label: string; message: string };
+
+/**
+ * Follows the transfer this view started through the shared transfers query, which server
+ * events refresh immediately and a short poll keeps current. Polling stops once the server
+ * reports a terminal state.
+ */
+function useWatchedTransfer(api: ApiClient, requestId: number | null) {
     return useQuery({
-        ...transfersQueryOptions(api),
+        ...watchedTransfersQueryOptions(api),
         enabled: requestId !== null,
-        retry: false,
         select: (response) =>
             response.transfers.find((entry) => entry.request_id === requestId),
         refetchInterval: (query) => {
@@ -254,12 +248,99 @@ function useSyncTransferProgress(api: ApiClient, requestId: number | null) {
             return transfer?.state === "completed" ||
                 transfer?.state === "errored"
                 ? false
-                : 500;
+                : WATCHED_TRANSFER_POLL_MS;
         },
     });
 }
 
-/** Keeps destination lookup, transfer polling, and diff out of the page render. */
+/** Generates the text comparison between the two endpoints, which only files support. */
+function useSyncDiff(
+    api: ApiClient,
+    sourceEndpoint: SyncEndpoint | null,
+    destinationEndpoint: SyncEndpoint | null,
+) {
+    const diffMutation = useMutation({
+        mutationFn: () => {
+            if (sourceEndpoint === null || destinationEndpoint === null) {
+                throw new Error("Selected device is unavailable");
+            }
+
+            return api.diffFiles(
+                { agent: sourceEndpoint.agent.id, path: sourceEndpoint.path },
+                {
+                    agent: destinationEndpoint.agent.id,
+                    path: destinationEndpoint.path,
+                },
+            );
+        },
+    });
+
+    return {
+        isPending: diffMutation.isPending,
+        errorMessage: diffMutation.isError
+            ? getErrorMessage(diffMutation.error, "Failed to generate diff")
+            : null,
+        unifiedDiff: diffMutation.isSuccess
+            ? diffMutation.data.unified_diff
+            : null,
+        run: () => diffMutation.mutate(),
+        reset: () => diffMutation.reset(),
+    };
+}
+
+/** The pieces a transfer can fail in, from checking the destination to reading progress. */
+type TransferFailureSources = {
+    label: string;
+    transfer: TransferProgressEntry | undefined;
+    prepareError: Error | null;
+    startError: Error | null;
+    readError: Error | null;
+};
+
+/** Words how the transfer ended, preferring the server's own report over request errors. */
+function describeTransferOutcome(
+    sources: TransferFailureSources,
+): TransferOutcome | null {
+    const label = sources.label;
+
+    if (sources.transfer?.state === "completed") {
+        return {
+            kind: "completed",
+            label,
+            transferredBytes: sources.transfer.transferred_bytes,
+        };
+    }
+
+    if (sources.transfer?.state === "errored") {
+        return {
+            kind: "failed",
+            label,
+            message: sources.transfer.error ?? `${label} failed`,
+        };
+    }
+
+    const requestError =
+        sources.prepareError ?? sources.startError ?? sources.readError;
+
+    if (requestError === null) {
+        return null;
+    }
+
+    const fallback =
+        sources.readError !== null
+            ? `Failed to read ${label.toLowerCase()} progress`
+            : sources.prepareError !== null
+              ? "Failed to check the destination"
+              : `Failed to start ${label.toLowerCase()}`;
+
+    return {
+        kind: "failed",
+        label,
+        message: getErrorMessage(requestError, fallback),
+    };
+}
+
+/** Keeps destination lookup, transfer progress, and diff out of the page render. */
 function useSyncWorkspace(props: {
     api: ApiClient;
     sourceAgent: Agent;
@@ -267,27 +348,15 @@ function useSyncWorkspace(props: {
     sourcePath: string;
     entryType: "file" | "directory";
 }) {
-    const navigate = useNavigate();
     const endpoints = useSyncEndpointSelection(props);
+    const { sourceEndpoint, destinationEndpoint, selectedEndpoint } = endpoints;
 
-    const {
-        availableAgents,
-        selectedAgentId,
-        setSelectedAgentId,
-        selectedPath,
-        setSelectedPath,
-        direction,
-        setDirection,
-        selectedAgent,
-        selectedEndpoint,
-        sourceEndpoint,
-        destinationEndpoint,
-    } = endpoints;
-
-    const [pendingOperation, setPendingOperation] =
+    // Asking before the request keeps a transfer from starting on a stray click.
+    const [confirmationOperation, setConfirmationOperation] =
         React.useState<TransferOperation | null>(null);
 
-    const [confirmationOperation, setConfirmationOperation] =
+    // The destination exists, so the user must choose a conflict policy first.
+    const [conflictOperation, setConflictOperation] =
         React.useState<TransferOperation | null>(null);
 
     const transferMutation = useMutation({
@@ -353,37 +422,29 @@ function useSyncWorkspace(props: {
                 return;
             }
 
-            setPendingOperation(result.operation);
+            setConflictOperation(result.operation);
         },
     });
 
-    const diffMutation = useMutation({
-        mutationFn: () => {
-            if (sourceEndpoint === null || destinationEndpoint === null) {
-                throw new Error("Selected device is unavailable");
-            }
+    const diff = useSyncDiff(props.api, sourceEndpoint, destinationEndpoint);
 
-            return props.api.diffFiles(
-                { agent: sourceEndpoint.agent.id, path: sourceEndpoint.path },
-                {
-                    agent: destinationEndpoint.agent.id,
-                    path: destinationEndpoint.path,
-                },
-            );
-        },
-    });
+    const transferQuery = useWatchedTransfer(
+        props.api,
+        transferMutation.data?.requestId ?? null,
+    );
 
-    const activeRequestId = transferMutation.data?.requestId ?? null;
-    const transferQuery = useSyncTransferProgress(props.api, activeRequestId);
     const transfer = transferQuery.data;
 
-    const transferOperation =
+    // The operation the status line talks about, from the latest stage that knows it.
+    const lastOperation =
         transferMutation.data?.operation ??
         transferMutation.variables?.operation ??
         prepareTransferMutation.variables ??
-        pendingOperation;
+        conflictOperation;
 
-    const isActive =
+    const label = lastOperation === "move" ? "Move" : "Copy";
+
+    const isRunning =
         transferMutation.isSuccess &&
         transfer?.state !== "completed" &&
         transfer?.state !== "errored" &&
@@ -392,6 +453,19 @@ function useSyncWorkspace(props: {
     const preparingOperation = prepareTransferMutation.isPending
         ? prepareTransferMutation.variables
         : null;
+
+    /** Derives one button's state from whichever stage is working for its operation. */
+    const operationStatus = (operation: TransferOperation): OperationStatus => {
+        if (
+            preparingOperation === operation ||
+            (transferMutation.isPending &&
+                transferMutation.variables?.operation === operation)
+        ) {
+            return "starting";
+        }
+
+        return isRunning && lastOperation === operation ? "running" : "idle";
+    };
 
     /** Probes the destination so conflict policy is asked only when a path already exists. */
     const startTransfer = (operation: TransferOperation) => {
@@ -404,93 +478,99 @@ function useSyncWorkspace(props: {
         prepareTransferMutation.mutate(operation);
     };
 
-    /** Real href so middle-click / open-in-new-tab works; left-click stays in-app. */
-    const selectedHref = selectedEndpoint?.path.startsWith("/")
-        ? selectedEndpoint.agent.getBrowserUrl(selectedEndpoint.path)
-        : null;
-
-    /** Opens the selected endpoint regardless of which transfer direction is active. */
-    const gotoSelected = () => {
-        if (selectedHref === null) {
-            return;
-        }
-
-        void navigate({
-            to: selectedHref,
-            search: {},
-        });
-    };
-
     /** Endpoint edits make previous comparisons and terminal transfer reports misleading. */
     const resetFeedback = () => {
         setConfirmationOperation(null);
-        setPendingOperation(null);
+        setConflictOperation(null);
         prepareTransferMutation.reset();
         transferMutation.reset();
-        diffMutation.reset();
+        diff.reset();
     };
 
     /** Keeps agent selection and its dependent results in sync. */
     const changeSelectedAgent = (agentId: string) => {
         resetFeedback();
-        setSelectedAgentId(agentId);
+        endpoints.setSelectedAgentId(agentId);
     };
 
     /** Keeps path selection and its dependent results in sync. */
     const changeSelectedPath = (path: string) => {
         resetFeedback();
-        setSelectedPath(path);
+        endpoints.setSelectedPath(path);
     };
 
     /** Reorders both transfer and comparison endpoints from one explicit choice. */
     const changeDirection = (nextDirection: SyncDirection) => {
         resetFeedback();
-        setDirection(nextDirection);
+        endpoints.setDirection(nextDirection);
     };
 
+    const isBusy =
+        prepareTransferMutation.isPending ||
+        transferMutation.isPending ||
+        isRunning;
+
     return {
-        availableAgents,
-        selectedAgentId,
-        selectedPath,
-        selectedAgent,
+        availableAgents: endpoints.availableAgents,
+        selectedAgentId: endpoints.selectedAgentId,
+        selectedPath: endpoints.selectedPath,
+        selectedAgent: endpoints.selectedAgent,
         selectedEndpoint,
-        direction,
+        direction: endpoints.direction,
+        sourceEndpoint,
+        destinationEndpoint,
+        /** Only a file has a text comparison. */
+        canDiff: props.entryType === "file",
+        /** The "view" link target, which only exists for an absolute path. */
+        viewTarget: selectedEndpoint?.path.startsWith("/")
+            ? {
+                  agentId: selectedEndpoint.agent.id,
+                  path: selectedEndpoint.path,
+              }
+            : null,
+        isBusy,
+        operationStatus,
+        /** Bytes moved so far, while a transfer is running. */
+        progress: isRunning
+            ? {
+                  transferredBytes: transfer?.transferred_bytes ?? 0,
+                  totalBytes: transfer?.total_bytes ?? 0,
+              }
+            : null,
+        transferOutcome: describeTransferOutcome({
+            label,
+            transfer,
+            prepareError: prepareTransferMutation.error,
+            startError: transferMutation.error,
+            readError: transferQuery.error,
+        }),
+        diff,
+        confirmationOperation,
+        requestConfirmation: setConfirmationOperation,
+        cancelConfirmation: () => setConfirmationOperation(null),
+        /** Starts the transfer the user just confirmed. */
+        confirmTransfer: () => {
+            if (confirmationOperation === null) {
+                return;
+            }
+
+            setConfirmationOperation(null);
+            startTransfer(confirmationOperation);
+        },
+        conflictOperation,
+        cancelConflict: () => setConflictOperation(null),
+        /** Starts the transfer that found an existing destination, with the chosen policy. */
+        resolveConflict: (mode: CopyExistingMode) => {
+            if (conflictOperation === null) {
+                return;
+            }
+
+            setConflictOperation(null);
+            transferMutation.mutate({ operation: conflictOperation, mode });
+        },
         changeSelectedAgent,
         changeSelectedPath,
         changeDirection,
-        pendingOperation,
-        setPendingOperation,
-        confirmationOperation,
-        setConfirmationOperation,
-        selectedHref,
-        canDiff: props.entryType === "file",
-        transferMutation,
-        prepareTransferMutation,
-        diffMutation,
-        transfer,
-        transferQuery,
-        transferOperation,
-        transferLabel: transferOperation === "move" ? "Move" : "Copy",
-        sourceEndpoint,
-        destinationEndpoint,
-        isActive,
-        isBusy:
-            prepareTransferMutation.isPending ||
-            transferMutation.isPending ||
-            isActive,
-        preparingOperation,
-        copyInFlight:
-            preparingOperation === "copy" ||
-            (transferMutation.isPending &&
-                transferMutation.variables?.operation === "copy") ||
-            (isActive && transferOperation === "copy"),
-        moveInFlight:
-            preparingOperation === "move" ||
-            (transferMutation.isPending &&
-                transferMutation.variables?.operation === "move") ||
-            (isActive && transferOperation === "move"),
-        startTransfer,
-        gotoSelected,
     };
 }
 
@@ -622,6 +702,56 @@ function conflictDialogLabels(operation: TransferOperation | null) {
     };
 }
 
+/**
+ * One Copy or Move button, so both operations show the same states: idle, sending the
+ * request, and moving bytes. Only the verb, icon and emphasis differ.
+ */
+function TransferButton(props: {
+    operation: TransferOperation;
+    status: OperationStatus;
+    disabled: boolean;
+    tooltip: React.ReactNode;
+    onClick: () => void;
+}) {
+    const isCopy = props.operation === "copy";
+    const verb = isCopy ? "Copy" : "Move";
+    const progressVerb = isCopy ? "Copying" : "Moving";
+
+    const label =
+        props.status === "starting"
+            ? `Starting ${verb.toLowerCase()}...`
+            : props.status === "running"
+              ? `${progressVerb}...`
+              : verb;
+
+    return (
+        <Tooltip content={props.tooltip}>
+            <Button
+                type="button"
+                variant={isCopy ? "primary" : "secondary"}
+                size="lg"
+                disabled={props.disabled}
+                isLoading={props.status !== "idle"}
+                onClick={props.onClick}
+                className={
+                    isCopy
+                        ? "rounded-md text-sm font-semibold shadow-sm shadow-blue-950/30"
+                        : "rounded-md text-sm font-semibold"
+                }
+            >
+                {props.status !== "idle" ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : isCopy ? (
+                    <Copy className="h-4 w-4" />
+                ) : (
+                    <FolderInput className="h-4 w-4" />
+                )}
+                {label}
+            </Button>
+        </Tooltip>
+    );
+}
+
 /** Keeps transfer and comparison actions in one toolbar without bloating the page. */
 function SyncActionBar(props: { workspace: SyncWorkspace }) {
     const workspace = props.workspace;
@@ -640,71 +770,32 @@ function SyncActionBar(props: { workspace: SyncWorkspace }) {
         />
     );
 
+    const isDisabled = workspace.isBusy || !workspace.selectedAgentId;
+
     return (
         <div className="flex flex-wrap items-center gap-3">
-            <Tooltip
-                content={
+            <TransferButton
+                operation="copy"
+                status={workspace.operationStatus("copy")}
+                disabled={isDisabled}
+                tooltip={
                     <>
                         Copy {sourcePath} to {destinationPath}
                     </>
                 }
-            >
-                <Button
-                    type="button"
-                    size="lg"
-                    disabled={workspace.isBusy || !workspace.selectedAgentId}
-                    isLoading={workspace.copyInFlight}
-                    onClick={() => workspace.setConfirmationOperation("copy")}
-                    className="rounded-md text-sm font-semibold shadow-sm shadow-blue-950/30"
-                >
-                    {workspace.copyInFlight ? (
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                    ) : (
-                        <Copy className="h-4 w-4" />
-                    )}
-                    {workspace.preparingOperation === "copy" ||
-                    (workspace.transferMutation.isPending &&
-                        workspace.transferMutation.variables?.operation ===
-                            "copy")
-                        ? "Starting copy..."
-                        : workspace.isActive &&
-                            workspace.transferOperation === "copy"
-                          ? "Copying..."
-                          : "Copy"}
-                </Button>
-            </Tooltip>
-            <Tooltip
-                content={
+                onClick={() => workspace.requestConfirmation("copy")}
+            />
+            <TransferButton
+                operation="move"
+                status={workspace.operationStatus("move")}
+                disabled={isDisabled}
+                tooltip={
                     <>
                         Move {sourcePath} to {destinationPath}
                     </>
                 }
-            >
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="lg"
-                    disabled={workspace.isBusy || !workspace.selectedAgentId}
-                    isLoading={workspace.moveInFlight}
-                    onClick={() => workspace.setConfirmationOperation("move")}
-                    className="rounded-md text-sm font-semibold"
-                >
-                    {workspace.moveInFlight ? (
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                    ) : (
-                        <FolderInput className="h-4 w-4" />
-                    )}
-                    {workspace.preparingOperation === "move" ||
-                    (workspace.transferMutation.isPending &&
-                        workspace.transferMutation.variables?.operation ===
-                            "move")
-                        ? "Starting move..."
-                        : workspace.isActive &&
-                            workspace.transferOperation === "move"
-                          ? "Moving..."
-                          : "Move"}
-                </Button>
-            </Tooltip>
+                onClick={() => workspace.requestConfirmation("move")}
+            />
             {workspace.canDiff ? (
                 <Tooltip
                     content={
@@ -717,34 +808,24 @@ function SyncActionBar(props: { workspace: SyncWorkspace }) {
                         type="button"
                         variant="secondary"
                         size="lg"
-                        disabled={
-                            workspace.isBusy ||
-                            !workspace.selectedAgentId ||
-                            workspace.diffMutation.isPending
-                        }
-                        isLoading={workspace.diffMutation.isPending}
-                        onClick={() => {
-                            if (!workspace.selectedAgentId) {
-                                return;
-                            }
-
-                            workspace.diffMutation.mutate();
-                        }}
+                        disabled={isDisabled || workspace.diff.isPending}
+                        isLoading={workspace.diff.isPending}
+                        onClick={workspace.diff.run}
                         className="rounded-md text-sm font-semibold"
                     >
                         <GitCompareArrows className="h-4 w-4" />
-                        {workspace.diffMutation.isPending
+                        {workspace.diff.isPending
                             ? "Generating diff..."
                             : "Diff"}
                     </Button>
                 </Tooltip>
             ) : null}
-            {workspace.isActive ? (
+            {workspace.progress ? (
                 <span role="status" className="text-sm text-slate-400">
-                    {formatSize(workspace.transfer?.transferred_bytes ?? 0)}{" "}
+                    {formatSize(workspace.progress.transferredBytes)}{" "}
                     transferred
-                    {(workspace.transfer?.total_bytes ?? 0) > 0
-                        ? ` of ${formatSize(workspace.transfer?.total_bytes ?? 0)}`
+                    {workspace.progress.totalBytes > 0
+                        ? ` of ${formatSize(workspace.progress.totalBytes)}`
                         : ""}{" "}
                     from {sourcePath} to {destinationPath}
                 </span>
@@ -756,8 +837,13 @@ function SyncActionBar(props: { workspace: SyncWorkspace }) {
 /** Reports transfer completion separately so a later Diff result can stay on screen. */
 function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
     const workspace = props.workspace;
+    const outcome = workspace.transferOutcome;
 
-    if (workspace.transfer?.state === "completed") {
+    if (outcome === null) {
+        return null;
+    }
+
+    if (outcome.kind === "completed") {
         const sourcePath = (
             <EndpointPath
                 endpoint={workspace.sourceEndpoint}
@@ -777,64 +863,39 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
                 role="status"
                 className="border-t border-slate-800 p-4 text-sm text-emerald-300 sm:p-5"
             >
-                {workspace.transferLabel} completed successfully.{" "}
-                {formatSize(workspace.transfer.transferred_bytes)} transferred
-                from {sourcePath} to {destinationPath}.
+                {outcome.label} completed successfully.{" "}
+                {formatSize(outcome.transferredBytes)} transferred from{" "}
+                {sourcePath} to {destinationPath}.
             </p>
         );
     }
 
-    if (
-        workspace.prepareTransferMutation.isError ||
-        workspace.transferMutation.isError ||
-        workspace.transferQuery.isError ||
-        workspace.transfer?.state === "errored"
-    ) {
-        return (
-            <p
-                role="alert"
-                className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
-            >
-                {workspace.transferLabel} failed:{" "}
-                {workspace.transfer?.state === "errored"
-                    ? (workspace.transfer.error ??
-                      `${workspace.transferLabel} failed`)
-                    : getErrorMessage(
-                          workspace.prepareTransferMutation.error ??
-                              workspace.transferMutation.error ??
-                              workspace.transferQuery.error,
-                          workspace.transferQuery.isError
-                              ? `Failed to read ${workspace.transferLabel.toLowerCase()} progress`
-                              : workspace.prepareTransferMutation.isError
-                                ? "Failed to check the destination"
-                                : `Failed to start ${workspace.transferLabel.toLowerCase()}`,
-                      )}
-            </p>
-        );
-    }
-
-    return null;
+    return (
+        <p
+            role="alert"
+            className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
+        >
+            {outcome.label} failed: {outcome.message}
+        </p>
+    );
 }
 
 /** Keeps the rendered hunks under the form so Copy/Move chrome stays interactive. */
 function SyncDiffSection(props: { workspace: SyncWorkspace }) {
-    const workspace = props.workspace;
+    const diff = props.workspace.diff;
 
-    if (workspace.diffMutation.isError) {
+    if (diff.errorMessage !== null) {
         return (
             <p
                 role="alert"
                 className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
             >
-                {getErrorMessage(
-                    workspace.diffMutation.error,
-                    "Failed to generate diff",
-                )}
+                {diff.errorMessage}
             </p>
         );
     }
 
-    if (!workspace.diffMutation.isSuccess) {
+    if (diff.unifiedDiff === null) {
         return null;
     }
 
@@ -843,9 +904,7 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
             aria-label="File diff"
             className="file-diff-host w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 sm:p-5"
         >
-            <UnifiedDiff
-                unifiedDiff={workspace.diffMutation.data.unified_diff}
-            />
+            <UnifiedDiff unifiedDiff={diff.unifiedDiff} />
         </section>
     );
 }
@@ -860,7 +919,7 @@ export function SyncView(props: {
 }) {
     const workspace = useSyncWorkspace(props);
     const entryLabel = props.entryType === "file" ? "file" : "directory";
-    const conflictLabels = conflictDialogLabels(workspace.pendingOperation);
+    const conflictLabels = conflictDialogLabels(workspace.conflictOperation);
 
     const confirmationLabel =
         workspace.confirmationOperation === "move" ? "Move" : "Copy";
@@ -881,29 +940,17 @@ export function SyncView(props: {
 
     return (
         <BrowserViewCard>
-            <header className="border-b border-slate-800 p-4 sm:p-5">
-                <div className="flex min-w-0 items-start gap-2">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center text-blue-400">
-                        <RefreshCw className="h-5 w-5" aria-hidden="true" />
-                    </div>
-                    <div className="min-w-0 flex-1 pt-0.5">
-                        <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">
-                            Sync {entryLabel}
-                        </p>
-                        <h1 className="break-all text-lg font-semibold text-slate-50">
-                            {props.sourcePath
-                                .split("/")
-                                .filter(Boolean)
-                                .pop() ?? "/"}
-                        </h1>
-                    </div>
-                </div>
+            <ViewCardHeader
+                icon={<RefreshCw className="h-5 w-5" aria-hidden="true" />}
+                eyebrow={`Sync ${entryLabel}`}
+                title={getBaseName(props.sourcePath)}
+            >
                 <p className="mt-3 max-w-3xl text-sm text-slate-400">
                     {props.entryType === "file"
                         ? "Choose an absolute path or use ~ for the home directory on a connected device, then copy, move, or compare in either direction."
                         : "Choose an absolute path or use ~ for the home directory on a connected device, then copy or move in either direction."}
                 </p>
-            </header>
+            </ViewCardHeader>
 
             <div className="grid gap-4 p-4 sm:p-5">
                 <SyncDirectionFields
@@ -916,10 +963,9 @@ export function SyncView(props: {
                     agentId={workspace.selectedAgentId}
                     path={workspace.selectedPath}
                     disabled={workspace.isBusy}
-                    viewHref={workspace.selectedHref}
+                    viewTarget={workspace.viewTarget}
                     onAgentChange={workspace.changeSelectedAgent}
                     onPathChange={workspace.changeSelectedPath}
-                    onView={workspace.gotoSelected}
                 />
                 <SyncActionBar workspace={workspace} />
             </div>
@@ -937,36 +983,21 @@ export function SyncView(props: {
                     </>
                 }
                 confirmLabel={`Confirm ${confirmationLabel.toLowerCase()}`}
-                onClose={() => workspace.setConfirmationOperation(null)}
-                onConfirm={() => {
-                    if (workspace.confirmationOperation === null) {
-                        return;
-                    }
-
-                    const operation = workspace.confirmationOperation;
-                    workspace.setConfirmationOperation(null);
-                    workspace.startTransfer(operation);
-                }}
+                onClose={workspace.cancelConfirmation}
+                onConfirm={workspace.confirmTransfer}
             />
 
-            <DestinationConflictDialog
-                isOpen={workspace.pendingOperation !== null}
-                title="Destination items already exist"
-                description="The destination path already exists. Choose how to handle the existing destination."
-                closeAriaLabel={conflictLabels.closeAriaLabel}
-                confirmLabel={conflictLabels.confirmLabel}
-                radioGroupName={conflictLabels.radioGroupName}
-                onClose={() => workspace.setPendingOperation(null)}
-                onConfirm={(mode) => {
-                    if (workspace.pendingOperation === null) {
-                        return;
-                    }
-
-                    const operation = workspace.pendingOperation;
-                    workspace.setPendingOperation(null);
-                    workspace.transferMutation.mutate({ operation, mode });
-                }}
-            />
+            {workspace.conflictOperation !== null ? (
+                <DestinationConflictDialog
+                    title="Destination items already exist"
+                    description="The destination path already exists. Choose how to handle the existing destination."
+                    closeAriaLabel={conflictLabels.closeAriaLabel}
+                    confirmLabel={conflictLabels.confirmLabel}
+                    radioGroupName={conflictLabels.radioGroupName}
+                    onClose={workspace.cancelConflict}
+                    onConfirm={workspace.resolveConflict}
+                />
+            ) : null}
         </BrowserViewCard>
     );
 }

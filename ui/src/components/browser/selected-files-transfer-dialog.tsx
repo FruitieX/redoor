@@ -72,9 +72,12 @@ export type SelectedFilesTransferTriggerApi = {
     labels: typeof transferTriggerCopy;
 };
 
-/** Reuses one Keep / Replace / Merge prompt for listing transfers and the Sync workspace. */
+/**
+ * Reuses one Keep / Replace / Merge prompt for listing transfers and the Sync workspace.
+ * Callers mount it only while a conflict is being resolved, so each prompt starts from the
+ * safe default instead of resetting it in an effect.
+ */
 export function DestinationConflictDialog(props: {
-    isOpen: boolean;
     title: string;
     description: string;
     closeAriaLabel: string;
@@ -86,16 +89,9 @@ export function DestinationConflictDialog(props: {
     const [existingMode, setExistingMode] =
         React.useState<CopyExistingMode>("error");
 
-    // Reset to the safe default whenever the dialog reopens for a new conflict.
-    React.useEffect(() => {
-        if (props.isOpen) {
-            setExistingMode("error");
-        }
-    }, [props.isOpen]);
-
     return (
         <Dialog
-            isOpen={props.isOpen}
+            isOpen={true}
             title={props.title}
             description={props.description}
             closeAriaLabel={props.closeAriaLabel}
@@ -219,11 +215,11 @@ export function SelectedFilesTransferTrigger(props: {
     const operationLabel = copy ? "Copy" : "Move";
     const hasConflicts = conflictingFiles.length > 0;
 
-    React.useEffect(() => {
-        if (isOpen && props.selectedFiles.length === 0) {
-            setIsOpen(false);
-        }
-    }, [isOpen, props.selectedFiles.length]);
+    // Clearing the selection dismisses the prompt. Resetting the state while rendering, rather
+    // than hiding the dialog, keeps it from reappearing when something is selected again.
+    if (isOpen && props.selectedFiles.length === 0) {
+        setIsOpen(false);
+    }
 
     return (
         <>
