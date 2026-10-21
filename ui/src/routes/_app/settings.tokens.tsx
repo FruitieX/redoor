@@ -18,7 +18,6 @@ import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { Select } from "#ui/components/select";
 import { TextField } from "#ui/components/text-field";
 import { Toast } from "#ui/components/toast";
-import { Tooltip } from "#ui/components/tooltip";
 import { getErrorMessage } from "#ui/utils/error";
 
 export const Route = createFileRoute("/_app/settings/tokens")({
@@ -154,15 +153,14 @@ function AccessTokenSettingsPage() {
                             MCP clients.
                         </p>
                     </div>
-                    <Tooltip content="Create a token with limited permissions and devices">
-                        <Button
-                            type="button"
-                            onClick={() => setCreateOpen(true)}
-                        >
-                            <Plus className="h-4 w-4" />
-                            Create token
-                        </Button>
-                    </Tooltip>
+                    <Button
+                        tooltip="Create a token with limited permissions and devices"
+                        type="button"
+                        onClick={() => setCreateOpen(true)}
+                    >
+                        <Plus className="h-4 w-4" />
+                        Create token
+                    </Button>
                 </div>
                 {tokensQuery.isError ? (
                     <p
@@ -170,15 +168,14 @@ function AccessTokenSettingsPage() {
                         className="mt-6 rounded border border-red-800 bg-red-950/20 p-4 text-red-300"
                     >
                         Could not load access tokens.{" "}
-                        <Tooltip content="Reload the token list">
-                            <Button
-                                type="button"
-                                variant="subtle"
-                                onClick={() => void tokensQuery.refetch()}
-                            >
-                                Try again
-                            </Button>
-                        </Tooltip>
+                        <Button
+                            tooltip="Reload the token list"
+                            type="button"
+                            variant="subtle"
+                            onClick={() => void tokensQuery.refetch()}
+                        >
+                            Try again
+                        </Button>
                     </p>
                 ) : tokensQuery.isLoading ? (
                     <p className="mt-8 text-slate-400">
@@ -379,38 +376,35 @@ function TokenCard(props: {
                     </dl>
                 </div>
                 <div className="flex items-start gap-2">
-                    <Tooltip content="Edit token name, permissions, and allowed devices">
-                        <Button
-                            type="button"
-                            variant="secondary"
-                            disabled={expired}
-                            onClick={props.onEdit}
-                        >
-                            <Pencil className="h-4 w-4" />
-                            Edit
-                        </Button>
-                    </Tooltip>
-                    <Tooltip content="Replace the secret and invalidate the current one">
-                        <Button
-                            type="button"
-                            variant="secondary"
-                            disabled={expired}
-                            onClick={props.onRotate}
-                        >
-                            <RotateCw className="h-4 w-4" />
-                            Rotate
-                        </Button>
-                    </Tooltip>
-                    <Tooltip content="Delete the token and reject its clients">
-                        <Button
-                            type="button"
-                            variant="danger"
-                            onClick={props.onDelete}
-                        >
-                            <Trash2 className="h-4 w-4" />
-                            Delete
-                        </Button>
-                    </Tooltip>
+                    <Button
+                        tooltip="Edit token name, permissions, and allowed devices"
+                        type="button"
+                        variant="secondary"
+                        disabled={expired}
+                        onClick={props.onEdit}
+                    >
+                        <Pencil className="h-4 w-4" />
+                        Edit
+                    </Button>
+                    <Button
+                        tooltip="Replace the secret and invalidate the current one"
+                        type="button"
+                        variant="secondary"
+                        disabled={expired}
+                        onClick={props.onRotate}
+                    >
+                        <RotateCw className="h-4 w-4" />
+                        Rotate
+                    </Button>
+                    <Button
+                        tooltip="Delete the token and reject its clients"
+                        type="button"
+                        variant="danger"
+                        onClick={props.onDelete}
+                    >
+                        <Trash2 className="h-4 w-4" />
+                        Delete
+                    </Button>
                 </div>
             </div>
         </article>
@@ -553,32 +547,28 @@ function TokenDialog(
                 />
             </div>
             <DialogActions stackOnMobile>
-                <Tooltip content="Discard changes">
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        disabled={mutation.isPending}
-                        onClick={close}
-                    >
-                        Cancel
-                    </Button>
-                </Tooltip>
-                <Tooltip
-                    content={
+                <Button
+                    tooltip="Discard changes"
+                    type="button"
+                    variant="secondary"
+                    disabled={mutation.isPending}
+                    onClick={close}
+                >
+                    Cancel
+                </Button>
+                <Button
+                    tooltip={
                         canSubmit
                             ? "Save the token policy"
                             : "Enter a name, at least one permission, and at least one device"
                     }
+                    type="button"
+                    isLoading={mutation.isPending}
+                    disabled={!canSubmit}
+                    onClick={() => mutation.mutate()}
                 >
-                    <Button
-                        type="button"
-                        isLoading={mutation.isPending}
-                        disabled={!canSubmit}
-                        onClick={() => mutation.mutate()}
-                    >
-                        {props.token ? "Save changes" : "Create token"}
-                    </Button>
-                </Tooltip>
+                    {props.token ? "Save changes" : "Create token"}
+                </Button>
             </DialogActions>
         </Dialog>
     );
@@ -753,11 +743,13 @@ function SecretDialog(props: {
                 </p>
             </div>
             <DialogActions>
-                <Tooltip content="Close and permanently hide this token">
-                    <Button type="button" onClick={props.onClose}>
-                        I saved the token
-                    </Button>
-                </Tooltip>
+                <Button
+                    tooltip="Close and permanently hide this token"
+                    type="button"
+                    onClick={props.onClose}
+                >
+                    I saved the token
+                </Button>
             </DialogActions>
         </Dialog>
     );

@@ -115,7 +115,8 @@ export function Dialog(props: DialogProps) {
                         label={props.closeAriaLabel}
                         onClick={props.onClose}
                         disabled={props.isBusy}
-                        className="rounded p-2 text-slate-400 hover:bg-tint-strong hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        variant="ghost"
+                        size="md"
                     >
                         <X className="h-4 w-4" />
                     </IconButton>

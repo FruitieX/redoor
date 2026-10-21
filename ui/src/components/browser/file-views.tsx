@@ -51,7 +51,6 @@ import { FullWindowToggle } from "#ui/components/full-window-toggle";
 import { EditorPinnedFiles } from "#ui/components/browser/editor-pinned-files";
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
-import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { fileContentQueryOptions } from "#ui/queries";
 import { useAgentSearchNavigation } from "#ui/search-navigation";
@@ -101,19 +100,18 @@ ${props.selection.text}
 
     return (
         <>
-            <Tooltip content="Save file (Ctrl+S)">
-                <Button
-                    type="button"
-                    aria-label="Save file"
-                    onClick={props.onSave}
-                    disabled={!props.canEdit || !props.isDirty}
-                    isLoading={props.isSaving}
-                    size="sm"
-                    className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
-                >
-                    <Save className="h-4 w-4" aria-hidden="true" />
-                </Button>
-            </Tooltip>
+            <Button
+                tooltip="Save file (Ctrl+S)"
+                type="button"
+                aria-label="Save file"
+                onClick={props.onSave}
+                disabled={!props.canEdit || !props.isDirty}
+                isLoading={props.isSaving}
+                size="sm"
+                className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
+            >
+                <Save className="h-4 w-4" aria-hidden="true" />
+            </Button>
             <PinButton
                 file={{
                     agentId: props.bookmark.agentId,
@@ -145,47 +143,46 @@ ${props.selection.text}
                         : "Search and replace in the file (Ctrl+F)"
                 }
                 onClick={props.onToggleSearch}
-                className="h-9 w-9 aria-[pressed=false]:text-slate-200 aria-[pressed=false]:hover:bg-tint"
+                size="lg"
+                className="aria-[pressed=false]:text-slate-200 aria-[pressed=false]:hover:bg-tint"
             >
                 <Replace className="h-4 w-4" aria-hidden="true" />
             </ToggleButton>
-            <Tooltip content="Copy the selection as a fenced code block headed by path#Lline, ready to reference this file in prompts to AI agents.">
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    aria-label="Copy selection with file reference"
-                    disabled={props.selection === null}
-                    isLoading={copyMutation.isPending}
-                    onClick={() => copyMutation.mutate()}
-                    className="h-9 w-9 rounded-md p-0 font-semibold"
-                >
-                    <ClipboardCopy className="h-4 w-4" aria-hidden="true" />
-                </Button>
-            </Tooltip>
-            <Tooltip content="Search the selected text from the git repository root when the file is in a worktree.">
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    aria-label="Search selected text"
-                    disabled={props.selection === null}
-                    onClick={() => {
-                        if (props.selection === null) {
-                            return;
-                        }
+            <Button
+                tooltip="Copy the selection as a fenced code block headed by path#Lline, ready to reference this file in prompts to AI agents."
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-label="Copy selection with file reference"
+                disabled={props.selection === null}
+                isLoading={copyMutation.isPending}
+                onClick={() => copyMutation.mutate()}
+                className="h-9 w-9 rounded-md p-0 font-semibold"
+            >
+                <ClipboardCopy className="h-4 w-4" aria-hidden="true" />
+            </Button>
+            <Button
+                tooltip="Search the selected text from the git repository root when the file is in a worktree."
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-label="Search selected text"
+                disabled={props.selection === null}
+                onClick={() => {
+                    if (props.selection === null) {
+                        return;
+                    }
 
-                        void updateSearch({
-                            q: props.selection.text,
-                            mode: "content",
-                            gitroot: true,
-                        });
-                    }}
-                    className="h-9 w-9 rounded-md p-0 font-semibold"
-                >
-                    <Search className="h-4 w-4" aria-hidden="true" />
-                </Button>
-            </Tooltip>
+                    void updateSearch({
+                        q: props.selection.text,
+                        mode: "content",
+                        gitroot: true,
+                    });
+                }}
+                className="h-9 w-9 rounded-md p-0 font-semibold"
+            >
+                <Search className="h-4 w-4" aria-hidden="true" />
+            </Button>
             {props.statusMessage ? (
                 <span
                     role="status"
@@ -345,7 +342,9 @@ function CloseMarkdownPreviewButton(props: { onClose: () => void }) {
             label="Close markdown preview"
             tooltip="Edit markdown"
             onClick={props.onClose}
-            className="h-8 w-8 rounded-md bg-surface/90 text-slate-300 hover:bg-tint hover:text-slate-50"
+            variant="ghost"
+            size="lg"
+            className="bg-surface/90 text-slate-300 hover:text-slate-50"
         >
             <X className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -394,7 +393,8 @@ function FileEditorSecondaryActions(props: {
                         terminals.openOrFocus(terminalTarget);
                     }
                 }}
-                className="h-9 w-9 rounded-md text-slate-400 hover:bg-tint hover:text-slate-100"
+                variant="ghost"
+                size="xl"
             >
                 <Terminal className="h-4 w-4" aria-hidden="true" />
             </IconButton>

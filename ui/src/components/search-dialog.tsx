@@ -474,7 +474,7 @@ function SearchControls(props: {
                                     ? "Exclude hidden files and directories"
                                     : "Include hidden files and directories"
                             }
-                            className="h-9 w-9"
+                            size="lg"
                             onClick={() =>
                                 props.onUpdateOption(
                                     { hidden: !props.includeHidden },
@@ -499,7 +499,7 @@ function SearchControls(props: {
                                     ? "Include files ignored by .gitignore"
                                     : "Respect .gitignore files"
                             }
-                            className="h-9 w-9"
+                            size="lg"
                             onClick={() =>
                                 props.onUpdateOption(
                                     { gitignore: !props.respectGitignore },
@@ -521,7 +521,7 @@ function SearchControls(props: {
                                         ? "Search as literal text"
                                         : "Use regular expressions"
                                 }
-                                className="h-9 w-9"
+                                size="lg"
                                 onClick={() =>
                                     void props.onUpdate({ regex: !props.regex })
                                 }
@@ -536,7 +536,9 @@ function SearchControls(props: {
                                     props.caseSensitivity
                                 ]
                             }
-                            className="h-9 w-9 rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            variant="outline"
+                            size="xl"
+                            className="bg-slate-900 hover:bg-transparent hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                             onClick={() =>
                                 void props.onUpdate({
                                     case: nextCaseSensitivity[
@@ -556,7 +558,7 @@ function SearchControls(props: {
                                         ? "Search the current directory only"
                                         : "Search the entire Git repository instead of the current directory"
                                 }
-                                className="h-9 w-9"
+                                size="lg"
                                 onClick={() =>
                                     void props.onUpdate({
                                         gitroot: !props.searchFromGitRoot,

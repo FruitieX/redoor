@@ -359,18 +359,18 @@ export function DirectoryFilesActions(props: {
                 </span>
             </ToggleButton>
             <div className="flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto overscroll-x-contain">
-                <Tooltip content="Pasted text or images are created as new files in this directory.">
-                    <Button
-                        type="button"
-                        variant="subtle"
-                        onClick={importFromClipboard}
-                        aria-label="Paste files or text"
-                        className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-tint hover:text-slate-100"
-                    >
-                        <ClipboardPaste className="h-4 w-4 text-slate-400" />
-                        <span className="hidden sm:inline">Paste</span>
-                    </Button>
-                </Tooltip>
+                <Button
+                    tooltip="Pasted text or images are created as new files in this directory."
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={importFromClipboard}
+                    aria-label="Paste files or text"
+                    className="rounded-md"
+                >
+                    <ClipboardPaste className="h-4 w-4 text-slate-400" />
+                    <span className="hidden sm:inline">Paste</span>
+                </Button>
                 <DirectoryNewAction
                     agent={props.agent}
                     directoryPath={props.directoryPath}
@@ -391,24 +391,24 @@ export function DirectoryFilesActions(props: {
                     downloadTooltip="Downloads this directory as a .tar.gz archive."
                     secondaryDownload
                     afterDownload={
-                        <Tooltip content="Reload directory listing from the device">
-                            <Button
-                                type="button"
-                                variant="subtle"
-                                aria-label="Reload directory listing"
-                                onClick={() => {
-                                    void reloadListing();
-                                }}
-                                disabled={isReloading}
-                                isLoading={isReloading}
-                                className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-tint hover:text-slate-100"
-                            >
-                                <RefreshCw className="h-4 w-4 text-slate-400" />
-                                <span className="hidden sm:inline">
-                                    {isReloading ? "Reloading..." : "Reload"}
-                                </span>
-                            </Button>
-                        </Tooltip>
+                        <Button
+                            tooltip="Reload directory listing from the device"
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            aria-label="Reload directory listing"
+                            onClick={() => {
+                                void reloadListing();
+                            }}
+                            disabled={isReloading}
+                            isLoading={isReloading}
+                            className="rounded-md"
+                        >
+                            <RefreshCw className="h-4 w-4 text-slate-400" />
+                            <span className="hidden sm:inline">
+                                {isReloading ? "Reloading..." : "Reload"}
+                            </span>
+                        </Button>
                     }
                 />
             </div>

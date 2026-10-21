@@ -149,7 +149,8 @@ export function TabbedBottomDrawer(props: {
                                 onClick={() =>
                                     props.onCollapsedChange(!props.isCollapsed)
                                 }
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
+                                variant="ghost"
+                                size="lg"
                             >
                                 {props.isCollapsed ? (
                                     <ChevronUp className="h-4 w-4" />

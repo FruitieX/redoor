@@ -179,8 +179,9 @@ export function SideMenu(props: {
                                 type="button"
                                 label={`Close ${props.label.toLowerCase()}`}
                                 tooltip={false}
+                                variant="ghost"
+                                size="md"
                                 onClick={onClose}
-                                className="rounded p-2 text-slate-400 hover:bg-tint-strong hover:text-slate-100"
                             >
                                 <X className="h-4 w-4" />
                             </IconButton>

@@ -3,19 +3,16 @@ import { twMerge } from "tailwind-merge";
 
 /**
  * Provides the shared visual baseline without obscuring native input behavior or attributes.
+ * `ref` is an ordinary prop in React 19, so the input receives it through the spread.
  */
-export const InputControl = React.forwardRef<
-    HTMLInputElement,
-    React.InputHTMLAttributes<HTMLInputElement>
->((props, ref) => (
-    <input
-        {...props}
-        ref={ref}
-        className={twMerge(
-            "rounded-md border border-slate-700 bg-canvas px-3 py-2 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
-            props.className,
-        )}
-    />
-));
-
-InputControl.displayName = "InputControl";
+export function InputControl(props: React.ComponentPropsWithRef<"input">) {
+    return (
+        <input
+            {...props}
+            className={twMerge(
+                "rounded-md border border-slate-700 bg-canvas px-3 py-2 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
+                props.className,
+            )}
+        />
+    );
+}

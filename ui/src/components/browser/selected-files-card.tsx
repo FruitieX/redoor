@@ -24,7 +24,6 @@ import {
 } from "#ui/components/browser/delete-paths-dialog";
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
-import { Tooltip } from "#ui/components/tooltip";
 import type { Agent, ApiClient } from "#ui/api-client";
 import type { CopyExistingMode } from "#bindings/CopyExistingMode";
 import { invalidateAgentData } from "#ui/queries";
@@ -472,18 +471,17 @@ function SelectedFilesTransferButton(props: {
     }
 
     return (
-        <Tooltip content={props.trigger.labels.buttonTooltip}>
-            <Button
-                type="button"
-                onClick={props.trigger.start}
-                aria-label={props.trigger.labels.buttonAriaLabel}
-                size="sm"
-                className="h-9 rounded-md px-3.5 py-0 font-semibold shadow-sm shadow-blue-950/30"
-            >
-                <props.trigger.labels.Icon className="h-3.5 w-3.5" />
-                {props.trigger.labels.buttonLabel}
-            </Button>
-        </Tooltip>
+        <Button
+            tooltip={props.trigger.labels.buttonTooltip}
+            type="button"
+            onClick={props.trigger.start}
+            aria-label={props.trigger.labels.buttonAriaLabel}
+            size="sm"
+            className="h-9 rounded-md px-3.5 py-0 font-semibold shadow-sm shadow-blue-950/30"
+        >
+            <props.trigger.labels.Icon className="h-3.5 w-3.5" />
+            {props.trigger.labels.buttonLabel}
+        </Button>
     );
 }
 
@@ -561,22 +559,21 @@ function SelectedFilesCardActions(props: {
                     <SelectedFilesTransferButton trigger={props.copyTrigger} />
                     <SelectedFilesTransferButton trigger={props.moveTrigger} />
                     {props.canDelete ? (
-                        <Tooltip content="Delete selected items">
-                            <Button
-                                type="button"
-                                variant="danger"
-                                aria-label="Delete selected items"
-                                onClick={props.onDelete}
-                                size="sm"
-                                className="h-9 rounded-md border-red-500/40 bg-red-500/10 px-3.5 py-0 font-semibold text-red-200 hover:border-red-500/60 hover:bg-red-500/20"
-                            >
-                                <Trash2
-                                    className="h-3.5 w-3.5"
-                                    aria-hidden="true"
-                                />
-                                Delete
-                            </Button>
-                        </Tooltip>
+                        <Button
+                            tooltip="Delete selected items"
+                            type="button"
+                            variant="danger"
+                            aria-label="Delete selected items"
+                            onClick={props.onDelete}
+                            size="sm"
+                            className="h-9 rounded-md border-red-500/40 bg-red-500/10 px-3.5 py-0 font-semibold text-red-200 hover:border-red-500/60 hover:bg-red-500/20"
+                        >
+                            <Trash2
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                            />
+                            Delete
+                        </Button>
                     ) : null}
                 </>
             )}
@@ -584,7 +581,8 @@ function SelectedFilesCardActions(props: {
                 type="button"
                 label="Clear selection"
                 onClick={props.onClear}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
+                variant="ghost"
+                size="xl"
             >
                 <X className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -680,30 +678,25 @@ export function SelectedFilesCard(props: {
                                     />
                                 </span>
                                 {hasSelection ? (
-                                    <Tooltip
-                                        content="Show selected items"
-                                        className="min-w-0 flex-1"
+                                    <Button
+                                        tooltip="Show selected items"
+                                        tooltipClassName="min-w-0 flex-1"
+                                        type="button"
+                                        variant="ghost"
+                                        aria-label={`${selectionSummary}. Show selected items`}
+                                        onClick={() =>
+                                            activateBottomDrawerTab("selected")
+                                        }
+                                        className="h-9 min-w-0 w-full justify-start gap-2 px-2 py-0 text-left"
                                     >
-                                        <Button
-                                            type="button"
-                                            variant="subtle"
-                                            aria-label={`${selectionSummary}. Show selected items`}
-                                            onClick={() =>
-                                                activateBottomDrawerTab(
-                                                    "selected",
-                                                )
-                                            }
-                                            className="h-9 min-w-0 w-full justify-start gap-2 px-2 py-0 text-left text-sm font-medium text-slate-200 hover:bg-tint hover:text-slate-100"
-                                        >
-                                            <span className="truncate">
-                                                {selectionSummary}
-                                            </span>
-                                            <PanelBottom
-                                                className="h-4 w-4 shrink-0 text-slate-400"
-                                                aria-hidden="true"
-                                            />
-                                        </Button>
-                                    </Tooltip>
+                                        <span className="truncate">
+                                            {selectionSummary}
+                                        </span>
+                                        <PanelBottom
+                                            className="h-4 w-4 shrink-0 text-slate-400"
+                                            aria-hidden="true"
+                                        />
+                                    </Button>
                                 ) : (
                                     <p className="flex h-9 min-w-0 flex-1 items-center truncate px-2 text-sm font-medium text-slate-200">
                                         {selectionSummary}

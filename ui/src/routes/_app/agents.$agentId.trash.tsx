@@ -20,7 +20,6 @@ import { Dialog } from "#ui/components/dialog";
 import { DialogActions } from "#ui/components/dialog-actions";
 import { RouteError } from "#ui/components/route-error";
 import { TextField } from "#ui/components/text-field";
-import { Tooltip } from "#ui/components/tooltip";
 import { joinBrowserPath } from "#ui/components/browser/utils";
 import { getErrorMessage } from "#ui/utils/error";
 import {
@@ -293,21 +292,17 @@ function TrashInventoryPage(props: { agent: Agent }) {
                             {items.length}{" "}
                             {items.length === 1 ? "item" : "items"}
                         </span>
-                        <Tooltip content="Permanently delete every item in trash">
-                            <Button
-                                type="button"
-                                variant="danger"
-                                size="sm"
-                                disabled={items.length === 0}
-                                onClick={() => setIsEmptyDialogOpen(true)}
-                            >
-                                <Trash2
-                                    className="h-4 w-4"
-                                    aria-hidden="true"
-                                />
-                                Empty trash
-                            </Button>
-                        </Tooltip>
+                        <Button
+                            tooltip="Permanently delete every item in trash"
+                            type="button"
+                            variant="danger"
+                            size="sm"
+                            disabled={items.length === 0}
+                            onClick={() => setIsEmptyDialogOpen(true)}
+                        >
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                            Empty trash
+                        </Button>
                     </div>
                 </div>
 
@@ -367,20 +362,19 @@ function TrashInventoryPage(props: { agent: Agent }) {
                                 >
                                     {formatDeletedAt(item.deleted_at)}
                                 </time>
-                                <Tooltip content={`Restore ${item.name}`}>
-                                    <Button
-                                        type="button"
-                                        variant="secondary"
-                                        size="sm"
-                                        onClick={() => setRestoreItem(item)}
-                                    >
-                                        <ArchiveRestore
-                                            className="h-4 w-4"
-                                            aria-hidden="true"
-                                        />
-                                        Restore
-                                    </Button>
-                                </Tooltip>
+                                <Button
+                                    tooltip={`Restore ${item.name}`}
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => setRestoreItem(item)}
+                                >
+                                    <ArchiveRestore
+                                        className="h-4 w-4"
+                                        aria-hidden="true"
+                                    />
+                                    Restore
+                                </Button>
                             </article>
                         ))}
                     </div>

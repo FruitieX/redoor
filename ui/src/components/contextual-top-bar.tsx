@@ -55,8 +55,9 @@ export function ContextualTopBar() {
                     aria-haspopup="dialog"
                     aria-controls={sideMenuDrawerIds.application}
                     aria-expanded={openMenu === "application"}
+                    variant="ghost"
+                    size="md"
                     onClick={() => setOpenMenu("application")}
-                    className="rounded p-2 text-slate-400 hover:bg-tint hover:text-slate-100"
                 >
                     <PanelLeftOpen className="h-5 w-5" aria-hidden="true" />
                 </IconButton>
@@ -65,7 +66,7 @@ export function ContextualTopBar() {
                 <ContextualViewSwitch context={context} />
             </div>
             {context && !isFilesystemContext ? (
-                <SearchButton className="rounded p-2 text-slate-400 hover:bg-tint hover:text-slate-100" />
+                <SearchButton size="md" />
             ) : null}
             <ThemeToggle />
             {isPersistent ? null : (
@@ -76,8 +77,9 @@ export function ContextualTopBar() {
                     aria-haspopup="dialog"
                     aria-controls={sideMenuDrawerIds.agents}
                     aria-expanded={openMenu === "agents"}
+                    variant="ghost"
+                    size="md"
                     onClick={() => setOpenMenu("agents")}
-                    className="rounded p-2 text-slate-400 hover:bg-tint hover:text-slate-100"
                 >
                     <PanelRightOpen className="h-5 w-5" aria-hidden="true" />
                 </IconButton>

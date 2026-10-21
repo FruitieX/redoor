@@ -134,21 +134,20 @@ function OpenAgentSidebarButton() {
     }
 
     return (
-        <Tooltip content="Open device sidebar">
-            <Button
-                type="button"
-                variant="subtle"
-                aria-label="Open device sidebar"
-                aria-haspopup="dialog"
-                aria-controls={sideMenuDrawerIds.agents}
-                aria-expanded={openMenu === "agents"}
-                onClick={() => setOpenMenu("agents")}
-                className="mt-2 inline-flex items-center gap-1.5 rounded border border-slate-800 bg-surface px-2 py-0.5 text-sm font-normal text-slate-200 hover:border-slate-600 hover:bg-tint"
-            >
-                <PanelRightOpen className="h-3.5 w-3.5" aria-hidden="true" />
-                Device menu
-            </Button>
-        </Tooltip>
+        <Button
+            tooltip="Open device sidebar"
+            type="button"
+            variant="subtle"
+            aria-label="Open device sidebar"
+            aria-haspopup="dialog"
+            aria-controls={sideMenuDrawerIds.agents}
+            aria-expanded={openMenu === "agents"}
+            onClick={() => setOpenMenu("agents")}
+            className="mt-2 inline-flex items-center gap-1.5 rounded border border-slate-800 bg-surface px-2 py-0.5 text-sm font-normal text-slate-200 hover:border-slate-600 hover:bg-tint"
+        >
+            <PanelRightOpen className="h-3.5 w-3.5" aria-hidden="true" />
+            Device menu
+        </Button>
     );
 }
 

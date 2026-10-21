@@ -53,7 +53,10 @@ function BrowserPageHeader(props: {
                             <Home className="h-4 w-4" aria-hidden="true" />
                         </Link>
                     </Tooltip>
-                    <SearchButton className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100 [&_svg]:h-4 [&_svg]:w-4" />
+                    <SearchButton
+                        size="sm"
+                        className="shrink-0 [&_svg]:h-4 [&_svg]:w-4"
+                    />
                     {props.navigation}
                     <Breadcrumbs
                         // A new location resets the path editor, so it starts closed (or open for a path that needs correcting).
@@ -438,7 +441,9 @@ function Breadcrumbs(props: {
                     <IconButton
                         type="submit"
                         label="Navigate to path"
-                        className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0"
                     >
                         <Check className="h-4 w-4" />
                     </IconButton>
@@ -501,10 +506,12 @@ function Breadcrumbs(props: {
                         }}
                         label={isCopied ? "Copied!" : "Copy file path"}
                         tooltip="Copy file path"
+                        variant="ghost"
+                        size="sm"
                         className={
                             isCopied
-                                ? "shrink-0 rounded-md p-1.5 text-emerald-300"
-                                : "shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-tint hover:text-slate-100"
+                                ? "shrink-0 text-emerald-300 hover:bg-transparent hover:text-emerald-300"
+                                : "shrink-0 text-slate-500"
                         }
                     >
                         {isCopied ? (
@@ -517,7 +524,9 @@ function Breadcrumbs(props: {
                         type="button"
                         onClick={startEditing}
                         label="Edit file path"
-                        className="shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-tint hover:text-slate-100"
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0 text-slate-500"
                     >
                         <Pencil className="h-3.5 w-3.5" />
                     </IconButton>

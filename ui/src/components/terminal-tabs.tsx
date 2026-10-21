@@ -5,6 +5,7 @@ import {
     HardDrive,
     LoaderCircle,
     MoreHorizontal,
+    Plus,
     RotateCcw,
     X,
 } from "lucide-react";
@@ -18,7 +19,6 @@ import type {
     TerminalCreationTarget,
 } from "#ui/terminal/terminal-sessions";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
-import { AddButton } from "#ui/components/add-button";
 import { IconButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import type { ItemMove } from "#ui/utils/reorder";
@@ -94,19 +94,21 @@ export function TerminalTabActions(props: {
                 </div>
             </SortableList>
             {props.activeTarget ? (
-                <AddButton
+                <IconButton
+                    type="button"
+                    label="New terminal"
                     tooltip={`New terminal in ${props.activeTarget.agent.name} (t, Alt+t)`}
+                    variant="ghost"
+                    size="lg"
+                    className="shrink-0"
+                    onClick={() => {
+                        if (props.activeTarget) {
+                            props.onCreate(props.activeTarget);
+                        }
+                    }}
                 >
-                    <button
-                        type="button"
-                        aria-label="New terminal"
-                        onClick={() => {
-                            if (props.activeTarget) {
-                                props.onCreate(props.activeTarget);
-                            }
-                        }}
-                    />
-                </AddButton>
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
             ) : null}
             <ActionMenu
                 label="Choose device for new terminal"
@@ -229,7 +231,7 @@ function TerminalTabControl(props: {
                             type="button"
                             label={`Restart ${props.tab.title}`}
                             onClick={() => props.onRestart(props.tab.id)}
-                            className="inline-flex h-8 w-7 items-center justify-center border-l border-slate-700 text-blue-400 transition-colors hover:bg-blue-500/10 hover:text-blue-300"
+                            className="h-8 w-7 border-l border-slate-700 text-blue-400 transition-colors hover:bg-blue-500/10 hover:text-blue-300"
                         >
                             <RotateCcw className="h-3.5 w-3.5" />
                         </IconButton>
@@ -238,7 +240,7 @@ function TerminalTabControl(props: {
                         type="button"
                         label={`Close ${props.tab.title}`}
                         onClick={() => props.onClose(props.tab.id)}
-                        className="inline-flex h-8 w-7 items-center justify-center border-l border-slate-700 text-slate-500 transition-colors hover:bg-tint hover:text-slate-200"
+                        className="h-8 w-7 border-l border-slate-700 text-slate-500 transition-colors hover:bg-tint hover:text-slate-200"
                     >
                         <X className="h-3.5 w-3.5" />
                     </IconButton>

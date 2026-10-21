@@ -224,10 +224,10 @@ function LogoutButton() {
     return (
         <Button
             type="button"
-            variant="subtle"
+            variant="ghost"
             onClick={() => logoutMutation.mutate()}
             disabled={logoutMutation.isPending}
-            className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left text-sm font-normal text-slate-300 hover:bg-tint hover:text-slate-100 disabled:cursor-wait disabled:opacity-60"
+            className="flex w-full items-center justify-start gap-2.5 rounded px-3 py-2.5 text-left font-normal text-slate-300 disabled:cursor-wait disabled:opacity-60"
         >
             {logoutMutation.isPending ? (
                 <LoaderCircle
@@ -363,7 +363,9 @@ function PinnedFileRow(props: {
                         label="Remove pinned file"
                         tooltip={`Remove ${props.file.name}`}
                         onClick={() => props.onRemove(props.file)}
-                        className="mt-1 mr-1 shrink-0 rounded p-1 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
+                        variant="quiet"
+                        size="xs"
+                        className="mt-1 mr-1 shrink-0"
                     >
                         <X className="h-3 w-3" aria-hidden="true" />
                     </IconButton>

@@ -3,7 +3,6 @@ import type { ApiClient } from "#ui/api-client";
 import type { PartialActionRequest } from "#bindings/PartialActionRequest";
 import { partialsQueryOptions, queryKeys } from "#ui/queries";
 import { Button } from "#ui/components/button";
-import { Tooltip } from "#ui/components/tooltip";
 import { formatSize } from "#ui/utils/path";
 
 /** Durable inventory remains available even after transfer history or processes disappear. */
@@ -56,27 +55,23 @@ export function ResumableTransfers(props: { api: ApiClient }) {
                             {formatSize(partial.total_bytes)}
                         </p>
                     </div>
-                    <Tooltip content="Verify the saved prefix and continue transferring">
-                        <Button
-                            disabled={action.isPending}
-                            onClick={() =>
-                                action.mutate({ partial, resume: true })
-                            }
-                        >
-                            Resume
-                        </Button>
-                    </Tooltip>
-                    <Tooltip content="Remove this partial file">
-                        <Button
-                            variant="secondary"
-                            disabled={action.isPending}
-                            onClick={() =>
-                                action.mutate({ partial, resume: false })
-                            }
-                        >
-                            Discard
-                        </Button>
-                    </Tooltip>
+                    <Button
+                        tooltip="Verify the saved prefix and continue transferring"
+                        disabled={action.isPending}
+                        onClick={() => action.mutate({ partial, resume: true })}
+                    >
+                        Resume
+                    </Button>
+                    <Button
+                        tooltip="Remove this partial file"
+                        variant="secondary"
+                        disabled={action.isPending}
+                        onClick={() =>
+                            action.mutate({ partial, resume: false })
+                        }
+                    >
+                        Discard
+                    </Button>
                 </div>
             ))}
         </section>

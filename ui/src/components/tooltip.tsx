@@ -293,3 +293,40 @@ export function Tooltip(props: TooltipProps) {
         </span>
     );
 }
+
+/** Props every button-like control accepts so a tooltip is declared the same way everywhere. */
+export type ControlTooltipProps = {
+    /**
+     * Explains the control on hover and keyboard focus. Nothing renders when it is missing,
+     * `null` or `false`, so a control can opt out without a conditional wrapper at the call site.
+     */
+    tooltip?: React.ReactNode;
+    /** Lets the tooltip's trigger wrapper take part in layout, for example `shrink-0`. */
+    tooltipClassName?: string;
+};
+
+/**
+ * Attaches the tooltip declared through `ControlTooltipProps` and otherwise leaves the control
+ * alone, so Button, IconButton, ToggleButton and Tab share one rule instead of each
+ * re-implementing "wrap only when there is something to say".
+ */
+export function OptionalTooltip(
+    props: ControlTooltipProps & {
+        children: React.ReactElement<TooltipChildProps>;
+    },
+) {
+    if (
+        props.tooltip === undefined ||
+        props.tooltip === null ||
+        props.tooltip === false ||
+        props.tooltip === ""
+    ) {
+        return props.children;
+    }
+
+    return (
+        <Tooltip content={props.tooltip} className={props.tooltipClassName}>
+            {props.children}
+        </Tooltip>
+    );
+}

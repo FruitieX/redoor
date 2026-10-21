@@ -335,10 +335,10 @@ function SortableFileColumnHeader(props: {
         >
             <Button
                 type="button"
-                variant="subtle"
+                variant="ghost"
                 onClick={() => props.onSort(props.column)}
                 aria-label={`Sort by ${props.label} ${nextDirection}`}
-                className="flex w-full justify-start gap-1.5 px-1.5 py-1.5 text-left font-medium text-slate-400 hover:bg-tint hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="flex w-full justify-start gap-1.5 px-1.5 py-1.5 text-left text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
                 {props.label}
                 <SortIcon className="h-3.5 w-3.5" />

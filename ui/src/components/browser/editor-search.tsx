@@ -555,19 +555,18 @@ function SearchActionButton(props: {
     onClick: () => void;
 }) {
     return (
-        <Tooltip content={props.tooltip}>
-            <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                aria-label={props.label}
-                disabled={props.disabled}
-                onClick={props.onClick}
-                className="h-9 w-9 shrink-0 rounded-md p-0"
-            >
-                {props.icon}
-            </Button>
-        </Tooltip>
+        <Button
+            tooltip={props.tooltip}
+            type="button"
+            variant="secondary"
+            size="sm"
+            aria-label={props.label}
+            disabled={props.disabled}
+            onClick={props.onClick}
+            className="h-9 w-9 shrink-0 rounded-md p-0"
+        >
+            {props.icon}
+        </Button>
     );
 }
 

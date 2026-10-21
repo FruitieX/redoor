@@ -79,7 +79,9 @@ export function Toast(props: {
                 type="button"
                 label={props.dismissAriaLabel ?? "Dismiss notification"}
                 onClick={dismiss}
-                className="ml-1 shrink-0 rounded-md p-1 text-slate-500 transition-colors hover:bg-tint-strong hover:text-slate-200"
+                variant="quiet"
+                size="xs"
+                className="ml-1 shrink-0"
             >
                 <X className="h-4 w-4" />
             </IconButton>

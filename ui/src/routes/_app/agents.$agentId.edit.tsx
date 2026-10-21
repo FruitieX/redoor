@@ -10,7 +10,6 @@ import {
     type ManagedAgentKind,
     type ManagedAgentSubmitRequest,
 } from "#ui/components/managed-agent-form";
-import { Tooltip } from "#ui/components/tooltip";
 import {
     agentConfigurationQueryOptions,
     agentsQueryOptions,
@@ -137,26 +136,23 @@ function EditManagedAgentPage() {
                 onChange={() => updateMutation.reset()}
             >
                 <div className="border-t border-red-950 pt-6">
-                    <Tooltip
-                        content={
+                    <Button
+                        tooltip={
                             isBusy
                                 ? "Wait for the current save or delete to finish"
                                 : isRunning
                                   ? "Stop the agent and remove this device from Redoor"
                                   : "Remove this device from Redoor"
                         }
+                        type="button"
+                        variant="danger"
+                        onClick={() => setIsDeleteOpen(true)}
+                        disabled={isBusy}
+                        className="rounded-md disabled:opacity-60"
                     >
-                        <Button
-                            type="button"
-                            variant="danger"
-                            onClick={() => setIsDeleteOpen(true)}
-                            disabled={isBusy}
-                            className="rounded-md disabled:opacity-60"
-                        >
-                            <Trash2 className="h-4 w-4" aria-hidden="true" />
-                            Remove device
-                        </Button>
-                    </Tooltip>
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                        Remove device
+                    </Button>
                 </div>
             </ManagedAgentForm>
             <ConfirmationDialog

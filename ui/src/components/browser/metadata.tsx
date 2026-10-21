@@ -723,18 +723,17 @@ export function DirectoryDetailView(props: {
                 size={directorySizeMutation.data?.size}
                 sizeLabel="Directory size value"
                 sizeAction={
-                    <Tooltip content="Recursively totals the contents of regular files in this directory.">
-                        <Button
-                            type="button"
-                            variant="subtle"
-                            isLoading={directorySizeMutation.isPending}
-                            onClick={() => directorySizeMutation.mutate()}
-                        >
-                            {directorySizeMutation.isPending
-                                ? "Calculating..."
-                                : "Calculate size"}
-                        </Button>
-                    </Tooltip>
+                    <Button
+                        tooltip="Recursively totals the contents of regular files in this directory."
+                        type="button"
+                        variant="subtle"
+                        isLoading={directorySizeMutation.isPending}
+                        onClick={() => directorySizeMutation.mutate()}
+                    >
+                        {directorySizeMutation.isPending
+                            ? "Calculating..."
+                            : "Calculate size"}
+                    </Button>
                 }
                 entryCount={props.lsResult.files.length}
                 headingPrefix="directory"
@@ -952,7 +951,9 @@ function ShareableLinkCard(props: {
                         void copy();
                     }}
                     label={`Copy shareable link ${props.linkNumber}`}
-                    className="shrink-0 rounded-md p-2 text-slate-400 transition hover:bg-tint hover:text-slate-100"
+                    variant="ghost"
+                    size="md"
+                    className="shrink-0"
                 >
                     {isCopied ? (
                         <Check className="h-4 w-4 text-emerald-400" />

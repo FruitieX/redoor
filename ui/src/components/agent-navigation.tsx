@@ -7,6 +7,7 @@ import {
     FoldVertical,
     HardDrive,
     Pencil,
+    Plus,
     UnfoldVertical,
     Wifi,
     X,
@@ -19,8 +20,7 @@ import {
 } from "#ui/agent-tab-locations";
 import { AgentStatusDot } from "#ui/components/agent-status-dot";
 import { SideMenu } from "#ui/components/side-menu";
-import { AddButton } from "#ui/components/add-button";
-import { IconButton } from "#ui/components/icon-button";
+import { IconButton, IconLinkButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import { Tooltip } from "#ui/components/tooltip";
 import {
@@ -124,7 +124,8 @@ function AgentMenu(props: { agents: Agent[] }) {
                                           ),
                                 )
                             }
-                            className="rounded p-1.5 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
+                            variant="quiet"
+                            size="sm"
                         >
                             {hasExpandedBookmarks ? (
                                 <FoldVertical
@@ -139,13 +140,16 @@ function AgentMenu(props: { agents: Agent[] }) {
                             )}
                         </IconButton>
                     ) : null}
-                    <AddButton tooltip="Add device">
-                        <Link
-                            to="/agents/new"
-                            aria-label="Add device"
-                            onClick={closeMenu}
-                        />
-                    </AddButton>
+                    <IconLinkButton
+                        to="/agents/new"
+                        label="Add device"
+                        variant="ghost"
+                        size="lg"
+                        className="shrink-0"
+                        onClick={closeMenu}
+                    >
+                        <Plus className="h-4 w-4" aria-hidden="true" />
+                    </IconLinkButton>
                 </div>
             </div>
             {visibleAgents.length === 0 ? (
@@ -268,7 +272,13 @@ function ConnectedDevicesToggle() {
                     showOnlyConnectedDevices: !current.showOnlyConnectedDevices,
                 }))
             }
-            className={`rounded p-1.5 hover:bg-tint-strong ${userState.showOnlyConnectedDevices ? "bg-blue-500/15 text-blue-400" : "text-slate-500 hover:text-slate-200"}`}
+            variant="quiet"
+            size="sm"
+            className={
+                userState.showOnlyConnectedDevices
+                    ? "bg-blue-500/15 text-blue-400 hover:text-blue-400"
+                    : undefined
+            }
         >
             <Wifi className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -323,7 +333,9 @@ function DeviceBlock(props: {
                                         : bookmarksId
                                 }
                                 onClick={props.onToggleBookmarks}
-                                className="ml-1 shrink-0 rounded p-1 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
+                                variant="quiet"
+                                size="xs"
+                                className="ml-1 shrink-0"
                             >
                                 <ChevronDown
                                     className={`h-3.5 w-3.5 ${props.bookmarksFolded ? "-rotate-90" : ""}`}
@@ -492,7 +504,9 @@ function BookmarkRow(props: {
                         label={`Remove bookmark ${props.bookmark.name}`}
                         tooltip={`Remove ${props.bookmark.name}`}
                         onClick={() => props.onRemove(props.bookmark)}
-                        className="mr-0.5 shrink-0 rounded p-1 text-slate-600 opacity-0 hover:bg-tint-strong hover:text-slate-200 group-hover:opacity-100 group-focus-within:opacity-100"
+                        variant="quiet"
+                        size="xs"
+                        className="mr-0.5 shrink-0 text-slate-600 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
                     >
                         <X className="h-3 w-3" aria-hidden="true" />
                     </IconButton>

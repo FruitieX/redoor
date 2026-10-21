@@ -9,7 +9,6 @@ import { Button } from "#ui/components/button";
 import { Password } from "#ui/components/password";
 import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { TextField } from "#ui/components/text-field";
-import { Tooltip } from "#ui/components/tooltip";
 
 type FormState = Record<
     | "target"
@@ -362,27 +361,26 @@ function FormActions(props: {
                     </span>
                 ) : null}
             </p>
-            <Tooltip content={props.submitTooltip ?? defaultSubmitTooltip}>
-                <Button
-                    type="submit"
-                    size="lg"
-                    disabled={props.isDisabled}
-                    isLoading={props.isSubmitting}
-                    className="shrink-0 rounded-md px-5 disabled:opacity-60"
-                >
-                    {props.isSubmitting ? (
-                        <LoaderCircle
-                            className="h-4 w-4 animate-spin"
-                            aria-hidden="true"
-                        />
-                    ) : null}
-                    {props.isSubmitting
-                        ? (props.submittingLabel ??
-                          (isEdit ? "Saving device..." : "Adding device..."))
-                        : (props.submitLabel ??
-                          (isEdit ? "Save device" : "Add device"))}
-                </Button>
-            </Tooltip>
+            <Button
+                tooltip={props.submitTooltip ?? defaultSubmitTooltip}
+                type="submit"
+                size="lg"
+                disabled={props.isDisabled}
+                isLoading={props.isSubmitting}
+                className="shrink-0 rounded-md px-5 disabled:opacity-60"
+            >
+                {props.isSubmitting ? (
+                    <LoaderCircle
+                        className="h-4 w-4 animate-spin"
+                        aria-hidden="true"
+                    />
+                ) : null}
+                {props.isSubmitting
+                    ? (props.submittingLabel ??
+                      (isEdit ? "Saving device..." : "Adding device..."))
+                    : (props.submitLabel ??
+                      (isEdit ? "Save device" : "Add device"))}
+            </Button>
         </div>
     );
 }

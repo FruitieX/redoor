@@ -1,9 +1,10 @@
 import * as React from "react";
-import { AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { z } from "zod";
 import { ApiError } from "#ui/api-transport";
 import { Button } from "#ui/components/button";
+import { FoldingSection } from "#ui/components/folding-section";
 
 /** True for browser network failures that never received an HTTP response. */
 function isNetworkError(cause: unknown): boolean {
@@ -222,56 +223,42 @@ export function RouteError(
                     </dl>
 
                     {hasTechnicalDetails ? (
-                        <div className="rounded-lg border border-slate-800 bg-canvas">
-                            <button
-                                type="button"
-                                aria-expanded={detailsOpen}
-                                onClick={() => setDetailsOpen((open) => !open)}
-                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-medium text-slate-400 hover:bg-tint hover:text-slate-200"
-                            >
-                                Technical details
-                                <ChevronDown
-                                    className={`h-4 w-4 shrink-0 transition-transform ${
-                                        detailsOpen ? "rotate-180" : ""
-                                    }`}
-                                    aria-hidden="true"
-                                />
-                            </button>
-                            {detailsOpen ? (
-                                <div className="space-y-3 border-t border-slate-800 px-3 py-3">
-                                    {responseBody ? (
-                                        <div>
-                                            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                                                Response body
-                                            </p>
-                                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
-                                                {responseBody}
-                                            </pre>
-                                        </div>
-                                    ) : null}
-                                    {stack ? (
-                                        <div>
-                                            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                                                Stack
-                                            </p>
-                                            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
-                                                {stack}
-                                            </pre>
-                                        </div>
-                                    ) : null}
-                                    {componentStack ? (
-                                        <div>
-                                            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                                                Component stack
-                                            </p>
-                                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-500">
-                                                {componentStack}
-                                            </pre>
-                                        </div>
-                                    ) : null}
+                        <FoldingSection
+                            title="Technical details"
+                            open={detailsOpen}
+                            onOpenChange={setDetailsOpen}
+                        >
+                            {responseBody ? (
+                                <div>
+                                    <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                                        Response body
+                                    </p>
+                                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
+                                        {responseBody}
+                                    </pre>
                                 </div>
                             ) : null}
-                        </div>
+                            {stack ? (
+                                <div>
+                                    <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                                        Stack
+                                    </p>
+                                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
+                                        {stack}
+                                    </pre>
+                                </div>
+                            ) : null}
+                            {componentStack ? (
+                                <div>
+                                    <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                                        Component stack
+                                    </p>
+                                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-500">
+                                        {componentStack}
+                                    </pre>
+                                </div>
+                            ) : null}
+                        </FoldingSection>
                     ) : null}
 
                     <div className="flex flex-wrap gap-2 pt-1">

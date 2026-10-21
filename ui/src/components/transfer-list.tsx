@@ -179,6 +179,8 @@ function TransferActionsCell(props: {
                 <IconButton
                     type="button"
                     label="Pause transfer"
+                    variant="ghost"
+                    size="md"
                     disabled={props.disabled}
                     onClick={props.onPause}
                 >
@@ -191,7 +193,9 @@ function TransferActionsCell(props: {
                     label="Cancel transfer"
                     disabled={props.disabled}
                     onClick={props.onCancel}
-                    className="rounded-md p-2 text-slate-400 transition-colors hover:bg-red-500/15 hover:text-red-300"
+                    variant="ghost"
+                    size="md"
+                    className="hover:bg-red-500/15 hover:text-red-300"
                 >
                     <CircleX className="h-4 w-4" />
                 </IconButton>

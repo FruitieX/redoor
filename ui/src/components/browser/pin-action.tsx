@@ -2,7 +2,6 @@ import * as React from "react";
 import { Pin } from "lucide-react";
 
 import { Button } from "#ui/components/button";
-import { Tooltip } from "#ui/components/tooltip";
 import {
     isFilePinned,
     pinFile,
@@ -38,27 +37,26 @@ export function PinButton(props: { file: PinnedFile }) {
     const tooltip = `${label}. A file is pinned automatically the first time it is edited.`;
 
     return (
-        <Tooltip content={tooltip}>
-            <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                aria-label={label}
-                onClick={() => {
-                    setUserState((current) => ({
-                        ...current,
-                        pinnedFiles: isPinned
-                            ? unpinFile(current.pinnedFiles, props.file)
-                            : pinFile(current.pinnedFiles, props.file),
-                    }));
-                }}
-                className="h-9 w-9 rounded-md p-0 font-semibold"
-            >
-                <Pin
-                    className={`h-4 w-4 ${isPinned ? "fill-current text-blue-300" : ""}`}
-                    aria-hidden="true"
-                />
-            </Button>
-        </Tooltip>
+        <Button
+            tooltip={tooltip}
+            type="button"
+            variant="secondary"
+            size="sm"
+            aria-label={label}
+            onClick={() => {
+                setUserState((current) => ({
+                    ...current,
+                    pinnedFiles: isPinned
+                        ? unpinFile(current.pinnedFiles, props.file)
+                        : pinFile(current.pinnedFiles, props.file),
+                }));
+            }}
+            className="h-9 w-9 rounded-md p-0 font-semibold"
+        >
+            <Pin
+                className={`h-4 w-4 ${isPinned ? "fill-current text-blue-300" : ""}`}
+                aria-hidden="true"
+            />
+        </Button>
     );
 }

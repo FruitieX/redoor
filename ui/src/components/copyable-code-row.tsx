@@ -1,7 +1,6 @@
 import * as React from "react";
 import { Link } from "@tanstack/react-router";
 import { Button } from "#ui/components/button";
-import { Tooltip } from "#ui/components/tooltip";
 import { Check, Copy } from "lucide-react";
 
 /** Writes text to the clipboard, with a textarea fallback when the async API is unavailable. */
@@ -173,30 +172,30 @@ export function CopyablePath(props: {
                     {props.value}
                 </code>
             )}
-            <Tooltip content={props.copyAriaLabel} className="shrink-0">
-                <Button
-                    type="button"
-                    variant="subtle"
-                    onClick={() => {
-                        void copy();
-                    }}
-                    className={
-                        isCopied
-                            ? "relative mr-1 shrink-0 gap-1 rounded bg-emerald-500/20 px-1.5 py-1 text-xs text-emerald-300"
-                            : "relative mr-1 shrink-0 rounded px-1.5 py-1 text-slate-400 hover:bg-tint hover:text-slate-100"
-                    }
-                    aria-label={isCopied ? "Copied!" : props.copyAriaLabel}
-                >
-                    {isCopied ? (
-                        <>
-                            <Check className="h-3.5 w-3.5" />
-                            <span>Copied!</span>
-                        </>
-                    ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                    )}
-                </Button>
-            </Tooltip>
+            <Button
+                tooltip={props.copyAriaLabel}
+                tooltipClassName="shrink-0"
+                type="button"
+                variant="subtle"
+                onClick={() => {
+                    void copy();
+                }}
+                className={
+                    isCopied
+                        ? "relative mr-1 shrink-0 gap-1 rounded bg-emerald-500/20 px-1.5 py-1 text-xs text-emerald-300"
+                        : "relative mr-1 shrink-0 rounded px-1.5 py-1 text-slate-400 hover:bg-tint hover:text-slate-100"
+                }
+                aria-label={isCopied ? "Copied!" : props.copyAriaLabel}
+            >
+                {isCopied ? (
+                    <>
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Copied!</span>
+                    </>
+                ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                )}
+            </Button>
         </div>
     );
 }

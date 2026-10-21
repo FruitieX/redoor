@@ -722,30 +722,29 @@ function TransferButton(props: {
               : verb;
 
     return (
-        <Tooltip content={props.tooltip}>
-            <Button
-                type="button"
-                variant={isCopy ? "primary" : "secondary"}
-                size="lg"
-                disabled={props.disabled}
-                isLoading={props.status !== "idle"}
-                onClick={props.onClick}
-                className={
-                    isCopy
-                        ? "rounded-md text-sm font-semibold shadow-sm shadow-blue-950/30"
-                        : "rounded-md text-sm font-semibold"
-                }
-            >
-                {props.status !== "idle" ? (
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                ) : isCopy ? (
-                    <Copy className="h-4 w-4" />
-                ) : (
-                    <FolderInput className="h-4 w-4" />
-                )}
-                {label}
-            </Button>
-        </Tooltip>
+        <Button
+            tooltip={props.tooltip}
+            type="button"
+            variant={isCopy ? "primary" : "secondary"}
+            size="lg"
+            disabled={props.disabled}
+            isLoading={props.status !== "idle"}
+            onClick={props.onClick}
+            className={
+                isCopy
+                    ? "rounded-md text-sm font-semibold shadow-sm shadow-blue-950/30"
+                    : "rounded-md text-sm font-semibold"
+            }
+        >
+            {props.status !== "idle" ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : isCopy ? (
+                <Copy className="h-4 w-4" />
+            ) : (
+                <FolderInput className="h-4 w-4" />
+            )}
+            {label}
+        </Button>
     );
 }
 
@@ -794,28 +793,23 @@ function SyncActionBar(props: { workspace: SyncWorkspace }) {
                 onClick={() => workspace.requestConfirmation("move")}
             />
             {workspace.canDiff ? (
-                <Tooltip
-                    content={
+                <Button
+                    tooltip={
                         <>
                             Compare {sourcePath} with {destinationPath}
                         </>
                     }
+                    type="button"
+                    variant="secondary"
+                    size="lg"
+                    disabled={isDisabled || workspace.diff.isPending}
+                    isLoading={workspace.diff.isPending}
+                    onClick={workspace.diff.run}
+                    className="rounded-md text-sm font-semibold"
                 >
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        size="lg"
-                        disabled={isDisabled || workspace.diff.isPending}
-                        isLoading={workspace.diff.isPending}
-                        onClick={workspace.diff.run}
-                        className="rounded-md text-sm font-semibold"
-                    >
-                        <GitCompareArrows className="h-4 w-4" />
-                        {workspace.diff.isPending
-                            ? "Generating diff..."
-                            : "Diff"}
-                    </Button>
-                </Tooltip>
+                    <GitCompareArrows className="h-4 w-4" />
+                    {workspace.diff.isPending ? "Generating diff..." : "Diff"}
+                </Button>
             ) : null}
             {workspace.progress ? (
                 <span role="status" className="text-sm text-slate-400">

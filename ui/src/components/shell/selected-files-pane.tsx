@@ -26,10 +26,10 @@ function SelectedFilesPanelActions(props: {
         <div className="flex items-center gap-2">
             <Button
                 type="button"
-                variant="subtle"
+                variant="ghost"
                 aria-label="Clear all selected items"
                 onClick={props.onClearSelectedFiles}
-                className="inline-flex h-8 items-center justify-center rounded-md px-2 text-xs font-medium text-slate-400 transition-colors hover:bg-tint hover:text-slate-100 sm:px-2.5"
+                className="h-8 rounded-md px-2 text-xs text-slate-400 sm:px-2.5"
             >
                 <X className="h-4 w-4 sm:hidden" aria-hidden="true" />
                 <span className="hidden sm:inline">Clear all</span>
@@ -83,7 +83,9 @@ function SelectedFilesTable(props: {
                                     path: file.path,
                                 })
                             }
-                            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-700 text-slate-300 transition-colors hover:bg-tint"
+                            variant="outline"
+                            size="lg"
+                            className="shrink-0"
                         >
                             <X className="h-4 w-4" aria-hidden="true" />
                         </IconButton>
