@@ -114,10 +114,15 @@ function useSearchQuery(urlQuery: string | undefined) {
     const [query, setQuery] = React.useState(urlQuery ?? "");
     const [debouncedQuery, setDebouncedQuery] = React.useState(query);
 
-    React.useEffect(() => {
-        // Editor search and opened/shared URLs populate the input without controlling it.
+    const [seededFrom, setSeededFrom] = React.useState(urlQuery);
+
+    // Editor search and opened/shared URLs populate the input without controlling it. Seeding
+    // while rendering, only when the URL value changes, avoids an effect and a frame that shows
+    // the old text.
+    if (seededFrom !== urlQuery) {
+        setSeededFrom(urlQuery);
         setQuery(urlQuery ?? "");
-    }, [urlQuery]);
+    }
 
     React.useEffect(() => {
         const timer = window.setTimeout(() => setDebouncedQuery(query), 200);

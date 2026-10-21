@@ -50,19 +50,11 @@ export const userStateSchema = z.object({
 
 export type UserState = z.infer<typeof userStateSchema>;
 
-export const defaultUserState: UserState = {
-    showHiddenFiles: true,
-    theme: "system",
-    bookmarks: [],
-    pinnedFiles: [],
-    vimMode: false,
-    wrapEditorLines: false,
-    recursiveSearchTimeoutSeconds: 5,
-    recursiveSearchIncludeHidden: false,
-    recursiveSearchRespectGitignore: true,
-    deviceOrder: [],
-    showOnlyConnectedDevices: false,
-};
+/**
+ * Derived from the schema's `.catch()` fallbacks, so a default can only be declared in one place
+ * and a new preference cannot be forgotten here.
+ */
+export const defaultUserState: UserState = userStateSchema.parse({});
 
 /** Identifies one bookmarked path so the same file cannot be stored twice. */
 export function getBookmarkKey(bookmark: Pick<Bookmark, "agentId" | "path">) {

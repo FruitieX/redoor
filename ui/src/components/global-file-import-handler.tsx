@@ -298,6 +298,13 @@ function usePastedContentImport(props: {
         null,
     );
 
+    // Queued clipboard content must not outlive the directory it was pasted for. Resetting
+    // while rendering (guarded, so it settles in one pass) avoids an effect and the stale
+    // frame it would render first.
+    if (!props.destination && pastedContents.length > 0) {
+        setPastedContents([]);
+    }
+
     const pastedContent = pastedContents[0] ?? null;
 
     const uploadMutation = useMutation({
@@ -406,12 +413,6 @@ function usePastedContentImport(props: {
             uploadMutation,
         ],
     );
-
-    React.useEffect(() => {
-        if (!props.destination) {
-            setPastedContents([]);
-        }
-    }, [props.destination]);
 
     return {
         closePastedContentDialog,
