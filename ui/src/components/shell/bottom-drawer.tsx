@@ -1,5 +1,4 @@
-import * as React from "react";
-import { useAtom, useAtomValue } from "jotai";
+import { useAtom } from "jotai";
 import { ArrowUpDown, Files, SquareTerminal } from "lucide-react";
 
 import { TabbedBottomDrawer } from "#ui/components/collapsible-bottom-panel";
@@ -13,14 +12,11 @@ import {
 } from "#ui/components/shell/transfers-pane";
 import { TerminalPanel } from "#ui/components/terminal-panel";
 import {
-    bottomDrawerActivationAtom,
     bottomDrawerActiveTabAtom,
     bottomDrawerCollapsedAtom,
 } from "#ui/bottom-drawer-state";
-import { useTargetAgent } from "#ui/use-active-agent";
 import { useAgents } from "#ui/use-agents";
-import { useBrowserLocation } from "#ui/use-browser-location";
-import { getParentPath } from "#ui/utils/path";
+import { useActiveTerminalTarget } from "#ui/use-terminals";
 
 /**
  * Hosts the shared tools in one drawer. The badges and panes read their own data, so the
@@ -30,20 +26,8 @@ export function ApplicationBottomDrawer(props: {
     isTerminalFullWindow: boolean;
     onTerminalFullWindowChange: (isFullWindow: boolean) => void;
 }) {
-    const drawerActivation = useAtomValue(bottomDrawerActivationAtom);
     const [activeTab, setActiveTab] = useAtom(bottomDrawerActiveTabAtom);
     const [isCollapsed, setIsCollapsed] = useAtom(bottomDrawerCollapsedAtom);
-    const lastActivationRef = React.useRef(0);
-
-    React.useEffect(() => {
-        if (drawerActivation.sequence <= lastActivationRef.current) {
-            return;
-        }
-
-        lastActivationRef.current = drawerActivation.sequence;
-        setActiveTab(drawerActivation.tab);
-        setIsCollapsed(false);
-    }, [drawerActivation]);
 
     return (
         <TabbedBottomDrawer
@@ -73,7 +57,6 @@ export function ApplicationBottomDrawer(props: {
                     icon: <SquareTerminal className="h-4 w-4" />,
                     content: (
                         <ShellTerminalPane
-                            isVisible={!isCollapsed && activeTab === "terminal"}
                             isFullWindow={props.isTerminalFullWindow}
                             onFullWindowChange={
                                 props.onTerminalFullWindowChange
@@ -86,39 +69,18 @@ export function ApplicationBottomDrawer(props: {
     );
 }
 
-/**
- * Points the terminal at the agent the user is heading to, opening in the browsed directory
- * when there is one and in the agent's home otherwise. Missing paths still expose a directory so the
- * terminal opens near the attempted location.
- */
+/** Gives the terminal panel the agents to pick from and the target a new shell would open in. */
 function ShellTerminalPane(props: {
-    isVisible: boolean;
     isFullWindow: boolean;
     onFullWindowChange: (isFullWindow: boolean) => void;
 }) {
     const agents = useAgents();
-    const activeAgent = useTargetAgent();
-    const browser = useBrowserLocation();
-
-    // While navigating to another agent the browser location still belongs to the previous
-    // one, whose directory means nothing on the new device.
-    const browsedDirectory =
-        browser === null || browser.agentId !== activeAgent?.id
-            ? null
-            : browser.entry === "file"
-              ? getParentPath(browser.path)
-              : browser.path;
-
-    const activeTarget =
-        activeAgent?.status === "connected" && activeAgent.cwd !== null
-            ? { agent: activeAgent, cwd: browsedDirectory ?? activeAgent.cwd }
-            : null;
+    const activeTarget = useActiveTerminalTarget();
 
     return (
         <TerminalPanel
             agents={agents}
             activeTarget={activeTarget}
-            isVisible={props.isVisible}
             isFullWindow={props.isFullWindow}
             onFullWindowChange={props.onFullWindowChange}
         />

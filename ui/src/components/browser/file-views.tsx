@@ -1,5 +1,5 @@
 import React from "react";
-import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ShouldBlockFn, useBlocker } from "@tanstack/react-router";
 import {
@@ -21,8 +21,9 @@ import type { Agent } from "#ui/api-client";
 import {
     bottomDrawerActiveTabAtom,
     bottomDrawerCollapsedAtom,
-    terminalOpenRequestedAtom,
 } from "#ui/bottom-drawer-state";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { useActiveTerminalTarget, useTerminals } from "#ui/use-terminals";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { ViewCardHeader } from "#ui/components/view-card-header";
@@ -365,7 +366,8 @@ function FileEditorSecondaryActions(props: {
     onReload: () => void;
     onDelete: () => void;
 }) {
-    const requestTerminalOpen = useSetAtom(terminalOpenRequestedAtom);
+    const terminals = useTerminals();
+    const terminalTarget = useActiveTerminalTarget();
 
     const [isDrawerCollapsed, setDrawerCollapsed] = useAtom(
         bottomDrawerCollapsedAtom,
@@ -389,7 +391,7 @@ function FileEditorSecondaryActions(props: {
                     if (isTerminalOpen) {
                         setDrawerCollapsed(true);
                     } else {
-                        requestTerminalOpen(true);
+                        terminals.openOrFocus(terminalTarget);
                     }
                 }}
                 className="h-9 w-9 rounded-md text-slate-400 hover:bg-white/5 hover:text-slate-100"
@@ -422,30 +424,19 @@ function FileEditorSecondaryActions(props: {
  * which is why CodeMirror needs no binding of its own. The terminal keeps its keystrokes.
  */
 function useFileSaveShortcut(onSave: () => void) {
-    React.useEffect(() => {
-        const handleSaveShortcut = (event: KeyboardEvent) => {
-            if (
-                !(
-                    (event.ctrlKey || event.metaKey) &&
-                    !event.altKey &&
-                    event.key === "s"
-                ) ||
-                event.defaultPrevented ||
-                isTerminalInputTarget(event.target)
-            ) {
-                return;
-            }
-
-            event.preventDefault();
-            event.stopPropagation();
-            onSave();
-        };
-
-        window.addEventListener("keydown", handleSaveShortcut, true);
-
-        return () =>
-            window.removeEventListener("keydown", handleSaveShortcut, true);
-    }, [onSave]);
+    useShortcut({
+        name: "editor-save",
+        phase: "capture",
+        priority: shortcutPriority.editor,
+        effect: "swallow",
+        match: (event) =>
+            (event.ctrlKey || event.metaKey) &&
+            !event.altKey &&
+            event.key === "s" &&
+            !event.defaultPrevented &&
+            !isTerminalInputTarget(event.target),
+        run: onSave,
+    });
 }
 
 /** Selects the editor body without coupling its loading states to draft ownership. */

@@ -3,7 +3,7 @@ import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { bbedit } from "@uiw/codemirror-theme-bbedit";
 import { tokyoNight } from "@uiw/codemirror-theme-tokyo-night";
 import { search } from "@codemirror/search";
-import type { EditorState } from "@codemirror/state";
+import { Facet, type EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { vim, Vim } from "@replit/codemirror-vim";
 import {
@@ -12,6 +12,8 @@ import {
 } from "#ui/components/browser/editor-search";
 import { vimYankHighlightExtension } from "./vim-yank-highlight";
 import { languageFromFileName } from "#ui/utils/editor-language";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { useTerminals } from "#ui/use-terminals";
 import { isTerminalInputTarget, isUnmodifiedAltKey } from "#ui/utils/keyboard";
 import { getBaseName } from "#ui/utils/path";
 import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
@@ -22,58 +24,76 @@ export type EditorSelection = {
     startLine: number;
 };
 
-/** Lets :w call the current save handler without re-registering the global ex command. */
-const vimWriteRef = { current: () => {} };
-
-Vim.defineEx("write", "w", () => {
-    vimWriteRef.current();
+/**
+ * Carries each editor's save handler in its own CodeMirror state. Vim's `:w` is registered
+ * once for the whole page, so it finds the handler of the editor that ran it through that
+ * editor's state, rather than through a shared variable that assumes only one editor exists.
+ */
+const vimWriteHandler = Facet.define<() => void, (() => void) | null>({
+    combine: (handlers) => handlers[0] ?? null,
 });
 
-/** Reclaims editor focus from an active shell when the global Alt-e shortcut is used. */
+Vim.defineEx("write", "w", (cm) => {
+    cm.cm6.state.facet(vimWriteHandler)?.();
+});
+
+/**
+ * Reclaims editor focus from an active shell with Alt-e, and drops a pending delayed
+ * correction when a newer terminal activation arrives, which must win.
+ */
 function useFocusEditorShortcut(view: EditorView | null) {
+    const terminals = useTerminals();
+    const focusCorrectionTimer = React.useRef<number | undefined>(undefined);
+
     React.useEffect(() => {
-        if (view === null) {
-            return;
-        }
+        return () => window.clearTimeout(focusCorrectionTimer.current);
+    }, []);
 
-        let focusCorrectionTimer: number | undefined;
+    // A watcher in the observer tier, so it still sees `t` after the terminal shortcut claims it.
+    useShortcut(
+        {
+            name: "editor-cancel-focus-correction",
+            phase: "capture",
+            priority: shortcutPriority.observer,
+            match: (event) =>
+                isUnmodifiedAltKey(event, "t") || event.key === "t",
+            run: () => {
+                window.clearTimeout(focusCorrectionTimer.current);
 
-        /** Returns from a focused shell without typing e into the session. */
-        const handleFocusEditorShortcut = (event: KeyboardEvent) => {
-            if (isUnmodifiedAltKey(event, "t") || event.key === "t") {
-                // A newer shell activation must win over the delayed Alt-e focus correction.
-                window.clearTimeout(focusCorrectionTimer);
-            }
+                return false;
+            },
+        },
+        view !== null,
+    );
 
-            if (
-                !isUnmodifiedAltKey(event, "e") ||
-                !isTerminalInputTarget(event.target)
-            ) {
-                return;
-            }
+    useShortcut(
+        {
+            name: "editor-reclaim-focus",
+            phase: "capture",
+            priority: shortcutPriority.editor,
+            match: (event) => isUnmodifiedAltKey(event, "e"),
+            run: (event) => {
+                // Whatever the key's target, the user went back to the editor, so a terminal
+                // that finishes connecting later must not take focus again.
+                terminals.cancelPendingFocus();
 
-            event.preventDefault();
-            view.focus();
-            window.clearTimeout(focusCorrectionTimer);
-            focusCorrectionTimer = window.setTimeout(() => {
-                // The terminal may settle focus asynchronously, so reclaim it only if that won.
-                if (isTerminalInputTarget(document.activeElement)) {
-                    view.focus();
+                if (view === null || !isTerminalInputTarget(event.target)) {
+                    return false;
                 }
-            }, 0);
-        };
 
-        window.addEventListener("keydown", handleFocusEditorShortcut, true);
+                view.focus();
+                window.clearTimeout(focusCorrectionTimer.current);
 
-        return () => {
-            window.clearTimeout(focusCorrectionTimer);
-            window.removeEventListener(
-                "keydown",
-                handleFocusEditorShortcut,
-                true,
-            );
-        };
-    }, [view]);
+                focusCorrectionTimer.current = window.setTimeout(() => {
+                    // The terminal may settle focus asynchronously, so reclaim it only if that won.
+                    if (isTerminalInputTarget(document.activeElement)) {
+                        view.focus();
+                    }
+                }, 0);
+            },
+        },
+        view !== null,
+    );
 }
 
 /** Selects the inbound ?line= target and centers it so the opened location is obvious in a tall buffer. */
@@ -146,15 +166,14 @@ export function CodeEditor(props: {
     const resolvedTheme = useResolvedTheme();
     const onSaveRef = React.useRef(props.onSave);
     onSaveRef.current = props.onSave;
+    const editorRef = React.useRef<ReactCodeMirrorRef>(null);
 
-    /** Saves without leaving CodeMirror so Mod-s and :w cannot dump the user into chrome. */
-    const saveFromEditor = () => {
+    /** Saves without leaving CodeMirror so :w cannot dump the user into chrome. */
+    const saveFromEditor = React.useCallback(() => {
         onSaveRef.current();
         editorRef.current?.view?.focus();
-    };
+    }, []);
 
-    vimWriteRef.current = saveFromEditor;
-    const editorRef = React.useRef<ReactCodeMirrorRef>(null);
     const onFocusRef = React.useRef(props.onFocus);
     onFocusRef.current = props.onFocus;
     const hasReceivedFocusRef = React.useRef(false);
@@ -182,7 +201,11 @@ export function CodeEditor(props: {
         return [
             // Vim must precede both its observer and other keymaps so its adapter exists and normal-mode keys win.
             ...(props.vimMode
-                ? [vim({ status: true }), vimYankHighlightExtension]
+                ? [
+                      vim({ status: true }),
+                      vimYankHighlightExtension,
+                      vimWriteHandler.of(saveFromEditor),
+                  ]
                 : []),
             ...(props.wrapLines ? [EditorView.lineWrapping] : []),
             search(),
@@ -221,7 +244,13 @@ export function CodeEditor(props: {
             }),
             ...(language === undefined ? [] : [language]),
         ];
-    }, [languageContent, props.fileName, props.vimMode, props.wrapLines]);
+    }, [
+        languageContent,
+        props.fileName,
+        props.vimMode,
+        props.wrapLines,
+        saveFromEditor,
+    ]);
 
     useFocusEditorShortcut(view);
     useInboundScrollToLine(view, props.scrollToLine);

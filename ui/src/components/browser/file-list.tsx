@@ -36,7 +36,8 @@ import {
 import type { FileSortColumn } from "#ui/browser-search";
 import { browserRoute } from "#ui/browser-route";
 import { formatSize } from "#ui/utils/path";
-import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { isPlainKey } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
 import {
     buildUnarchiveCommand,
@@ -45,7 +46,7 @@ import {
     getCustomArchiveDirectoryError,
     type UnarchiveDestination,
 } from "#ui/utils/archive";
-import { requestTerminalCreationAtom } from "#ui/bottom-drawer-state";
+import { useTerminals } from "#ui/use-terminals";
 
 /** Identifies the destination that should restore filter focus after Enter navigation. */
 const filterFocusPathAtom = atom<string | null>(null);
@@ -56,33 +57,33 @@ function useFileListShortcuts(props: {
     filter: string;
     setFilter: React.Dispatch<React.SetStateAction<string>>;
 }) {
-    React.useEffect(() => {
-        /** Keeps file-browser shortcuts from replacing text entered into form controls. */
-        const handleShortcut = (event: KeyboardEvent) => {
-            if (shouldIgnoreKeyboardShortcut(event, { shift: true })) {
-                return;
+    // Both keys stay out of text controls, so typing an f or leaving the filter box with
+    // Escape never triggers them; Escape clears the filter only once focus is elsewhere.
+    useShortcut({
+        name: "file-list-focus-filter",
+        phase: "bubble",
+        priority: shortcutPriority.view,
+        skipTypingTargets: true,
+        match: (event) => isPlainKey(event, "f"),
+        run: () => {
+            props.filterInputRef.current?.focus();
+        },
+    });
+
+    useShortcut({
+        name: "file-list-clear-filter",
+        phase: "bubble",
+        priority: shortcutPriority.view,
+        skipTypingTargets: true,
+        match: (event) => isPlainKey(event, "Escape"),
+        run: () => {
+            if (props.filter === "") {
+                return false;
             }
 
-            if (event.key === "Escape") {
-                if (props.filter !== "") {
-                    props.setFilter("");
-                }
-
-                return;
-            }
-
-            if (event.key === "f") {
-                event.preventDefault();
-                props.filterInputRef.current?.focus();
-
-                return;
-            }
-        };
-
-        window.addEventListener("keydown", handleShortcut);
-
-        return () => window.removeEventListener("keydown", handleShortcut);
-    }, [props.filterInputRef, props.filter, props.setFilter]);
+            props.setFilter("");
+        },
+    });
 }
 
 /** Filters only the loaded directory entries so recursive search remains in the shared dialog. */
@@ -358,10 +359,10 @@ function UnarchiveDialog(props: {
 
     const [customDirectory, setCustomDirectory] = React.useState("");
     const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
-    const requestTerminalCreation = useSetAtom(requestTerminalCreationAtom);
+    const terminals = useTerminals();
     const archive = getArchiveInfo(props.entryName);
 
-    /** Validates before queuing so invalid shell input remains visible and actionable. */
+    /** Validates before opening so invalid shell input remains visible and actionable. */
     const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
 
@@ -388,7 +389,7 @@ function UnarchiveDialog(props: {
         }
 
         props.onClose();
-        requestTerminalCreation({
+        terminals.create({
             agent: props.agent,
             cwd: props.directoryPath,
             startupCommand: command,

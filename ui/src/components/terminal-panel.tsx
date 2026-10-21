@@ -1,315 +1,83 @@
 import * as React from "react";
-import { useAtom, useAtomValue, useSetAtom } from "jotai";
-import type { WTerm } from "@wterm/dom";
-import type { GhosttyCore } from "@wterm/ghostty";
-import { z } from "zod";
-import { useQueryClient } from "@tanstack/react-query";
 
-import { type Agent, type TerminalServerMessage } from "#ui/api-client";
-import {
-    disposeTerminalResources,
-    sendTerminalInput,
-    sendTerminalResize,
-    type TerminalResources,
-} from "#ui/terminal/session";
-import { applyTerminalTheme } from "#ui/terminal/theme";
-import { createWTerm } from "#ui/terminal/wterm";
-import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
+import type { Agent } from "#ui/api-client";
 import { ActionMenuButton } from "#ui/components/action-menu";
 import { ContextMenu } from "#ui/components/context-menu";
+import { TerminalTabActions } from "#ui/components/terminal-tabs";
 import { TerminalToolbar } from "#ui/components/terminal-toolbar";
-import {
-    type ActiveTerminalTarget,
-    type TerminalCreationTarget,
-    TerminalTabActions,
-    type TerminalState,
-    type TerminalTab,
-} from "#ui/components/terminal-tabs";
 import { Toast } from "#ui/components/toast";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import type {
+    TerminalSession,
+    TerminalTabSnapshot,
+} from "#ui/terminal/terminal-session";
+import type {
+    ActiveTerminalTarget,
+    TerminalSessions,
+} from "#ui/terminal/terminal-sessions";
+import { useTerminals, useTerminalsSnapshot } from "#ui/use-terminals";
 import {
     isEditorInputTarget,
+    isPlainKey,
     isUnmodifiedAltKey,
-    shouldIgnoreKeyboardShortcut,
 } from "#ui/utils/keyboard";
-import {
-    activateBottomDrawerTabAtom,
-    type BrowserListingRefreshTarget,
-    consumeTerminalCreationRequestsAtom,
-    terminalCreationRequestsAtom,
-    terminalOpenRequestedAtom,
-} from "#ui/bottom-drawer-state";
-import { queryKeys } from "#ui/queries";
-import { OneShotTerminalCommand } from "#ui/terminal/one-shot-command";
-import { moveKeyedItems, type ItemMove } from "#ui/utils/reorder";
+import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
 
-const terminalServerMessageSchema: z.ZodType<TerminalServerMessage> =
-    z.discriminatedUnion("type", [
-        z.object({ type: z.literal("ready") }),
-        z.object({
-            type: z.literal("error"),
-            message: z.string(),
-        }),
-        z.object({
-            type: z.literal("exit"),
-            code: z.number().nullable(),
-            signal: z.number().nullable(),
-        }),
-    ]);
-
-/** Converts a server lifecycle notification into a useful terminal status. */
-function getServerDisconnectMessage(
-    message: TerminalServerMessage,
-): string | null {
-    if (message.type === "error") {
-        return message.message;
-    }
-
-    if (message.type === "exit") {
-        if (message.code !== null) {
-            return `Shell exited with code ${message.code}`;
-        }
-
-        if (message.signal !== null) {
-            return `Shell exited from signal ${message.signal}`;
-        }
-
-        return "Shell exited";
-    }
-
-    return null;
-}
-
-/** Gives wterm's resize observer one rendered frame before PTY dimensions are captured. */
-function waitForTerminalSizing(): Promise<void> {
-    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
-
-/** Returns only native browser selection whose endpoints both belong to this terminal. */
-function getTerminalSelection(host: HTMLElement): string {
-    const selection = window.getSelection();
-
-    if (
-        !selection ||
-        selection.isCollapsed ||
-        !selection.anchorNode ||
-        !selection.focusNode ||
-        !host.contains(selection.anchorNode) ||
-        !host.contains(selection.focusNode)
-    ) {
-        return "";
-    }
-
-    return selection.toString();
-}
-
-/** Removes control escapes and adds shell paste guards only when the PTY requested them. */
-function formatTerminalPaste(terminal: WTerm, text: string): string {
-    const safeText = text.replaceAll("\x1b", "");
-
-    return terminal.bridge?.bracketedPaste() === true
-        ? `\x1b[200~${safeText}\x1b[201~`
-        : safeText;
-}
-
-/** Reuses a live shell only when it was opened in the same directory as the current browse path. */
-function findOpenTerminalForAgent(
-    tabs: TerminalTab[],
-    activeTabId: number | null,
-    target: ActiveTerminalTarget,
-): TerminalTab | undefined {
-    const matchingTabs = tabs.filter(
-        (tab) =>
-            tab.agent.id === target.agent.id &&
-            tab.cwd === target.cwd &&
-            tab.state.type !== "disconnected",
-    );
-
-    if (matchingTabs.length === 0) {
-        return undefined;
-    }
-
-    return (
-        matchingTabs.find((tab) => tab.id === activeTabId) ??
-        matchingTabs[matchingTabs.length - 1]
-    );
-}
-
-/** Reorders tab presentation without replacing any live terminal session. */
-function useMoveTerminal(
-    setTabs: React.Dispatch<React.SetStateAction<TerminalTab[]>>,
+/**
+ * Registers the open-terminal shortcuts: `t` outside text entry, and Alt+t from the editor,
+ * where `t` would be typed. The registry runs them in the capture phase, so Alt+t reaches
+ * the terminal action before Vim consumes the key. The registrations are stable, because the
+ * registry reads the target and picker state through the latest render.
+ */
+function useTerminalShortcuts(
+    terminals: TerminalSessions,
+    activeTarget: ActiveTerminalTarget | null,
+    isPickerOpen: boolean,
 ) {
-    return (move: ItemMove) =>
-        setTabs((tabs) => moveKeyedItems(tabs, (tab) => String(tab.id), move));
-}
-
-/** Keeps earned listing refreshes alive across tab closure but releases them with the app shell. */
-function useListingRefreshScheduler() {
-    const queryClient = useQueryClient();
-    const timersRef = React.useRef(new Set<number>());
-
-    React.useEffect(() => {
-        return () => {
-            for (const timer of timersRef.current) {
-                window.clearTimeout(timer);
-            }
-
-            timersRef.current.clear();
-        };
-    }, []);
-
-    /** Invalidates only the immutable listing that originated the terminal command. */
-    return React.useCallback(
-        (target: BrowserListingRefreshTarget) => {
-            const timer = window.setTimeout(() => {
-                timersRef.current.delete(timer);
-                void queryClient.invalidateQueries({
-                    queryKey: queryKeys.browserListing(
-                        target.agentId,
-                        target.path,
-                    ),
-                    exact: true,
-                    refetchType: "active",
-                });
-            }, 1000);
-
-            timersRef.current.add(timer);
-        },
-        [queryClient],
-    );
-}
-
-/** Atomically drains feature-created terminal requests so remounts cannot replay them. */
-function useTerminalCreationRequests(
-    onCreate: (target: TerminalCreationTarget) => void,
-) {
-    const requests = useAtomValue(terminalCreationRequestsAtom);
-    const consumeRequests = useSetAtom(consumeTerminalCreationRequestsAtom);
-    React.useEffect(() => {
-        if (requests.length === 0) {
-            return;
+    /** Opens the routed shell, or asks for a device when the route has no terminal target. */
+    const openTerminal = () => {
+        if (activeTarget === null && isPickerOpen) {
+            return false;
         }
 
-        for (const request of consumeRequests()) {
-            onCreate(request);
-        }
-    }, [consumeRequests, onCreate, requests]);
+        terminals.openOrFocus(activeTarget);
+    };
+
+    useShortcut({
+        name: "open-terminal",
+        phase: "capture",
+        priority: shortcutPriority.app,
+        skipTypingTargets: true,
+        match: (event) => isPlainKey(event, "t"),
+        run: openTerminal,
+    });
+
+    useShortcut({
+        name: "open-terminal-from-editor",
+        phase: "capture",
+        priority: shortcutPriority.app,
+        match: (event) =>
+            isUnmodifiedAltKey(event, "t") && isEditorInputTarget(event.target),
+        run: openTerminal,
+    });
 }
 
-/** Consumes feature-button requests before opening so rerenders cannot create duplicate tabs. */
-function useTerminalOpenRequest(onOpen: () => void) {
-    const [openRequested, setOpenRequested] = useAtom(
-        terminalOpenRequestedAtom,
-    );
-
-    React.useEffect(() => {
-        if (openRequested) {
-            setOpenRequested(false);
-            onOpen();
-        }
-    }, [openRequested, setOpenRequested, onOpen]);
-}
-
-/** Owns terminal tabs globally so route and agent navigation cannot destroy live shells. */
+/** Owns the terminal chrome only; the shells and tabs belong to the application's owner. */
 export function TerminalPanel(props: {
     agents: Agent[];
     activeTarget: ActiveTerminalTarget | null;
-    isVisible: boolean;
     isFullWindow: boolean;
     onFullWindowChange: (isFullWindow: boolean) => void;
 }) {
+    const terminals = useTerminals();
+    const snapshot = useTerminalsSnapshot();
     const resolvedTheme = useResolvedTheme();
-    const scheduleListingRefresh = useListingRefreshScheduler();
-    const activateBottomDrawerTab = useSetAtom(activateBottomDrawerTabAtom);
-    const [isPickerOpen, setIsPickerOpen] = React.useState(false);
-    const [tabs, setTabs] = React.useState<TerminalTab[]>([]);
-    const moveTerminal = useMoveTerminal(setTabs);
-    const [activeTabId, setActiveTabId] = React.useState<number | null>(null);
-    const [focusRequestId, setFocusRequestId] = React.useState(0);
-    const pendingTerminalFocusRef = React.useRef(false);
-    const nextTabIdRef = React.useRef(1);
-    const nextAgentTerminalNumberRef = React.useRef(new Map<string, number>());
 
-    /** Captures the selected agent and directory without changing older tabs. */
-    const createTerminal = (target: TerminalCreationTarget) => {
-        const id = nextTabIdRef.current;
-        nextTabIdRef.current += 1;
+    React.useEffect(() => {
+        terminals.setTheme(resolvedTheme);
+    }, [terminals, resolvedTheme]);
 
-        const agentTerminalNumber =
-            nextAgentTerminalNumberRef.current.get(target.agent.id) ?? 1;
-
-        nextAgentTerminalNumberRef.current.set(
-            target.agent.id,
-            agentTerminalNumber + 1,
-        );
-        const title = `${target.agent.name} ${agentTerminalNumber}`;
-        setTabs((currentTabs) => [
-            ...currentTabs,
-            {
-                id,
-                agent: target.agent,
-                agentTerminalNumber,
-                title,
-                cwd: target.cwd,
-                state: { type: "not_started" },
-                restartGeneration: 0,
-                startupCommand: target.startupCommand ?? null,
-                refreshTarget: target.refreshTarget ?? null,
-            },
-        ]);
-        setActiveTabId(id);
-        activateBottomDrawerTab("terminal");
-        pendingTerminalFocusRef.current = true;
-        setFocusRequestId((current) => current + 1);
-    };
-
-    useTerminalCreationRequests(createTerminal);
-
-    /** Updates only the session that emitted a lifecycle transition. */
-    const updateTabState = (tabId: number, state: TerminalState) => {
-        setTabs((currentTabs) =>
-            currentTabs.map((tab) =>
-                tab.id === tabId ? { ...tab, state } : tab,
-            ),
-        );
-    };
-
-    /** Removes one session and chooses its nearest surviving neighbor. */
-    const closeTerminal = (tabId: number) => {
-        const tabIndex = tabs.findIndex((tab) => tab.id === tabId);
-
-        if (tabIndex === -1) {
-            return;
-        }
-
-        const remainingTabs = tabs.filter((tab) => tab.id !== tabId);
-        setTabs(remainingTabs);
-
-        if (activeTabId === tabId) {
-            const replacement =
-                remainingTabs[tabIndex] ?? remainingTabs[tabIndex - 1] ?? null;
-
-            setActiveTabId(replacement?.id ?? null);
-        }
-    };
-
-    /** Requests a fresh shell while preserving the tab's identity and cwd. */
-    const restartTerminal = (tabId: number) => {
-        setTabs((currentTabs) =>
-            currentTabs.map((tab) =>
-                tab.id === tabId
-                    ? {
-                          ...tab,
-                          state: { type: "not_started" },
-                          restartGeneration: tab.restartGeneration + 1,
-                      }
-                    : tab,
-            ),
-        );
-        setActiveTabId(tabId);
-        activateBottomDrawerTab("terminal");
-        pendingTerminalFocusRef.current = true;
-        setFocusRequestId((current) => current + 1);
-    };
+    useTerminalShortcuts(terminals, props.activeTarget, snapshot.isPickerOpen);
 
     /** Gives arrow keys browser-style selection across terminal tabs. */
     const handleTabKeyDown = (
@@ -321,84 +89,20 @@ export function TerminalPanel(props: {
         }
 
         const offset = event.key === "ArrowRight" ? 1 : -1;
-        const nextIndex = (tabIndex + offset + tabs.length) % tabs.length;
-        const nextTab = tabs[nextIndex];
+
+        const nextIndex =
+            (tabIndex + offset + snapshot.tabs.length) % snapshot.tabs.length;
+
+        const nextTab = snapshot.tabs[nextIndex];
 
         if (!nextTab) {
             return;
         }
 
-        setActiveTabId(nextTab.id);
+        terminals.select(nextTab.id);
         document.getElementById(`terminal-tab-${nextTab.id}`)?.focus();
         event.preventDefault();
     };
-
-    /** Shares tab reuse and focus behavior between feature buttons and keyboard shortcuts. */
-    const openActiveTerminal = () => {
-        if (!props.activeTarget) {
-            if (!isPickerOpen) {
-                activateBottomDrawerTab("terminal");
-                setIsPickerOpen(true);
-            }
-
-            return;
-        }
-
-        const existingTab = findOpenTerminalForAgent(
-            tabs,
-            activeTabId,
-            props.activeTarget,
-        );
-
-        if (existingTab) {
-            setActiveTabId(existingTab.id);
-            activateBottomDrawerTab("terminal");
-        } else {
-            createTerminal(props.activeTarget);
-        }
-
-        pendingTerminalFocusRef.current = true;
-        setFocusRequestId((current) => current + 1);
-    };
-
-    useTerminalOpenRequest(openActiveTerminal);
-
-    React.useEffect(() => {
-        /** Opens the routed shell or asks for an agent when the route has no terminal target. */
-        const handleShortcut = (event: KeyboardEvent) => {
-            if (isUnmodifiedAltKey(event, "e")) {
-                // Alt+e already returned to the editor; a later connected state must not steal it.
-                pendingTerminalFocusRef.current = false;
-
-                return;
-            }
-
-            const isEditorAltT =
-                isUnmodifiedAltKey(event, "t") &&
-                isEditorInputTarget(event.target);
-
-            const isGlobalT =
-                event.key === "t" &&
-                !shouldIgnoreKeyboardShortcut(event, { shift: true });
-
-            if (!isEditorAltT && !isGlobalT) {
-                return;
-            }
-
-            if (!props.activeTarget && isPickerOpen) {
-                return;
-            }
-
-            event.preventDefault();
-            openActiveTerminal();
-        };
-
-        // Capture so Alt+t reaches the terminal action before Vim consumes t.
-        window.addEventListener("keydown", handleShortcut, true);
-
-        return () =>
-            window.removeEventListener("keydown", handleShortcut, true);
-    }, [isPickerOpen, props.activeTarget, openActiveTerminal]);
 
     return (
         <section
@@ -412,15 +116,17 @@ export function TerminalPanel(props: {
                 <TerminalTabActions
                     agents={props.agents}
                     activeTarget={props.activeTarget}
-                    isPickerOpen={isPickerOpen}
-                    tabs={tabs}
-                    activeTabId={activeTabId}
-                    onCreate={createTerminal}
-                    onPickerOpenChange={setIsPickerOpen}
-                    onClose={closeTerminal}
-                    onMove={moveTerminal}
-                    onRestart={restartTerminal}
-                    onSelect={setActiveTabId}
+                    isPickerOpen={snapshot.isPickerOpen}
+                    tabs={snapshot.tabs}
+                    activeTabId={snapshot.activeTabId}
+                    onCreate={(target) => terminals.create(target)}
+                    onPickerOpenChange={(isOpen) =>
+                        terminals.setPickerOpen(isOpen)
+                    }
+                    onClose={(tabId) => terminals.close(tabId)}
+                    onMove={(move) => terminals.move(move)}
+                    onRestart={(tabId) => terminals.restart(tabId)}
+                    onSelect={(tabId) => terminals.select(tabId)}
                     onTabKeyDown={handleTabKeyDown}
                 />
             </TerminalToolbar>
@@ -428,20 +134,22 @@ export function TerminalPanel(props: {
                 data-terminal-theme={resolvedTheme}
                 className={`relative min-h-0 flex-1 overflow-hidden bg-[#0b0d12] ${props.isFullWindow ? "mx-2 mb-2 rounded-md sm:mx-4 sm:mb-4" : "rounded-md"}`}
             >
-                {tabs.map((tab) => (
-                    <TerminalSession
-                        key={tab.id}
-                        agent={tab.agent}
-                        tab={tab}
-                        isActive={tab.id === activeTabId}
-                        isPanelCollapsed={!props.isVisible}
-                        focusRequestId={focusRequestId}
-                        pendingTerminalFocusRef={pendingTerminalFocusRef}
-                        onStartupCommandSent={scheduleListingRefresh}
-                        onStateChange={updateTabState}
-                    />
-                ))}
-                {tabs.length === 0 ? (
+                {snapshot.tabs.map((tab) => {
+                    const session = terminals.sessionFor(tab.id);
+
+                    return session === undefined ? null : (
+                        <TerminalView
+                            key={tab.id}
+                            tab={tab}
+                            session={session}
+                            terminals={terminals}
+                            isActive={tab.id === snapshot.activeTabId}
+                            isPanelVisible={snapshot.isPanelVisible}
+                            focusEpoch={snapshot.focusEpoch}
+                        />
+                    );
+                })}
+                {snapshot.tabs.length === 0 ? (
                     <div className="flex h-full items-center justify-center px-4 text-center text-sm text-slate-500">
                         Open a terminal for a connected device to start a shell.
                     </div>
@@ -451,378 +159,21 @@ export function TerminalPanel(props: {
     );
 }
 
-/** Describes the parent-managed state and callbacks required by one terminal session. */
-type TerminalSessionProps = {
-    agent: Agent;
-    tab: TerminalTab;
+/**
+ * Hosts one shell's element in the page. The session owns the emulator and the socket, so
+ * this view only attaches and detaches the element, retries focusing after renders, and
+ * offers the clipboard menu.
+ */
+function TerminalView(props: {
+    tab: TerminalTabSnapshot;
+    session: TerminalSession;
+    terminals: TerminalSessions;
     isActive: boolean;
-    isPanelCollapsed: boolean;
-    focusRequestId: number;
-    pendingTerminalFocusRef: React.RefObject<boolean>;
-    onStartupCommandSent: (target: BrowserListingRefreshTarget) => void;
-    onStateChange: (tabId: number, state: TerminalState) => void;
-};
-
-/** Connects one initialized terminal to its shell while keeping socket protocol handling isolated. */
-function connectTerminal(props: {
-    agent: Agent;
-    cwd: string;
-    generation: number;
-    resources: TerminalResources;
-    terminal: WTerm;
-    isReadyRef: React.RefObject<boolean>;
-    updateTerminalState: (state: TerminalState) => void;
-    showDisconnected: (generation: number, message: string) => void;
-    generationRef: React.RefObject<number>;
-    stateRef: React.RefObject<TerminalState>;
+    isPanelVisible: boolean;
+    focusEpoch: number;
 }) {
-    const socket = new WebSocket(
-        props.agent.getTerminalWebSocketUrl(
-            { rows: props.terminal.rows, cols: props.terminal.cols },
-            props.cwd,
-        ),
-    );
-
-    socket.binaryType = "arraybuffer";
-    props.resources.socketRef.current = socket;
-    props.isReadyRef.current = false;
-
-    /** Applies typed binary output and lifecycle notifications. */
-    const handleMessage = (event: MessageEvent) => {
-        if (props.generationRef.current !== props.generation) {
-            return;
-        }
-
-        const terminal = props.resources.terminalRef.current;
-
-        if (event.data instanceof ArrayBuffer) {
-            terminal?.write(new Uint8Array(event.data));
-
-            return;
-        }
-
-        const textFrame = z.string().safeParse(event.data);
-
-        if (!textFrame.success) {
-            socket.close(1002, "Unsupported terminal frame");
-
-            return;
-        }
-
-        let message: TerminalServerMessage;
-
-        try {
-            message = terminalServerMessageSchema.parse(
-                JSON.parse(textFrame.data),
-            );
-        } catch {
-            socket.close(1002, "Invalid terminal control message");
-
-            return;
-        }
-
-        if (message.type === "ready") {
-            props.isReadyRef.current = true;
-            props.resources.startupCommand?.reserve(
-                socket,
-                () =>
-                    props.generationRef.current === props.generation &&
-                    props.resources.socketRef.current === socket,
-            );
-            props.updateTerminalState({ type: "connected" });
-
-            return;
-        }
-
-        const disconnectMessage = getServerDisconnectMessage(message);
-
-        if (!disconnectMessage) {
-            socket.close(1002, "Invalid terminal control message");
-
-            return;
-        }
-
-        props.showDisconnected(props.generation, disconnectMessage);
-        socket.close();
-    };
-
-    /** Distinguishes setup loss from an established shell disconnect. */
-    const handleClose = () => {
-        props.resources.startupCommand?.cancelPending();
-
-        if (
-            props.generationRef.current !== props.generation ||
-            props.stateRef.current.type === "disconnected"
-        ) {
-            return;
-        }
-
-        props.showDisconnected(
-            props.generation,
-            props.isReadyRef.current
-                ? "Terminal connection closed"
-                : "Terminal connection closed during setup",
-        );
-    };
-
-    /** Relies on close for one deterministic state transition. */
-    const handleError = () => {
-        if (props.generationRef.current === props.generation) {
-            socket.close();
-        }
-    };
-
-    socket.addEventListener("message", handleMessage);
-    socket.addEventListener("close", handleClose);
-    socket.addEventListener("error", handleError);
-    props.resources.removeSocketListenersRef.current = () => {
-        socket.removeEventListener("message", handleMessage);
-        socket.removeEventListener("close", handleClose);
-        socket.removeEventListener("error", handleError);
-    };
-}
-
-/** Manages one terminal's browser resources independently from its tab presentation. */
-function useTerminalLifecycle(props: TerminalSessionProps) {
-    const resolvedTheme = useResolvedTheme();
-    const hostRef = React.useRef<HTMLDivElement | null>(null);
-    const stateRef = React.useRef<TerminalState>(props.tab.state);
-    const startupCommandRef = React.useRef<OneShotTerminalCommand | null>(null);
-
-    if (
-        startupCommandRef.current === null &&
-        props.tab.startupCommand !== null &&
-        props.tab.refreshTarget !== null
-    ) {
-        const refreshTarget = props.tab.refreshTarget;
-        startupCommandRef.current = new OneShotTerminalCommand(
-            props.tab.startupCommand,
-            () => props.onStartupCommandSent(refreshTarget),
-        );
-    }
-
-    const resources: TerminalResources = {
-        terminalRef: React.useRef<WTerm | null>(null),
-        coreRef: React.useRef<GhosttyCore | null>(null),
-        socketRef: React.useRef<WebSocket | null>(null),
-        removeSocketListenersRef: React.useRef<(() => void) | null>(null),
-        startupCommand: startupCommandRef.current,
-    };
-
-    const generationRef = React.useRef(0);
-    const restartGenerationRef = React.useRef(props.tab.restartGeneration);
-    const isActiveRef = React.useRef(props.isActive);
-    const isPanelCollapsedRef = React.useRef(props.isPanelCollapsed);
-    const isReadyRef = React.useRef(false);
-    const themeRef = React.useRef(resolvedTheme);
-    isActiveRef.current = props.isActive;
-    isPanelCollapsedRef.current = props.isPanelCollapsed;
-    themeRef.current = resolvedTheme;
-
-    /** Keeps socket handlers and the parent tab badge on the same lifecycle. */
-    const updateTerminalState = (nextState: TerminalState) => {
-        stateRef.current = nextState;
-        props.onStateChange(props.tab.id, nextState);
-    };
-
-    /** Releases every resource associated with only this terminal tab. */
-    const disposeResources = () => {
-        disposeTerminalResources({
-            resources,
-            hostRef,
-            isReadyRef,
-        });
-    };
-
-    /** Leaves setup failures visible so this tab can be explicitly restarted. */
-    const failSetup = (generation: number, message: string) => {
-        if (generationRef.current !== generation) {
-            return;
-        }
-
-        generationRef.current += 1;
-        disposeResources();
-        updateTerminalState({ type: "disconnected", message });
-    };
-
-    /** Creates wterm and a shell only for a selected, expanded tab. */
-    const startTerminal = async () => {
-        if (stateRef.current.type !== "not_started") {
-            return;
-        }
-
-        const generation = generationRef.current + 1;
-        generationRef.current = generation;
-        updateTerminalState({ type: "initializing" });
-
-        try {
-            const host = hostRef.current;
-
-            if (!host) {
-                failSetup(generation, "Terminal host is unavailable");
-
-                return;
-            }
-
-            applyTerminalTheme(host, themeRef.current);
-
-            const session = await createWTerm({
-                host,
-                onData: (data) =>
-                    sendTerminalInput({
-                        resources,
-                        isReady: () => isReadyRef.current,
-                        data,
-                    }),
-                onResize: (cols, rows) =>
-                    sendTerminalResize({
-                        resources,
-                        isReady: () => isReadyRef.current,
-                        canResize: () =>
-                            isActiveRef.current && !isPanelCollapsedRef.current,
-                        cols,
-                        rows,
-                    }),
-            });
-
-            if (generationRef.current !== generation) {
-                session.terminal.destroy();
-                session.core.dispose();
-
-                return;
-            }
-
-            resources.terminalRef.current = session.terminal;
-            resources.coreRef.current = session.core;
-            host.setAttribute("data-terminal-initialized", "true");
-            await waitForTerminalSizing();
-
-            if (generationRef.current !== generation) {
-                return;
-            }
-
-            updateTerminalState({ type: "connecting" });
-            connectTerminal({
-                agent: props.agent,
-                cwd: props.tab.cwd,
-                generation,
-                resources,
-                terminal: session.terminal,
-                isReadyRef,
-                updateTerminalState,
-                showDisconnected: (currentGeneration, message) => {
-                    if (generationRef.current === currentGeneration) {
-                        updateTerminalState({ type: "disconnected", message });
-                    }
-                },
-                generationRef,
-                stateRef,
-            });
-        } catch {
-            failSetup(generation, "Failed to initialize terminal");
-        }
-    };
-
-    React.useEffect(() => {
-        if (restartGenerationRef.current !== props.tab.restartGeneration) {
-            restartGenerationRef.current = props.tab.restartGeneration;
-            generationRef.current += 1;
-            disposeResources();
-            stateRef.current = { type: "not_started" };
-        }
-
-        if (props.isActive && !props.isPanelCollapsed) {
-            if (stateRef.current.type === "not_started") {
-                void startTerminal();
-
-                return;
-            }
-
-            if (stateRef.current.type === "connected") {
-                sendTerminalResize({
-                    resources,
-                    isReady: () => isReadyRef.current,
-                    canResize: () => true,
-                    cols: resources.terminalRef.current?.cols ?? 80,
-                    rows: resources.terminalRef.current?.rows ?? 24,
-                });
-            }
-        }
-    }, [
-        props.isActive,
-        props.isPanelCollapsed,
-        props.tab.restartGeneration,
-        props.tab.state.type,
-    ]);
-
-    React.useEffect(() => {
-        const host = hostRef.current;
-
-        if (host) {
-            applyTerminalTheme(host, resolvedTheme);
-        }
-    }, [resolvedTheme]);
-
-    React.useEffect(() => {
-        // Shortcut open/reuse must wait until the shell is connected; activation props may not change.
-        if (
-            props.focusRequestId === 0 ||
-            !props.isActive ||
-            props.isPanelCollapsed ||
-            props.tab.state.type !== "connected"
-        ) {
-            return;
-        }
-
-        if (props.pendingTerminalFocusRef.current) {
-            resources.terminalRef.current?.focus();
-            props.pendingTerminalFocusRef.current = false;
-
-            return;
-        }
-
-        // A late ready/connected must not keep the shell if Alt+e already restored the editor.
-        const editor = document.querySelector<HTMLElement>(
-            '[role="textbox"][data-file-editor]',
-        );
-
-        if (
-            editor &&
-            document.activeElement?.closest("[data-terminal-input]")
-        ) {
-            editor.focus();
-        }
-    }, [
-        props.focusRequestId,
-        props.isActive,
-        props.isPanelCollapsed,
-        props.tab.state.type,
-    ]);
-
-    React.useEffect(() => {
-        return () => {
-            generationRef.current += 1;
-            disposeResources();
-            // Strict Mode probes cleanup before mounting effects again.
-            stateRef.current = { type: "not_started" };
-        };
-    }, []);
-
-    /** Lets context-menu paste use the same UTF-8 ready-gated path as keyboard input. */
-    const sendInput = (data: string) => {
-        sendTerminalInput({
-            resources,
-            isReady: () => isReadyRef.current,
-            data,
-        });
-    };
-
-    return { hostRef, terminalRef: resources.terminalRef, sendInput };
-}
-
-/** Owns one tab's browser resources so sibling sessions cannot affect it. */
-function TerminalSession(props: TerminalSessionProps) {
-    const { hostRef, terminalRef, sendInput } = useTerminalLifecycle(props);
+    const containerRef = React.useRef<HTMLDivElement | null>(null);
+    const session = props.session;
 
     const [contextMenu, setContextMenu] = React.useState<{
         x: number;
@@ -834,12 +185,20 @@ function TerminalSession(props: TerminalSessionProps) {
         null,
     );
 
-    React.useEffect(() => {
-        const host = hostRef.current;
+    React.useLayoutEffect(() => {
+        const container = containerRef.current;
 
-        if (!host) {
+        if (!container) {
             return;
         }
+
+        session.attach(container);
+
+        return () => session.detach(container);
+    }, [session]);
+
+    React.useEffect(() => {
+        const host = session.element;
 
         /** Replaces the browser menu so terminal copy and paste stay available. */
         const handleContextMenu = (event: MouseEvent) => {
@@ -848,7 +207,7 @@ function TerminalSession(props: TerminalSessionProps) {
             setContextMenu({
                 x: event.clientX,
                 y: event.clientY,
-                canCopy: getTerminalSelection(host).length > 0,
+                canCopy: session.getSelection().length > 0,
             });
         };
 
@@ -856,21 +215,33 @@ function TerminalSession(props: TerminalSessionProps) {
 
         return () =>
             host.removeEventListener("contextmenu", handleContextMenu, true);
-    }, [hostRef, terminalRef]);
+    }, [session]);
+
+    // A shell that was just revealed is inert until this commit, so focusing has to wait for
+    // the render that follows the owner's request.
+    React.useEffect(() => {
+        props.terminals.flushFocus(props.tab.id);
+    }, [
+        props.terminals,
+        props.tab.id,
+        props.focusEpoch,
+        props.isActive,
+        props.isPanelVisible,
+        props.tab.state.type,
+    ]);
 
     /** Returns keyboard focus to the shell after the overlay closes. */
     const closeContextMenu = () => {
         setContextMenu(null);
 
-        if (props.isActive && !props.isPanelCollapsed) {
-            terminalRef.current?.focus();
+        if (props.isActive && props.isPanelVisible) {
+            session.focus();
         }
     };
 
     /** Copies only selection rendered inside this terminal's DOM host. */
     const copySelection = async () => {
-        const host = hostRef.current;
-        const text = host ? getTerminalSelection(host) : "";
+        const text = session.getSelection();
 
         if (!text) {
             return;
@@ -885,9 +256,7 @@ function TerminalSession(props: TerminalSessionProps) {
 
     /** Sends sanitized clipboard text with the shell's requested paste framing. */
     const pasteClipboard = async () => {
-        const terminal = terminalRef.current;
-
-        if (!terminal) {
+        if (!session.isInitialized) {
             return;
         }
 
@@ -895,7 +264,7 @@ function TerminalSession(props: TerminalSessionProps) {
             const text = await navigator.clipboard.readText();
 
             if (text) {
-                sendInput(formatTerminalPaste(terminal, text));
+                session.paste(text);
             }
         } catch {
             setClipboardError("Could not paste into the terminal");
@@ -911,14 +280,7 @@ function TerminalSession(props: TerminalSessionProps) {
             inert={!props.isActive}
             className={`absolute inset-0 rounded-md border border-transparent p-1.5 focus-within:border-blue-500 ${props.isActive ? "visible" : "invisible"}`}
         >
-            <div
-                ref={hostRef}
-                data-terminal-input
-                role="textbox"
-                aria-multiline="true"
-                aria-label={`${props.tab.title} for ${props.agent.name}`}
-                className="terminal-host h-full w-full caret-transparent"
-            />
+            <div ref={containerRef} className="h-full w-full" />
             <ContextMenu
                 isOpen={contextMenu !== null}
                 title="Terminal actions"

@@ -4,10 +4,13 @@ import { TanStackDevtools } from "@tanstack/react-devtools";
 import type { QueryClient } from "@tanstack/react-query";
 
 import type { ApiClient } from "#ui/api-client";
+import type { TerminalSessions } from "#ui/terminal/terminal-sessions";
 
 interface AppRouterContext {
     api: ApiClient;
     queryClient: QueryClient;
+    /** Owns every terminal shell, so tabs outlive routes and components. */
+    terminals: TerminalSessions;
 }
 
 /**

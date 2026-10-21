@@ -9,42 +9,19 @@ import {
     X,
 } from "lucide-react";
 import type { Agent } from "#ui/api-client";
-import type { BrowserListingRefreshTarget } from "#ui/bottom-drawer-state";
+import type {
+    TerminalState,
+    TerminalTabSnapshot,
+} from "#ui/terminal/terminal-session";
+import type {
+    ActiveTerminalTarget,
+    TerminalCreationTarget,
+} from "#ui/terminal/terminal-sessions";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { AddButton } from "#ui/components/add-button";
 import { IconButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import type { ItemMove } from "#ui/utils/reorder";
-
-/** Separates shell setup progress from recoverable terminal disconnection. */
-export type TerminalState =
-    | { type: "not_started" }
-    | { type: "initializing" }
-    | { type: "connecting" }
-    | { type: "connected" }
-    | { type: "disconnected"; message: string };
-
-/** Keeps each tab's owning agent, creation directory, and lifecycle independent. */
-export type TerminalTab = {
-    id: number;
-    agent: Agent;
-    agentTerminalNumber: number;
-    title: string;
-    cwd: string;
-    state: TerminalState;
-    restartGeneration: number;
-    startupCommand: string | null;
-    refreshTarget: BrowserListingRefreshTarget | null;
-};
-
-/** Identifies the routed agent and directory used by the direct new-terminal action. */
-export type ActiveTerminalTarget = { agent: Agent; cwd: string };
-
-/** Adds one-shot shell input only for feature-created terminals. */
-export type TerminalCreationTarget = ActiveTerminalTarget & {
-    startupCommand?: string;
-    refreshTarget?: BrowserListingRefreshTarget;
-};
 
 /** Gives each terminal tab its own concise lifecycle label and color. */
 function getTerminalStatus(state: TerminalState) {
@@ -64,7 +41,7 @@ export function TerminalTabActions(props: {
     agents: Agent[];
     activeTarget: ActiveTerminalTarget | null;
     isPickerOpen: boolean;
-    tabs: TerminalTab[];
+    tabs: readonly TerminalTabSnapshot[];
     activeTabId: number | null;
     onCreate: (target: TerminalCreationTarget) => void;
     onPickerOpenChange: (isOpen: boolean) => void;
@@ -178,7 +155,7 @@ export function TerminalTabActions(props: {
 
 /** Keeps sorting, activation, and lifecycle controls together for one terminal tab. */
 function TerminalTabControl(props: {
-    tab: TerminalTab;
+    tab: TerminalTabSnapshot;
     tabIndex: number;
     isActive: boolean;
     onClose: (tabId: number) => void;

@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
-import { Provider } from "jotai";
+import { Provider, createStore } from "jotai";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -11,6 +11,7 @@ import "./styles.css";
 import { ApiClient } from "#ui/api-client";
 import { RouteError } from "#ui/components/route-error";
 import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
+import { TerminalSessions } from "#ui/terminal/terminal-sessions";
 
 // The API lives on the same origin as the page: the redoor binary
 // embeds the UI alongside the API on a single port, and during local
@@ -20,6 +21,14 @@ import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
 export const api = new ApiClient(window.location.origin);
 
 export const queryClient = new QueryClient();
+
+// The store is created here, rather than by the Provider, so the terminal owner can read the
+// drawer atoms and reveal the drawer without going through a component.
+const store = createStore();
+
+// Terminals are a page-lifetime resource: shells keep running while routes and the drawer
+// come and go. Logging out or losing the session reloads the page, which ends them.
+const terminals = new TerminalSessions(queryClient, store);
 
 // One registry owns every window-level shortcut, so the order in which commands claim a key
 // is decided by explicit priority instead of by whichever component registered first.
@@ -31,6 +40,7 @@ const router = createRouter({
     context: {
         api,
         queryClient,
+        terminals,
     },
     defaultPreload: "intent",
     scrollRestoration: true,
@@ -72,7 +82,7 @@ if (rootElement && !rootElement.innerHTML) {
     const root = ReactDOM.createRoot(rootElement);
     root.render(
         <StrictMode>
-            <Provider>
+            <Provider store={store}>
                 <ShortcutRegistryContext value={shortcuts}>
                     <QueryClientProvider client={queryClient}>
                         <RouterProvider router={router} />
