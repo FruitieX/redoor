@@ -928,9 +928,10 @@ The route tree separates the authenticated application from the public login for
   valid session.
 - **Session-scoped work lives in the shell's lifecycle.** `AppShell` starts the
   `RefreshListener` (the UI event socket) in an effect and stops it on unmount, and also
-  hosts the upload scheduler, the clipboard and drag-and-drop import handler and the
-  Escape-to-blur key handler. Because they only exist below `_app`, they cannot run while
-  signed out.
+  hosts the clipboard and drag-and-drop import handler and the Escape-to-blur shortcut.
+  Because they only exist below `_app`, they cannot run while signed out. The clipboard
+  import wraps the shell as a context provider, so the toolbar's Paste button calls it
+  directly instead of signalling it through a window event.
 - **Context comes from the router, not from pathnames.** `useDisplayedAgentId` reads the
   `agentId` param of the committed agent route, `useAgentViewContext` picks the top bar's
   views from the leaf route id, and `useBrowserLocation` is the one selector over the browser
@@ -947,9 +948,59 @@ The route tree separates the authenticated application from the public login for
   and each pane reads its own queries. The transfer badge runs an animation-frame clock
   (`useTransferClock`, shared with the per-row progress cell), so it is a leaf component;
   otherwise every frame would rerender the terminals.
+- **The drawer is two atoms and one write.** `bottomDrawerActiveTabAtom` and
+  `bottomDrawerCollapsedAtom` are the whole state. `activateBottomDrawerTabAtom` is a
+  write-only atom that sets both, so revealing a pane is the state change itself; there is no
+  request counter for an effect to drain.
 - **Search state is typed URL state.** `agentSearchSchema` validates the search keys on
   `/agents/$agentId`, and `useAgentSearchNavigation` changes them with the router's typed
   `search` updater, so the path, hash and the child view's own keys survive.
+
+### Browser long-lived resources and shortcuts
+
+Anything that must outlive a route or a component is a class created once in `main.tsx`.
+Components do not run such work from effects; they call a method on the owner, or subscribe
+to its snapshot. The owners that carry data for views extend `ExternalStore`, which publishes
+immutable snapshots for `useSyncExternalStore`, and reach components through the router
+context (`useTerminals`, `useUploads`).
+
+- **`TerminalSessions` owns the tabs.** Features call it instead of queueing requests:
+  `create` opens a shell, optionally with a one-shot startup command whose listing refresh
+  it schedules, and `openOrFocus` is shared by the `t` shortcut and the toolbar button. It
+  reads the drawer atoms through the shared jotai store, which `main.tsx` creates, to know
+  whether a tab is on screen and to reveal the drawer. Active tab, device picker, focus
+  requests and tab order live in its snapshot.
+- **`TerminalSession` owns one shell.** It holds the WebSocket, the wterm emulator, the
+  ready flag and a generation counter. Every asynchronous step (emulator load, socket events)
+  carries the generation it started under, and restarting, failing or disposing bumps it, so a
+  late event from an earlier attempt drops itself. The session builds its own host element,
+  which keeps its emulator while React remounts, so the panel only attaches and detaches that
+  element. A shell starts lazily the first time it is displayed and attached, and the PTY is
+  only resized while displayed, because a hidden layout measures as 1x1. The panel retries
+  focusing in an effect after each render, because a tab that was just revealed is inert
+  until React has committed it.
+- **`UploadQueue` owns uploads.** It keeps the rows, runs at most five uploads at once, shares
+  one directory request between files with the same parent and sends requests through a
+  `MutationObserver`, so they are still query mutations. Files stay `File` handles that
+  `Agent.upload` streams, so a large file is never read into memory, and the concurrency limit
+  leaves room on the connection for control requests. When the last pending piece finishes it
+  invalidates agent data, and while work is pending it warns before the page unloads.
+- **`ShortcutRegistry` owns every window shortcut.** There is one capture and one bubble
+  `keydown` listener, attached while something is registered. A binding declares its phase,
+  a priority tier, a key matcher, whether it skips text controls, the terminal and the editor,
+  and what claiming the key does: `prevent` (cancel the default), `swallow` (also hide the key
+  from CodeMirror, Vim and the terminal) or `shield` (only hide it). The tiers, highest first,
+  are observer (watchers that never claim), modal (open menus and drawers), interaction (a
+  drag in progress), editor (save and find, which also work with focus outside the editor),
+  app (opening the terminal or the search) and view (page keys such as filter or create).
+  Within a tier the first registered wins. A binding that returns `false` only observed the
+  key; the first binding that handles it claims the press for both phases, so a keyboard sort
+  that claims Escape in capture also keeps the drawer from closing in bubble. Components
+  register with `useShortcut`, which reads `match` and `run` through a ref, so it
+  subscribes once and never on every render.
+- **No module-level singletons for per-instance state.** The editor's `:w` finds its save
+  handler in a CodeMirror facet of the editor that ran it. The open editor's path and dirty
+  flag, which refresh triggers read, are an atom in the application's store.
 
 ### File browser
 
@@ -985,11 +1036,11 @@ cache, so Back, reload and shared links all land on the same screen.
 - **Waiting for an agent to return is shared.** Restarting or upgrading an agent recognizes the
   replacement as the same agent id on a new connection. `useAgentReconnect` does that in one
   place for the device list and the device page.
-- **The editor owns its keys at the window.** Mod-S (save) and the find keys are handled by one
-  capture-phase listener each, which consumes the key so CodeMirror and Vim never see it. That
-  works with focus inside or outside the editor and needs no second binding in CodeMirror.
-  Whether the find panel is open belongs to the editor view, which also shows it on the
-  toolbar.
+- **The editor owns its keys at the window.** Mod-S (save) and the find keys are
+  editor-tier capture bindings in the shortcut registry that swallow the key, so CodeMirror
+  and Vim never see it. That works with focus inside or outside the editor and needs no second
+  binding in CodeMirror. Whether the find panel is open belongs to the editor view, which also
+  shows it on the toolbar.
 
 ## Authentication and trust
 
