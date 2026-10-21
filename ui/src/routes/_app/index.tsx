@@ -29,6 +29,7 @@ import {
     usePersistentSideMenus,
 } from "#ui/side-menu-state";
 import { useAgents } from "#ui/use-agents";
+import { sortAgentsByName } from "#ui/utils/agents";
 
 export const Route = createFileRoute("/_app/")({
     component: Index,
@@ -91,11 +92,7 @@ function agentOriginTooltip(agent: Agent): string {
 
 /** Packs known agent names into a dense wrap so several fit on one home row. */
 function AgentNameGrid(props: { agents: Agent[] }) {
-    const sortedAgents = [...props.agents].sort(
-        (left, right) =>
-            left.name.localeCompare(right.name) ||
-            left.id.localeCompare(right.id),
-    );
+    const sortedAgents = sortAgentsByName(props.agents);
 
     return (
         <section aria-label="Device names" className="mb-6">

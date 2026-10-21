@@ -6,6 +6,7 @@ import type { ServerInfoResponse, UpgradeAgentResponse } from "#ui/api-client";
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
 import { InputControl } from "./input-control";
+import { getErrorMessage } from "#ui/utils/error";
 
 type UpgradeAction = "published_release" | "running_server";
 
@@ -25,7 +26,7 @@ type UpgradeButtonProps = {
 
 /** Converts request and reconnection failures into dialog feedback. */
 function upgradeErrorMessage(cause: unknown): string {
-    return cause instanceof Error ? cause.message : "Upgrade failed";
+    return getErrorMessage(cause, "Upgrade failed");
 }
 
 /** Explains a client-known condition that prevents the server from starting an upgrade. */

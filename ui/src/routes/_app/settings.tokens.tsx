@@ -21,6 +21,7 @@ import { Select } from "#ui/components/select";
 import { TextField } from "#ui/components/text-field";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
+import { getErrorMessage } from "#ui/utils/error";
 
 export const Route = createFileRoute("/_app/settings/tokens")({
     loader: async ({ context }) => {
@@ -243,7 +244,12 @@ function AccessTokenSettingsPage() {
                 busyLabel="Rotating…"
                 isBusy={rotate.isPending}
                 errorMessage={
-                    rotate.error instanceof Error ? rotate.error.message : null
+                    rotate.isError
+                        ? getErrorMessage(
+                              rotate.error,
+                              "Could not rotate the token",
+                          )
+                        : null
                 }
                 onClose={() => setSelected(null)}
                 onConfirm={() => {
@@ -258,7 +264,12 @@ function AccessTokenSettingsPage() {
                 busyLabel="Deleting…"
                 isBusy={remove.isPending}
                 errorMessage={
-                    remove.error instanceof Error ? remove.error.message : null
+                    remove.isError
+                        ? getErrorMessage(
+                              remove.error,
+                              "Could not delete the token",
+                          )
+                        : null
                 }
                 onClose={() => setSelected(null)}
                 onConfirm={() => {
@@ -488,7 +499,12 @@ function TokenDialog(
             }
             isBusy={mutation.isPending}
             errorMessage={
-                mutation.error instanceof Error ? mutation.error.message : null
+                mutation.isError
+                    ? getErrorMessage(
+                          mutation.error,
+                          "Could not save the token",
+                      )
+                    : null
             }
             size="wide"
             onClose={close}

@@ -21,7 +21,8 @@ import { DialogActions } from "#ui/components/dialog-actions";
 import { RouteError } from "#ui/components/route-error";
 import { TextField } from "#ui/components/text-field";
 import { Tooltip } from "#ui/components/tooltip";
-import { getErrorMessage, joinBrowserPath } from "#ui/components/browser/utils";
+import { joinBrowserPath } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import {
     agentDetailsQueryOptions,
     fetchQueryUncancelled,

@@ -20,6 +20,7 @@ import {
     serverInfoQueryOptions,
 } from "#ui/queries";
 import { useAgent } from "#ui/use-agents";
+import { getErrorMessage } from "#ui/utils/error";
 
 export const Route = createFileRoute("/_app/agents/$agentId/edit")({
     loader: async ({ context, params }) => {
@@ -100,9 +101,7 @@ function EditManagedAgentPage() {
     });
 
     const mutationError = updateMutation.isError
-        ? updateMutation.error instanceof Error
-            ? updateMutation.error.message
-            : "Failed to update device"
+        ? getErrorMessage(updateMutation.error, "Failed to update device")
         : null;
 
     const isBusy = updateMutation.isPending || deleteMutation.isPending;
@@ -169,9 +168,10 @@ function EditManagedAgentPage() {
                 isBusy={deleteMutation.isPending}
                 errorMessage={
                     deleteMutation.isError
-                        ? deleteMutation.error instanceof Error
-                            ? deleteMutation.error.message
-                            : "Failed to remove device"
+                        ? getErrorMessage(
+                              deleteMutation.error,
+                              "Failed to remove device",
+                          )
                         : null
                 }
                 onClose={() => {

@@ -168,3 +168,11 @@ export function buildUnarchiveCommand(
 
     return `${mkdir} && 7z x ${archivePath} ${quoteShellArgument(`-o./${directoryName}`)}`;
 }
+
+/**
+ * Names the tarball a directory downloads as. The filesystem root has no name of its own, so
+ * it becomes "archive" instead of an unnamed ".tar.gz".
+ */
+export function getDirectoryArchiveName(directoryName: string): string {
+    return `${directoryName === "/" ? "archive" : directoryName}.tar.gz`;
+}

@@ -5,6 +5,7 @@ import { ClipboardPaste, Upload } from "lucide-react";
 import { ApiError, type Agent } from "#ui/api-client";
 import { joinBrowserPath } from "#ui/components/browser/utils";
 import { invalidateAgentData } from "#ui/queries";
+import { getErrorMessage } from "#ui/utils/error";
 import { focusAndSelectFileNameStem } from "#ui/utils/file-name";
 import {
     enqueueUploadBatchAtom,
@@ -33,11 +34,6 @@ type ImportState =
 /** Requests a clipboard import from controls outside the global handler. */
 export function requestClipboardPaste() {
     window.dispatchEvent(new Event(REQUEST_CLIPBOARD_PASTE_EVENT));
-}
-
-/** Produces a useful message without exposing unknown thrown values to the UI. */
-function getErrorMessage(cause: unknown, fallbackMessage: string) {
-    return cause instanceof Error ? cause.message : fallbackMessage;
 }
 
 /** Avoids replacing the browser's normal paste behavior while the user is editing. */

@@ -6,6 +6,7 @@ import {
     type ManagedAgentSubmitRequest,
 } from "#ui/components/managed-agent-form";
 import { agentsQueryOptions, serverInfoQueryOptions } from "#ui/queries";
+import { getErrorMessage } from "#ui/utils/error";
 
 export const Route = createFileRoute("/_app/agents/new")({
     component: NewManagedAgentPage,
@@ -35,9 +36,7 @@ function NewManagedAgentPage() {
     });
 
     const mutationError = createMutation.isError
-        ? createMutation.error instanceof Error
-            ? createMutation.error.message
-            : "Failed to add device"
+        ? getErrorMessage(createMutation.error, "Failed to add device")
         : null;
 
     return (

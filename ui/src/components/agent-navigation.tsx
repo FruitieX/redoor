@@ -38,6 +38,7 @@ import {
 } from "#ui/side-menu-state";
 import { useTargetAgentId } from "#ui/use-active-agent";
 import { useAgents } from "#ui/use-agents";
+import { sortAgentsByName } from "#ui/utils/agents";
 
 /** Places agent selection and management actions in the shared right-side presentation. */
 export function AgentNavigation() {
@@ -45,10 +46,7 @@ export function AgentNavigation() {
 
     // The name order is the fallback for devices the user has not placed by hand.
     const sortedAgents = React.useMemo(
-        () =>
-            [...agents].sort((left, right) =>
-                left.name.localeCompare(right.name),
-            ),
+        () => sortAgentsByName(agents),
         [agents],
     );
 

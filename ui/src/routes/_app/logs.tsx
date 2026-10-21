@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { LogViewer } from "#ui/components/log-viewer";
 import { useAgents } from "#ui/use-agents";
+import { sortAgentsByName } from "#ui/utils/agents";
 import { queryKeys, serverLoggingLevelQueryOptions } from "#ui/queries";
 
 export const Route = createFileRoute("/_app/logs")({
@@ -18,9 +19,9 @@ function ServerLogsPage() {
     const { api } = Route.useRouteContext();
     const agents = useAgents();
 
-    const connectedAgents = agents
-        .filter((agent) => agent.status === "connected")
-        .sort((left, right) => left.name.localeCompare(right.name));
+    const connectedAgents = sortAgentsByName(
+        agents.filter((agent) => agent.status === "connected"),
+    );
 
     const agentLinks = (
         <nav

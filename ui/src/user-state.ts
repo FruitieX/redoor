@@ -4,6 +4,7 @@ import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import type { ApiClient } from "#ui/api-client";
 import { queryKeys } from "#ui/queries";
+import { getErrorMessage } from "#ui/utils/error";
 import {
     moveKeyedItems,
     moveKeyedSubsequence,
@@ -283,11 +284,7 @@ export function useUserStatePersistError(): [string | null, () => void] {
 }
 
 function persistErrorMessage(cause: unknown) {
-    if (cause instanceof Error && cause.message.length > 0) {
-        return cause.message;
-    }
-
-    return "Could not save settings";
+    return getErrorMessage(cause, "Could not save settings");
 }
 
 /** Serializes writes so rapid updates converge on the last visible cache value. */

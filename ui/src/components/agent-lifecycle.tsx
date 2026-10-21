@@ -4,14 +4,12 @@ import { useAtomValue, useSetAtom } from "jotai";
 import { HardDrive, LoaderCircle } from "lucide-react";
 
 import type { Agent } from "#ui/api-client";
-import {
-    agentStartStatesAtom,
-    getStartErrorMessage,
-} from "#ui/agent-start-state";
+import { agentStartStatesAtom } from "#ui/agent-start-state";
 import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { Tooltip } from "#ui/components/tooltip";
 import { queryKeys } from "#ui/queries";
+import { getErrorMessage } from "#ui/utils/error";
 import {
     formatAgentRecency,
     formatElapsedSecsMs,
@@ -61,7 +59,7 @@ export function AgentLifecycle(props: {
                 ...states,
                 [props.agent.id]: {
                     starting: false,
-                    error: getStartErrorMessage(error),
+                    error: getErrorMessage(error, "Failed to start agent"),
                     autoRedirect: props.preserveDestination !== true,
                 },
             }));
@@ -88,7 +86,7 @@ export function AgentLifecycle(props: {
                 ...states,
                 [props.agent.id]: {
                     starting: true,
-                    error: getStartErrorMessage(error),
+                    error: getErrorMessage(error, "Failed to start agent"),
                     autoRedirect:
                         props.preserveDestination !== true &&
                         (states[props.agent.id]?.autoRedirect ?? true),
@@ -112,9 +110,7 @@ export function AgentLifecycle(props: {
     });
 
     const shutdownError = shutdownMutation.isError
-        ? shutdownMutation.error instanceof Error
-            ? shutdownMutation.error.message
-            : "Failed to shut down agent"
+        ? getErrorMessage(shutdownMutation.error, "Failed to shut down agent")
         : null;
 
     /** Leaves an in-flight shutdown modal in place until the request settles. */

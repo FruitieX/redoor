@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "#ui/components/button";
 import { Password } from "#ui/components/password";
 import { TextField } from "#ui/components/text-field";
+import { getErrorMessage } from "#ui/utils/error";
 
 const loginSearchSchema = z.object({
     redirect: z.string().optional(),
@@ -70,9 +71,7 @@ function LoginPage() {
     };
 
     const error = loginMutation.isError
-        ? loginMutation.error instanceof Error
-            ? loginMutation.error.message
-            : "Login failed"
+        ? getErrorMessage(loginMutation.error, "Login failed")
         : null;
 
     const isSubmitting = loginMutation.isPending;

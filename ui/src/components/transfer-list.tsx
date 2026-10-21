@@ -24,6 +24,7 @@ import {
     getTransferSpeedBytesPerSecond,
 } from "#ui/utils/transfer-progress";
 import { useTransferClock } from "#ui/utils/use-transfer-clock";
+import { getErrorMessage } from "#ui/utils/error";
 
 /** Keeps the pie animating only while the API reports the transfer as still moving. */
 function isTransferActive(transfer: TransferProgressEntry): boolean {
@@ -491,8 +492,11 @@ export function TransferList(props: {
                 isOpen={selectedTransfer !== null}
                 isBusy={cancelMutation.isPending}
                 errorMessage={
-                    cancelMutation.error instanceof Error
-                        ? cancelMutation.error.message
+                    cancelMutation.isError
+                        ? getErrorMessage(
+                              cancelMutation.error,
+                              "Could not cancel the transfer",
+                          )
                         : null
                 }
                 onClose={() => {

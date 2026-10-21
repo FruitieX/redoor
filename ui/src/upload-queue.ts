@@ -2,7 +2,8 @@ import React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { atom, useAtomValue, useSetAtom } from "jotai";
 import type { Agent } from "#ui/api-client";
-import { getErrorMessage, joinBrowserPath } from "#ui/components/browser/utils";
+import { joinBrowserPath } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 
 export const MAX_QUEUED_UPLOADS = 100;
 
