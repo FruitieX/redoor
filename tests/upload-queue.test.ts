@@ -66,7 +66,7 @@ function createQueue() {
     const uploads: Deferred[] = [];
     const createdDirectories: string[] = [];
 
-    vi.spyOn(agent, "upload").mockImplementation(() => {
+    const uploadSpy = vi.spyOn(agent, "upload").mockImplementation(() => {
         const pending = deferred();
         uploads.push(pending);
 
@@ -94,7 +94,14 @@ function createQueue() {
         queryClient.clear();
     });
 
-    return { queue, uploads, createdDirectories, onSettled, unloadTarget };
+    return {
+        queue,
+        uploads,
+        uploadSpy,
+        createdDirectories,
+        onSettled,
+        unloadTarget,
+    };
 }
 
 /** Makes a small in-memory source file for a relative path. */
@@ -115,6 +122,7 @@ describe("UploadQueue concurrency", () => {
         const result = queue.enqueue({
             agentId: "agent-1",
             destinationPath: "/home/agent",
+            onExisting: "error",
             files: Array.from({ length: 8 }, (_, index) =>
                 source(`file-${index}.txt`),
             ),
@@ -146,6 +154,7 @@ describe("UploadQueue concurrency", () => {
         queue.enqueue({
             agentId: "agent-1",
             destinationPath: "/home/agent",
+            onExisting: "error",
             files: [source("photos/a.jpg"), source("photos/b.jpg")],
         });
 
@@ -170,12 +179,32 @@ describe("UploadQueue concurrency", () => {
         expect(failed?.error).toBe("disk full");
     });
 
+    test("sends the batch's conflict policy with every file", async () => {
+        const { queue, uploads, uploadSpy } = createQueue();
+
+        queue.enqueue({
+            agentId: "agent-1",
+            destinationPath: "/home/agent",
+            onExisting: "merge",
+            files: [source("photos/a.jpg"), source("b.jpg")],
+        });
+
+        await vi.waitFor(() => expect(uploads).toHaveLength(2));
+
+        // Every request must carry the user's choice, since the server no longer replaces by default.
+        expect(uploadSpy.mock.calls.map((call) => call[2])).toEqual([
+            { on_existing: "merge" },
+            { on_existing: "merge" },
+        ]);
+    });
+
     test("fails files whose agent is no longer known", async () => {
         const { queue, onSettled } = createQueue();
 
         queue.enqueue({
             agentId: "gone",
             destinationPath: "/home/agent",
+            onExisting: "error",
             files: [source("a.txt")],
         });
 
@@ -195,6 +224,7 @@ describe("UploadQueue validation and lifetime", () => {
         const result = queue.enqueue({
             agentId: "agent-1",
             destinationPath: "/home/agent",
+            onExisting: "error",
             files: Array.from({ length: MAX_QUEUED_UPLOADS + 1 }, (_, index) =>
                 source(`file-${index}.txt`),
             ),
@@ -211,6 +241,7 @@ describe("UploadQueue validation and lifetime", () => {
         const result = queue.enqueue({
             agentId: "agent-1",
             destinationPath: "/home/agent",
+            onExisting: "error",
             files: [source("../outside.txt")],
         });
 
@@ -227,6 +258,7 @@ describe("UploadQueue validation and lifetime", () => {
         queue.enqueue({
             agentId: "agent-1",
             destinationPath: "/home/agent",
+            onExisting: "error",
             files: [source("a.txt")],
         });
 

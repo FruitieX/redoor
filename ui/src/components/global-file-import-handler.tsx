@@ -4,7 +4,14 @@ import { ClipboardPaste, Upload } from "lucide-react";
 import { type Agent } from "#ui/api-client";
 import { ApiError } from "#ui/api-transport";
 import { joinBrowserPath } from "#ui/components/browser/utils";
-import { invalidateAgentData } from "#ui/queries";
+import {
+    type ConflictingUpload,
+    getTopLevelUploadItems,
+    type ResolvedUpload,
+    UploadConflictDialog,
+} from "#ui/components/browser/upload-conflict-dialog";
+import { isLsDirectoryResponse } from "#ui/ls-response";
+import { browserListingQueryOptions, invalidateAgentData } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
 import { focusAndSelectFileNameStem } from "#ui/utils/file-name";
 import type { UploadSourceFile } from "#ui/upload-queue";
@@ -27,23 +34,46 @@ type ImportState =
     | { type: "success"; message: string }
     | { type: "error"; message: string };
 
+/** Starts an upload into one directory, asking first if it would collide with existing items. */
+type UploadFilesTo = (
+    destination: DirectoryDestination,
+    files: UploadSourceFile[],
+    directories?: string[],
+) => Promise<void>;
+
 /**
- * Lets controls outside the handler, such as the toolbar's Paste button, start the same
- * permission-gated clipboard import. The handler owns the destination and the dialogs the
- * import may open, so it hands the control a direct call instead of the control signalling
+ * Lets controls outside the handler, such as the toolbar's Paste and Upload buttons, start
+ * the same imports as dropping and pasting. The handler owns the destination and the dialogs
+ * an import may open, so it hands the control a direct call instead of the control signalling
  * it through the window.
  */
-const ClipboardImportContext = React.createContext<(() => void) | null>(null);
+const FileImportContext = React.createContext<{
+    importFromClipboard: () => void;
+    uploadFilesTo: UploadFilesTo;
+} | null>(null);
 
-/** Returns the function that imports from the clipboard into the directory on screen. */
-export function useClipboardImport(): () => void {
-    const importFromClipboard = React.useContext(ClipboardImportContext);
+/** Reads the handler's imports, failing loudly when a control is rendered outside of it. */
+function useFileImportContext() {
+    const context = React.useContext(FileImportContext);
 
-    if (importFromClipboard === null) {
+    if (context === null) {
         throw new Error("Missing GlobalFileImportHandler");
     }
 
-    return importFromClipboard;
+    return context;
+}
+
+/** Returns the function that imports from the clipboard into the directory on screen. */
+export function useClipboardImport(): () => void {
+    return useFileImportContext().importFromClipboard;
+}
+
+/**
+ * Returns the upload entry point shared with drag and drop, so picked files get the same
+ * conflict prompt instead of silently replacing existing items.
+ */
+export function useFileUpload(): UploadFilesTo {
+    return useFileImportContext().uploadFilesTo;
 }
 
 /** Avoids replacing the browser's normal paste behavior while the user is editing. */
@@ -213,13 +243,18 @@ async function readDroppedFiles(dataTransfer: DataTransfer) {
     return manifest;
 }
 
-/** Enqueues source manifests for the active destination. */
+/** Enqueues source manifests, holding back the ones that collide with existing items. */
 function useFileUploader(props: { destination: DirectoryDestination | null }) {
     const uploads = useUploads();
+    const queryClient = useQueryClient();
 
     const [importState, setImportState] = React.useState<ImportState>({
         type: "idle",
     });
+
+    // An upload that would collide with existing entries waits here for the user's choice.
+    const [conflictingUpload, setConflictingUpload] =
+        React.useState<ConflictingUpload | null>(null);
 
     const showMissingDirectoryError = React.useCallback(() => {
         setImportState({
@@ -229,25 +264,13 @@ function useFileUploader(props: { destination: DirectoryDestination | null }) {
         });
     }, []);
 
-    const uploadFiles = React.useCallback(
-        async (files: UploadSourceFile[], directories: string[] = []) => {
-            if (files.length === 0 && directories.length === 0) {
-                return;
-            }
-
-            if (!props.destination) {
-                showMissingDirectoryError();
-
-                return;
-            }
-
-            const destination = props.destination;
-
+    /** Hands an upload whose conflict policy is settled to the page-wide queue. */
+    const enqueueUpload = React.useCallback(
+        (destination: DirectoryDestination, upload: ResolvedUpload) => {
             const result = uploads.enqueue({
                 agentId: destination.agent.id,
                 destinationPath: destination.path,
-                files,
-                directories,
+                ...upload,
             });
 
             if (!result.ok) {
@@ -264,14 +287,107 @@ function useFileUploader(props: { destination: DirectoryDestination | null }) {
                 message: `Queued ${result.fileCount} ${result.fileCount === 1 ? "file" : "files"}.`,
             });
         },
-        [uploads, props.destination, showMissingDirectoryError],
+        [uploads],
+    );
+
+    /**
+     * Reads the destination fresh, because the cached listing may predate a recent change,
+     * and asks before any upload would write over an entry that is already there.
+     */
+    const uploadFilesTo: UploadFilesTo = React.useCallback(
+        async (destination, files, directories = []) => {
+            if (files.length === 0 && directories.length === 0) {
+                return;
+            }
+
+            try {
+                const items = getTopLevelUploadItems(files, directories);
+
+                const listing = await queryClient.fetchQuery({
+                    ...browserListingQueryOptions(
+                        destination.agent,
+                        destination.path,
+                    ),
+                    staleTime: 0,
+                });
+
+                const destinationEntries = isLsDirectoryResponse(listing)
+                    ? listing.files
+                    : [];
+
+                const existingNames = new Set(
+                    destinationEntries.map((entry) => entry.name),
+                );
+
+                if (items.some((item) => existingNames.has(item.fileName))) {
+                    setConflictingUpload({
+                        agent: destination.agent,
+                        destinationPath: destination.path,
+                        files,
+                        directories,
+                        destinationEntries,
+                    });
+
+                    return;
+                }
+            } catch (error) {
+                setImportState({
+                    type: "error",
+                    message: getErrorMessage(
+                        error,
+                        "The upload destination could not be checked.",
+                    ),
+                });
+
+                return;
+            }
+
+            enqueueUpload(destination, {
+                files,
+                directories,
+                onExisting: "error",
+            });
+        },
+        [queryClient, enqueueUpload],
+    );
+
+    /** Uploads dropped and pasted files into the directory on screen. */
+    const uploadFiles = React.useCallback(
+        async (files: UploadSourceFile[], directories: string[] = []) => {
+            if (!props.destination) {
+                showMissingDirectoryError();
+
+                return;
+            }
+
+            await uploadFilesTo(props.destination, files, directories);
+        },
+        [props.destination, showMissingDirectoryError, uploadFilesTo],
     );
 
     return {
+        conflictingUpload,
+        closeConflictingUpload: () => setConflictingUpload(null),
+        /** Queues the held-back upload once the user chose how to treat existing entries. */
+        resolveConflictingUpload: (upload: ResolvedUpload) => {
+            if (conflictingUpload === null) {
+                return;
+            }
+
+            setConflictingUpload(null);
+            enqueueUpload(
+                {
+                    agent: conflictingUpload.agent,
+                    path: conflictingUpload.destinationPath,
+                },
+                upload,
+            );
+        },
         importState,
         setImportState,
         showMissingDirectoryError,
         uploadFiles,
+        uploadFilesTo,
     };
 }
 
@@ -843,13 +959,26 @@ export function GlobalFileImportHandler(props: {
         uploadFiles: uploader.uploadFiles,
     });
 
-    const requestClipboardImport = React.useCallback(() => {
-        void importFromClipboard();
-    }, [importFromClipboard]);
+    const uploadFilesTo = uploader.uploadFilesTo;
+
+    const fileImport = React.useMemo(
+        () => ({
+            importFromClipboard: () => void importFromClipboard(),
+            uploadFilesTo,
+        }),
+        [importFromClipboard, uploadFilesTo],
+    );
 
     return (
-        <ClipboardImportContext value={requestClipboardImport}>
+        <FileImportContext value={fileImport}>
             {props.children}
+            {uploader.conflictingUpload !== null ? (
+                <UploadConflictDialog
+                    upload={uploader.conflictingUpload}
+                    onClose={uploader.closeConflictingUpload}
+                    onResolved={uploader.resolveConflictingUpload}
+                />
+            ) : null}
             <FileImportDropOverlay
                 destination={props.destination}
                 isDraggingFiles={isDraggingFiles}
@@ -871,6 +1000,6 @@ export function GlobalFileImportHandler(props: {
                 setFileName={pastedContentImport.setFileName}
                 setFileNameError={pastedContentImport.setFileNameError}
             />
-        </ClipboardImportContext>
+        </FileImportContext>
     );
 }

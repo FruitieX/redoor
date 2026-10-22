@@ -24,8 +24,8 @@ use super::super::{
 /// Selects creation metadata and replacement behavior for one raw upload.
 #[derive(serde::Deserialize)]
 pub(crate) struct RawUploadQueryParams {
-    /// Keeps existing raw PUT clients replacing files unless they opt into strict creation.
-    #[serde(default = "redoor_protocol::api::transfers::CopyExistingMode::override_mode")]
+    /// Defaults to strict creation so replacing an existing file requires an explicit choice.
+    #[serde(default)]
     pub(crate) on_existing: redoor_protocol::api::transfers::CopyExistingMode,
     /// Accepts either a user name or numeric UID for the new file.
     pub(crate) owner: Option<String>,

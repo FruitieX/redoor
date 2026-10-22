@@ -16,13 +16,14 @@ import { Button } from "#ui/components/button";
 import { FileInput, type FileInputHandle } from "#ui/components/file-input";
 import { PathNameDialog } from "#ui/components/browser/path-name-dialog";
 import { browserRoute } from "#ui/browser-route";
-import { useClipboardImport } from "#ui/components/global-file-import-handler";
-import { Toast } from "#ui/components/toast";
+import {
+    useClipboardImport,
+    useFileUpload,
+} from "#ui/components/global-file-import-handler";
 import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
 import type { Agent } from "#ui/api-client";
 import { joinBrowserPath } from "#ui/components/browser/utils";
-import { useUploads } from "#ui/use-uploads";
 import { getDirectoryArchiveName } from "#ui/utils/archive";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { isPlainKey } from "#ui/utils/keyboard";
@@ -30,25 +31,24 @@ import { getBaseName } from "#ui/utils/path";
 import { PersistentPathActions } from "#ui/components/browser/path-actions";
 import { useRefreshBrowserPath } from "#ui/components/browser/refresh";
 
-/** Sends file and directory selections through the same bounded global queue. */
+/**
+ * Sends file and directory selections through the same conflict check and bounded global
+ * queue as dropped files, which also report their errors.
+ */
 function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
-    const uploads = useUploads();
+    const uploadFilesTo = useFileUpload();
     const fileInputRef = React.useRef<FileInputHandle>(null);
     const directoryInputRef = React.useRef<FileInputHandle>(null);
-    const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
     /** Queues the picked files, keeping directory structure when the browser reports it. */
     const handleFileSelection = (selectedFiles: File[]) => {
-        const result = uploads.enqueue({
-            agentId: props.agent.id,
-            destinationPath: props.directoryPath,
-            files: selectedFiles.map((file) => ({
+        void uploadFilesTo(
+            { agent: props.agent, path: props.directoryPath },
+            selectedFiles.map((file) => ({
                 file,
                 relativePath: file.webkitRelativePath || file.name,
             })),
-        });
-
-        setErrorMessage(result.ok ? null : result.message);
+        );
     };
 
     return (
@@ -96,16 +96,6 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
                     </>
                 )}
             </ActionMenu>
-            {errorMessage ? (
-                <Toast
-                    tone="error"
-                    icon={<Upload className="h-4 w-4" />}
-                    dismissAriaLabel="Dismiss upload error"
-                    onDismiss={() => setErrorMessage(null)}
-                >
-                    {errorMessage}
-                </Toast>
-            ) : null}
         </div>
     );
 }

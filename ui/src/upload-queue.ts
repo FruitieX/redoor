@@ -1,5 +1,6 @@
 import { MutationObserver, type QueryClient } from "@tanstack/react-query";
 
+import type { CopyExistingMode } from "#bindings/CopyExistingMode";
 import type { Agent } from "#ui/api-client";
 import { joinBrowserPath } from "#ui/components/browser/utils";
 import { ExternalStore } from "#ui/utils/external-store";
@@ -23,6 +24,8 @@ export type UploadBatch = {
     destinationPath: string;
     files: UploadSourceFile[];
     directories?: string[];
+    /** The conflict policy the user chose for this batch, so uploads never replace silently. */
+    onExisting: CopyExistingMode;
 };
 
 /** A queued file with its progress, kept after completion so the queue view can settle. */
@@ -30,6 +33,7 @@ export type UploadQueueItem = UploadSourceFile & {
     id: number;
     agentId: string;
     destinationPath: string;
+    onExisting: CopyExistingMode;
     status: "waiting" | "uploading" | "done";
     error: string | null;
 };
@@ -68,10 +72,16 @@ export type UploadQueueOptions = {
 /** One request the queue sends to an agent. */
 type UploadOperation =
     | { type: "directory"; agent: Agent; path: string }
-    | { type: "file"; agent: Agent; path: string; file: File };
+    | {
+          type: "file";
+          agent: Agent;
+          path: string;
+          file: File;
+          onExisting: CopyExistingMode;
+      };
 
 /** Rejects paths that could address files outside the selected destination. */
-function normalizeRelativePath(path: string) {
+export function normalizeRelativePath(path: string) {
     const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
     const components = normalized.split("/");
 
@@ -131,7 +141,9 @@ export class UploadQueue extends ExternalStore<UploadQueueSnapshot> {
                     return;
                 }
 
-                await operation.agent.upload(operation.path, operation.file);
+                await operation.agent.upload(operation.path, operation.file, {
+                    on_existing: operation.onExisting,
+                });
             },
         });
     }
@@ -164,6 +176,7 @@ export class UploadQueue extends ExternalStore<UploadQueueSnapshot> {
                 id: this.takeId(),
                 agentId: batch.agentId,
                 destinationPath: batch.destinationPath,
+                onExisting: batch.onExisting,
                 status: "waiting" as const,
                 error: null,
             }));
@@ -338,6 +351,7 @@ export class UploadQueue extends ExternalStore<UploadQueueSnapshot> {
                           item.relativePath,
                       ),
                       file: item.file,
+                      onExisting: item.onExisting,
                   }),
               )
             : Promise.reject(new Error("Upload agent is unavailable."));

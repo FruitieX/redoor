@@ -160,7 +160,9 @@ describe("Raw Upload API", () => {
             type: "text/plain",
         });
 
-        await testAgent.upload(uploadedFilePath, uploadFile);
+        await testAgent.upload(uploadedFilePath, uploadFile, {
+            on_existing: "override",
+        });
 
         const downloadedContent = Buffer.from(
             await testAgent.raw(uploadedFilePath),
@@ -170,7 +172,7 @@ describe("Raw Upload API", () => {
         expect(downloadedContent).toBe(replacementContent);
     });
 
-    it("should preserve an existing file when strict upload creation is requested", async () => {
+    it("should preserve an existing file when no conflict policy is given", async () => {
         const uploadedFilePath = tempFiles.create("original content", {
             suffix: ".txt",
         });
@@ -179,14 +181,37 @@ describe("Raw Upload API", () => {
             testAgent.upload(
                 uploadedFilePath,
                 new File(["replacement content"], "replacement.txt"),
-                { on_existing: "error" },
             ),
         ).rejects.toThrow("already exists");
 
-        // A rejected strict upload must leave the destination bytes untouched.
+        // Replacing must be an explicit choice, so a plain upload leaves the bytes untouched.
         expect(fs.readFileSync(uploadedFilePath, "utf8")).toBe(
             "original content",
         );
+    });
+
+    it("should replace a file but refuse a directory when merging", async () => {
+        const directory = tempFiles.tempDirectory({ suffix: "-merge-upload" });
+        const filePath = path.join(directory, "file.txt");
+        const directoryPath = path.join(directory, "folder");
+        fs.writeFileSync(filePath, "old");
+        fs.mkdirSync(directoryPath);
+
+        await testAgent.upload(filePath, new File(["new"], "file.txt"), {
+            on_existing: "merge",
+        });
+
+        // The UI merges uploaded directories file by file, so a file must replace a file.
+        expect(fs.readFileSync(filePath, "utf8")).toBe("new");
+
+        await expect(
+            testAgent.upload(directoryPath, new File(["new"], "folder"), {
+                on_existing: "merge",
+            }),
+        ).rejects.toThrow();
+
+        // Merging must never turn an existing directory into a file.
+        expect(fs.statSync(directoryPath).isDirectory()).toBe(true);
     });
 
     it("should preserve existing permissions when replacing a file", async () => {
@@ -200,6 +225,7 @@ describe("Raw Upload API", () => {
         await testAgent.upload(
             uploadedFilePath,
             new File(["new executable"], "replacement.bin"),
+            { on_existing: "override" },
         );
 
         // Replacement must update bytes while preserving the destination inode's prior role.
@@ -224,7 +250,11 @@ describe("Raw Upload API", () => {
             new File(["control"], "control.txt"),
         );
         const newFileMode = fs.statSync(controlPath).mode & 0o777;
-        await testAgent.upload(linkPath, new File(["replacement"], "link.txt"));
+        await testAgent.upload(
+            linkPath,
+            new File(["replacement"], "link.txt"),
+            { on_existing: "override" },
+        );
 
         // Upload publication must replace the symlink entry with a regular file.
         expect(fs.lstatSync(linkPath).isFile()).toBe(true);
@@ -245,7 +275,11 @@ describe("Raw Upload API", () => {
         const linkPath = path.join(directory, "link.txt");
         fs.symlinkSync("missing.txt", linkPath);
 
-        await testAgent.upload(linkPath, new File(["replacement"], "link.txt"));
+        await testAgent.upload(
+            linkPath,
+            new File(["replacement"], "link.txt"),
+            { on_existing: "override" },
+        );
 
         // A dangling link entry must become the uploaded regular file.
         expect(fs.lstatSync(linkPath).isFile()).toBe(true);
@@ -276,7 +310,11 @@ describe("Raw Upload API", () => {
         fs.chmodSync(targetDirectory, 0o000);
         onTestFinished(() => fs.chmodSync(targetDirectory, 0o700));
 
-        await testAgent.upload(linkPath, new File(["replacement"], "link.txt"));
+        await testAgent.upload(
+            linkPath,
+            new File(["replacement"], "link.txt"),
+            { on_existing: "override" },
+        );
         fs.chmodSync(targetDirectory, 0o700);
 
         // Publication must require access only to the selected link entry and its parent.
@@ -301,6 +339,7 @@ describe("Raw Upload API", () => {
         await testAgent.upload(
             selectedPath,
             new File(["selected new"], "selected.txt"),
+            { on_existing: "override" },
         );
         const selectedAfter = fs.statSync(selectedPath, { bigint: true });
         const peerAfter = fs.statSync(peerPath, { bigint: true });

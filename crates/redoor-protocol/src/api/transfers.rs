@@ -27,13 +27,6 @@ pub enum CopyExistingMode {
     Merge,
 }
 
-impl CopyExistingMode {
-    /// Default used by direct raw uploads so existing HTTP clients keep overwriting files.
-    pub const fn override_mode() -> Self {
-        Self::Override
-    }
-}
-
 /// Starts one asynchronous copy between agent filesystem endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

@@ -709,6 +709,8 @@ sequenceDiagram
   cancelled.
 - Raw file uploads, tar directory uploads and in-place file edits all use the same
   `UploadDriver`. They differ only in their `UploadSink`.
+- Raw file and tar directory uploads both default to `on_existing=error`. Replacing or merging
+  into an existing entry must be requested explicitly, so no client overwrites by accident.
 
 ## Copy and move between agents
 
@@ -994,6 +996,13 @@ context (`useTerminals`, `useUploads`).
   `Agent.upload` streams, so a large file is never read into memory, and the concurrency limit
   leaves room on the connection for control requests. When the last pending piece finishes it
   invalidates agent data, and while work is pending it warns before the page unloads.
+  Every batch carries one conflict policy (`onExisting`). `GlobalFileImportHandler` is the only
+  place that enqueues. Before enqueueing, it lists the destination and, if any top-level item
+  already exists, shows the same Rename / Replace / Merge prompt as Copy, Move and Sync
+  (`destination-conflict.tsx`). Merge is offered only when a directory meets an existing
+  directory. Rename rewrites the top-level path component, and Merge sends `merge` with every
+  file. Because uploads go file by file, Replace first trashes (or deletes) a conflicting
+  directory and then uploads with `override`.
 - **`ShortcutRegistry` owns every window shortcut.** There is one capture and one bubble
   `keydown` listener, attached while something is registered. A binding declares its phase,
   a priority tier, a key matcher, whether it skips text controls, the terminal and the editor,
