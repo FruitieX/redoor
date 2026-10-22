@@ -82,6 +82,7 @@ export async function createWTerm(
 
         if (navigator.platform.startsWith("Mac")) {
             const input = options.host.querySelector("textarea");
+
             const handleOptionKey = (event: KeyboardEvent) =>
                 preserveOptionText(event, terminal);
 
