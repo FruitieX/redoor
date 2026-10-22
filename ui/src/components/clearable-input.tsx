@@ -1,6 +1,5 @@
 import * as React from "react";
 import { X } from "lucide-react";
-import { twMerge } from "tailwind-merge";
 
 import { IconButton } from "#ui/components/icon-button";
 import { InputControl } from "#ui/components/input-control";
@@ -23,34 +22,38 @@ export function ClearableInput(props: {
     const inputRef = React.useRef<HTMLInputElement>(null);
 
     return (
-        <div className={twMerge("relative", props.className)}>
-            <InputControl
-                ref={inputRef}
-                type="text"
-                aria-label={props.label}
-                value={props.value}
-                placeholder={props.placeholder}
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(event) => props.onChange(event.target.value)}
-                className="w-full py-1.5 pr-8 text-sm placeholder:text-slate-600"
-            />
-            {props.value !== "" ? (
-                <IconButton
-                    type="button"
-                    label={props.clearLabel ?? "Clear"}
-                    onClick={() => {
-                        props.onChange("");
-                        inputRef.current?.focus();
-                    }}
-                    variant="quiet"
-                    size="xs"
-                    // The tooltip wraps the button, so the wrapper is what must be positioned.
-                    tooltipClassName="absolute top-1/2 right-1.5 -translate-y-1/2"
-                >
-                    <X className="h-3.5 w-3.5" aria-hidden="true" />
-                </IconButton>
-            ) : null}
+        <div className={props.className}>
+            {/* The inner flex box matches the input exactly, so caller padding and the inline
+                input's baseline gap cannot shift the clear button off center. */}
+            <div className="relative flex items-center">
+                <InputControl
+                    ref={inputRef}
+                    type="text"
+                    aria-label={props.label}
+                    value={props.value}
+                    placeholder={props.placeholder}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) => props.onChange(event.target.value)}
+                    className="w-full py-1.5 pr-8 text-sm placeholder:text-slate-600"
+                />
+                {props.value !== "" ? (
+                    <IconButton
+                        type="button"
+                        label={props.clearLabel ?? "Clear"}
+                        onClick={() => {
+                            props.onChange("");
+                            inputRef.current?.focus();
+                        }}
+                        variant="quiet"
+                        size="xs"
+                        // The tooltip wraps the button, so the wrapper is what must be positioned.
+                        tooltipClassName="absolute right-1"
+                    >
+                        <X className="h-3.5 w-3.5" aria-hidden="true" />
+                    </IconButton>
+                ) : null}
+            </div>
         </div>
     );
 }
