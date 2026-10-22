@@ -12,7 +12,10 @@ export type SelectedPath = {
     entryType: "file" | "directory";
 };
 
-function getSelectedFileKey(file: Pick<SelectedPath, "agentId" | "path">) {
+/** Identifies a selection across agents, since the same path can exist on several devices. */
+export function getSelectedFileKey(
+    file: Pick<SelectedPath, "agentId" | "path">,
+) {
     return `${file.agentId}:${file.path}`;
 }
 

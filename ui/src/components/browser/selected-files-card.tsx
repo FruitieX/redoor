@@ -31,6 +31,7 @@ import { waitForTransfers } from "#ui/transfer-wait";
 import {
     selectedFilesAtom,
     clearSelectedFilesAtom,
+    getSelectedFileKey,
     unselectFileAtom,
     type SelectedPath,
 } from "#ui/selected-files";
@@ -47,6 +48,12 @@ import {
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
 import { AffectedPathsList } from "#ui/components/browser/affected-paths-list";
+
+/** A selection paired with the name it lands under, which differs only when renamed. */
+type TransferItem = {
+    file: SelectedPath;
+    destinationName: string;
+};
 
 type TransferSelectedFilesState =
     | { type: "idle" }
@@ -77,7 +84,7 @@ const transferActionMove = {
 async function waitForPendingTransfers(props: {
     queryClient: QueryClient;
     api: ApiClient;
-    pendingTransfers: Map<number, SelectedPath>;
+    pendingTransfers: Map<number, TransferItem>;
     completedFiles: SelectedPath[];
     pausedFiles: SelectedPath[];
     destinationAgentId: string;
@@ -97,14 +104,14 @@ async function waitForPendingTransfers(props: {
             signal: props.signal,
             isSettled: async (transfers) => {
                 for (const transfer of transfers) {
-                    const file = props.pendingTransfers.get(
+                    const item = props.pendingTransfers.get(
                         transfer.request_id,
                     );
 
-                    if (!file) continue;
+                    if (!item) continue;
 
                     if (transfer.state === "completed") {
-                        props.completedFiles.push(file);
+                        props.completedFiles.push(item.file);
                         props.pendingTransfers.delete(transfer.request_id);
                     } else if (transfer.state === "errored") {
                         props.failures.push(
@@ -126,22 +133,22 @@ async function waitForPendingTransfers(props: {
                     // A paused copy drops its row, so its kept partial is the only trace.
                     const inventory = await props.api.listPartials();
 
-                    for (const [id, file] of missingTransfers) {
+                    for (const [id, item] of missingTransfers) {
                         const paused = inventory.partials.some(
                             (partial) =>
-                                partial.source.agent === file.agentId &&
-                                partial.source.path === file.path &&
+                                partial.source.agent === item.file.agentId &&
+                                partial.source.path === item.file.path &&
                                 partial.dest_agent_id ===
                                     props.destinationAgentId &&
                                 partial.dest.path ===
                                     joinBrowserPath(
                                         props.directoryPath,
-                                        file.fileName,
+                                        item.destinationName,
                                     ),
                         );
 
                         if (paused) {
-                            props.pausedFiles.push(file);
+                            props.pausedFiles.push(item.file);
                             props.pendingTransfers.delete(id);
                         }
                     }
@@ -207,7 +214,7 @@ function useTransferStarts(props: {
 
     return useMutation({
         mutationFn: (request: {
-            filesToTransfer: SelectedPath[];
+            itemsToTransfer: TransferItem[];
             existingMode: CopyExistingMode;
             resume: ResumeMode;
         }) => {
@@ -216,46 +223,48 @@ function useTransferStarts(props: {
             );
 
             return Promise.allSettled(
-                request.filesToTransfer.map(async (file) => {
-                    const sourceAgent = agentsById.get(file.agentId);
+                request.itemsToTransfer.map(
+                    async ({ file, destinationName }) => {
+                        const sourceAgent = agentsById.get(file.agentId);
 
-                    if (!sourceAgent) {
-                        throw new Error(
-                            `Source device unavailable for selected item: ${file.agentId}`,
-                        );
-                    }
+                        if (!sourceAgent) {
+                            throw new Error(
+                                `Source device unavailable for selected item: ${file.agentId}`,
+                            );
+                        }
 
-                    const destination = {
-                        agent: props.destinationAgent.id,
-                        path: joinBrowserPath(
-                            props.directoryPath,
-                            file.fileName,
-                        ),
-                    };
+                        const destination = {
+                            agent: props.destinationAgent.id,
+                            path: joinBrowserPath(
+                                props.directoryPath,
+                                destinationName,
+                            ),
+                        };
 
-                    const options = {
-                        on_existing: request.existingMode,
-                        resume: request.resume,
-                    };
+                        const options = {
+                            on_existing: request.existingMode,
+                            resume: request.resume,
+                        };
 
-                    if (isCopy) {
-                        const response = await sourceAgent.copyTo(
+                        if (isCopy) {
+                            const response = await sourceAgent.copyTo(
+                                destination,
+                                file.path,
+                                options,
+                            );
+
+                            return response.copy_request_id;
+                        }
+
+                        const response = await sourceAgent.moveTo(
                             destination,
                             file.path,
                             options,
                         );
 
-                        return response.copy_request_id;
-                    }
-
-                    const response = await sourceAgent.moveTo(
-                        destination,
-                        file.path,
-                        options,
-                    );
-
-                    return response.move_request_id;
-                }),
+                        return response.move_request_id;
+                    },
+                ),
             );
         },
     });
@@ -318,16 +327,27 @@ function TransferSelectedFilesAction(props: {
         isRoutePending,
     });
 
-    /** Starts every selected transfer with one consistent destination conflict policy. */
+    /**
+     * Starts every selected transfer with one consistent destination conflict policy.
+     * Items the user renamed land under their new names; the rest keep their own.
+     */
     const transferSelectedFiles = async (
         mode: CopyExistingMode,
         resume: ResumeMode,
+        destinationNames: ReadonlyMap<string, string>,
     ) => {
         if (selectedFiles.length === 0) {
             return;
         }
 
         const filesToTransfer = [...selectedFiles];
+
+        const itemsToTransfer = filesToTransfer.map((file) => ({
+            file,
+            destinationName:
+                destinationNames.get(getSelectedFileKey(file)) ?? file.fileName,
+        }));
+
         const controller = new AbortController();
         activeTransferRef.current?.abort();
         activeTransferRef.current = controller;
@@ -340,7 +360,7 @@ function TransferSelectedFilesAction(props: {
 
         try {
             const results = await transferStartsMutation.mutateAsync({
-                filesToTransfer,
+                itemsToTransfer,
                 existingMode: mode,
                 resume,
             });
@@ -353,7 +373,7 @@ function TransferSelectedFilesAction(props: {
 
             const pendingTransfers = new Map(
                 results.flatMap((result, index) => {
-                    const file = filesToTransfer[index];
+                    const item = itemsToTransfer[index];
 
                     if (result.status === "rejected") {
                         failures.push(result.reason);
@@ -361,7 +381,7 @@ function TransferSelectedFilesAction(props: {
                         return [];
                     }
 
-                    return file ? [[result.value, file] as const] : [];
+                    return item ? [[result.value, item] as const] : [];
                 }),
             );
 
@@ -436,8 +456,8 @@ function TransferSelectedFilesAction(props: {
                 directoryPath={props.directoryPath}
                 destinationFileNames={props.destinationFileNames}
                 canTransfer={canTransfer}
-                onConfirm={(mode, resume) =>
-                    void transferSelectedFiles(mode, resume)
+                onConfirm={(mode, resume, destinationNames) =>
+                    void transferSelectedFiles(mode, resume, destinationNames)
                 }
             >
                 {props.children}

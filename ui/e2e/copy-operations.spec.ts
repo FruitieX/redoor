@@ -351,21 +351,23 @@ test.describe.serial("Copy Operations", () => {
         ).rejects.toThrow();
     });
 
-    test("should keep an existing file when resolving a copy conflict", async ({
+    test("should copy under a new name when resolving a copy conflict", async ({
         page,
     }) => {
         test.setTimeout(60_000);
-        const sourceName = `keep-existing-${Date.now()}.txt`;
+        const stem = `rename-copy-${Date.now()}`;
+        const sourceName = `${stem}.txt`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
-
-        const destinationPath = path.join(
-            ctx.testDirPath,
-            "subdir1",
-            sourceName,
-        );
+        const destinationDirPath = path.join(ctx.testDirPath, "subdir1");
+        const destinationPath = path.join(destinationDirPath, sourceName);
 
         await fs.writeFile(sourcePath, "source content");
         await fs.writeFile(destinationPath, "destination content");
+        // A taken `_2` name proves the suggestion skips to the first free counter.
+        await fs.writeFile(
+            path.join(destinationDirPath, `${stem}_2.txt`),
+            "older copy",
+        );
 
         await openCopyConflict({
             page,
@@ -381,10 +383,37 @@ test.describe.serial("Copy Operations", () => {
 
         // A same-named destination must interrupt the copy before any request starts.
         await expect(dialog).toBeVisible();
-        // Keeping the destination is the safe default conflict policy.
+        // Renaming keeps the destination intact, so it is the safe default policy.
         await expect(
-            dialog.getByRole("radio", { name: "Keep existing" }),
+            dialog.getByRole("radio", { name: "Rename" }),
         ).toBeChecked();
+        // Doing nothing is what Cancel is for, so there is no separate keep option.
+        await expect(
+            dialog.getByRole("radio", { name: /^Keep existing/ }),
+        ).toHaveCount(0);
+
+        const nameField = dialog.getByRole("textbox", {
+            name: `New name for ${sourceName}`,
+        });
+
+        // The counter goes before the extension and skips names already in the directory.
+        await expect(nameField).toHaveValue(`${stem}_3.txt`);
+
+        const continueButton = dialog.getByRole("button", {
+            name: "Continue copying",
+        });
+
+        await nameField.fill(sourceName);
+        // Renaming onto the conflicting name would just conflict again, so it is refused.
+        await expect(dialog.getByRole("alert")).toContainText(
+            "already exists in the destination",
+        );
+        await expect(continueButton).toBeDisabled();
+
+        const renamedName = `${stem}-renamed.txt`;
+
+        await nameField.fill(renamedName);
+        await expect(continueButton).toBeEnabled();
 
         const copyRequest = page.waitForRequest(
             (request) =>
@@ -392,25 +421,34 @@ test.describe.serial("Copy Operations", () => {
                 request.method() === "POST",
         );
 
-        await dialog.getByRole("button", { name: "Continue copying" }).click();
-        // The selected dialog action must be forwarded to the copy API.
-        expect((await copyRequest).postDataJSON().on_existing).toBe("error");
-        // The terminal transfer error must be reported after choosing the safe policy.
-        await expect(page.getByRole("alert")).toContainText("Copy failed", {
-            timeout: 30_000,
-        });
-        // Error policy must preserve the destination bytes.
+        await continueButton.click();
+
+        const requestBody = (await copyRequest).postDataJSON();
+
+        // The new name must replace only the destination's last path segment.
+        expect(requestBody.dest.path).toBe(
+            path.join(destinationDirPath, renamedName),
+        );
+        // A rename must never overwrite, even if the new name got taken meanwhile.
+        expect(requestBody.on_existing).toBe("error");
+        // The copy lands under the new name next to the untouched existing file.
+        await expect
+            .poll(() =>
+                fs
+                    .readFile(
+                        path.join(destinationDirPath, renamedName),
+                        "utf8",
+                    )
+                    .catch(() => null),
+            )
+            .toBe("source content");
         await expect(fs.readFile(destinationPath, "utf8")).resolves.toBe(
             "destination content",
         );
-        // A failed copy must also preserve the source and its selection.
+        // Copy must leave the source in place.
         await expect(fs.readFile(sourcePath, "utf8")).resolves.toBe(
             "source content",
         );
-        await expect(
-            page.getByRole("button", { name: "Clear selection" }),
-        ).toBeVisible();
-        await page.getByRole("button", { name: "Clear selection" }).click();
     });
 
     test("should replace an existing directory when resolving a copy conflict", async ({

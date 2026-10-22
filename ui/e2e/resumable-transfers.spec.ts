@@ -53,7 +53,7 @@ test.describe.serial("Resumable transfer workflow", () => {
             dialog.getByRole("radio", { name: /^Resume/ }),
         ).toBeChecked();
         await expect(
-            dialog.getByRole("radio", { name: /^Keep existing/ }),
+            dialog.getByRole("radio", { name: /^Rename/ }),
         ).toBeVisible();
         await dialog.getByRole("radio", { name: /^Start over/ }).click();
         await expect(

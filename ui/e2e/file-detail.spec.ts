@@ -502,6 +502,65 @@ test.describe.serial("File Detail View", () => {
         await expect(fs.access(changedSelectedPath)).rejects.toThrow();
     });
 
+    test("should copy under a new name when the Sync destination exists", async ({
+        page,
+    }) => {
+        const sourcePath = path.join(
+            ctx.testDirPath,
+            `sync-rename-source-${Date.now()}.txt`,
+        );
+
+        const destinationStem = `sync-rename-dest-${Date.now()}`;
+
+        const destinationPath = path.join(
+            ctx.testDirPath,
+            `${destinationStem}.txt`,
+        );
+
+        const renamedPath = path.join(
+            ctx.testDirPath,
+            `${destinationStem}_2.txt`,
+        );
+
+        await fs.writeFile(sourcePath, "renamed source\n");
+        await fs.writeFile(destinationPath, "existing destination\n");
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
+        );
+        await page.getByLabel("Sync path").fill(destinationPath);
+        await page.getByRole("button", { name: "Copy", exact: true }).click();
+        await page
+            .getByRole("dialog", { name: "Copy file?" })
+            .getByRole("button", { name: "Confirm copy" })
+            .click();
+
+        const dialog = page.getByRole("dialog", {
+            name: "Destination items already exist",
+        });
+
+        // An existing destination must offer the non-destructive rename by default.
+        await expect(
+            dialog.getByRole("radio", { name: "Rename" }),
+        ).toBeChecked();
+        // The suggestion is derived from the destination's name, not the source's.
+        await expect(
+            dialog.getByRole("textbox", {
+                name: `New name for ${destinationStem}.txt`,
+            }),
+        ).toHaveValue(`${destinationStem}_2.txt`);
+        await dialog.getByRole("button", { name: "Continue copying" }).click();
+        await expect(page.getByRole("status")).toContainText(
+            "Copy completed successfully",
+        );
+        // The copy lands beside the existing destination, which stays untouched.
+        await expect(fs.readFile(renamedPath, "utf8")).resolves.toBe(
+            "renamed source\n",
+        );
+        await expect(fs.readFile(destinationPath, "utf8")).resolves.toBe(
+            "existing destination\n",
+        );
+    });
+
     test("should copy to a missing path and move to a new path from Sync", async ({
         page,
     }) => {

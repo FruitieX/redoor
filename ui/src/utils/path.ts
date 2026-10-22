@@ -4,6 +4,14 @@ export function getBaseName(path: string): string {
 }
 
 /**
+ * Swaps the last path segment so a conflicting destination can be renamed while it stays in
+ * the directory the user chose. Works on relative paths too, since Sync accepts typed paths.
+ */
+export function replaceBaseName(path: string, name: string): string {
+    return path.replace(/[^/]+\/*$/, name);
+}
+
+/**
  * Expands the agent's home shorthand so a typed `~` or `~/dir` resolves against that
  * device's own home. Paths without the shorthand, and agents whose home is not known yet,
  * pass through unchanged.

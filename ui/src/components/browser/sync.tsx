@@ -28,7 +28,12 @@ import {
     watchedTransfersQueryOptions,
 } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
-import { expandHomePath, formatSize, getBaseName } from "#ui/utils/path";
+import {
+    expandHomePath,
+    formatSize,
+    getBaseName,
+    replaceBaseName,
+} from "#ui/utils/path";
 
 /** Names the destination a "view" link opens, so the router builds a real, typed link. */
 type ViewTarget = { agentId: string; path: string };
@@ -360,6 +365,8 @@ function useSyncWorkspace(props: {
         mutationFn: async (request: {
             operation: TransferOperation;
             mode: CopyExistingMode;
+            /** Set when the user renamed a conflicting destination within its directory. */
+            newName: string | null;
         }) => {
             if (sourceEndpoint === null || destinationEndpoint === null) {
                 throw new Error("Selected device is unavailable");
@@ -367,7 +374,13 @@ function useSyncWorkspace(props: {
 
             const destination = {
                 agent: destinationEndpoint.agent.id,
-                path: destinationEndpoint.path,
+                path:
+                    request.newName === null
+                        ? destinationEndpoint.path
+                        : replaceBaseName(
+                              destinationEndpoint.path,
+                              request.newName,
+                          ),
             };
 
             if (request.operation === "copy") {
@@ -414,6 +427,7 @@ function useSyncWorkspace(props: {
                 transferMutation.mutate({
                     operation: result.operation,
                     mode: "error",
+                    newName: null,
                 });
 
                 return;
@@ -557,13 +571,17 @@ function useSyncWorkspace(props: {
         conflictOperation,
         cancelConflict: () => setConflictOperation(null),
         /** Starts the transfer that found an existing destination, with the chosen policy. */
-        resolveConflict: (mode: CopyExistingMode) => {
+        resolveConflict: (mode: CopyExistingMode, newName: string | null) => {
             if (conflictOperation === null) {
                 return;
             }
 
             setConflictOperation(null);
-            transferMutation.mutate({ operation: conflictOperation, mode });
+            transferMutation.mutate({
+                operation: conflictOperation,
+                mode,
+                newName,
+            });
         },
         changeSelectedAgent,
         changeSelectedPath,
@@ -985,6 +1003,10 @@ export function SyncView(props: {
                     closeAriaLabel={conflictLabels.closeAriaLabel}
                     confirmLabel={conflictLabels.confirmLabel}
                     radioGroupName={conflictLabels.radioGroupName}
+                    existingName={getBaseName(
+                        workspace.destinationEndpoint?.path ?? "",
+                    )}
+                    entryType={props.entryType}
                     onClose={workspace.cancelConflict}
                     onConfirm={workspace.resolveConflict}
                 />
