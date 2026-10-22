@@ -187,6 +187,34 @@ test.describe("Application navigation", () => {
         await expect(page.getByRole("tooltip")).toBeVisible();
     });
 
+    test("keeps tooltips hidden when a clicked dialog moves focus", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("button", { name: "Restart server" })
+            .click();
+
+        const dialog = page.getByRole("dialog", { name: "Restart server?" });
+
+        const closeButton = dialog.getByRole("button", {
+            name: "Close confirmation dialog",
+        });
+
+        // The modal moves focus to its first control on open, which is the premise of this test.
+        await expect(closeButton).toBeFocused();
+        // Script focus after a click is not keyboard navigation, so the close tooltip must stay hidden.
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+        await page.keyboard.press("Tab");
+        await page.keyboard.press("Shift+Tab");
+        // Real keyboard navigation inside the same dialog must still describe the focused control.
+        await expect(
+            page.getByRole("tooltip", { name: "Close confirmation dialog" }),
+        ).toBeVisible();
+    });
+
     test("opens and dismisses the sidebar from outside on mobile", async ({
         page,
     }) => {

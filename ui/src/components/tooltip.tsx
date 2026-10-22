@@ -45,11 +45,13 @@ function releaseActiveTooltip(hide: TooltipHide) {
 /**
  * Shows a small tooltip after 500ms of hover or immediately on keyboard focus and touch.
  *
- * Pointer activation focuses links and buttons, but that focus must not keep the
- * tooltip open after the cursor leaves. Keyboard and programmatic focus still
- * open it. On touch devices the tooltip opens on the trigger's touchstart and
- * closes on that same gesture's touchend, so it cannot linger after the finger
- * lifts. This wrapper is also useful for disabled controls when the tooltip
+ * Focus opens it only when the browser marks the focused element `:focus-visible`,
+ * the same signal that decides whether to draw a focus ring. Clicks focus links and
+ * buttons, and dialogs move focus by script when they open (to their first control)
+ * and close (back to their trigger); after mouse use none of that is keyboard
+ * navigation, so a tooltip there would pop up far from the cursor. On touch devices
+ * the tooltip opens on the trigger's touchstart and closes on that same gesture's
+ * touchend, so it cannot linger after the finger lifts. This wrapper is also useful for disabled controls when the tooltip
  * needs to be attached to a non-disabled parent element instead of the control.
  */
 export function Tooltip(props: TooltipProps) {
@@ -57,7 +59,6 @@ export function Tooltip(props: TooltipProps) {
     const triggerRef = React.useRef<HTMLSpanElement>(null);
     const tooltipRef = React.useRef<HTMLSpanElement>(null);
     const hoverTimerRef = React.useRef<number | null>(null);
-    const ignoreFocusFromPointerRef = React.useRef(false);
     // Touch synthesizes mouseenter; ignore that hover until a real mouse leave.
     const ignoreHoverFromTouchRef = React.useRef(false);
     const [isHovered, setIsHovered] = React.useState(false);
@@ -222,28 +223,15 @@ export function Tooltip(props: TooltipProps) {
 
     const child = React.cloneElement(props.children, tooltipChildProps);
 
-    /** Prevents a click-induced focus from pinning the tooltip after mouseleave. */
-    const handlePointerDown = () => {
-        ignoreFocusFromPointerRef.current = true;
-        setIsFocused(false);
-    };
-
-    /** Drops the pointer flag when this press never focused the trigger. */
-    const handlePointerUp = () => {
-        window.setTimeout(() => {
-            ignoreFocusFromPointerRef.current = false;
-        }, 0);
-    };
-
-    /** Opens on keyboard or programmatic focus, but not on the focus that follows a click. */
-    const handleFocus = () => {
-        if (ignoreFocusFromPointerRef.current) {
-            ignoreFocusFromPointerRef.current = false;
-
-            return;
+    /**
+     * Opens only for keyboard-style focus. Script focus after mouse use, such as a
+     * dialog focusing its close button or restoring focus to its trigger, does not
+     * match `:focus-visible`, so it no longer looks like the user tabbed there.
+     */
+    const handleFocus = (event: React.FocusEvent) => {
+        if (event.target.matches(":focus-visible")) {
+            setIsFocused(true);
         }
-
-        setIsFocused(true);
     };
 
     return (
@@ -266,9 +254,8 @@ export function Tooltip(props: TooltipProps) {
                 clearHoverTimer(hoverTimerRef);
                 setIsHovered(false);
             }}
-            onPointerDown={handlePointerDown}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
+            // A click on a keyboard-focused trigger hands control back to the cursor.
+            onPointerDown={() => setIsFocused(false)}
             onFocus={handleFocus}
             onBlur={() => setIsFocused(false)}
             onTouchStart={() => {

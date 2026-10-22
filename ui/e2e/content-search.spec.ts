@@ -373,7 +373,7 @@ last line`,
             name: "Use regular expressions",
         });
 
-        await regexToggle.focus();
+        await regexToggle.hover();
 
         const dialogTooltip = page.getByRole("tooltip", {
             name: "Use regular expressions",
