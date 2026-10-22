@@ -330,7 +330,11 @@ pub(super) async fn directory_size(
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_seconds),
-        crate::directory_measurement::measure_directory(std::path::Path::new(&path), false, cancel),
+        redoor_core::directory_measurement::measure_directory(
+            std::path::Path::new(&path),
+            false,
+            cancel,
+        ),
     )
     .await
     {

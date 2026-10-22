@@ -80,6 +80,9 @@ Infrastructure that more than one role needs:
   atomic name reservation).
 - `stream_credit`: the per-stream flow-control primitives that both the agent and server
   transfer paths use.
+- `directory_measurement`: one directory walk that yields content bytes and the predicted
+  tar size. The agent uses it for download totals and directory sizes, and the CLI uses it
+  for the percentage of local directory uploads.
 - Process helpers (`process`, `subprocess::run_checked`), `bounded_tail`, `paths::home()`,
   binary identity and build information.
 

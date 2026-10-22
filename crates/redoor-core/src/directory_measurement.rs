@@ -1,5 +1,5 @@
 //! Walks a directory once to size both its content and its tar archive, so downloads can
-//! report an accurate total before streaming starts.
+//! report an accurate total before streaming starts and CLI uploads can show a percentage.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

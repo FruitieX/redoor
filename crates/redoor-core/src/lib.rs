@@ -9,6 +9,7 @@ pub mod bounded_tail;
 pub mod config;
 pub mod desktop;
 pub mod destination;
+pub mod directory_measurement;
 pub mod identity;
 pub mod logging;
 pub mod partial_signatures;

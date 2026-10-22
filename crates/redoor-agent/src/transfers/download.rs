@@ -6,12 +6,12 @@
 
 use super::stream::StreamWriter;
 use crate::commands::ctx::{CommandCtx, Reply};
-use crate::directory_measurement::{
-    archive_member_path, directory_archive_root, measure_directory,
-};
 use crate::runtime::cancel::Registration;
 use crate::runtime::responder::Responder;
 use anyhow::{Context, Result, bail};
+use redoor_core::directory_measurement::{
+    archive_member_path, directory_archive_root, measure_directory,
+};
 use redoor_core::{log, log_error};
 use redoor_protocol::wire::request::{self, CommandError};
 use redoor_protocol::{

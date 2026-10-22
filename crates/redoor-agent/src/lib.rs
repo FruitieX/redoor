@@ -3,7 +3,6 @@
 pub mod args;
 mod commands;
 mod connection;
-mod directory_measurement;
 mod errors;
 mod exec;
 mod logs;
