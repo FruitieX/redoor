@@ -425,10 +425,10 @@ DeletionDate=2020-01-01T00:00:00
         ).rejects.toThrow();
     });
 
-    it("explains and logs a trash root that is not private", async () => {
+    it("explains and logs a trash root that others can write to", async () => {
         const source = path.join(root, "loose-trash-root.txt");
         await fs.writeFile(source, "must remain");
-        await fs.chmod(trashRoot, 0o755);
+        await fs.chmod(trashRoot, 0o777);
         onTestFinished(async () => {
             await fs.chmod(trashRoot, 0o700);
             await fs.rm(source, { force: true });
@@ -440,7 +440,7 @@ DeletionDate=2020-01-01T00:00:00
         await expect(operation).rejects.toMatchObject({
             status: 403,
             message: expect.stringContaining(
-                `Trash directory ${trashRoot} must be a private real directory owned by the agent user: its mode is 0755`,
+                `Trash directory ${trashRoot} must be a real directory owned by the agent user and not writable by others: its mode is 0777`,
             ),
         });
         // Validation runs before the rename, so the source must stay where it was.

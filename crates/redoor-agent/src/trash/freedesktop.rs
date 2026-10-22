@@ -922,7 +922,7 @@ async fn validate_private_root(root: &Path) -> Result<(), TrashError> {
         return Err(TrashError::new(
             CommandErrorKind::PermissionDenied,
             format!(
-                "Trash directory {} must be a private real directory owned by the agent user: {problem}",
+                "Trash directory {} must be a real directory owned by the agent user and not writable by others: {problem}",
                 root.display()
             ),
         ));
@@ -942,7 +942,7 @@ async fn validate_private_root(root: &Path) -> Result<(), TrashError> {
             return Err(TrashError::new(
                 CommandErrorKind::PermissionDenied,
                 format!(
-                    "Trash child directory {} must be private and on the trash device: {problem}",
+                    "Trash child directory {} must be owned by the agent user, not writable by others and on the trash device: {problem}",
                     child.display()
                 ),
             ));
@@ -951,8 +951,13 @@ async fn validate_private_root(root: &Path) -> Result<(), TrashError> {
     Ok(())
 }
 
-/// Names the first failed private-directory rule so operators know whether to fix the
+/// Names the first failed trash-directory rule so operators know whether to fix the
 /// owner, the mode, or the path itself instead of guessing from a generic refusal.
+///
+/// Group bits are accepted because distributions with per-user private groups and a
+/// `0002` umask (Ubuntu, Fedora) leave trash directories made by other tools at `0775`,
+/// which GIO and trash-cli use without complaint. Only write access for others lets
+/// another user plant symlinks or `.trashinfo` files that restore and empty would act on.
 fn private_directory_problem(
     metadata: &std::fs::Metadata,
     uid: u32,
@@ -968,9 +973,9 @@ fn private_directory_problem(
             "it is owned by uid {} but the agent runs as uid {uid}",
             metadata.uid()
         ))
-    } else if mode & 0o077 != 0 {
+    } else if mode & 0o002 != 0 {
         Some(format!(
-            "its mode is {mode:04o} but group and others must have no access (expected 0700)"
+            "its mode is {mode:04o} which lets other users write to it"
         ))
     } else if let Some(device) = expected_device
         && metadata.dev() != device
@@ -1092,7 +1097,7 @@ DeletionDate=2020-01-01T00:00:00
         let temp_dir = TempDir::create();
         let root = temp_dir.path().join("Trash");
         prepare_private_root(&root).await.unwrap();
-        tokio::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+        tokio::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o757))
             .await
             .unwrap();
 
@@ -1101,7 +1106,22 @@ DeletionDate=2020-01-01T00:00:00
         // Operators need the exact path to know which trash directory to fix.
         assert!(error.message.contains(&root.display().to_string()));
         // Naming the offending mode tells operators a chmod fixes it, not a chown.
-        assert!(error.message.contains("its mode is 0755"));
+        assert!(error.message.contains("its mode is 0757"));
+    }
+
+    #[tokio::test]
+    async fn private_root_validation_accepts_group_writable_umask_directories() {
+        let temp_dir = TempDir::create();
+        let root = temp_dir.path().join("Trash");
+        prepare_private_root(&root).await.unwrap();
+        for directory in [root.clone(), root.join("files"), root.join("info")] {
+            tokio::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775))
+                .await
+                .unwrap();
+        }
+
+        // A 0002 umask leaves trash made by other tools at 0775, which must stay usable.
+        assert!(validate_private_root(&root).await.is_ok());
     }
 
     #[tokio::test]
