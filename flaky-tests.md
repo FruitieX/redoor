@@ -1,2 +1,3 @@
 # Flaky tests
 - 2026-10-22 `pn test` integration (`tests/terminal.test.ts`): `dedicated terminal tunnel > reports the shell's exit status after its last output` failed at line 334 because the lifecycle events were empty (`expected [] to deep equally contain { type: "exit", code: 3, signal: null }`). All 5 tests in the file passed on immediate rerun.
+- 2026-10-22 `pn test` Playwright (`ui/e2e/file-operations.spec.ts`): `File Operations > should create directory from directory view` timed out at line 380 hovering the `New directory` menu button, because `<html>` intercepted pointer events and the button was then detached from the DOM. All 22 tests in the file passed on immediate rerun.
