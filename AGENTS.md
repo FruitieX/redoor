@@ -43,6 +43,7 @@
 - Always write multiline strings with real newlines inside the quotes, never escaped `\n` sequences.
 - If you are asked to write a plan: Write a .md file to ./plans dir. Come up with short name
 - When you see a transient flaky test that succeeds on second run log them to `./flaky-tests.md`
+- When `./flaky-tests.md` shows the same test has been flaky more than once, spawn a subagent to fix its flakiness at the root cause, or to remove the test if it cannot be made reliable
 
 # UI
 
