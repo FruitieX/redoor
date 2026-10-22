@@ -70,10 +70,18 @@ async fn create_private_directory_tree(path: &Path) -> Result<(), TrashError> {
         }
         match tokio::fs::symlink_metadata(&current).await {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => {
+            Ok(metadata) => {
+                let kind = if metadata.file_type().is_symlink() {
+                    "a symlink"
+                } else {
+                    "not a directory"
+                };
                 return Err(TrashError::new(
                     CommandErrorKind::PermissionDenied,
-                    "Trash directory path contains a non-directory or symlink",
+                    format!(
+                        "Trash directory path component {} is {kind}",
+                        current.display()
+                    ),
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -81,7 +89,10 @@ async fn create_private_directory_tree(path: &Path) -> Result<(), TrashError> {
             }
             Err(error) => {
                 return Err(TrashError::io(
-                    "Failed to inspect trash directory path",
+                    &format!(
+                        "Failed to inspect trash directory path {}",
+                        current.display()
+                    ),
                     error,
                 ));
             }
@@ -891,43 +902,86 @@ async fn create_private_directory(path: &Path) -> Result<(), TrashError> {
     match tokio::fs::DirBuilder::new().mode(0o700).create(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(TrashError::io("Failed to create trash directory", error)),
+        Err(error) => Err(TrashError::io(
+            &format!("Failed to create trash directory {}", path.display()),
+            error,
+        )),
     }
 }
 
 /// Revalidates ownership, type, permissions, and child device identity before destructive rename.
 async fn validate_private_root(root: &Path) -> Result<(), TrashError> {
     let uid = nix::unistd::Uid::effective().as_raw();
-    let root_metadata = tokio::fs::symlink_metadata(root)
-        .await
-        .map_err(|error| TrashError::io("Failed to inspect trash directory", error))?;
-    if !root_metadata.is_dir()
-        || root_metadata.file_type().is_symlink()
-        || root_metadata.uid() != uid
-        || root_metadata.mode() & 0o077 != 0
-    {
+    let root_metadata = tokio::fs::symlink_metadata(root).await.map_err(|error| {
+        TrashError::io(
+            &format!("Failed to inspect trash directory {}", root.display()),
+            error,
+        )
+    })?;
+    if let Some(problem) = private_directory_problem(&root_metadata, uid, None) {
         return Err(TrashError::new(
             CommandErrorKind::PermissionDenied,
-            "Trash directory must be a private real directory owned by the agent user",
+            format!(
+                "Trash directory {} must be a private real directory owned by the agent user: {problem}",
+                root.display()
+            ),
         ));
     }
     for child in [root.join("files"), root.join("info")] {
-        let metadata = tokio::fs::symlink_metadata(&child)
-            .await
-            .map_err(|error| TrashError::io("Failed to inspect trash child directory", error))?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.uid() != uid
-            || metadata.mode() & 0o077 != 0
-            || metadata.dev() != root_metadata.dev()
+        let metadata = tokio::fs::symlink_metadata(&child).await.map_err(|error| {
+            TrashError::io(
+                &format!(
+                    "Failed to inspect trash child directory {}",
+                    child.display()
+                ),
+                error,
+            )
+        })?;
+        if let Some(problem) = private_directory_problem(&metadata, uid, Some(root_metadata.dev()))
         {
             return Err(TrashError::new(
                 CommandErrorKind::PermissionDenied,
-                "Trash files and info directories must be private and on the trash device",
+                format!(
+                    "Trash child directory {} must be private and on the trash device: {problem}",
+                    child.display()
+                ),
             ));
         }
     }
     Ok(())
+}
+
+/// Names the first failed private-directory rule so operators know whether to fix the
+/// owner, the mode, or the path itself instead of guessing from a generic refusal.
+fn private_directory_problem(
+    metadata: &std::fs::Metadata,
+    uid: u32,
+    expected_device: Option<u64>,
+) -> Option<String> {
+    let mode = metadata.mode() & 0o7777;
+    if metadata.file_type().is_symlink() {
+        Some("it is a symlink".to_string())
+    } else if !metadata.is_dir() {
+        Some("it is not a directory".to_string())
+    } else if metadata.uid() != uid {
+        Some(format!(
+            "it is owned by uid {} but the agent runs as uid {uid}",
+            metadata.uid()
+        ))
+    } else if mode & 0o077 != 0 {
+        Some(format!(
+            "its mode is {mode:04o} but group and others must have no access (expected 0700)"
+        ))
+    } else if let Some(device) = expected_device
+        && metadata.dev() != device
+    {
+        Some(format!(
+            "it is on device {} but the trash directory is on device {device}",
+            metadata.dev()
+        ))
+    } else {
+        None
+    }
 }
 
 /// Chooses the longest containing mount point whose device id matches the source.
@@ -960,6 +1014,7 @@ async fn mount_points() -> Result<Vec<PathBuf>, TrashError> {
 mod tests {
     use super::*;
     use redoor_core::test_support::TempDir;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn percent_encoding_round_trips_arbitrary_path_bytes() {
@@ -1030,6 +1085,23 @@ DeletionDate=2020-01-01T00:00:00
             !tokio::fs::try_exists(real.join("Trash")).await.unwrap(),
             "refusing the symlink must leave its target untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn private_root_validation_reports_the_path_and_failed_rule() {
+        let temp_dir = TempDir::create();
+        let root = temp_dir.path().join("Trash");
+        prepare_private_root(&root).await.unwrap();
+        tokio::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+
+        let error = validate_private_root(&root).await.unwrap_err();
+
+        // Operators need the exact path to know which trash directory to fix.
+        assert!(error.message.contains(&root.display().to_string()));
+        // Naming the offending mode tells operators a chmod fixes it, not a chown.
+        assert!(error.message.contains("its mode is 0755"));
     }
 
     #[tokio::test]
