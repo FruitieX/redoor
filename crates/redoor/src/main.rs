@@ -1,5 +1,6 @@
 //! Redoor binary entry point: dispatches the server, agent, and remote CLI roles.
 
+mod examples;
 mod process_control;
 mod process_logs;
 mod service;
@@ -70,8 +71,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the server or use its role-specific utilities.
+    #[command(after_help = examples::SERVER)]
     Server(ServerArgs),
     /// Run the agent or use its role-specific utilities.
+    #[command(after_help = examples::AGENT)]
     Agent(Box<AgentCommandArgs>),
     /// Authenticate and operate on devices through a remote server.
     Remote(redoor_cli::RemoteArgs),
@@ -92,14 +95,19 @@ struct ServerArgs {
 #[derive(Subcommand)]
 enum ServerCommand {
     /// Stop the server recorded in the application PID file.
+    #[command(after_help = examples::SERVER_STOP)]
     Stop,
     /// Report whether the server PID file lock is held.
+    #[command(after_help = examples::SERVER_STATUS)]
     Status,
     /// Print the configured server file log.
+    #[command(after_help = examples::SERVER_LOGS)]
     Logs(ServerLogsArgs),
     /// Install or manage the server as a systemd service.
+    #[command(after_help = examples::SERVER_SYSTEMD)]
     Systemd(service::SystemdArgs),
     /// Install or manage the server as a macOS LaunchAgent.
+    #[command(after_help = examples::SERVER_LAUNCHD)]
     Launchd(service::LaunchdArgs),
 }
 
@@ -135,16 +143,22 @@ struct AgentCommandArgs {
 #[derive(Subcommand)]
 enum AgentCommand {
     /// Stop the standalone agent recorded in the application PID file.
+    #[command(after_help = examples::AGENT_STOP)]
     Stop,
     /// Report whether the standalone agent PID file lock is held.
+    #[command(after_help = examples::AGENT_STATUS)]
     Status,
     /// Print the configured standalone-agent file log.
+    #[command(after_help = examples::AGENT_LOGS)]
     Logs(AgentLogsArgs),
     /// Install or manage the agent as a systemd service.
+    #[command(after_help = examples::AGENT_SYSTEMD)]
     Systemd(service::SystemdArgs),
     /// Install or manage the agent as a macOS LaunchAgent.
+    #[command(after_help = examples::AGENT_LAUNCHD)]
     Launchd(service::LaunchdArgs),
     /// Start an agent on an SSH host and relay it through this machine to a redoor server.
+    #[command(after_help = examples::RELAY)]
     Relay(Box<RelayCommandArgs>),
 }
 
@@ -159,14 +173,19 @@ struct RelayCommandArgs {
 #[derive(Subcommand)]
 enum RelayCommand {
     /// List the relay IDs available in configuration.
+    #[command(after_help = examples::RELAY_LS)]
     Ls(RelayListArgs),
     /// Start one configured relay in the foreground or background.
+    #[command(after_help = examples::RELAY_START)]
     Start(RelayStartArgs),
     /// Stop one named relay using its locked runtime file.
+    #[command(after_help = examples::RELAY_STOP)]
     Stop(RelayIdArgs),
     /// Report whether one named relay runtime-file lock is held.
+    #[command(after_help = examples::RELAY_STATUS)]
     Status(RelayIdArgs),
     /// Print one named relay's file log.
+    #[command(after_help = examples::RELAY_LOGS)]
     Logs(RelayLogsArgs),
 }
 
@@ -695,5 +714,101 @@ mod tests {
             panic!("agent relay stop should preserve its relay command wrapper");
         };
         assert!(matches!(stop_relay.command, RelayCommand::Stop(_)));
+    }
+
+    /// Splits one example line like a POSIX shell would for the quoting the examples use,
+    /// so quoted patterns such as `'TODO|FIXME'` stay one argument.
+    fn split_example(line: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut word: Option<String> = None;
+        let mut quote = None;
+        for character in line.chars() {
+            match (quote, character) {
+                (Some(open), _) if character == open => quote = None,
+                (Some(_), _) => word.get_or_insert_default().push(character),
+                (None, '\'' | '"') => {
+                    quote = Some(character);
+                    word.get_or_insert_default();
+                }
+                (None, ' ') => words.extend(word.take()),
+                (None, _) => word.get_or_insert_default().push(character),
+            }
+        }
+        words.extend(word);
+        words
+    }
+
+    /// Collects every `redoor ...` invocation from the examples of `command` and its
+    /// subcommands, recording which commands have no examples at all.
+    fn collect_examples(
+        command: &clap::Command,
+        path: String,
+        examples: &mut Vec<(String, Vec<String>)>,
+        missing: &mut Vec<String>,
+    ) {
+        let subcommands = command
+            .get_subcommands()
+            .filter(|subcommand| subcommand.get_name() != "help")
+            .collect::<Vec<_>>();
+        // The top-level command only lists roles; every role and action below it needs examples.
+        if !path.is_empty() {
+            match command.get_after_help() {
+                Some(help) => {
+                    let help = help.to_string().replace(" \\\n", " ");
+                    for line in help.lines().map(str::trim) {
+                        if line.is_empty() || line.starts_with('#') || line == "Examples:" {
+                            continue;
+                        }
+                        // Drop a feeding pipeline, `sudo` and environment assignments: clap
+                        // only sees the arguments after the binary name.
+                        let words = split_example(line);
+                        let start = words
+                            .iter()
+                            .rposition(|word| word == "|")
+                            .map_or(0, |i| i + 1);
+                        let words = words
+                            .into_iter()
+                            .skip(start)
+                            .skip_while(|word| word == "sudo" || word.contains('='))
+                            .collect::<Vec<_>>();
+                        examples.push((path.clone(), words));
+                    }
+                }
+                None => missing.push(path.clone()),
+            }
+        }
+        for subcommand in subcommands {
+            collect_examples(
+                subcommand,
+                format!("{path} {}", subcommand.get_name()),
+                examples,
+                missing,
+            );
+        }
+    }
+
+    /// Help examples are copied verbatim by people and AI agents, so each one must parse with
+    /// the current flags and every command must have some.
+    #[test]
+    fn help_examples_parse_and_cover_every_command() {
+        use clap::CommandFactory;
+
+        let mut examples = Vec::new();
+        let mut missing = Vec::new();
+        collect_examples(&Cli::command(), String::new(), &mut examples, &mut missing);
+        // New commands must ship with usage examples like the existing ones.
+        assert!(missing.is_empty(), "commands without examples: {missing:?}");
+        for (path, words) in examples {
+            // An example that does not start with the binary is a formatting mistake.
+            assert_eq!(
+                words.first().map(String::as_str),
+                Some("redoor"),
+                "example of{path} must invoke redoor: {words:?}"
+            );
+            // Parsing fails when an example uses a removed or misspelled flag or value.
+            if let Err(error) = Cli::try_parse_from(&words) {
+                panic!("example of{path} does not parse: {words:?}\n{error}");
+            }
+        }
     }
 }

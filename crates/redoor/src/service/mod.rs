@@ -44,20 +44,28 @@ impl ServiceRole {
 #[derive(Subcommand)]
 pub(crate) enum ServiceCommand {
     /// Install and enable the service, remaining stopped unless requested.
+    #[command(after_help = crate::examples::SERVICE_INSTALL)]
     Install(InstallArgs),
     /// Stop, disable, and remove the service while preserving its config.
+    #[command(after_help = crate::examples::SERVICE_UNINSTALL)]
     Uninstall,
     /// Start the installed service.
+    #[command(after_help = crate::examples::SERVICE_START)]
     Start,
     /// Stop the installed service while leaving it enabled for future startup.
+    #[command(after_help = crate::examples::SERVICE_STOP)]
     Stop,
     /// Reload and restart the installed service.
+    #[command(after_help = crate::examples::SERVICE_RESTART)]
     Restart,
     /// Show installation, enablement, and process state.
+    #[command(after_help = crate::examples::SERVICE_STATUS)]
     Status,
     /// Enable the installed service without starting it.
+    #[command(after_help = crate::examples::SERVICE_ENABLE)]
     Enable,
     /// Disable automatic startup, optionally stopping the service now.
+    #[command(after_help = crate::examples::SERVICE_DISABLE)]
     Disable(DisableArgs),
 }
 
@@ -105,6 +113,7 @@ enum LaunchdCommand {
     #[command(flatten)]
     Service(ServiceCommand),
     /// Replace a stale ad-hoc identity so macOS asks for Local Network access again.
+    #[command(after_help = crate::examples::REFRESH_LOCAL_NETWORK_PERMISSION)]
     RefreshLocalNetworkPermission,
 }
 
