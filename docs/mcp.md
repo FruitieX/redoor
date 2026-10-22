@@ -12,7 +12,10 @@ from an earlier request.
 MCP clients authenticate with an **access token**, the same kind of credential
 the remote CLI uses. Create one under **Access tokens** in Redoor's application
 menu. Choose only the permissions and devices the client needs, create the
-token, and copy both the endpoint and the token from the one-time result.
+token, and copy both the endpoint and the token from the one-time result. The
+result also offers a ready-made **AI agent setup prompt** containing the
+endpoint and token, which you can paste to an AI agent so it configures the
+server for itself.
 
 Permissions:
 

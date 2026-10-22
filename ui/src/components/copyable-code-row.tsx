@@ -69,6 +69,8 @@ export function CopyableCodeRow(props: {
     value: string;
     copyAriaLabel?: string;
     multiline?: boolean;
+    /** Prose such as AI agent prompts reads better wrapped than horizontally scrolled. */
+    wrap?: boolean;
 }) {
     const { isCopied, flashKey, copy } = useCopyFeedback(props.value);
 
@@ -120,9 +122,11 @@ export function CopyableCodeRow(props: {
             <code
                 aria-label={`${props.label} contents`}
                 className={
-                    props.multiline
-                        ? "relative block overflow-x-auto whitespace-pre px-3 py-2.5 font-mono text-sm leading-6 text-slate-200"
-                        : "relative block overflow-x-auto whitespace-nowrap px-3 py-2.5 font-mono text-sm text-slate-200"
+                    props.wrap
+                        ? "relative block whitespace-pre-wrap wrap-anywhere px-3 py-2.5 font-mono text-sm leading-6 text-slate-200"
+                        : props.multiline
+                          ? "relative block overflow-x-auto whitespace-pre px-3 py-2.5 font-mono text-sm leading-6 text-slate-200"
+                          : "relative block overflow-x-auto whitespace-nowrap px-3 py-2.5 font-mono text-sm text-slate-200"
                 }
             >
                 {props.value}

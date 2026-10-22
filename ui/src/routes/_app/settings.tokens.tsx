@@ -695,6 +695,21 @@ function DeviceScopeFields(props: {
     );
 }
 
+/**
+ * Builds a self-contained instruction for an AI agent so users can hand over the MCP setup
+ * in one paste instead of translating the endpoint details into their client's config format.
+ */
+function agentSetupPrompt(token: string, origin: string): string {
+    return `Configure the Redoor MCP server for yourself so you can use its tools.
+
+Server name: redoor
+URL: ${origin}/mcp
+Transport: Streamable HTTP (stateless, POST only, MCP protocol version 2026-07-28)
+Authentication: send the header "Authorization: Bearer ${token}" with every request
+
+Add the server to your own MCP client configuration, then verify the connection by listing its tools. Treat the token as a password: store it as a secret or environment variable where your client supports that, and never commit it to version control or print it in logs.`;
+}
+
 /** Displays the sole recoverable copy of a new secret until the user closes the workflow. */
 function SecretDialog(props: {
     secret: { value: string; action: "created" | "rotated" } | null;
@@ -725,6 +740,12 @@ function SecretDialog(props: {
                     label="MCP endpoint"
                     value={`${props.origin}/mcp`}
                     copyAriaLabel="Copy MCP endpoint"
+                />
+                <CopyableCodeRow
+                    label="AI agent setup prompt"
+                    value={agentSetupPrompt(props.secret.value, props.origin)}
+                    copyAriaLabel="Copy AI agent setup prompt"
+                    wrap
                 />
                 <p className="text-sm text-slate-400">
                     MCP clients should POST to this endpoint with{" "}

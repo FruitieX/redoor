@@ -89,6 +89,17 @@ test.describe("Access token settings", () => {
         await expect(
             secretDialog.getByLabel("MCP endpoint contents", { exact: true }),
         ).toHaveText(`${WEB_BASE_URL}/mcp`);
+
+        const agentPrompt = secretDialog.getByLabel(
+            "AI agent setup prompt contents",
+            { exact: true },
+        );
+
+        // The agent prompt must be self-contained, so it embeds both the endpoint and the secret.
+        await expect(agentPrompt).toContainText(`${WEB_BASE_URL}/mcp`);
+        await expect(agentPrompt).toContainText(
+            `Authorization: Bearer ${originalToken}`,
+        );
         await secretDialog
             .getByRole("button", { name: "Copy access token" })
             .click();
