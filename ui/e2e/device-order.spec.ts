@@ -38,6 +38,7 @@ test.describe.serial("Device order", () => {
                 recursiveSearchIncludeHidden: false,
                 recursiveSearchRespectGitignore: true,
                 deviceOrder: [],
+                showOnlyConnectedDevices: false,
             },
         });
     });
@@ -135,6 +136,111 @@ test.describe.serial("Device order", () => {
         await expect
             .poll(async () => (await api.getUserState()).state)
             .toMatchObject({ showOnlyConnectedDevices: false });
+    });
+
+    test("filters devices by name regardless of the connected-only preference", async ({
+        page,
+    }) => {
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+        await api.updateUserState({
+            state: { showOnlyConnectedDevices: true },
+        });
+
+        await page.route("**/api/v1/agents", async (route) => {
+            const response = await route.fetch();
+            const body: AgentListResponse = await response.json();
+            const template = body.agents[0];
+
+            if (!template) {
+                throw new Error(
+                    "Expected an agent for the device name filter fixture",
+                );
+            }
+
+            await route.fulfill({
+                json: {
+                    agents: [
+                        {
+                            ...template,
+                            id: "name-filter-alpha",
+                            name: "Alpha laptop",
+                            status: "connected",
+                        },
+                        {
+                            ...template,
+                            id: "name-filter-beta",
+                            name: "Beta phone",
+                            status: "connected",
+                        },
+                        {
+                            ...template,
+                            id: "name-filter-gamma",
+                            name: "Gamma phone",
+                            status: "disconnected",
+                            cwd: null,
+                        },
+                    ],
+                },
+            });
+        });
+        await page.goto(`${WEB_BASE_URL}/`);
+
+        const menu = page.getByRole("navigation", {
+            name: "Devices",
+            exact: true,
+        });
+
+        const filter = menu.getByRole("textbox", {
+            name: "Filter devices by name",
+        });
+
+        const alpha = menu.getByRole("listitem", {
+            name: "Device Alpha laptop",
+            exact: true,
+        });
+
+        const beta = menu.getByRole("listitem", {
+            name: "Device Beta phone",
+            exact: true,
+        });
+
+        const gamma = menu.getByRole("listitem", {
+            name: "Device Gamma phone",
+            exact: true,
+        });
+
+        const clear = menu.getByRole("button", {
+            name: "Clear device filter",
+        });
+
+        // The saved connected-only preference hides the disconnected device before filtering.
+        await expect(alpha).toBeVisible();
+        await expect(beta).toBeVisible();
+        await expect(gamma).toHaveCount(0);
+        // Nothing to clear yet, so the clear button must not add noise.
+        await expect(clear).toHaveCount(0);
+
+        await filter.fill("PHONE");
+        // Matching is case-insensitive and also reveals disconnected devices.
+        await expect(alpha).toHaveCount(0);
+        await expect(beta).toBeVisible();
+        await expect(gamma).toBeVisible();
+
+        await filter.fill("nothing like this");
+        // An empty result explains that the filter, not the inventory, caused it.
+        await expect(
+            menu.getByText("No devices match the filter", { exact: true }),
+        ).toBeVisible();
+
+        await clear.click();
+        // Clearing restores the connected-only view and keeps focus for typing a new query.
+        await expect(filter).toHaveValue("");
+        await expect(filter).toBeFocused();
+        await expect(alpha).toBeVisible();
+        await expect(beta).toBeVisible();
+        await expect(gamma).toHaveCount(0);
+        await expect(clear).toHaveCount(0);
     });
 
     test("reorders devices with their bookmarks and restores the saved slots", async ({

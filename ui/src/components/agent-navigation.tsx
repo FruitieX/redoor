@@ -19,6 +19,7 @@ import {
     getAgentTabLocation,
 } from "#ui/agent-tab-locations";
 import { AgentStatusDot } from "#ui/components/agent-status-dot";
+import { ClearableInput } from "#ui/components/clearable-input";
 import { SideMenu } from "#ui/components/side-menu";
 import { IconButton, IconLinkButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
@@ -64,6 +65,7 @@ function AgentMenu(props: { agents: Agent[] }) {
     const [userState, setUserState] = useUserState();
     const [foldedAgents, setFoldedAgents] = useAtom(foldedBookmarkAgentsAtom);
     const listRef = React.useRef<HTMLUListElement>(null);
+    const [nameFilter, setNameFilter] = React.useState("");
     const inventoryIds = props.agents.map((agent) => agent.id);
     const agentsById = new Map(props.agents.map((agent) => [agent.id, agent]));
 
@@ -76,9 +78,13 @@ function AgentMenu(props: { agents: Agent[] }) {
         return agent ? [agent] : [];
     });
 
-    const visibleAgents = userState.showOnlyConnectedDevices
-        ? orderedAgents.filter((agent) => agent.status === "connected")
-        : orderedAgents;
+    const nameQuery = nameFilter.trim().toLocaleLowerCase();
+
+    const visibleAgents = filterVisibleAgents(
+        orderedAgents,
+        nameQuery,
+        userState.showOnlyConnectedDevices,
+    );
 
     const bookmarkedAgents = visibleAgents.filter((agent) =>
         userState.bookmarks.some((bookmark) => bookmark.agentId === agent.id),
@@ -152,11 +158,23 @@ function AgentMenu(props: { agents: Agent[] }) {
                     </IconLinkButton>
                 </div>
             </div>
+            {orderedAgents.length > 0 ? (
+                <ClearableInput
+                    label="Filter devices by name"
+                    clearLabel="Clear device filter"
+                    value={nameFilter}
+                    placeholder="Filter devices"
+                    onChange={setNameFilter}
+                    className="mb-2 px-2"
+                />
+            ) : null}
             {visibleAgents.length === 0 ? (
                 <span className="px-2 py-3 text-sm text-slate-500">
-                    {userState.showOnlyConnectedDevices
-                        ? "No connected devices"
-                        : "No devices configured or connected"}
+                    {nameQuery !== ""
+                        ? "No devices match the filter"
+                        : userState.showOnlyConnectedDevices
+                          ? "No connected devices"
+                          : "No devices configured or connected"}
                 </span>
             ) : (
                 <SortableList
@@ -250,6 +268,26 @@ function AgentMenu(props: { agents: Agent[] }) {
             )}
         </nav>
     );
+}
+
+/**
+ * A typed name is an explicit search, so it also finds disconnected devices that the
+ * connected-only preference would otherwise hide.
+ */
+function filterVisibleAgents(
+    agents: Agent[],
+    nameQuery: string,
+    showOnlyConnected: boolean,
+): Agent[] {
+    if (nameQuery !== "") {
+        return agents.filter((agent) =>
+            agent.name.toLocaleLowerCase().includes(nameQuery),
+        );
+    }
+
+    return showOnlyConnected
+        ? agents.filter((agent) => agent.status === "connected")
+        : agents;
 }
 
 /** Keeps the connected-only preference discoverable and consistent in the sidebar and drawer. */
