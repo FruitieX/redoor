@@ -36,7 +36,7 @@ function loadWTermModules(): Promise<WTermModules> {
 }
 
 /** Lets macOS layouts commit Option text instead of wterm encoding it as Escape-prefixed input. */
-function preserveOptionText(event: KeyboardEvent): void {
+function preserveOptionText(event: KeyboardEvent, terminal: WTerm): void {
     if (
         event.altKey &&
         !event.ctrlKey &&
@@ -46,6 +46,13 @@ function preserveOptionText(event: KeyboardEvent): void {
         // Keep the native default action so input/composition events deliver the resolved text.
         // Capture on the textarea itself because wterm's listener is on the same element.
         event.stopImmediatePropagation();
+
+        if (event.type === "keydown") {
+            // wterm only moves its textarea to the cursor on focus, so after output scrolls it
+            // sits far up in scrollback and the native insertion scrolls the viewport there.
+            // Focusing again repositions it at the prompt before the browser inserts the text.
+            terminal.focus();
+        }
     }
 }
 
@@ -75,9 +82,12 @@ export async function createWTerm(
 
         if (navigator.platform.startsWith("Mac")) {
             const input = options.host.querySelector("textarea");
+            const handleOptionKey = (event: KeyboardEvent) =>
+                preserveOptionText(event, terminal);
+
             // These listeners live on wterm's textarea and are released with it on teardown.
-            input?.addEventListener("keydown", preserveOptionText, true);
-            input?.addEventListener("keyup", preserveOptionText, true);
+            input?.addEventListener("keydown", handleOptionKey, true);
+            input?.addEventListener("keyup", handleOptionKey, true);
         }
 
         return { terminal, core };

@@ -234,6 +234,86 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await expect.poll(() => inputFrames.at(-1)).toBe("\x1b[1;3D");
     });
 
+    test("stays scrolled to the prompt when typing macOS Option characters", async ({
+        page,
+    }) => {
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "platform", {
+                get: () => "MacIntel",
+            });
+        });
+        let terminalOutput = "";
+        const inputFrames: string[] = [];
+        page.on("websocket", (socket) => {
+            if (!socket.url().includes("/terminal/ws")) {
+                return;
+            }
+
+            socket.on("framereceived", (event) => {
+                terminalOutput += terminalFrameSchema.parse(event.payload);
+            });
+            socket.on("framesent", (event) => {
+                inputFrames.push(terminalFrameSchema.parse(event.payload));
+            });
+        });
+        await page.goto(ctx.agentBrowserUrl);
+        await page.getByRole("tab", { name: "Terminal" }).click();
+        await page
+            .getByRole("button", { name: "New terminal", exact: true })
+            .click();
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+
+        const terminalHost = page
+            .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+            .filter({ has: page.locator("textarea") });
+
+        await terminalHost.locator("textarea").focus();
+        // Enough output to push the prompt far below where the input was first focused.
+        await page.keyboard.type("seq 1 300; echo scroll-''done");
+        await page.keyboard.press("Enter");
+        await expect.poll(() => terminalOutput).toContain("scroll-done");
+
+        /** Measures how far the shell viewport is from the live prompt at the bottom. */
+        const distanceFromBottom = () =>
+            terminalHost.evaluate(
+                (host) =>
+                    host.scrollHeight - host.scrollTop - host.clientHeight,
+            );
+
+        // The output must leave the viewport on the prompt before the key is typed.
+        await expect.poll(distanceFromBottom).toBeLessThan(5);
+
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: "|",
+            code: "Digit7",
+            text: "|",
+            modifiers: 1,
+        });
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "|",
+            code: "Digit7",
+            modifiers: 1,
+        });
+        // The pipe must still reach the PTY as typed text.
+        await expect.poll(() => inputFrames.at(-1)).toBe("|");
+        // Let the browser finish any caret scroll-into-view from the native text insertion.
+        await terminalHost.evaluate(
+            () =>
+                new Promise<void>((resolve) =>
+                    requestAnimationFrame(() =>
+                        requestAnimationFrame(() => resolve()),
+                    ),
+                ),
+        );
+        // Typing must not jump the viewport back into scrollback away from the prompt.
+        expect(await distanceFromBottom()).toBeLessThan(5);
+    });
+
     test("expands the terminal to the full window without replacing its session", async ({
         page,
     }) => {
