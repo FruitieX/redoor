@@ -59,7 +59,7 @@ pub(crate) const CP: &str = "Examples:
   redoor remote cp -r workstation:/srv/app nas:/backups
 
   # Merge into an existing directory, replacing conflicting files
-  redoor remote cp -r --on-existing merge ./site workstation:/var/www
+  redoor remote cp -r --merge ./site workstation:/var/www
 
   # Local file names containing a colon need a ./ prefix
   redoor remote cp ./notes:2024.txt workstation:/tmp";
@@ -108,7 +108,7 @@ pub(crate) const MV: &str = "Examples:
   redoor remote mv workstation:/tmp/report.csv workstation:/srv/archive
 
   # Move a directory to another device, replacing an existing one
-  redoor remote mv --on-existing override workstation:/srv/app nas:/backups/app";
+  redoor remote mv --force workstation:/srv/app nas:/backups/app";
 
 /// Shown by `redoor remote find --help`.
 pub(crate) const FIND: &str = "Examples:

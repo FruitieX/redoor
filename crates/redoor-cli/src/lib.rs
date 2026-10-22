@@ -12,6 +12,7 @@ mod login;
 mod ls;
 mod mkdir;
 mod mv;
+mod progress;
 mod rm;
 mod search;
 mod status;

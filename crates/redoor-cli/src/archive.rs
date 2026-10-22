@@ -1,16 +1,25 @@
 //! Async tar IO keeps payload memory fixed and avoids filesystem work on Tokio's control workers.
 
+use super::progress::TransferCounters;
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use futures_util::Stream;
 use std::{
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// Produces plain tar relative to the destination root; an empty tree is a valid empty archive.
-pub fn stream(root: PathBuf) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+/// Only file content is counted, so progress matches the directory's measured size.
+pub fn stream(
+    root: PathBuf,
+    counters: Arc<TransferCounters>,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::try_stream! {
         let directory = tokio::fs::read_dir(&root).await?;
         let mut stack = vec![directory];
@@ -55,6 +64,7 @@ pub fn stream(root: PathBuf) -> impl Stream<Item = Result<Bytes, std::io::Error>
                     let count = file.read(&mut buffer[..limit]).await?;
                     if count == 0 { Err(std::io::Error::other("Archive source shrank during upload"))?; }
                     remaining -= count as u64;
+                    counters.bytes.fetch_add(count as u64, Ordering::Relaxed);
                     yield Bytes::copy_from_slice(&buffer[..count]);
                 }
                 let padding = (512 - metadata.len() % 512) % 512;
@@ -86,10 +96,12 @@ fn relative_member(path: &Path, root: &str) -> Result<PathBuf> {
 }
 
 /// Extracts only regular files/directories into private staging; validates tar end markers and drains gzip trailers.
+/// `bytes` counts extracted file content so progress matches the source directory's size.
 pub async fn extract<R: AsyncRead + Unpin>(
     reader: &mut R,
     destination: &Path,
     root: &str,
+    bytes: &AtomicU64,
 ) -> Result<()> {
     let mut long_name = None;
     loop {
@@ -161,6 +173,7 @@ pub async fn extract<R: AsyncRead + Unpin>(
                     .await?;
                 let copied = tokio::io::copy(&mut reader.take(size), &mut file).await?;
                 ensure!(copied == size, "Truncated archive member");
+                bytes.fetch_add(copied, Ordering::Relaxed);
                 file.flush().await?;
                 tokio::fs::set_permissions(
                     &output,
@@ -200,9 +213,14 @@ mod tests {
         let valid = fixture(tar::EntryType::Regular, "root/file", b"payload");
         let destination = root.path().join("valid");
         tokio::fs::create_dir(&destination).await.unwrap();
-        extract(&mut valid.as_slice(), &destination, "root")
-            .await
-            .unwrap();
+        extract(
+            &mut valid.as_slice(),
+            &destination,
+            "root",
+            &AtomicU64::new(0),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             tokio::fs::read(destination.join("file")).await.unwrap(),
             b"payload",
@@ -227,9 +245,14 @@ mod tests {
             let destination = root.path().join(index.to_string());
             tokio::fs::create_dir(&destination).await.unwrap();
             assert!(
-                extract(&mut archive.as_slice(), &destination, "root")
-                    .await
-                    .is_err(),
+                extract(
+                    &mut archive.as_slice(),
+                    &destination,
+                    "root",
+                    &AtomicU64::new(0)
+                )
+                .await
+                .is_err(),
                 "truncated, linked, and unexpected-root archives must fail before publication"
             );
         }
@@ -244,11 +267,16 @@ mod tests {
         let mut corrupt = valid;
         corrupt[0] ^= 1;
         assert!(
-            extract(&mut corrupt.as_slice(), root.path(), "root")
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("checksum"),
+            extract(
+                &mut corrupt.as_slice(),
+                root.path(),
+                "root",
+                &AtomicU64::new(0)
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("checksum"),
             "header corruption must not silently redirect extracted members"
         );
     }
@@ -261,7 +289,7 @@ mod tests {
             .await
             .unwrap();
         file.set_len(4 * 1024 * 1024).await.unwrap();
-        let mut chunks = Box::pin(stream(root.path().to_owned()));
+        let mut chunks = Box::pin(stream(root.path().to_owned(), Default::default()));
         let mut count = 0;
         while let Some(chunk) = chunks.try_next().await.unwrap() {
             assert!(
@@ -277,7 +305,10 @@ mod tests {
         );
         let empty = root.path().join("empty");
         tokio::fs::create_dir(&empty).await.unwrap();
-        let chunks = stream(empty).try_collect::<Vec<_>>().await.unwrap();
+        let chunks = stream(empty, Default::default())
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
         assert_eq!(
             chunks.concat(),
             vec![0; 1024],

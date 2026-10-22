@@ -3,10 +3,7 @@
 //! The bytes never pass through the CLI; the server renames on one device or copies and then
 //! deletes the source, and the CLI follows the transfer's progress like `cp` does.
 
-use std::{
-    path::Path,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{path::Path, sync::atomic::Ordering};
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -15,16 +12,16 @@ use reqwest::Method;
 
 use super::{
     client::RemoteClient,
-    copy::{ExistingMode, Location},
+    copy::{ExistingArgs, Location},
     credentials::CredentialStore,
+    progress::TransferCounters,
 };
 
 /// Arguments of `mv`.
 #[derive(Args)]
 pub(crate) struct MvArgs {
-    /// Policy for the resulting path after destination-directory resolution.
-    #[arg(long, value_enum, default_value = "error")]
-    on_existing: ExistingMode,
+    #[command(flatten)]
+    existing: ExistingArgs,
     /// Print one terminal JSON result.
     #[arg(long)]
     json: bool,
@@ -36,8 +33,8 @@ pub(crate) struct MvArgs {
 
 /// Moves one path and waits for the move to finish.
 pub(crate) async fn run(store: CredentialStore, args: MvArgs) -> Result<()> {
-    let bytes = AtomicU64::new(0);
-    let result = execute(&store, &args, &bytes).await;
+    let counters = TransferCounters::default();
+    let result = execute(&store, &args, &counters).await;
     if args.json {
         println!(
             "{}",
@@ -46,7 +43,7 @@ pub(crate) async fn run(store: CredentialStore, args: MvArgs) -> Result<()> {
                 "source": args.source,
                 "destination": args.destination,
                 "resolved_destination": result.as_ref().ok(),
-                "bytes_transferred": bytes.load(Ordering::Relaxed),
+                "bytes_transferred": counters.bytes.load(Ordering::Relaxed),
                 "error": result.as_ref().err().map(|error| format!("{error:#}")),
             })
         );
@@ -55,7 +52,11 @@ pub(crate) async fn run(store: CredentialStore, args: MvArgs) -> Result<()> {
 }
 
 /// Resolves the destination, admits the move and follows it to the end.
-async fn execute(store: &CredentialStore, args: &MvArgs, bytes: &AtomicU64) -> Result<String> {
+async fn execute(
+    store: &CredentialStore,
+    args: &MvArgs,
+    counters: &TransferCounters,
+) -> Result<String> {
     let source = Location::remote(&args.source).await?;
     let mut destination = Location::remote(&args.destination).await?;
     let client = RemoteClient::load(store).await?;
@@ -78,7 +79,7 @@ async fn execute(store: &CredentialStore, args: &MvArgs, bytes: &AtomicU64) -> R
     let request = MoveFileRequest {
         source,
         dest: destination.clone(),
-        on_existing: args.on_existing.into(),
+        on_existing: args.existing.mode(),
         resume: Default::default(),
     };
     let response = client
@@ -90,7 +91,7 @@ async fn execute(store: &CredentialStore, args: &MvArgs, bytes: &AtomicU64) -> R
         .await?;
     let admitted: MoveFileResponse = serde_json::from_slice(&response.bytes().await?)?;
     client
-        .wait_for_transfer(admitted.move_request_id, bytes)
+        .wait_for_transfer(admitted.move_request_id, counters)
         .await??;
     Ok(format!("{}:{}", destination.agent, destination.path))
 }

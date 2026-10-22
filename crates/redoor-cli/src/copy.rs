@@ -1,15 +1,19 @@
 //! One transfer command resolves copy-style destinations before choosing the existing REST transport.
 
-use super::client::{RemoteApiError, RemoteClient};
+use super::{
+    client::{RemoteApiError, RemoteClient},
+    progress::{ProgressLine, TransferCounters},
+};
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Args, ValueEnum};
+use clap::Args;
 use futures_util::{StreamExt, TryStreamExt};
-use redoor_core::destination::{
-    check_existing_destination, place_temp_at_destination, remove_existing_path,
+use redoor_core::{
+    destination::{check_existing_destination, place_temp_at_destination, remove_existing_path},
+    directory_measurement::measure_directory,
 };
 use redoor_protocol::{
     api::{
-        files::MetadataResponse,
+        files::{DirectorySizeResponse, MetadataResponse},
         transfers::{
             CopyEndpoint, CopyExistingMode, CopyFileRequest, CopyFileResponse,
             TransferProgressListResponse, TransferProgressState,
@@ -19,32 +23,34 @@ use redoor_protocol::{
 };
 use reqwest::{Method, StatusCode};
 use std::{
+    io::IsTerminal,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
 };
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
-/// Keeps supported conflict policies explicit in command help and consistent across all transports.
-#[derive(Clone, Copy, ValueEnum)]
-pub enum ExistingMode {
-    /// Reject existing resulting paths (the default).
-    Error,
-    /// Replace the resulting path entirely.
-    Override,
-    /// Merge directories, replacing conflicting files.
-    Merge,
+/// Two short flags, like `cp -f`, instead of a policy value. Rejecting an existing path stays
+/// the default, so replacing or merging is always an explicit choice.
+#[derive(Args, Clone, Copy)]
+pub(crate) struct ExistingArgs {
+    /// Replace an existing resulting path entirely instead of failing.
+    #[arg(short = 'f', long, conflicts_with = "merge")]
+    force: bool,
+    /// Merge into an existing directory, replacing conflicting files, instead of failing.
+    #[arg(short = 'm', long)]
+    merge: bool,
 }
 
-impl From<ExistingMode> for CopyExistingMode {
-    /// Adapts CLI spelling to the existing API policy without changing its meaning.
-    fn from(value: ExistingMode) -> Self {
-        match value {
-            ExistingMode::Error => Self::Error,
-            ExistingMode::Override => Self::Override,
-            ExistingMode::Merge => Self::Merge,
+impl ExistingArgs {
+    /// Maps the flags to the API policy every transport shares.
+    pub(crate) fn mode(self) -> CopyExistingMode {
+        if self.force {
+            CopyExistingMode::Override
+        } else if self.merge {
+            CopyExistingMode::Merge
+        } else {
+            CopyExistingMode::Error
         }
     }
 }
@@ -55,9 +61,8 @@ pub struct CopyArgs {
     /// Copy directory trees using streaming archives.
     #[arg(short = 'r', long)]
     recursive: bool,
-    /// Policy for the resulting path after destination-directory resolution.
-    #[arg(long, value_enum, default_value = "error")]
-    on_existing: ExistingMode,
+    #[command(flatten)]
+    existing: ExistingArgs,
     /// Suppress progress and successful completion messages.
     #[arg(long)]
     quiet: bool,
@@ -69,7 +74,7 @@ pub struct CopyArgs {
 }
 
 /// Separates remote syntax from local colon filenames without guessing agent names from the server.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Location {
     Local(PathBuf),
     Remote(CopyEndpoint),
@@ -138,7 +143,9 @@ struct Transfer {
     remote_id: Option<TransferId>,
     /// Identifies this HTTP upload through the server's post-body publication phase.
     upload_token: Option<uuid::Uuid>,
-    bytes: Arc<AtomicU64>,
+    counters: Arc<TransferCounters>,
+    /// Measures a directory beside the transfer; aborted at cleanup if still walking.
+    sizing: Option<tokio::task::JoinHandle<()>>,
     /// Admission must finish to recover the server-owned id even if interrupted during POST.
     admission: Option<tokio::task::JoinHandle<Result<TransferId>>>,
     /// Completed local staging is published outside the interruptible streaming region.
@@ -148,6 +155,9 @@ struct Transfer {
 impl Transfer {
     /// Handles both stream-driven server cancellation and explicit asynchronous copy cancellation.
     async fn cleanup(&mut self, client: &RemoteClient, failed: bool) -> Result<()> {
+        if let Some(sizing) = self.sizing.take() {
+            sizing.abort();
+        }
         if let Some(creation) = self.staging_creation.take() {
             self.staging = Some(creation.await??);
         }
@@ -240,6 +250,12 @@ impl Transfer {
             !directory || args.recursive,
             "Source is a directory; use -r or --recursive"
         );
+        match (&source, &destination) {
+            // Server-side copies report their own total through transfer progress.
+            (Location::Remote(_), Location::Remote(_)) => {}
+            _ if directory => self.start_sizing(client, &source),
+            _ => self.counters.total.store(size, Ordering::Relaxed),
+        }
         match &mut destination {
             Location::Local(path) => match tokio::fs::metadata(&path).await {
                 Ok(metadata) if metadata.is_dir() => *path = path.join(basename),
@@ -254,7 +270,7 @@ impl Transfer {
             },
             Location::Remote(remote) => client.resolve_destination(remote, basename).await?,
         }
-        let policy = args.on_existing.into();
+        let policy = args.existing.mode();
         match (&source, &destination) {
             (Location::Local(path), Location::Remote(remote)) => {
                 self.upload(client, path, remote, directory, size, policy)
@@ -273,6 +289,27 @@ impl Transfer {
             Location::Local(path) => path.display().to_string(),
             Location::Remote(remote) => format!("{}:{}", remote.agent, remote.path),
         })
+    }
+
+    /// Directory totals come from a walk running beside the transfer, so a large tree starts
+    /// moving immediately. A failed walk only costs the percentage, never the copy.
+    fn start_sizing(&mut self, client: &RemoteClient, source: &Location) {
+        let client = client.clone();
+        let source = source.clone();
+        let counters = self.counters.clone();
+        self.sizing = Some(tokio::spawn(async move {
+            let size = match source {
+                Location::Local(path) => measure_directory(&path, false, &CancellationToken::new())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|measurement| measurement.content_bytes),
+                Location::Remote(remote) => client.directory_size(&remote).await.ok(),
+            };
+            if let Some(size) = size {
+                counters.total.store(size, Ordering::Relaxed);
+            }
+        }));
     }
 
     /// Streams raw bytes or a generated archive without a producer task that could outlive cancellation.
@@ -301,11 +338,9 @@ impl Transfer {
         let token = uuid::Uuid::new_v4();
         self.upload_token = Some(token);
         let builder = builder.header("X-Redoor-Upload-Request", token.to_string());
-        let counter = self.bytes.clone();
+        let counters = self.counters.clone();
         let builder = if directory {
-            let stream = super::archive::stream(source.to_owned()).inspect_ok(move |bytes| {
-                counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-            });
+            let stream = super::archive::stream(source.to_owned(), counters);
             builder
                 .header("Content-Type", "application/x-tar")
                 .body(reqwest::Body::wrap_stream(stream))
@@ -313,7 +348,9 @@ impl Transfer {
             let file = tokio::fs::File::open(source).await?;
             let stream = tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024).inspect_ok(
                 move |bytes| {
-                    counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    counters
+                        .bytes
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                 },
             );
             builder
@@ -372,11 +409,16 @@ impl Transfer {
         let response = client
             .send(client.request(Method::GET, &client.agent_path(source, "raw")?)?)
             .await?;
-        let counter = self.bytes.clone();
+        // Directories count extracted file content instead of gzip bytes to match their total.
+        let counters = (!directory).then(|| self.counters.clone());
         let stream = response.bytes_stream().map(move |chunk| {
             chunk
                 .inspect(|bytes| {
-                    counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    if let Some(counters) = &counters {
+                        counters
+                            .bytes
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    }
                 })
                 .map_err(std::io::Error::other)
         });
@@ -387,7 +429,7 @@ impl Transfer {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .context("Archive source needs a basename")?;
-            super::archive::extract(&mut gzip, &staging, root).await?;
+            super::archive::extract(&mut gzip, &staging, root, &self.counters.bytes).await?;
         } else {
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
@@ -434,7 +476,7 @@ impl Transfer {
         self.admission = None;
         let id = admitted??;
         self.remote_id = Some(id);
-        let outcome = client.wait_for_transfer(id, &self.bytes).await?;
+        let outcome = client.wait_for_transfer(id, &self.counters).await?;
         // A finished transfer needs no cancellation, whether it succeeded or not.
         self.remote_id = None;
         outcome
@@ -447,7 +489,7 @@ impl RemoteClient {
     pub(crate) async fn wait_for_transfer(
         &self,
         id: TransferId,
-        bytes: &AtomicU64,
+        counters: &TransferCounters,
     ) -> Result<Result<()>> {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
         loop {
@@ -459,7 +501,10 @@ impl RemoteClient {
                 .into_iter()
                 .find(|entry| entry.request_id == id)
                 .context("Transfer progress disappeared before completion")?;
-            bytes.store(entry.transferred_bytes, Ordering::Relaxed);
+            counters
+                .bytes
+                .store(entry.transferred_bytes, Ordering::Relaxed);
+            counters.total.store(entry.total_bytes, Ordering::Relaxed);
             match entry.state {
                 TransferProgressState::Completed => return Ok(Ok(())),
                 TransferProgressState::Errored | TransferProgressState::Canceled => {
@@ -489,6 +534,18 @@ impl RemoteClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Recursive regular-file bytes, the same quantity directory transfers count.
+    async fn directory_size(&self, endpoint: &CopyEndpoint) -> Result<u64> {
+        let response = self
+            .send(
+                self.request(Method::POST, &self.agent_path(endpoint, "directory-size")?)?
+                    .timeout(std::time::Duration::from_secs(30)),
+            )
+            .await?;
+        let size: DirectorySizeResponse = serde_json::from_slice(&response.bytes().await?)?;
+        Ok(size.size)
     }
 
     /// Applies copy-style destination rules: an existing directory receives the source's
@@ -523,17 +580,18 @@ async fn interrupted() -> Result<()> {
 
 /// Waits by default and guarantees one final JSON object, including failures and interruption.
 pub async fn run(store: super::credentials::CredentialStore, args: CopyArgs) -> Result<()> {
+    let mut line = ProgressLine::new(!args.quiet && !args.json && std::io::stderr().is_terminal());
     let client = match RemoteClient::load(&store).await {
         Ok(client) => client,
         Err(error) => {
             let result = Err(error);
-            print_result(&args, &result, 0)?;
+            print_result(&args, &result, 0, &line)?;
             return result.map(|_| ());
         }
     };
     let mut transfer = Transfer::default();
-    let bytes = transfer.bytes.clone();
-    let mut progress = tokio::time::interval(std::time::Duration::from_secs(1));
+    let counters = transfer.counters.clone();
+    let mut progress = tokio::time::interval(std::time::Duration::from_millis(500));
     let mut result = {
         let operation = transfer.execute(&client, &args);
         tokio::pin!(operation);
@@ -544,7 +602,7 @@ pub async fn run(store: super::credentials::CredentialStore, args: CopyArgs) -> 
                 biased;
                 signal = &mut interrupt => break signal.and_then(|_| Err(anyhow::anyhow!("Transfer interrupted"))),
                 result = &mut operation => break result,
-                _ = progress.tick() => report_progress(&args, &bytes),
+                _ = progress.tick() => line.draw(&counters),
             }
         }
     };
@@ -568,12 +626,23 @@ pub async fn run(store: super::credentials::CredentialStore, args: CopyArgs) -> 
                 .unwrap_or_else(|| "Transfer completed".into())
         )),
     };
-    print_result(&args, &result, bytes.load(Ordering::Relaxed))?;
+    line.clear();
+    print_result(
+        &args,
+        &result,
+        counters.bytes.load(Ordering::Relaxed),
+        &line,
+    )?;
     result.map(|_| ())
 }
 
 /// Includes authentication and preflight failures in the same terminal JSON contract as payload failures.
-fn print_result(args: &CopyArgs, result: &Result<String>, bytes: u64) -> Result<()> {
+fn print_result(
+    args: &CopyArgs,
+    result: &Result<String>,
+    bytes: u64,
+    line: &ProgressLine,
+) -> Result<()> {
     if args.json {
         println!(
             "{}",
@@ -582,17 +651,7 @@ fn print_result(args: &CopyArgs, result: &Result<String>, bytes: u64) -> Result<
             )?
         );
     } else if result.is_ok() && !args.quiet {
-        eprintln!("Copy completed ({bytes} bytes)");
+        eprintln!("{}", line.summary(bytes));
     }
     Ok(())
-}
-
-/// Progress remains human-readable stderr and never contaminates scripted stdout.
-fn report_progress(args: &CopyArgs, bytes: &AtomicU64) {
-    if !args.quiet && !args.json {
-        eprintln!(
-            "Copying: {} bytes transferred",
-            bytes.load(Ordering::Relaxed)
-        );
-    }
 }

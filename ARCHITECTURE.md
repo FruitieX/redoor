@@ -163,6 +163,12 @@ keeps file content inline and capped at 64 KiB.
   `REDOOR_REMOTE_TOKEN` override it, so CI jobs and AI agents need no saved login.
 - `login`: `LoginFlow` behind a `Prompter` trait (dialoguer on a terminal, scripted answers
   in tests). Every prompt also has a flag, so the same command works in scripts.
+- `progress`: the single redrawn stderr line of `cp`, shown only when stderr is a terminal so
+  logs and pipes get no carriage-return noise. Directory transfers count file content bytes
+  rather than tar or gzip bytes, because that is what the directory sizes (a local
+  `directory_measurement` walk, or the agent's `directory-size` endpoint) report. The size
+  walk runs beside the transfer, so a large tree starts moving at once and the percentage
+  appears when the walk finishes.
 
 ### `redoor`
 

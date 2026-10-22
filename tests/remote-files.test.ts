@@ -238,6 +238,24 @@ describe("Remote CLI file commands", () => {
         expect(await fs.readFile(path.join(secondRoot, "moved.txt"), "utf8")).toBe(
             "moving",
         );
+
+        const replacement = path.join(root, "replacement.txt");
+        await fs.writeFile(replacement, "replaced");
+        const target = at(path.join(secondRoot, "moved.txt"), secondId);
+
+        const refused = await remote(["mv", at(replacement), target]);
+
+        // An existing destination is only replaced when explicitly asked for.
+        expect(refused.exitCode).not.toBe(0);
+        expect(existsSync(replacement)).toBe(true);
+
+        const forced = await remote(["mv", "-f", at(replacement), target]);
+
+        // --force replaces the existing destination with the moved file.
+        expect(forced.exitCode, forced.stderr).toBe(0);
+        expect(await fs.readFile(path.join(secondRoot, "moved.txt"), "utf8")).toBe(
+            "replaced",
+        );
     });
 
     it("finds names and greps contents", async () => {

@@ -118,10 +118,15 @@ describe("Remote cp and streaming archive upload", () => {
         expect(JSON.parse(conflict.stdout).status).toBe("failed");
         await fs.writeFile(source, "replacement");
 
+        const contradictory = await cp("-f", "-m", source, remote);
+
+        // Replacing and merging contradict each other, so the parser must refuse before any transfer.
+        expect(contradictory.exitCode).not.toBe(0);
+        expect(contradictory.stderr).toContain("cannot be used with");
+
         const overwrite = await cp(
             "--quiet",
-            "--on-existing",
-            "override",
+            "--force",
             source,
             remote,
         );
@@ -178,14 +183,16 @@ describe("Remote cp and streaming archive upload", () => {
         expect(JSON.parse(downloadConflict.stdout).status).toBe("failed");
 
         const merge = await cp(
-            "--quiet",
-            "--on-existing",
-            "merge",
+            "-m",
             `${secondId}:${second}`,
             downloadDirectory,
         );
 
         expect(merge.exitCode, merge.stderr).toBe(0);
+        // Without a terminal the redrawn progress line stays off, leaving one human-readable summary.
+        expect(merge.stderr).toMatch(
+            /^Copy completed: 11 B in \d+\.\ds \(\d+(\.\d)? (B|KiB|MiB)\/s\)\n$/,
+        );
 
         const badRemote = await cp(
             "--json",
@@ -323,8 +330,7 @@ describe("Remote cp and streaming archive upload", () => {
         const merged = await cp(
             "-r",
             "--quiet",
-            "--on-existing",
-            "merge",
+            "--merge",
             `${secondId}:${secondPath}`,
             local,
         );
@@ -338,8 +344,7 @@ describe("Remote cp and streaming archive upload", () => {
         const overridden = await cp(
             "-r",
             "--quiet",
-            "--on-existing",
-            "override",
+            "--force",
             `${secondId}:${secondPath}`,
             local,
         );
