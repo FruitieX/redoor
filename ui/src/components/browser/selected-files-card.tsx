@@ -26,6 +26,7 @@ import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
 import type { Agent, ApiClient } from "#ui/api-client";
 import type { CopyExistingMode } from "#bindings/CopyExistingMode";
+import type { LsEntry } from "#bindings/LsEntry";
 import { invalidateAgentData } from "#ui/queries";
 import { waitForTransfers } from "#ui/transfer-wait";
 import {
@@ -281,7 +282,7 @@ function TransferSelectedFilesAction(props: {
     agents: Agent[];
     destinationAgent: Agent;
     directoryPath: string;
-    destinationFileNames: string[];
+    destinationEntries: LsEntry[];
     isSiblingTransferring: boolean;
     onTransferringChange: (isTransferring: boolean) => void;
     children: (trigger: SelectedFilesTransferTriggerApi) => React.ReactNode;
@@ -454,7 +455,7 @@ function TransferSelectedFilesAction(props: {
                 selectedFiles={selectedFiles}
                 destinationAgent={props.destinationAgent}
                 directoryPath={props.directoryPath}
-                destinationFileNames={props.destinationFileNames}
+                destinationEntries={props.destinationEntries}
                 canTransfer={canTransfer}
                 onConfirm={(mode, resume, destinationNames) =>
                     void transferSelectedFiles(mode, resume, destinationNames)
@@ -616,7 +617,7 @@ export function SelectedFilesCard(props: {
     agents: Agent[];
     destinationAgent: Agent;
     directoryPath: string;
-    destinationFileNames: string[];
+    destinationEntries: LsEntry[];
 }) {
     const queryClient = useQueryClient();
     const selectedFiles = useAtomValue(selectedFilesAtom);
@@ -665,7 +666,7 @@ export function SelectedFilesCard(props: {
                 agents={props.agents}
                 destinationAgent={props.destinationAgent}
                 directoryPath={props.directoryPath}
-                destinationFileNames={props.destinationFileNames}
+                destinationEntries={props.destinationEntries}
                 isSiblingTransferring={busyTransferOperation === "move"}
                 onTransferringChange={(isTransferring) =>
                     setBusyTransferOperation(isTransferring ? "copy" : null)
@@ -678,7 +679,7 @@ export function SelectedFilesCard(props: {
                         agents={props.agents}
                         destinationAgent={props.destinationAgent}
                         directoryPath={props.directoryPath}
-                        destinationFileNames={props.destinationFileNames}
+                        destinationEntries={props.destinationEntries}
                         isSiblingTransferring={busyTransferOperation === "copy"}
                         onTransferringChange={(isTransferring) =>
                             setBusyTransferOperation(

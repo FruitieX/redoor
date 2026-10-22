@@ -391,10 +391,21 @@ test.describe.serial("Copy Operations", () => {
         await expect(
             dialog.getByRole("radio", { name: /^Keep existing/ }),
         ).toHaveCount(0);
+        // Merging a file into a file is just replacing it, so only directories offer Merge.
+        await expect(
+            dialog.getByRole("radio", {
+                name: "Merge directories and replace files",
+            }),
+        ).toHaveCount(0);
 
         const nameField = dialog.getByRole("textbox", {
             name: `New name for ${sourceName}`,
         });
+
+        // The hint must say the existing item survives, since Rename never overwrites.
+        await expect(
+            dialog.getByText(`The existing ${sourceName} is kept.`),
+        ).toBeVisible();
 
         // The counter goes before the extension and skips names already in the directory.
         await expect(nameField).toHaveValue(`${stem}_3.txt`);

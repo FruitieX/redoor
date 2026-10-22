@@ -20,7 +20,7 @@ import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { Select } from "#ui/components/select";
 import { Tooltip } from "#ui/components/tooltip";
 import { ViewCardHeader } from "#ui/components/view-card-header";
-import { DestinationConflictDialog } from "#ui/components/browser/selected-files-transfer-dialog";
+import { DestinationConflictDialog } from "#ui/components/browser/destination-conflict";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
 import { getPathLoadError } from "#ui/components/browser/utils";
 import {
@@ -28,6 +28,7 @@ import {
     watchedTransfersQueryOptions,
 } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
+import { isLsDirectoryResponse } from "#ui/ls-response";
 import {
     expandHomePath,
     formatSize,
@@ -139,22 +140,34 @@ function shortenSyncPath(agent: Agent, path: string): string {
     return path;
 }
 
-/** 404 means Copy/Move can start immediately; any other failure must stay visible. */
-async function destinationExists(agent: Agent, path: string): Promise<boolean> {
+/**
+ * 404 means Copy/Move can start immediately; any other failure must stay visible. The type
+ * of an existing destination decides whether merging into it is offered.
+ */
+async function getDestinationEntryType(
+    agent: Agent,
+    path: string,
+): Promise<"file" | "directory" | null> {
     try {
-        await agent.ls(path);
-
-        return true;
+        return isLsDirectoryResponse(await agent.ls(path))
+            ? "directory"
+            : "file";
     } catch (error) {
         const pathError = getPathLoadError(error);
 
         if (pathError?.type === "missing") {
-            return false;
+            return null;
         }
 
         throw error;
     }
 }
+
+/** An existing destination waiting for the user's conflict choice; its type decides Merge. */
+type SyncConflict = {
+    operation: TransferOperation;
+    destinationEntryType: "file" | "directory";
+};
 
 /** Owns the stable current endpoint and editable peer endpoint before direction reorders them. */
 function useSyncEndpointSelection(props: {
@@ -358,8 +371,9 @@ function useSyncWorkspace(props: {
         React.useState<TransferOperation | null>(null);
 
     // The destination exists, so the user must choose a conflict policy first.
-    const [conflictOperation, setConflictOperation] =
-        React.useState<TransferOperation | null>(null);
+    const [conflict, setConflict] = React.useState<SyncConflict | null>(null);
+
+    const conflictOperation = conflict?.operation ?? null;
 
     const transferMutation = useMutation({
         mutationFn: async (request: {
@@ -410,22 +424,21 @@ function useSyncWorkspace(props: {
     });
 
     const prepareTransferMutation = useMutation({
-        mutationFn: async (operation: TransferOperation) => {
+        // The operation is only carried as the mutation's variables for `onSuccess`.
+        mutationFn: async (_operation: TransferOperation) => {
             if (destinationEndpoint === null) {
                 throw new Error("Selected device is unavailable");
             }
 
-            const exists = await destinationExists(
+            return getDestinationEntryType(
                 destinationEndpoint.agent,
                 destinationEndpoint.path,
             );
-
-            return { operation, exists };
         },
-        onSuccess: (result) => {
-            if (!result.exists) {
+        onSuccess: (destinationEntryType, operation) => {
+            if (destinationEntryType === null) {
                 transferMutation.mutate({
-                    operation: result.operation,
+                    operation,
                     mode: "error",
                     newName: null,
                 });
@@ -433,7 +446,7 @@ function useSyncWorkspace(props: {
                 return;
             }
 
-            setConflictOperation(result.operation);
+            setConflict({ operation, destinationEntryType });
         },
     });
 
@@ -492,7 +505,7 @@ function useSyncWorkspace(props: {
     /** Endpoint edits make previous comparisons and terminal transfer reports misleading. */
     const resetFeedback = () => {
         setConfirmationOperation(null);
-        setConflictOperation(null);
+        setConflict(null);
         prepareTransferMutation.reset();
         transferMutation.reset();
         diff.reset();
@@ -569,14 +582,15 @@ function useSyncWorkspace(props: {
             startTransfer(confirmationOperation);
         },
         conflictOperation,
-        cancelConflict: () => setConflictOperation(null),
+        conflictDestinationType: conflict?.destinationEntryType ?? null,
+        cancelConflict: () => setConflict(null),
         /** Starts the transfer that found an existing destination, with the chosen policy. */
         resolveConflict: (mode: CopyExistingMode, newName: string | null) => {
             if (conflictOperation === null) {
                 return;
             }
 
-            setConflictOperation(null);
+            setConflict(null);
             transferMutation.mutate({
                 operation: conflictOperation,
                 mode,
@@ -1007,6 +1021,12 @@ export function SyncView(props: {
                         workspace.destinationEndpoint?.path ?? "",
                     )}
                     entryType={props.entryType}
+                    // Merge needs a directory on both sides; this page's entry stands in for
+                    // the peer, whose type is not looked up.
+                    canMerge={
+                        workspace.conflictDestinationType === "directory" &&
+                        props.entryType === "directory"
+                    }
                     onClose={workspace.cancelConflict}
                     onConfirm={workspace.resolveConflict}
                 />
