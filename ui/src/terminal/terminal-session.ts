@@ -166,9 +166,67 @@ export class TerminalSession {
             "aria-label",
             `${options.title} for ${options.agent.name}`,
         );
+        // wterm moves a host tabindex onto its input and makes the host itself focusable with
+        // -1. Without that, a drag-selection blurs the input to <body>, which hides the focus
+        // frame and lets the page's file-import paste handler claim the next paste.
+        this.element.setAttribute("tabindex", "0");
         this.element.className =
-            "terminal-host h-full w-full caret-transparent";
+            "terminal-host h-full w-full caret-transparent outline-none";
         applyTerminalTheme(this.element, this.theme);
+        this.element.addEventListener("keydown", (event) =>
+            this.handleHostKeyDown(event),
+        );
+        this.element.addEventListener("paste", (event) =>
+            this.handleHostPaste(event),
+        );
+    }
+
+    /**
+     * wterm releases its input after a mouse selection so native Copy works, leaving focus on
+     * the host. Copy keys stay on the host to keep the selection; any other key returns focus
+     * to the input before the browser delivers the text or paste that the key produces.
+     */
+    private handleHostKeyDown(event: KeyboardEvent): void {
+        if (event.target !== this.element) {
+            return;
+        }
+
+        const isModifierOnly = [
+            "Shift",
+            "Control",
+            "Alt",
+            "AltGraph",
+            "Meta",
+        ].includes(event.key);
+
+        const isCopy =
+            (event.ctrlKey || event.metaKey) &&
+            !event.altKey &&
+            event.key.toLowerCase() === "c";
+
+        if (!isModifierOnly && !isCopy) {
+            this.focus();
+        }
+    }
+
+    /**
+     * Sends pastes that land on the host itself to the shell instead of the file importer,
+     * then hands focus back to the input so the keys that follow reach the shell too.
+     */
+    private handleHostPaste(event: ClipboardEvent): void {
+        if (event.target !== this.element) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        const text = event.clipboardData?.getData("text/plain") ?? "";
+
+        if (text) {
+            this.paste(text);
+        }
+
+        this.focus();
     }
 
     /** The current tab data; its identity only changes with the state. */

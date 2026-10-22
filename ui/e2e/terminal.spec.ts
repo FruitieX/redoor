@@ -936,6 +936,116 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await expect.poll(() => terminalOutput).toContain("paste-ok");
     });
 
+    test("keeps keyboard focus in the terminal after selecting text with the mouse", async ({
+        page,
+    }) => {
+        let terminalOutput = "";
+        page.on("websocket", (socket) => {
+            if (!socket.url().includes("/terminal/ws")) {
+                return;
+            }
+
+            socket.on("framereceived", (event) => {
+                terminalOutput += terminalFrameSchema.parse(event.payload);
+            });
+        });
+
+        await page.goto(ctx.agentBrowserUrl);
+        await page.getByRole("tab", { name: "Terminal" }).click();
+        await page
+            .getByRole("button", { name: "New terminal", exact: true })
+            .click();
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+
+        const terminalInput = page.getByRole("textbox", {
+            name: `agent1_src 1 for ${ctx.agentName}`,
+        });
+
+        const terminalHost = terminalInput.filter({
+            has: page.locator("textarea"),
+        });
+
+        const terminalPanel = page.getByRole("tabpanel", {
+            name: "agent1_src 1",
+        });
+
+        await terminalHost.locator("textarea").focus();
+        // Octal escapes print the marker without putting it in the echoed command.
+        await page.keyboard.type(
+            "printf '\\163\\145\\154\\145\\143\\164\\055\\155\\145\\n'",
+        );
+        await page.keyboard.press("Enter");
+        await expect.poll(() => terminalOutput).toContain("select-me");
+
+        /** Drags across the printed marker the way a user selects text to copy. */
+        const selectMarker = async () => {
+            const box = await terminalHost
+                .getByText("select-me", { exact: true })
+                .first()
+                .boundingBox();
+
+            if (!box) {
+                throw new Error("selected terminal row is not rendered");
+            }
+
+            await page.mouse.move(box.x + 1, box.y + box.height / 2);
+            await page.mouse.down();
+            await page.mouse.move(
+                box.x + box.width - 1,
+                box.y + box.height / 2,
+                { steps: 5 },
+            );
+            await page.mouse.up();
+            // The drag must produce a real native selection for the browser's Copy action.
+            await expect
+                .poll(() =>
+                    page.evaluate(() => window.getSelection()?.toString()),
+                )
+                .toContain("select");
+            // Selecting releases wterm's input, but focus must stay on the terminal host.
+            await expectTerminalFocused(terminalInput);
+        };
+
+        await selectMarker();
+        // The blue frame must remain while the terminal still owns the keyboard.
+        await expect(terminalPanel).toHaveCSS(
+            "border-color",
+            "oklch(0.623 0.214 259.815)",
+        );
+
+        await page.evaluate(() => {
+            const data = new DataTransfer();
+            data.setData(
+                "text/plain",
+                "printf '\\163\\145\\154\\145\\143\\164\\055\\160\\141\\163\\164\\145\\n'",
+            );
+            document.activeElement?.dispatchEvent(
+                new ClipboardEvent("paste", {
+                    bubbles: true,
+                    cancelable: true,
+                    clipboardData: data,
+                }),
+            );
+        });
+        // A paste while the selection is held must not become a file import.
+        await expect(
+            page.getByRole("dialog", { name: "Save pasted text" }),
+        ).toHaveCount(0);
+        await page.keyboard.press("Enter");
+        // The pasted command must reach the shell, and Enter must follow it into the PTY.
+        await expect.poll(() => terminalOutput).toContain("select-paste");
+
+        await selectMarker();
+        await page.keyboard.type("echo typed-after-select");
+        await page.keyboard.press("Enter");
+        // The first key typed over a selection must reach the shell, not be swallowed by the host.
+        await expect
+            .poll(() => terminalOutput)
+            .toContain("echo typed-after-select");
+    });
+
     test("follows the app light theme without dropping the shell", async ({
         page,
     }) => {
