@@ -89,7 +89,8 @@ function ApplicationMenu() {
             label: "Access tokens",
             ariaLabel: "Manage access tokens",
             icon: KeyRound,
-            exact: true,
+            // Stays highlighted on a token's edit page.
+            exact: false,
         },
     ] as const;
 

@@ -128,32 +128,43 @@ test.describe("Access token settings", () => {
         // The card shows human labels, not raw permission ids.
         await expect(permissionBadges).toHaveText(["Read files"]);
         // Device-scoped tokens list the device by name rather than by id.
-        await expect(card).toContainText(`Devices: ${deviceName}`);
+        await expect(card.getByLabel("Devices", { exact: true })).toHaveText(
+            deviceName,
+        );
         await expect(card.getByText("Active")).toBeVisible();
         // A freshly created token has never been used by a client.
-        await expect(card).toContainText("Last used: Never");
+        await expect(card.getByLabel("Last used", { exact: true })).toHaveText(
+            "Never",
+        );
 
-        await card.getByRole("button", { name: "Edit" }).click();
+        await card.getByRole("link", { name: "Edit" }).click();
+        // Editing is a dedicated page rather than a modal over the list.
+        await expect(page).toHaveURL(
+            new RegExp(`${WEB_BASE_URL}/settings/tokens/[^/]+/edit$`),
+        );
+        await expect(page.getByRole("dialog")).toHaveCount(0);
 
-        const editDialog = page.getByRole("dialog", {
+        const editForm = page.getByRole("form", {
             name: "Edit access token",
         });
 
         // Editing starts from the saved policy.
-        await expect(editDialog.getByLabel("Token name")).toHaveValue(
-            tokenName,
-        );
+        await expect(editForm.getByLabel("Token name")).toHaveValue(tokenName);
         await expect(
-            editDialog.getByRole("radio", { name: /Selected devices/ }),
+            editForm.getByRole("radio", { name: /Selected devices/ }),
         ).toBeChecked();
         await expect(
-            editDialog
+            editForm
                 .getByRole("group", { name: "Selected devices" })
                 .getByRole("checkbox", { name: deviceName, exact: true }),
         ).toBeChecked();
-        await editDialog.getByRole("checkbox", { name: /Write files/ }).click();
-        await editDialog.getByRole("button", { name: "Save changes" }).click();
-        await expect(editDialog).toHaveCount(0);
+        await editForm.getByRole("checkbox", { name: /Write files/ }).click();
+        await editForm.getByRole("button", { name: "Save changes" }).click();
+        // Saving returns to the list and confirms the change.
+        await expect(page).toHaveURL(
+            `${WEB_BASE_URL}/settings/tokens?notice=updated`,
+        );
+        await expect(page.getByRole("status")).toContainText("Token updated");
         // The updated policy is reflected on the card without a new secret.
         await expect(permissionBadges).toHaveText([
             "Read files",
@@ -167,7 +178,9 @@ test.describe("Access token settings", () => {
             "Read files",
             "Write files",
         ]);
-        await expect(card).toContainText(`Devices: ${deviceName}`);
+        await expect(card.getByLabel("Devices", { exact: true })).toHaveText(
+            deviceName,
+        );
 
         await card.getByRole("button", { name: "Rotate" }).click();
         await page
