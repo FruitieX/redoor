@@ -5,6 +5,7 @@ mod archive;
 pub mod client;
 mod copy;
 pub mod credentials;
+mod examples;
 mod exec;
 mod lifecycle;
 mod login;
@@ -24,6 +25,7 @@ use credentials::CredentialStore;
 
 /// Keeps remote utilities separate from server/agent process management.
 #[derive(Args)]
+#[command(after_help = examples::REMOTE)]
 pub struct RemoteArgs {
     #[command(subcommand)]
     command: RemoteCommand,
@@ -34,42 +36,56 @@ pub struct RemoteArgs {
 #[derive(Subcommand)]
 enum RemoteCommand {
     /// Start a server-managed agent, including SSH agents, without waiting for connection.
+    #[command(after_help = examples::START)]
     Start(lifecycle::LifecycleArgs),
     /// Stop a server-managed agent and wait for shutdown cleanup.
+    #[command(after_help = examples::STOP)]
     Stop(lifecycle::LifecycleArgs),
     /// Execute argv without a shell, streaming output until the remote process exits.
+    #[command(after_help = examples::EXEC)]
     Exec(exec::ExecArgs),
     /// Stream files or recursively copy directories between local and device paths.
+    #[command(after_help = examples::CP)]
     Cp(copy::CopyArgs),
     /// List a remote directory (or describe a file).
+    #[command(after_help = examples::LS)]
     Ls(ls::PathArgs),
     /// Show a remote path's metadata.
+    #[command(after_help = examples::STAT)]
     Stat(ls::PathArgs),
     /// Create a remote directory.
+    #[command(after_help = examples::MKDIR)]
     Mkdir(mkdir::MkdirArgs),
     /// Move a remote path to the trash, or delete it permanently.
+    #[command(after_help = examples::RM)]
     Rm(rm::RmArgs),
     /// Move or rename a path on one device or between devices.
+    #[command(after_help = examples::MV)]
     Mv(mv::MvArgs),
     /// Find files and directories by name below a remote directory.
+    #[command(after_help = examples::FIND)]
     Find(search::FindArgs),
     /// Search file contents below a remote directory.
+    #[command(after_help = examples::GREP)]
     Grep(search::GrepArgs),
     /// Log in with the account password, choose the token's permissions and save the token.
+    #[command(after_help = examples::LOGIN)]
     Login(login::TokenRequestArgs),
     /// Revoke the saved token on the server and remove it locally.
+    #[command(after_help = examples::LOGOUT)]
     Logout,
     /// Show the server, token and permissions in use.
+    #[command(after_help = examples::STATUS)]
     Status {
         /// Print the token metadata as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Like login, but print the new token as JSON (for MCP clients) instead of saving it.
-    #[command(name = "create-token")]
+    #[command(name = "create-token", after_help = examples::CREATE_TOKEN)]
     CreateToken(login::TokenRequestArgs),
     /// List device IDs, names, and connection status.
-    #[command(name = "devices")]
+    #[command(name = "devices", after_help = examples::DEVICES)]
     Agents {
         /// Print the complete agent-list API response for scripts.
         #[arg(long)]
