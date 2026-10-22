@@ -3,12 +3,10 @@
 use super::super::flows::{CopyPhase, Flow, FlowId};
 use super::super::state::{CopyContentKind, RouterState};
 use super::copy::CopyRelease;
-use redoor_core::log;
+use redoor_core::{log, log_command_failure};
 use redoor_protocol::wire::command::Command;
 use redoor_protocol::wire::log::Level;
-use redoor_protocol::wire::request::{
-    self, AgentRequest, CommandError, CommandOutcome, DecodeError,
-};
+use redoor_protocol::wire::request::{self, AgentRequest, CommandOutcome, DecodeError};
 
 impl RouterState {
     /// Replaces the finished streams of a published remote move with one control command that
@@ -94,14 +92,14 @@ impl RouterState {
                 );
                 self.mark_copy_transfer_completed(flow.progress_id, None);
             }
-            Err(DecodeError::Failed(CommandError { message, .. })) => {
-                log!(
-                    Level::Debug,
-                    "Smart move source deletion failed: public_request_id={}, message={}",
-                    flow.progress_id,
-                    message
+            Err(DecodeError::Failed(error)) => {
+                // The copy already succeeded, so a failure here leaves the source duplicated.
+                log_command_failure!(
+                    error,
+                    "Smart move source deletion failed: public_request_id={}",
+                    flow.progress_id
                 );
-                self.mark_transfer_errored(flow.progress_id, message);
+                self.mark_transfer_errored(flow.progress_id, error.message);
             }
             Err(DecodeError::Malformed(error)) => {
                 log!(

@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use redoor_core::log;
+use redoor_core::{log, log_error};
 use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::{
@@ -203,8 +203,8 @@ pub(crate) async fn upgrade_agent_handler(
             {
                 Ok(source_path) => source_path,
                 Err(error) => {
-                    log!(
-                        Level::Info,
+                    log_error!(
+                        anyhow::Error::msg(error.to_string()),
                         "Agent upgrade binary preparation failed: agent_id={}, target_version={}, source=published_release, os={}, arch={}, error={}",
                         agent_id,
                         target_version,
@@ -269,12 +269,13 @@ pub(crate) async fn upgrade_agent_handler(
     if let Err(error) =
         upload_upgrade_binary(&state, agent_id.clone(), &source_path, &details.exe_path).await
     {
-        log!(
-            Level::Info,
-            "Agent upgrade binary upload failed: agent_id={}, target_version={}, source={}",
+        log_error!(
+            anyhow::Error::msg(error.to_string()),
+            "Agent upgrade binary upload failed: agent_id={}, target_version={}, source={}, error={}",
             agent_id,
             target_version,
-            binary_source
+            binary_source,
+            error
         );
         return error.into_response();
     }
@@ -307,8 +308,8 @@ pub(crate) async fn upgrade_agent_handler(
                 .into_response()
         }
         Err(error) => {
-            log!(
-                Level::Info,
+            log_error!(
+                anyhow::Error::msg(error.to_string()),
                 "Agent upgrade self-exec failed: agent_id={}, target_version={}, error={}",
                 agent_id,
                 target_version,

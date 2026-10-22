@@ -425,6 +425,46 @@ DeletionDate=2020-01-01T00:00:00
         ).rejects.toThrow();
     });
 
+    it("explains and logs a trash root that is not private", async () => {
+        const source = path.join(root, "loose-trash-root.txt");
+        await fs.writeFile(source, "must remain");
+        await fs.chmod(trashRoot, 0o755);
+        onTestFinished(async () => {
+            await fs.chmod(trashRoot, 0o700);
+            await fs.rm(source, { force: true });
+        });
+
+        const operation = testAgent.deleteFile(source, { trash: true });
+
+        // Naming the root and its mode tells the operator exactly which chmod fixes trashing.
+        await expect(operation).rejects.toMatchObject({
+            status: 403,
+            message: expect.stringContaining(
+                `Trash directory ${trashRoot} must be a private real directory owned by the agent user: its mode is 0755`,
+            ),
+        });
+        // Validation runs before the rename, so the source must stay where it was.
+        await expect(fs.readFile(source, "utf8")).resolves.toBe("must remain");
+
+        const errorLine = await waitForValue({
+            predicate: async () => {
+                const contents = await fs.readFile(AGENT_LOG_PATH, "utf8");
+
+                return contents
+                    .split("\n")
+                    .find(
+                        (line) =>
+                            line.includes("[ERROR] Command failed:") &&
+                            line.includes(`Trash directory ${trashRoot}`),
+                    );
+            },
+            description: "error-level log for the rejected trash root",
+        });
+
+        // Operator faults must reach error level so they show up with the default log level.
+        expect(errorLine).toContain("kind=PermissionDenied");
+    });
+
     it("rejects a forced trash root on another device without copying", async () => {
         const sharedMemory = "/dev/shm";
         let sharedMemoryStats: Awaited<ReturnType<typeof fs.stat>>;

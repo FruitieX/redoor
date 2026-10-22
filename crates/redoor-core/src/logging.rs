@@ -387,6 +387,23 @@ pub fn log_error(message: String, error: &anyhow::Error) {
     ));
 }
 
+/// Enqueues a command failure at the severity its kind deserves.
+///
+/// Error-level failures keep the structured diagnostic shape of [`log_error`] so operator
+/// faults look the same as every other runtime error, while expected outcomes stay plain.
+pub fn log_command_failure(
+    level: Level,
+    context: String,
+    error: &redoor_protocol::wire::request::CommandError,
+) {
+    let message = format!("{context}, kind={:?}, error={}", error.kind, error.message);
+    if level == Level::Error {
+        log_error(message, &anyhow::Error::msg(error.message.clone()));
+    } else {
+        log(level, message);
+    }
+}
+
 /// Truncates on a UTF-8 boundary while making diagnostic loss visible.
 fn bound_diagnostic(mut value: String) -> String {
     if value.len() <= LOG_DIAGNOSTIC_LIMIT {
@@ -541,6 +558,18 @@ macro_rules! log_error {
     ($error:expr, $($arg:tt)*) => {{
         if $crate::logging::enabled(::redoor_protocol::wire::log::Level::Error) {
             $crate::logging::log_error(format!($($arg)*), &$error);
+        }
+    }};
+}
+
+/// Logs a failed command at the level chosen by its kind, formatting only when enabled.
+#[macro_export]
+macro_rules! log_command_failure {
+    ($error:expr, $($arg:tt)*) => {{
+        let error: &::redoor_protocol::wire::request::CommandError = &$error;
+        let level = error.kind.log_level();
+        if $crate::logging::enabled(level) {
+            $crate::logging::log_command_failure(level, format!($($arg)*), error);
         }
     }};
 }

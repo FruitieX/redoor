@@ -281,4 +281,25 @@ impl CommandErrorKind {
             _ => Self::Internal,
         }
     }
+
+    /// Severity a command failure of this kind is logged at.
+    ///
+    /// Only failures an operator must fix (broken permissions, internal faults) reach error
+    /// level; outcomes users resolve themselves, like missing paths or name conflicts, would
+    /// otherwise drown real problems in default logs.
+    pub fn log_level(&self) -> crate::wire::log::Level {
+        use crate::wire::log::Level;
+        match self {
+            Self::Internal | Self::PermissionDenied => Level::Error,
+            Self::ServiceUnavailable => Level::Warning,
+            Self::Canceled | Self::Paused => Level::Debug,
+            Self::NotFound
+            | Self::NotADirectory
+            | Self::IsDirectory
+            | Self::AlreadyExists
+            | Self::Conflict
+            | Self::InvalidInput
+            | Self::SourceChanged => Level::Info,
+        }
+    }
 }

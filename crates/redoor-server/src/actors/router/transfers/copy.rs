@@ -17,8 +17,8 @@ use super::super::messages::{
 use super::super::progress::CopyStartContext;
 use super::super::state::{CopyContentKind, CopyOperation, RouterState};
 use super::super::streams::{OutboundStart, OutboundStream, OutputReceiver, StreamLease};
-use redoor_core::log;
 use redoor_core::partials::SEGMENT_SIZE;
+use redoor_core::{log, log_command_failure};
 use redoor_protocol::ids::{AgentId, RequestId, TransferId};
 use redoor_protocol::wire::command::CommandErrorKind;
 use redoor_protocol::wire::log::Level;
@@ -971,16 +971,18 @@ impl RouterState {
         };
         match atomic {
             Err(DecodeError::Failed(_)) if canceling => self.mark_transfer_canceled(progress_id),
-            Err(DecodeError::Failed(CommandError { message, .. })) => {
-                if flow.is_move() {
-                    log!(
-                        Level::Debug,
-                        "Smart move command failed: public_request_id={}, message={}",
-                        progress_id,
-                        message
-                    );
-                }
-                self.mark_transfer_errored(progress_id, message);
+            Err(DecodeError::Failed(error)) => {
+                log_command_failure!(
+                    error,
+                    "{} command failed: public_request_id={}",
+                    if flow.is_move() {
+                        "Smart move"
+                    } else {
+                        "Local copy"
+                    },
+                    progress_id
+                );
+                self.mark_transfer_errored(progress_id, error.message);
             }
             Err(DecodeError::Malformed(error)) => {
                 log!(

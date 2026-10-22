@@ -5,7 +5,7 @@
 //! after a frame reached the socket (re-exec) travel with the frame instead of being inferred by
 //! re-parsing outgoing text.
 
-use redoor_core::log;
+use redoor_core::{log, log_command_failure, log_error};
 use redoor_protocol::{
     ids::RequestId,
     wire::{AgentToServer, log::Level, request::CommandOutcome, stream::StreamChunk},
@@ -96,10 +96,9 @@ impl OutboundFrame {
             ControlFrame::Message(message) => match serde_json::to_string(message) {
                 Ok(json) => Some(WsMessage::text(json)),
                 Err(error) => {
-                    log!(
-                        Level::Warning,
-                        "Dropping control frame that failed to serialize: {error}"
-                    );
+                    let message =
+                        format!("Dropping control frame that failed to serialize: {error}");
+                    log_error!(anyhow::Error::new(error), "{message}");
                     None
                 }
             },
@@ -239,12 +238,19 @@ impl Responder {
             );
             return Ok(());
         }
-        log!(
-            Level::Info,
-            "Command complete: request_id={}, result={}",
-            self.request_id,
-            outcome.summary()
-        );
+        match outcome.failure() {
+            // Failures are logged by kind so operator faults like a misconfigured trash
+            // directory reach error level instead of hiding among routine completions.
+            Some(error) => {
+                log_command_failure!(error, "Command failed: request_id={}", self.request_id)
+            }
+            None => log!(
+                Level::Info,
+                "Command complete: request_id={}, result={}",
+                self.request_id,
+                outcome.summary()
+            ),
+        }
         lane.send(OutboundFrame {
             frame: ControlFrame::Message(Box::new(AgentToServer::Result {
                 id: self.request_id,

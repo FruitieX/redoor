@@ -189,8 +189,16 @@ impl Dispatcher {
     async fn answer_panics(run: impl Future<Output = Reply>) -> Reply {
         match std::panic::AssertUnwindSafe(run).catch_unwind().await {
             Ok(reply) => reply,
-            Err(_) => {
-                log!(Level::Warning, "Agent command panicked");
+            Err(payload) => {
+                let detail = payload
+                    .downcast_ref::<&str>()
+                    .map(|message| message.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "non-string panic payload".to_string());
+                log_error!(
+                    anyhow::Error::msg(detail.clone()),
+                    "Agent command panicked: {detail}"
+                );
                 Reply::failure(CommandError::new(
                     CommandErrorKind::Internal,
                     "Agent command failed unexpectedly",

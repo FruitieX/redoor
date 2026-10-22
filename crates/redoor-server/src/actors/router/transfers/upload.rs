@@ -15,10 +15,10 @@ use super::super::messages::{
 use super::super::progress::UploadStartContext;
 use super::super::state::RouterState;
 use super::super::streams::{OutboundError, OutboundStart, OutboundStream, StreamLease};
-use redoor_core::log;
+use redoor_core::{log, log_command_failure};
 use redoor_protocol::wire::log::Level;
 use redoor_protocol::wire::policy::UploadKind;
-use redoor_protocol::wire::request::{CommandError, CommandOutcome};
+use redoor_protocol::wire::request::CommandOutcome;
 use redoor_protocol::wire::stream::STREAM_CREDIT_WINDOW_FRAMES;
 use redoor_protocol::{
     api::transfers::TransferProgressState,
@@ -421,14 +421,13 @@ impl RouterState {
                     request_id
                 );
             }
-            CommandOutcome::Error(CommandError { message, .. }) => {
-                self.mark_transfer_errored(transfer_id, message.clone());
-                log!(
-                    Level::Info,
-                    "Routing upload error response: agent_id={}, request_id={}, message={}",
+            CommandOutcome::Error(error) => {
+                self.mark_transfer_errored(transfer_id, error.message.clone());
+                log_command_failure!(
+                    error,
+                    "Routing upload error response: agent_id={}, request_id={}",
                     response.agent_id,
-                    request_id,
-                    message
+                    request_id
                 );
             }
         }
