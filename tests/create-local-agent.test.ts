@@ -20,6 +20,7 @@ import {
     TEST_PASSWORD,
     TEST_USERNAME,
     VITEST_SERVER_PORT,
+    restartServerAndWait,
     waitForPort,
     waitForValue,
 } from "./test-utils";
@@ -78,6 +79,8 @@ let apiClient: ApiClient;
 
 let configPath: string;
 
+let serverLog: string;
+
 beforeAll(async () => {
     configPath = tempFiles.tempFile({ suffix: ".toml" });
     writeFileSync(
@@ -94,7 +97,7 @@ target = "fixture-host"
 name = "${SSH_FIXTURE_NAME}"
 `,
     );
-    const serverLog = tempFiles.tempFile({ suffix: ".log" });
+    serverLog = tempFiles.tempFile({ suffix: ".log" });
     rmSync(serverLog, { force: true });
     process.env.REDOOR_PORT = VITEST_SERVER_PORT.toString();
     processManager.spawnServer({ config: configPath, log: serverLog });
@@ -153,23 +156,9 @@ describe("Local agent configuration API", () => {
         expect(editedConfig).toContain('home = "/srv/local"');
         expect(editedConfig).toContain('log = "/tmp/created-local-agent.log"');
 
-        await apiClient.restartServer();
+        await restartServerAndWait({ apiClient, serverLog });
 
-        const afterRestart = await waitForValue({
-            timeoutMs: 15_000,
-            description: "created local agent after server restart",
-            predicate: async () => {
-                try {
-                    const agents = await apiClient.listAgents();
-
-                    return agents.some((agent) => agent.name === AGENT_NAME)
-                        ? agents
-                        : undefined;
-                } catch {
-                    return undefined;
-                }
-            },
-        });
+        const afterRestart = await apiClient.listAgents();
 
         // Persistence must reconstruct the same dormant agent after a full config reload.
         expect(

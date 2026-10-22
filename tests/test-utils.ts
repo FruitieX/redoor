@@ -6,6 +6,7 @@ import {
     mkdirSync,
     realpathSync,
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -574,25 +575,28 @@ export async function waitForAgentReady(
     );
 }
 
+/**
+ * Waits until a server answers its API on `port`.
+ *
+ * The budget is time-based and generous because a debug server can take well over five
+ * seconds to start while the integration and Playwright suites run in parallel.
+ */
 export async function waitForPort(
     port: number,
-    maxRetries = 50,
+    timeoutMs = 30_000,
 ): Promise<void> {
-    for (let i = 0; i < maxRetries; i++) {
-        try {
+    await waitForValue({
+        timeoutMs,
+        intervalMs: 100,
+        description: `server API on port ${port}`,
+        predicate: async () => {
             const response = await fetch(
                 `http://127.0.0.1:${port}/api/v1/agents`,
             );
 
-            if (response.ok || response.status === 401) {
-                return;
-            }
-        } catch {
-            await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-    }
-
-    throw new Error(`Port ${port} not ready after ${maxRetries} retries`);
+            return response.ok || response.status === 401;
+        },
+    });
 }
 
 /**
@@ -717,6 +721,53 @@ export async function waitForValue<T>(options: {
 
     const errorSuffix = lastError ? `: ${lastError.message}` : "";
     throw new Error(`Timeout waiting for ${options.description}${errorSuffix}`);
+}
+
+/** Counts startups recorded in a server log; a restart re-executes startup and appends one. */
+async function countServerStartups(serverLog: string): Promise<number> {
+    try {
+        const log = await readFile(serverLog, "utf8");
+
+        return log.match(/Loaded server config/g)?.length ?? 0;
+    } catch (error) {
+        if (isErrorCode(error, "ENOENT")) {
+            return 0;
+        }
+
+        throw error;
+    }
+}
+
+/**
+ * Restarts the server and waits until the re-executed process answers API requests.
+ *
+ * The restart endpoint replies before the old process shuts down, so polling the API alone
+ * can be answered by the old process, and the next request then finds nothing listening on
+ * the port. Waiting for the new startup in the log first rules that out.
+ */
+export async function restartServerAndWait(options: {
+    apiClient: ApiClient;
+    serverLog: string;
+    timeoutMs?: number;
+}): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? 15_000;
+    const startups = await countServerStartups(options.serverLog);
+    await options.apiClient.restartServer();
+    await waitForValue({
+        timeoutMs,
+        description: "restarted server startup in its log",
+        predicate: async () =>
+            (await countServerStartups(options.serverLog)) > startups,
+    });
+    await waitForValue({
+        timeoutMs,
+        description: "restarted server to serve API requests",
+        predicate: async () => {
+            await options.apiClient.listAgents();
+
+            return true;
+        },
+    });
 }
 
 /** Every grantable permission, for tokens that should behave like the old full-access CLI. */
