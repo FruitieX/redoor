@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import {
     dragReorderRow,
     keyboardReorder,
@@ -54,6 +54,23 @@ test.describe.serial("Pinned files", () => {
                 deviceOrder: [],
             },
         });
+    }
+
+    /**
+     * Pins the open file and waits for the background user-state write, because a following
+     * page.goto() aborts a write still in flight and the reloaded page would miss the pin.
+     */
+    async function pinOpenFile(page: Page) {
+        const pinPersisted = page.waitForResponse(
+            (response) =>
+                response.request().method() === "PUT" &&
+                response.url().includes("/api/v1/user/state"),
+        );
+
+        await page
+            .getByRole("button", { name: "Pin file", exact: true })
+            .click();
+        await pinPersisted;
     }
 
     test("pins editor files under Transfers and keeps newer pins at the bottom", async ({
@@ -215,13 +232,9 @@ test.describe.serial("Pinned files", () => {
         const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
         await page.goto(firstUrl);
-        await page
-            .getByRole("button", { name: "Pin file", exact: true })
-            .click();
+        await pinOpenFile(page);
         await page.goto(secondUrl);
-        await page
-            .getByRole("button", { name: "Pin file", exact: true })
-            .click();
+        await pinOpenFile(page);
         await page
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
@@ -290,13 +303,9 @@ test.describe.serial("Pinned files", () => {
         const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
         await page.goto(firstUrl);
-        await page
-            .getByRole("button", { name: "Pin file", exact: true })
-            .click();
+        await pinOpenFile(page);
         await page.goto(secondUrl);
-        await page
-            .getByRole("button", { name: "Pin file", exact: true })
-            .click();
+        await pinOpenFile(page);
         await page
             .getByRole("button", { name: "Expand editor to full window" })
             .click();

@@ -30,6 +30,10 @@ const RUNNING_EDIT_AGENT = `playwright-running-edit-${process.pid}`;
 
 const SERVER_LOG = path.resolve("log/playwright-redoor.log");
 
+// SSH connects provision the agent binary over the fixture and wait up to 60 seconds, so the
+// tests doing them need more than the default 30-second budget under full-suite load.
+const SSH_CONNECT_TEST_TIMEOUT = 150_000;
+
 /** Reads one lifecycle snapshot through the same authenticated API as the UI. */
 async function getAgent(
     request: APIRequestContext,
@@ -309,6 +313,7 @@ test.describe.serial("Agent management", () => {
             process.env.REDOOR_SSH_TEST !== "1",
             "redoor-ssh-test SSH fixture is not enabled",
         );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
         await page.goto(`${WEB_BASE_URL}/`);
         await page.getByRole("link", { name: "Add device" }).click();
 
@@ -390,6 +395,7 @@ test.describe.serial("Agent management", () => {
             process.env.REDOOR_SSH_TEST !== "1",
             "redoor-ssh-test SSH fixture is not enabled",
         );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
         const originalName = `${RUNNING_EDIT_AGENT}-original`;
 
         const createResponse = await page.request.post(
@@ -466,6 +472,7 @@ test.describe.serial("Agent management", () => {
                 !process.env.REDOOR_SSH_TEST_PASSWORD,
             "redoor-ssh-test password fixture is not enabled",
         );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
         const password = process.env.REDOOR_SSH_TEST_PASSWORD;
 
         if (password === undefined) {
@@ -513,6 +520,7 @@ test.describe.serial("Agent management", () => {
                 !process.env.REDOOR_SSH_TEST_PASSWORD,
             "redoor-ssh-test password fixture is not enabled",
         );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
         const password = process.env.REDOOR_SSH_TEST_PASSWORD;
 
         if (password === undefined) {
@@ -621,6 +629,7 @@ test.describe.serial("Agent management", () => {
                 !process.env.REDOOR_SSH_TEST_PASSWORD,
             "redoor-ssh-test password fixture is not enabled",
         );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
         const password = process.env.REDOOR_SSH_TEST_PASSWORD;
 
         if (password === undefined) {

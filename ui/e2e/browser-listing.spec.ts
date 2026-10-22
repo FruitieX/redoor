@@ -77,6 +77,14 @@ test.describe.serial("File Browser Listing", () => {
             .click();
         // Opening a file must make that exact file the second tab's destination.
         await expect(page).toHaveURL(agent2FileUrl);
+        // The location is remembered only once the file route resolves, so switching tabs
+        // before that would leave the directory as the remembered destination.
+        await expect(
+            page.getByRole("link", { name: "agent2_custom, connected" }),
+        ).toHaveAttribute(
+            "href",
+            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(agent2FilePath)}`,
+        );
 
         await page
             .getByRole("link", {

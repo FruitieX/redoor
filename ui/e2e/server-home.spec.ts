@@ -211,7 +211,10 @@ test.describe("Server home", () => {
         ).toBeVisible();
         await expect(archiveRow.getByText(/%/)).toHaveCount(0);
 
-        await measuringBadge.hover();
+        // Keyboard focus opens the tooltip immediately. Hover depends on the cursor staying over
+        // the badge through the 500ms delay, which intermittently failed under full-suite load.
+        await measuringBadge.focus();
+        // The badge explains why no percentage is shown yet.
         await expect(
             page.getByRole("tooltip", {
                 name: "The archive size is being measured while the download already runs.",

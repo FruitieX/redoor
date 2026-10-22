@@ -1010,6 +1010,11 @@ test.describe.serial("File Browser Navigation", () => {
         await page.getByRole("textbox", { name: "File path" }).press("Enter");
         // Bare ~ opens the connected agent's home rather than a literal /~ directory.
         await expect(page).toHaveURL(ctx.agentBrowserUrl);
+        // The breadcrumb editor remounts when the new path renders, so editing before the home
+        // listing appears would lose the second edit.
+        await expect(
+            page.getByRole("link", { name: ctx.testDirName, exact: true }),
+        ).toBeVisible();
 
         await page.getByRole("button", { name: "Edit file path" }).click();
         await page
