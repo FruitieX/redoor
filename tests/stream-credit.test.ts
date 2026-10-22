@@ -90,6 +90,9 @@ describe("per-stream credit on the multiplexed connection", () => {
 
         // Another stream of the same connection still completes normally after the violation.
         expect(await honestResponse.text()).toBe(`${stdout}\n${JSON.stringify(exit)}\n`);
-        await floodResponse.body?.cancel();
+        // The violating stream's body aborts instead of ending like a short but complete output.
+        // Reading it to the end also makes the abort deterministic: canceling the unread body
+        // raced the server's connection abort and could reject with the same error.
+        await expect(floodResponse.text()).rejects.toThrow("terminated");
     });
 });

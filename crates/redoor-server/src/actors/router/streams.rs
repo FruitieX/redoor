@@ -26,6 +26,9 @@ use std::sync::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Message shown when an agent sends more frames than its credit allowed.
+pub(crate) const CREDIT_VIOLATION: &str = "Agent exceeded the stream flow-control credit";
+
 /// What a stream needs to reach its agent without asking the router.
 #[derive(Clone, Debug)]
 pub struct AgentLink {
@@ -137,6 +140,9 @@ struct InboundSlot {
     cancel: CancellationToken,
     /// The lease's queued-byte counter.
     received: Arc<AtomicU64>,
+    /// The lease's failure reason, set here on a credit violation so the consumer reports it
+    /// even if it drains the closed queue before the router hears about the violation.
+    fault: Arc<OnceLock<String>>,
 }
 
 /// The stream tables of one connection, shared by the router and the connection's session.
@@ -219,6 +225,7 @@ impl ConnectionStreams {
                 sender,
                 cancel: lease.cancel.clone(),
                 received: lease.received.clone(),
+                fault: lease.fault.clone(),
             },
         );
         OutputReceiver {
@@ -332,12 +339,12 @@ impl ConnectionStreams {
     /// of the stream; its result follows on the connection and settles it in the router.
     pub(crate) fn deliver(&self, chunk: StreamChunk) -> Option<CreditViolation> {
         let request_id = chunk.request_id;
-        let (sender, cancel) = {
+        let (sender, cancel, fault) = {
             let mut inbound = self.inbound();
             let slot = inbound.get_mut(&request_id)?;
             slot.received
                 .fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
-            let route = (slot.sender.clone(), slot.cancel.clone());
+            let route = (slot.sender.clone(), slot.cancel.clone(), slot.fault.clone());
             if chunk.is_last {
                 // Nothing may follow FIN, so the stream stops being routable.
                 inbound.remove(&request_id);
@@ -350,6 +357,9 @@ impl ConnectionStreams {
         match sender.try_send(chunk) {
             Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => None,
             Err(mpsc::error::TrySendError::Full(_)) => {
+                // Closing the queue lets the consumer reach its end, so the fault must already
+                // be set: the router fails the lease only after it receives the violation.
+                let _ = fault.set(CREDIT_VIOLATION.to_string());
                 self.close_inbound(request_id);
                 Some(CreditViolation {
                     agent_id: self.tables.agent_id.clone(),
@@ -584,6 +594,27 @@ mod tests {
         assert_eq!(violation.request_id, RequestId::new(1));
         // The violating stream is no longer routed, so later frames are ignored.
         assert!(streams.deliver(frame(1, true)).is_none());
+    }
+
+    /// A consumer draining a violating stream before the router handles the violation must
+    /// still end with the error, never with a clean end that looks like a short stream.
+    #[tokio::test]
+    async fn credit_overflow_reports_error_before_router_fails_stream() {
+        let (streams, link, _grants) = session();
+        let mut receiver = streams.open_inbound(
+            StreamLease::new(RequestId::new(7), link, 0),
+            STREAM_CREDIT_WINDOW_FRAMES,
+        );
+        for _ in 0..STREAM_CREDIT_WINDOW_FRAMES + 1 {
+            streams.deliver(frame(7, false));
+        }
+        assert!(streams.deliver(frame(7, false)).is_some());
+        let mut last = None;
+        while let Some(item) = receiver.recv().await {
+            last = Some(item);
+        }
+        // The violation is reported after the queued frames without any router involvement.
+        assert_eq!(last, Some(Err(CREDIT_VIOLATION.to_string())));
     }
 
     /// Nothing may follow FIN, so a stream stops being routed once FIN was delivered, and the

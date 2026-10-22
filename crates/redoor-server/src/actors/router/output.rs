@@ -10,7 +10,7 @@ use super::flows::{Flow, FlowId, OutputFlow, OutputKind, OutputPhase};
 use super::messages::{ExecuteStreamRequest, OutputStreamTracking, RouteResponse};
 use super::progress::DownloadStartContext;
 use super::state::RouterState;
-use super::streams::StreamLease;
+use super::streams::{CREDIT_VIOLATION, StreamLease};
 use redoor_protocol::wire::request::{
     self, AgentRequest, CommandError, CommandOutcome, DecodeError,
 };
@@ -24,9 +24,6 @@ use redoor_protocol::{
     },
 };
 use std::sync::atomic::Ordering;
-
-/// Message shown when an agent sends more frames than its credit allowed.
-const CREDIT_VIOLATION: &str = "Agent exceeded the stream flow-control credit";
 
 /// The exec event a result reports; a failure still ends the execution visibly.
 fn exec_event(result: CommandOutcome) -> ExecEvent {
