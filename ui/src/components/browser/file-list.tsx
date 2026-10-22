@@ -32,7 +32,14 @@ import {
     type FileSort,
     formatModifiedAge,
     joinBrowserPath,
+    sortFileEntries,
 } from "#ui/components/browser/utils";
+import {
+    getPendingTransferSortEntry,
+    PendingFileEntry,
+    type PendingTransfer,
+    usePendingTransfers,
+} from "#ui/components/browser/pending-transfers";
 import type { FileSortColumn } from "#ui/browser-search";
 import { browserRoute } from "#ui/browser-route";
 import { formatSize } from "#ui/utils/path";
@@ -47,6 +54,33 @@ import {
     type UnarchiveDestination,
 } from "#ui/utils/archive";
 import { useTerminals } from "#ui/use-terminals";
+
+/**
+ * One displayed row: a listed entry, or an incoming transfer whose `entry` is a stand-in so it
+ * filters and sorts by the same rules as the real entries around it.
+ */
+type FileListRow = {
+    name: string;
+    entry: LsEntry;
+    pending: PendingTransfer | null;
+};
+
+/**
+ * Orders rows like the listing does when no column is chosen: directories first in listing
+ * order, then files, with pending rows placed among the files by name.
+ */
+function orderRowsWithoutSort(rows: FileListRow[]): FileListRow[] {
+    const directoryRows = rows.filter(
+        (row) => row.pending === null && row.entry.type === "directory",
+    );
+
+    const fileRows = rows.filter(
+        (row) => row.pending !== null || row.entry.type !== "directory",
+    );
+
+    // Listed files already arrive in this order, so only pending rows actually move.
+    return [...directoryRows, ...sortFileEntries(fileRows)];
+}
 
 /** Identifies the destination that should restore filter focus after Enter navigation. */
 const filterFocusPathAtom = atom<string | null>(null);
@@ -116,13 +150,43 @@ export function FileList(props: {
         entry.name.toLowerCase().includes(normalizedFilter),
     );
 
+    const pendingTransfers = usePendingTransfers(
+        props.agent.id,
+        props.directoryPath,
+    );
+
+    // Pending names follow the same hidden-file and filter rules as listed entries.
+    const pendingRows = pendingTransfers.flatMap((pending) =>
+        (includeHiddenFiles || !pending.name.startsWith(".")) &&
+        pending.name.toLowerCase().includes(normalizedFilter)
+            ? [
+                  {
+                      name: pending.name,
+                      entry: getPendingTransferSortEntry(pending),
+                      pending,
+                  },
+              ]
+            : [],
+    );
+
+    const rows: FileListRow[] = [
+        ...filteredFiles.map((entry) => ({
+            name: entry.name,
+            entry,
+            pending: null,
+        })),
+        ...pendingRows,
+    ];
+
     const sort = props.sort;
 
-    const displayedFiles = sort
-        ? [...filteredFiles].sort((left, right) => {
-              return compareFileEntries(left, right, sort);
+    const displayedRows = sort
+        ? [...rows].sort((left, right) => {
+              return compareFileEntries(left.entry, right.entry, sort);
           })
-        : filteredFiles;
+        : pendingRows.length > 0
+          ? orderRowsWithoutSort(rows)
+          : rows;
 
     useFileListShortcuts({
         filterInputRef,
@@ -181,7 +245,7 @@ export function FileList(props: {
             <FileTable
                 agent={props.agent}
                 directoryPath={props.directoryPath}
-                files={displayedFiles}
+                rows={displayedRows}
                 sort={sort}
                 onSort={props.onSort}
             />
@@ -228,7 +292,7 @@ function FilesystemFooter(props: { mountPoint: MountPoint | null }) {
 function FileTable(props: {
     agent: Agent;
     directoryPath: string;
-    files: LsEntry[];
+    rows: FileListRow[];
     sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
 }) {
@@ -294,14 +358,21 @@ function FileTable(props: {
                     </tr>
                 </thead>
                 <tbody>
-                    {props.files.map((entry) => (
-                        <FileEntry
-                            key={entry.name}
-                            agent={props.agent}
-                            directoryPath={props.directoryPath}
-                            entry={entry}
-                        />
-                    ))}
+                    {props.rows.map((row) =>
+                        row.pending ? (
+                            <PendingFileEntry
+                                key={`pending:${row.pending.transfer.request_id}`}
+                                pending={row.pending}
+                            />
+                        ) : (
+                            <FileEntry
+                                key={row.name}
+                                agent={props.agent}
+                                directoryPath={props.directoryPath}
+                                entry={row.entry}
+                            />
+                        ),
+                    )}
                 </tbody>
             </table>
         </div>
