@@ -41,6 +41,8 @@ pub(crate) struct ServerState {
     pub(crate) protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches,
     /// Validates opaque cookies against durable, server-side session files.
     pub(crate) auth: AuthState,
+    /// OpenID Connect sign-in, present only when `[server.oidc]` is configured.
+    pub(crate) oidc: Option<Arc<super::oidc::OidcClient>>,
     /// The server-owned access token table used by REST and MCP authentication.
     pub(crate) tokens: TokenStore,
     /// Enforces MCP-specific origin, rate, and concurrency policy outside browser auth.

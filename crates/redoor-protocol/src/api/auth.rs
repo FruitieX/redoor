@@ -24,3 +24,19 @@ pub struct LoginResponse {
 pub struct LogoutResponse {
     pub logged_out: bool,
 }
+
+/// Tells the public login page which sign-in methods to offer before any session exists.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LoginMethodsResponse {
+    /// Present when the server is configured for OpenID Connect sign-in.
+    pub oidc: Option<OidcLoginMethod>,
+}
+
+/// What the login page needs to lead with the identity provider button.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OidcLoginMethod {
+    /// Operator-chosen label, shown as "Sign in with {provider_name}".
+    pub provider_name: String,
+}

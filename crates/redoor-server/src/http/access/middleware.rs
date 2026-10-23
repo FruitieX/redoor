@@ -5,7 +5,7 @@ use axum::{
     RequestPartsExt,
     body::Body,
     extract::{MatchedPath, RawPathParams, Request, State},
-    http::{HeaderMap, StatusCode, header, request::Parts},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -15,7 +15,7 @@ use super::{
     Principal,
     routes::{self, Access},
 };
-use crate::http::{error::ApiError, state::ServerState};
+use crate::http::{auth::SessionCheck, error::ApiError, state::ServerState};
 
 /// Authenticates the caller, applies the route's access rule and hands the principal to the
 /// handler. Layered with `Router::layer`, so it only runs for matched browser routes.
@@ -40,8 +40,8 @@ pub(crate) async fn access_control(
     {
         return next.run(request).await;
     }
-    let principal = match authenticate(&state, request.headers()).await {
-        Ok(principal) => principal,
+    let (principal, renewed_cookie) = match authenticate(&state, request.headers()).await {
+        Ok(authenticated) => authenticated,
         Err(response) => return response,
     };
     let (mut parts, body) = request.into_parts();
@@ -49,22 +49,33 @@ pub(crate) async fn access_control(
         return error.into_response();
     }
     parts.extensions.insert(principal);
-    next.run(Request::from_parts(parts, body)).await
+    let mut response = next.run(Request::from_parts(parts, body)).await;
+    if let Some(cookie) = renewed_cookie {
+        // A sliding session moved its expiry forward; the browser cookie must follow or it
+        // would still expire at the original time.
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 /// A bearer token alone decides when present, so a stale cookie can never upgrade a rejected
-/// token; otherwise the browser session cookie is used.
-async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Principal, Response> {
+/// token; otherwise the browser session cookie is used. Also returns the refreshed session
+/// cookie when a sliding session was renewed.
+async fn authenticate(
+    state: &ServerState,
+    headers: &HeaderMap,
+) -> Result<(Principal, Option<HeaderValue>), Response> {
     if let Some(secret) = bearer_token(headers) {
         return match state.tokens.authenticate(secret).await {
-            Some(grant) => Ok(Principal::Token(grant)),
+            Some(grant) => Ok((Principal::Token(grant), None)),
             None => Err(unauthorized("Access token is invalid, expired or revoked")),
         };
     }
-    if state.auth.session_valid(headers).await {
-        return Ok(Principal::Session);
+    match state.auth.check_session(headers).await {
+        SessionCheck::Invalid => Err(unauthorized("Authentication required")),
+        SessionCheck::Valid => Ok((Principal::Session, None)),
+        SessionCheck::Renewed(cookie) => Ok((Principal::Session, Some(cookie))),
     }
-    Err(unauthorized("Authentication required"))
 }
 
 /// Extracts the bearer credential shared by REST and `/mcp`, so both accept exactly the same

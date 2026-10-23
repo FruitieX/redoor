@@ -218,6 +218,50 @@ pub struct ServerSection {
     pub cookie_secure: bool,
     /// Browser origins allowed to call MCP; origin-less native clients do not need an entry.
     pub mcp_allowed_origins: Vec<String>,
+    /// Optional OpenID Connect sign-in offered next to the password login.
+    pub oidc: Option<OidcConfig>,
+}
+
+/// Parsed `[server.oidc]` table enabling browser sign-in through an OpenID Connect provider.
+///
+/// OIDC only creates browser sessions for the server's single account; it never replaces the
+/// password backend, so a provider outage cannot lock the operator out.
+#[derive(Clone)]
+pub struct OidcConfig {
+    /// Provider issuer URL; `/.well-known/openid-configuration` is fetched below it.
+    pub issuer: String,
+    /// Client identifier registered at the provider.
+    pub client_id: String,
+    /// Confidential client secret used at the token endpoint.
+    pub client_secret: String,
+    /// Absolute callback URL registered at the provider; it must route to this server's
+    /// `/api/v1/auth/oidc/callback`. Explicit because a reverse proxy hides the public URL.
+    pub redirect_url: url::Url,
+    /// The ID token's `groups` claim must contain at least one of these.
+    pub allowed_groups: Vec<String>,
+    /// Scopes requested at the provider; always includes `openid`. Configurable because the
+    /// scope that releases the `groups` claim differs between providers.
+    pub scopes: Vec<String>,
+    /// Text for the login button, e.g. "Sign in with {provider_name}".
+    pub provider_name: String,
+    /// Idle lifetime of browser sessions created by OIDC sign-in; each use renews it.
+    pub session_lifetime: std::time::Duration,
+}
+
+impl std::fmt::Debug for OidcConfig {
+    /// Redacts the client secret so config debugging cannot leak it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcConfig")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"***")
+            .field("redirect_url", &self.redirect_url.as_str())
+            .field("allowed_groups", &self.allowed_groups)
+            .field("scopes", &self.scopes)
+            .field("provider_name", &self.provider_name)
+            .field("session_lifetime", &self.session_lifetime)
+            .finish()
+    }
 }
 
 /// Parsed `[agent]` table for a standalone `redoor agent` process.
@@ -1341,5 +1385,120 @@ log_level = "loud"
             error.to_string(),
             "Invalid config file 'config.toml': agent.log_level: logging level must be one of: trace, debug, info, warning, error"
         );
+    }
+
+    /// Parses a `[server]` section with a password login plus the given `[server.oidc]` body.
+    fn parse_oidc(oidc: &str) -> Result<RedoorConfig, ConfigError> {
+        parse_config_str(
+            Path::new("config.toml"),
+            &format!(
+                r#"agent_token = "t"
+[server]
+username = "admin"
+password = "secret"
+[server.oidc]
+{oidc}
+"#
+            ),
+        )
+    }
+
+    /// Minimal OIDC settings that should be accepted.
+    const VALID_OIDC: &str = r#"issuer = "https://id.example.org"
+client_id = "redoor"
+client_secret = "client-secret"
+redirect_url = "https://redoor.example.org/api/v1/auth/oidc/callback"
+allowed_groups = ["admins"]"#;
+
+    /// OIDC stays off unless configured, and a minimal section gets safe defaults.
+    #[test]
+    fn oidc_section_is_optional_and_defaults_are_safe() {
+        let without = parse_config_str(
+            Path::new("config.toml"),
+            "agent_token = \"t\"\n[server]\nusername = \"a\"\npassword = \"b\"\n",
+        )
+        .expect("a config without OIDC must keep working");
+        // Existing configs must not suddenly enable a new login path.
+        assert!(without.server.expect("server section").oidc.is_none());
+
+        let config = parse_oidc(VALID_OIDC).expect("minimal OIDC settings are valid");
+        let server = config.server.expect("server section");
+        let oidc = server.oidc.expect("oidc section");
+        // OIDC is added next to the password login, never instead of it.
+        assert!(matches!(server.auth, AuthMode::Configured { .. }));
+        // The default scopes release the groups claim on common providers.
+        assert_eq!(oidc.scopes, ["openid", "profile", "groups"]);
+        // A month-long sliding session is the default.
+        assert_eq!(oidc.session_lifetime.as_secs(), 30 * 24 * 60 * 60);
+        assert_eq!(oidc.provider_name, "single sign-on");
+        // Debug output is used in logs and must never contain the client secret.
+        assert!(!format!("{oidc:?}").contains("client-secret"));
+    }
+
+    /// Optional OIDC keys are honoured, and `openid` is always requested.
+    #[test]
+    fn oidc_optional_keys() {
+        let config = parse_oidc(&format!(
+            "{VALID_OIDC}\nscopes = [\"profile\", \"groups\"]\nprovider_name = \"passkey\"\nsession_lifetime_days = 365"
+        ))
+        .expect("optional keys are valid");
+        let oidc = config.server.and_then(|server| server.oidc).expect("oidc");
+        // Without `openid` the provider would not return an ID token.
+        assert_eq!(oidc.scopes, ["openid", "profile", "groups"]);
+        assert_eq!(oidc.provider_name, "passkey");
+        assert_eq!(oidc.session_lifetime.as_secs(), 365 * 24 * 60 * 60);
+    }
+
+    /// Settings that would break or weaken sign-in fail at startup with the key named.
+    #[test]
+    fn oidc_rejects_unsafe_or_incomplete_settings() {
+        let cases = [
+            (
+                "client_secret = \"client-secret\"\n",
+                "",
+                "server.oidc.client_secret",
+            ),
+            (
+                "allowed_groups = [\"admins\"]",
+                "allowed_groups = []",
+                "server.oidc.allowed_groups",
+            ),
+            (
+                "https://id.example.org",
+                "http://id.example.org",
+                "server.oidc.issuer",
+            ),
+            (
+                "https://redoor.example.org/api/v1/auth/oidc/callback",
+                "https://redoor.example.org/callback",
+                "server.oidc.redirect_url",
+            ),
+        ];
+        for (from, to, key) in cases {
+            let error = parse_oidc(&VALID_OIDC.replace(from, to))
+                .expect_err("the setting must be rejected")
+                .to_string();
+            // The message names the key so the operator knows what to fix.
+            assert!(error.contains(key), "{key}: {error}");
+        }
+        let error = parse_oidc(&format!("{VALID_OIDC}\nsession_lifetime_days = 401"))
+            .expect_err("browsers cannot keep cookies that long")
+            .to_string();
+        // Lifetimes beyond the browser cookie cap are refused.
+        assert!(error.contains("session_lifetime_days"), "{error}");
+        // Plain HTTP is fine for a provider on the same machine, e.g. in tests.
+        assert!(
+            parse_oidc(
+                &VALID_OIDC
+                    .replace("https://id.example.org", "http://127.0.0.1:9000")
+                    .replace("https://redoor.example.org", "http://localhost:7666")
+            )
+            .is_ok()
+        );
+        let error = parse_oidc(&format!("{VALID_OIDC}\nclient_secrett = \"x\""))
+            .expect_err("typos must not be ignored")
+            .to_string();
+        // Unknown keys are reported like everywhere else in the file.
+        assert!(error.contains("client_secrett"), "{error}");
     }
 }
