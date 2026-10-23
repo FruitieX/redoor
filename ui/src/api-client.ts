@@ -36,6 +36,7 @@ import type { MoveFileResponse } from "#bindings/MoveFileResponse";
 import type { TerminalSize } from "#bindings/TerminalSize";
 import type { LoginRequest } from "#bindings/LoginRequest";
 import type { LoginResponse } from "#bindings/LoginResponse";
+import type { LoginMethodsResponse } from "#bindings/LoginMethodsResponse";
 import type { LogoutResponse } from "#bindings/LogoutResponse";
 import type { MetadataResponse } from "#bindings/MetadataResponse";
 import type { CreateOneTimeTokenResponse } from "#bindings/CreateOneTimeTokenResponse";
@@ -877,6 +878,22 @@ export class ApiClient {
         }
 
         return response.json();
+    }
+
+    /** Lists the sign-in methods the public login page should offer. */
+    async getLoginMethods(): Promise<LoginMethodsResponse> {
+        return apiRequest<LoginMethodsResponse>(
+            `${this.baseUrl}/api/v1/auth/methods`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Builds the browser navigation target that starts OIDC sign-in and returns to `redirect`. */
+    getOidcLoginUrl(redirect: string): string {
+        const params = new URLSearchParams({ redirect });
+
+        return `${this.baseUrl}/api/v1/auth/oidc/login?${params.toString()}`;
     }
 
     /** Deletes the server-side session and forgets any Node-managed cookie. */
