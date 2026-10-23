@@ -3,6 +3,90 @@ import { expect, test } from "@playwright/test";
 import { WEB_BASE_URL } from "./helpers";
 
 test.describe("Application navigation", () => {
+    test("resizes both sidebars independently and remembers their widths", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/`);
+
+        const application = page.getByRole("complementary", {
+            name: "Application menu",
+        });
+
+        const devices = page.getByRole("complementary", {
+            name: "Device menu",
+        });
+
+        for (const [panel, label, delta] of [
+            [application, "Resize application menu", 80],
+            [devices, "Resize device menu", -100],
+        ] as const) {
+            const handle = page.getByRole("separator", { name: label });
+            const box = await handle.boundingBox();
+
+            if (!box) {
+                throw new Error(`Missing resize handle: ${label}`);
+            }
+
+            await page.mouse.move(
+                box.x + box.width / 2,
+                box.y + box.height / 2,
+            );
+            await page.mouse.down();
+            await page.mouse.move(
+                box.x + box.width / 2 + delta,
+                box.y + box.height / 2,
+                { steps: 8 },
+            );
+            await page.mouse.up();
+            // Each inner edge follows the pointer, including the mirrored right sidebar.
+            await expect
+                .poll(async () => (await panel.boundingBox())?.width)
+                .toBe(224 + Math.abs(delta));
+        }
+
+        await page.reload();
+        // Reload restores both independent preferences without changing the opposite panel.
+        await expect
+            .poll(async () => (await application.boundingBox())?.width)
+            .toBe(304);
+        await expect
+            .poll(async () => (await devices.boundingBox())?.width)
+            .toBe(324);
+
+        const handle = page.getByRole("separator", {
+            name: "Resize device menu",
+        });
+
+        await handle.focus();
+        await handle.press("ArrowLeft");
+        // Keyboard movement mirrors the right edge just like pointer movement.
+        await expect
+            .poll(async () => (await devices.boundingBox())?.width)
+            .toBe(348);
+        await handle.press("Control+ArrowLeft");
+        // Browser and operating-system key combinations must retain their usual behavior.
+        await expect(handle).toHaveAttribute("aria-valuenow", "348");
+        await handle.hover();
+        // Hovering or focusing a drag border must not display a tooltip over the content.
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+        for (let step = 0; step < 20; step += 1) {
+            await handle.press("ArrowRight");
+        }
+
+        // Shrinking stops before navigation controls become unusably narrow.
+        await expect
+            .poll(async () => (await devices.boundingBox())?.width)
+            .toBe(180);
+        await page.setViewportSize({ width: 390, height: 844 });
+        // Responsive drawers retain their own mobile sizing and expose no persistent resize handle.
+        await expect(handle).toBeHidden();
+        await page.getByRole("button", { name: "Open device menu" }).click();
+        await expect(
+            page.getByRole("dialog", { name: "Device menu" }),
+        ).toBeVisible();
+    });
+
     test("keeps both side menus visible on desktop", async ({ page }) => {
         await page.goto(`${WEB_BASE_URL}/`);
 
@@ -10,25 +94,32 @@ test.describe("Application navigation", () => {
         const applicationNavigation = page.getByRole("navigation", {
             name: "Application",
         });
+
         await expect(applicationNavigation).toBeVisible();
+
         const agentNavigation = page.getByRole("navigation", {
-            name: "Agents",
+            name: "Devices",
         });
+
         // Agent selection persists on the opposite side of the central route content.
         await expect(agentNavigation).toBeVisible();
         const applicationBox = await applicationNavigation.boundingBox();
         const agentBox = await agentNavigation.boundingBox();
         // Physical placement matches each menu's application and agent responsibilities.
         expect(applicationBox?.x ?? 1).toBeLessThan(agentBox?.x ?? 0);
+
         const sidebarModeBox = await applicationNavigation
-            .getByRole("button", { name: "Sidebar mode: Auto" })
+            .getByRole("group", { name: "Sidebar mode" })
             .boundingBox();
+
         const restartBox = await applicationNavigation
             .getByRole("button", { name: "Restart server" })
             .boundingBox();
+
         const logoutBox = await applicationNavigation
             .getByRole("button", { name: "Log out" })
             .boundingBox();
+
         // Layout preference sits with the other chrome actions, above process restart.
         expect(sidebarModeBox?.y ?? 1).toBeLessThan(restartBox?.y ?? 0);
         // Process restart sits just above logout so account actions remain last.
@@ -42,7 +133,7 @@ test.describe("Application navigation", () => {
             page.getByRole("button", { name: "Open application menu" }),
         ).toBeHidden();
         await expect(
-            page.getByRole("button", { name: "Open agent menu" }),
+            page.getByRole("button", { name: "Open device menu" }),
         ).toBeHidden();
     });
 
@@ -54,6 +145,7 @@ test.describe("Application navigation", () => {
         const themeButton = page.getByRole("button", {
             name: /Color theme:/,
         });
+
         await themeButton.hover();
         // Mouse hover must not show a tooltip before the shared 500ms delay elapses.
         await expect(page.getByRole("tooltip")).toHaveCount(0, {
@@ -63,15 +155,16 @@ test.describe("Application navigation", () => {
         await themeButton.click();
         // Click focuses the control, but the tooltip must follow the cursor rather than stay pinned.
         await page
-            .getByRole("region", { name: "Agent names" })
-            .getByRole("heading", { name: "Agents" })
+            .getByRole("region", { name: "Device names" })
+            .getByRole("heading", { name: "Devices" })
             .hover();
         await expect(page.getByRole("tooltip")).toHaveCount(0);
 
         const agentLink = page
-            .getByRole("region", { name: "Agent names" })
+            .getByRole("region", { name: "Device names" })
             .getByRole("link")
             .first();
+
         await agentLink.hover();
         await expect(page.getByRole("tooltip")).toBeVisible();
         await agentLink.click();
@@ -87,10 +180,39 @@ test.describe("Application navigation", () => {
         const themeButton = page.getByRole("button", {
             name: /Color theme:/,
         });
+
         await themeButton.focus();
 
         // The hover delay must not make keyboard users wait for a focused control's description.
         await expect(page.getByRole("tooltip")).toBeVisible();
+    });
+
+    test("keeps tooltips hidden when a clicked dialog moves focus", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("button", { name: "Restart server" })
+            .click();
+
+        const dialog = page.getByRole("dialog", { name: "Restart server?" });
+
+        const closeButton = dialog.getByRole("button", {
+            name: "Close confirmation dialog",
+        });
+
+        // The modal moves focus to its first control on open, which is the premise of this test.
+        await expect(closeButton).toBeFocused();
+        // Script focus after a click is not keyboard navigation, so the close tooltip must stay hidden.
+        await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+        await page.keyboard.press("Tab");
+        await page.keyboard.press("Shift+Tab");
+        // Real keyboard navigation inside the same dialog must still describe the focused control.
+        await expect(
+            page.getByRole("tooltip", { name: "Close confirmation dialog" }),
+        ).toBeVisible();
     });
 
     test("opens and dismisses the sidebar from outside on mobile", async ({
@@ -102,6 +224,7 @@ test.describe("Application navigation", () => {
         const openMenuButton = page.getByRole("button", {
             name: "Open application menu",
         });
+
         // Mobile navigation starts closed so content retains the viewport width.
         await expect(
             page.getByRole("navigation", { name: "Application" }),
@@ -114,6 +237,7 @@ test.describe("Application navigation", () => {
         const menuDialog = page.getByRole("dialog", {
             name: "Application menu",
         });
+
         // Opening the burger exposes the same application destinations in a modal drawer.
         await expect(menuDialog).toBeVisible();
         await expect(
@@ -139,34 +263,48 @@ test.describe("Application navigation", () => {
             page.getByRole("navigation", { name: "Application" }),
         ).toBeHidden();
         await expect(
-            page.getByRole("navigation", { name: "Agents" }),
+            page.getByRole("navigation", { name: "Devices" }),
         ).toBeHidden();
         // Both edge drawers remain independently reachable at this breakpoint.
         await expect(
             page.getByRole("button", { name: "Open application menu" }),
         ).toBeVisible();
         await expect(
-            page.getByRole("button", { name: "Open agent menu" }),
+            page.getByRole("button", { name: "Open device menu" }),
         ).toBeVisible();
     });
 
-    test("cycles sidebar visibility modes and keeps the choice in this tab", async ({
+    test("selects sidebar visibility modes and keeps the choice in this tab", async ({
         page,
     }) => {
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const autoButton = page.getByRole("button", {
-            name: "Sidebar mode: Auto",
-        });
-        await autoButton.hover();
-        // The tooltip names the next layout, not the mode already applied.
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Click to always show the sidebars",
-        );
-        await autoButton.click();
+        const sidebarMode = page.getByRole("group", { name: "Sidebar mode" });
+
+        // Auto is the default, and every mode is offered at once instead of cycling.
         await expect(
-            page.getByRole("button", { name: "Sidebar mode: Show" }),
-        ).toBeVisible();
+            sidebarMode.getByRole("button", { name: "Auto" }),
+        ).toHaveAttribute("aria-pressed", "true");
+        await expect(
+            sidebarMode.getByRole("button", { name: "Show" }),
+        ).toHaveAttribute("aria-pressed", "false");
+        await expect(
+            sidebarMode.getByRole("button", { name: "Hide" }),
+        ).toHaveAttribute("aria-pressed", "false");
+
+        await sidebarMode.getByRole("button", { name: "Show" }).hover();
+        // The tooltip explains what the segment does before it is chosen.
+        await expect(page.getByRole("tooltip")).toHaveText(
+            "Always show the sidebars",
+        );
+        await sidebarMode.getByRole("button", { name: "Show" }).click();
+        // Only the chosen segment is marked as selected.
+        await expect(
+            sidebarMode.getByRole("button", { name: "Show" }),
+        ).toHaveAttribute("aria-pressed", "true");
+        await expect(
+            sidebarMode.getByRole("button", { name: "Auto" }),
+        ).toHaveAttribute("aria-pressed", "false");
 
         await page.setViewportSize({ width: 390, height: 844 });
         // Show keeps both edge menus in the layout on a phone-sized viewport.
@@ -174,20 +312,17 @@ test.describe("Application navigation", () => {
             page.getByRole("navigation", { name: "Application" }),
         ).toBeVisible();
         await expect(
-            page.getByRole("navigation", { name: "Agents" }),
+            page.getByRole("navigation", { name: "Devices" }),
         ).toBeVisible();
         await expect(
             page.getByRole("button", { name: "Open application menu" }),
         ).toBeHidden();
         await expect(
-            page.getByRole("button", { name: "Open agent menu" }),
+            page.getByRole("button", { name: "Open device menu" }),
         ).toBeHidden();
 
-        await page.getByRole("button", { name: "Sidebar mode: Show" }).hover();
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Click to always hide the sidebars",
-        );
-        await page.getByRole("button", { name: "Sidebar mode: Show" }).click();
+        // Hide can be picked directly without passing through another mode.
+        await sidebarMode.getByRole("button", { name: "Hide" }).click();
 
         await page.setViewportSize({ width: 1280, height: 800 });
         // Hide keeps menus behind drawers even after returning to a wide viewport.
@@ -200,14 +335,11 @@ test.describe("Application navigation", () => {
         await page
             .getByRole("button", { name: "Open application menu" })
             .click();
-        const hideButton = page.getByRole("button", {
-            name: "Sidebar mode: Hide",
-        });
-        await expect(hideButton).toBeVisible();
-        await hideButton.hover();
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Click to automatically show the sidebars",
-        );
+
+        // The drawer copy of the control reflects the stored Hide preference.
+        await expect(
+            sidebarMode.getByRole("button", { name: "Hide" }),
+        ).toHaveAttribute("aria-pressed", "true");
 
         await page.reload();
         // Session storage must restore Hide after a reload in the same tab.
@@ -218,8 +350,8 @@ test.describe("Application navigation", () => {
             .getByRole("button", { name: "Open application menu" })
             .click();
         await expect(
-            page.getByRole("button", { name: "Sidebar mode: Hide" }),
-        ).toBeVisible();
+            sidebarMode.getByRole("button", { name: "Hide" }),
+        ).toHaveAttribute("aria-pressed", "true");
     });
 
     test("coordinates independently placed mobile drawers and restores focus", async ({
@@ -227,11 +359,13 @@ test.describe("Application navigation", () => {
     }) => {
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(`${WEB_BASE_URL}/`);
+
         const applicationTrigger = page.getByRole("button", {
             name: "Open application menu",
         });
+
         const agentTrigger = page.getByRole("button", {
-            name: "Open agent menu",
+            name: "Open device menu",
         });
 
         await applicationTrigger.click();
@@ -244,7 +378,7 @@ test.describe("Application navigation", () => {
         await expect(
             page.getByRole("dialog", { name: "Application menu" }),
         ).toBeHidden();
-        const agentDialog = page.getByRole("dialog", { name: "Agent menu" });
+        const agentDialog = page.getByRole("dialog", { name: "Device menu" });
         await expect(agentDialog).toBeVisible();
         const dialogBox = await agentDialog.locator("aside").boundingBox();
         // The agent drawer enters from and remains aligned to the viewport's right edge.
@@ -277,6 +411,7 @@ test.describe("Application navigation", () => {
 
                 dispatchTouch("touchstart", 200, 200);
                 dispatchTouch("touchmove", 100, 215);
+
                 const hiddenAfterHorizontalGesture =
                     document.documentElement.hasAttribute(
                         "data-touch-scrolling",
@@ -284,6 +419,7 @@ test.describe("Application navigation", () => {
 
                 dispatchTouch("touchstart", 200, 200);
                 dispatchTouch("touchmove", 200, 150);
+
                 const hiddenAtVerticalThreshold =
                     document.documentElement.hasAttribute(
                         "data-touch-scrolling",
@@ -291,6 +427,7 @@ test.describe("Application navigation", () => {
 
                 dispatchTouch("touchstart", 200, 200);
                 dispatchTouch("touchmove", 200, 149);
+
                 const hiddenAfterVerticalGesture =
                     document.documentElement.hasAttribute(
                         "data-touch-scrolling",
@@ -343,9 +480,50 @@ test.describe("Application navigation", () => {
         await expect
             .poll(async () => {
                 const box = await panel.boundingBox();
+
                 // Fully clipped counts as hidden; a partial slide would still report a y below the viewport.
                 return box === null || box.y >= 800;
             })
             .toBe(true);
+    });
+
+    test("shows page not found inside the application chrome", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/no-such-page`);
+
+        // Unknown addresses must say so rather than render a blank or default page.
+        await expect(
+            page.getByRole("heading", { name: "Page not found" }),
+        ).toBeVisible();
+
+        // The menus stay around the message, so the user is one click from a real page.
+        const applicationNavigation = page.getByRole("navigation", {
+            name: "Application",
+        });
+
+        await expect(applicationNavigation).toBeVisible();
+        await page.getByRole("link", { name: "Server home" }).first().click();
+        // The way back must land on the server home.
+        await expect(page).toHaveURL(`${WEB_BASE_URL}/`);
+    });
+
+    test("marks only the current destination in the application menu", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/transfers`);
+
+        const applicationNavigation = page.getByRole("navigation", {
+            name: "Application",
+        });
+
+        // The router's active matching must flag the page being viewed.
+        await expect(
+            applicationNavigation.getByRole("link", { name: "Transfers" }),
+        ).toHaveAttribute("aria-current", "page");
+        // Home is an exact match, so it must not light up for other pages.
+        await expect(
+            applicationNavigation.getByRole("link", { name: "Server home" }),
+        ).not.toHaveAttribute("aria-current", "page");
     });
 });

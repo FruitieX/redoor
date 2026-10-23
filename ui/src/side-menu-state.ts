@@ -1,4 +1,5 @@
-import { atom, useAtomValue } from "jotai";
+import * as React from "react";
+import { atom, useAtomValue, useSetAtom } from "jotai";
 
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
 import { atomWithSessionStorage } from "#ui/utils/local-storage-atom";
@@ -9,6 +10,28 @@ export type SideMenuId = "application" | "agents";
 /** Shares drawer requests so in-page controls can open the same side menus as the top bar. */
 export const openSideMenuAtom = atom<SideMenuId | null>(null);
 
+/**
+ * Names each menu's drawer element once, so the menu and the controls that open it agree on
+ * the `aria-controls` target.
+ */
+export const sideMenuDrawerIds = {
+    application: "application-menu-drawer",
+    agents: "agent-menu-drawer",
+} satisfies Record<SideMenuId, string>;
+
+/** Lets menu content dismiss its own drawer after navigation without receiving callbacks. */
+export function useCloseSideMenu(): () => void {
+    const setOpenMenu = useSetAtom(openSideMenuAtom);
+
+    return React.useCallback(() => setOpenMenu(null), [setOpenMenu]);
+}
+
+/** Keeps bookmark folding consistent between the sidebar and drawer across tab reloads. */
+export const foldedBookmarkAgentsAtom = atomWithSessionStorage<string[]>(
+    "redoor.folded-bookmark-agents",
+    [],
+);
+
 export type SidebarMode = "auto" | "show" | "hide";
 
 /** Remembers the tab's layout choice without affecting other windows. */
@@ -17,15 +40,24 @@ export const sidebarModeAtom = atomWithSessionStorage<SidebarMode>(
     "auto",
 );
 
+/** Remembers each edge's preferred width independently across navigation and tab reloads. */
+export const sidebarWidthsAtom = atomWithSessionStorage(
+    "redoor.sidebar-widths",
+    { left: 224, right: 224 },
+);
+
 /** Resolves whether both edge menus should occupy layout space instead of drawers. */
 export function usePersistentSideMenus(): boolean {
     const mode = useAtomValue(sidebarModeAtom);
     const isBelowLg = useIsBelowBreakpoint("lg");
+
     if (mode === "show") {
         return true;
     }
+
     if (mode === "hide") {
         return false;
     }
+
     return !isBelowLg;
 }

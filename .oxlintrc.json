@@ -48,7 +48,16 @@
                 "assertionStyle": "never"
             }
         ],
-        "typescript/no-floating-promises": "error"
+        "typescript/no-floating-promises": "error",
+        "anti-slop/no-array-filter-map": "error",
+        "anti-slop/no-reduce-accumulator-copy": "error",
+        "anti-slop/no-module-mocking": "error",
+        "anti-slop/no-reflect-apply": "error",
+        "anti-slop/no-reflect-get": "error",
+        "anti-slop/no-unknown-returns": "error",
+        "anti-slop/require-readable-spacing": "error",
+        "anti-slop/require-safety-comment-for-type-assertion": "error",
+        "oxc/no-accumulating-spread": "error"
     },
     "env": {
         "builtin": true

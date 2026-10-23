@@ -8,9 +8,11 @@ import {
     MoveRight,
     CircleX,
     FilePenLine,
+    Pause,
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { type ApiClient, type TransferProgressEntry } from "#ui/api-client";
+import { type ApiClient } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import { Tooltip } from "#ui/components/tooltip";
 import { IconButton } from "#ui/components/icon-button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
@@ -20,131 +22,45 @@ import { formatSize, formatSpeed } from "#ui/utils/path";
 import {
     formatRemainingTime,
     getAnimatedTransferProgress,
-    getLastEstimatedTransferProgress,
     getTransferSpeedBytesPerSecond,
 } from "#ui/utils/transfer-progress";
+import { useTransferClock } from "#ui/utils/use-transfer-clock";
+import { getErrorMessage } from "#ui/utils/error";
 
-type TransferAnimationFrame = {
-    transfer: TransferProgressEntry;
-    refreshedAtMilliseconds: number;
-    elapsedSeconds: number;
-};
-
-/** Restarts projection from each API snapshot and advances it at animation-frame cadence. */
-function useTransferAnimation(
-    transfer: TransferProgressEntry,
-): TransferAnimationFrame {
-    const [animationFrame, setAnimationFrame] = React.useState(() => ({
-        transfer,
-        refreshedAtMilliseconds: Date.now(),
-        elapsedSeconds: 0,
-    }));
-
-    React.useEffect(() => {
-        const refreshedAtMilliseconds = Date.now();
-        let frameRequest: number;
-
-        const updateAnimation = () => {
-            setAnimationFrame({
-                transfer,
-                refreshedAtMilliseconds,
-                elapsedSeconds: (Date.now() - refreshedAtMilliseconds) / 1000,
-            });
-
-            if (transfer.state === "active") {
-                frameRequest = window.requestAnimationFrame(updateAnimation);
-            }
-        };
-
-        frameRequest = window.requestAnimationFrame(updateAnimation);
-        return () => window.cancelAnimationFrame(frameRequest);
-    }, [transfer]);
-
-    if (animationFrame.transfer !== transfer) {
-        return {
-            transfer,
-            refreshedAtMilliseconds: Date.now(),
-            elapsedSeconds: 0,
-        };
-    }
-
-    return animationFrame;
-}
-
-/** Animates the header from the transfer whose ETA determines when all transfers finish. */
-export function useLastEstimatedTransferPercentage(
-    transfers: TransferProgressEntry[],
-): number | null {
-    const [animationFrame, setAnimationFrame] = React.useState(() => ({
-        transfers,
-        refreshedAtMilliseconds: Date.now(),
-        elapsedSeconds: 0,
-    }));
-
-    React.useEffect(() => {
-        const refreshedAtMilliseconds = Date.now();
-        if (
-            getLastEstimatedTransferProgress(
-                transfers,
-                0,
-                refreshedAtMilliseconds,
-            ) === null
-        ) {
-            return;
-        }
-        let frameRequest: number;
-
-        const updateAnimation = () => {
-            setAnimationFrame({
-                transfers,
-                refreshedAtMilliseconds,
-                elapsedSeconds: (Date.now() - refreshedAtMilliseconds) / 1000,
-            });
-            frameRequest = window.requestAnimationFrame(updateAnimation);
-        };
-
-        frameRequest = window.requestAnimationFrame(updateAnimation);
-        return () => window.cancelAnimationFrame(frameRequest);
-    }, [transfers]);
-
-    const currentFrame =
-        animationFrame.transfers === transfers
-            ? animationFrame
-            : {
-                  transfers,
-                  refreshedAtMilliseconds: Date.now(),
-                  elapsedSeconds: 0,
-              };
-    const progress = getLastEstimatedTransferProgress(
-        transfers,
-        currentFrame.elapsedSeconds,
-        currentFrame.refreshedAtMilliseconds,
-    );
-    return progress === null ? null : Math.round(progress.percentage);
+/** Keeps the pie animating only while the API reports the transfer as still moving. */
+function isTransferActive(transfer: TransferProgressEntry): boolean {
+    return transfer.state === "active";
 }
 
 /** Shows projected bytes and a pie whose full state only comes from the API. */
 function TransferProgressCell(props: { transfer: TransferProgressEntry }) {
-    const animationFrame = useTransferAnimation(props.transfer);
+    const animationFrame = useTransferClock(props.transfer, isTransferActive);
+
     const progress = getAnimatedTransferProgress(
         props.transfer,
         animationFrame.elapsedSeconds,
         animationFrame.refreshedAtMilliseconds,
     );
+
     const speed = getTransferSpeedBytesPerSecond(
         props.transfer,
         animationFrame.refreshedAtMilliseconds,
     );
+
     const displayedBytes = Math.floor(progress.transferredBytes);
     const sizeUnknown = props.transfer.total_bytes <= 0;
+
     const measuringArchive =
         sizeUnknown && props.transfer.direction === "download";
+
     const pieDegrees = sizeUnknown ? 0 : progress.percentage * 3.6;
     const remainingTime = formatRemainingTime(progress.remainingSeconds);
     const percentageLabel = `${Math.round(progress.percentage)}%`;
     const speedLabel = props.transfer.atomic ? null : formatSpeed(speed);
+
     const remainingLabel =
         remainingTime === null ? null : `${remainingTime} remaining`;
+
     const progressLabel = [
         sizeUnknown ? null : percentageLabel,
         speedLabel,
@@ -194,10 +110,10 @@ function TransferProgressCell(props: { transfer: TransferProgressEntry }) {
 
 function TransferTableHeader() {
     return (
-        <thead className="sticky top-0 bg-[#1a1f2a]">
+        <thead className="sticky top-0 bg-surface-raised">
             <tr className="border-b border-slate-800">
                 <th className="text-left p-3 text-sm font-medium text-slate-400">
-                    Agent
+                    Device
                 </th>
                 <th className="text-left p-3 text-sm font-medium text-slate-400">
                     Direction
@@ -233,7 +149,9 @@ function TransferStatusCell(props: { transfer: TransferProgressEntry }) {
                               : "text-slate-100"
                     }`}
                 >
-                    {props.transfer.state}
+                    {props.transfer.verifying
+                        ? "verifying"
+                        : props.transfer.state}
                 </span>
                 {props.transfer.error ? (
                     <span className="inline-flex max-w-xs items-start gap-1 text-xs text-red-400">
@@ -253,16 +171,31 @@ function TransferActionsCell(props: {
     transfer: TransferProgressEntry;
     disabled: boolean;
     onCancel: () => void;
+    onPause: () => void;
 }) {
     return (
         <td className="p-3 text-right">
+            {props.transfer.pausable && props.transfer.state === "active" ? (
+                <IconButton
+                    type="button"
+                    label="Pause transfer"
+                    variant="ghost"
+                    size="md"
+                    disabled={props.disabled}
+                    onClick={props.onPause}
+                >
+                    <Pause className="h-4 w-4" />
+                </IconButton>
+            ) : null}
             {props.transfer.cancelable && props.transfer.state === "active" ? (
                 <IconButton
                     type="button"
                     label="Cancel transfer"
                     disabled={props.disabled}
                     onClick={props.onCancel}
-                    className="rounded-md p-2 text-slate-400 transition-colors hover:bg-red-500/15 hover:text-red-300"
+                    variant="ghost"
+                    size="md"
+                    className="hover:bg-red-500/15 hover:text-red-300"
                 >
                     <CircleX className="h-4 w-4" />
                 </IconButton>
@@ -319,12 +252,14 @@ function TransferCancellationToast(props: {
 /** Gives every transfer semantic its own stable label and visual treatment. */
 function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
     const direction = props.transfer.direction;
+
     const color =
         direction === "upload"
             ? "bg-blue-500/15 text-blue-300"
             : direction === "edit"
               ? "bg-amber-500/15 text-amber-300"
               : "bg-emerald-500/15 text-emerald-300";
+
     const icon =
         direction === "upload" ? (
             <ArrowUpFromLine className="h-3.5 w-3.5" />
@@ -337,6 +272,7 @@ function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
         ) : (
             <Copy className="h-3.5 w-3.5" />
         );
+
     const label =
         direction === "upload"
             ? "Upload"
@@ -349,6 +285,7 @@ function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
                   : direction === "move"
                     ? "Move"
                     : "Copy";
+
     return (
         <span
             className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${color}`}
@@ -359,15 +296,38 @@ function TransferDirectionBadge(props: { transfer: TransferProgressEntry }) {
     );
 }
 
+/** Pause refreshes both live history and durable discovery after acknowledgement. */
+function usePauseTransfer(props: { api: ApiClient; onPaused: () => void }) {
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationFn: (transferId: number) => props.api.pauseTransfer(transferId),
+        onSuccess: async () => {
+            await Promise.all([
+                queryClient.invalidateQueries({
+                    queryKey: queryKeys.transfers(),
+                }),
+                queryClient.invalidateQueries({
+                    queryKey: queryKeys.partials(),
+                }),
+            ]);
+            props.onPaused();
+        },
+    });
+}
+
 export function TransferList(props: {
     api: ApiClient;
     agents: Awaited<ReturnType<ApiClient["listAgents"]>>;
     transfers: TransferProgressEntry[];
 }) {
     const queryClient = useQueryClient();
+
     const [selectedTransfer, setSelectedTransfer] =
         React.useState<TransferProgressEntry | null>(null);
+
     const [toastMessage, setToastMessage] = React.useState<string | null>(null);
+
     const cancelMutation = useMutation({
         mutationFn: (transferId: number) =>
             props.api.cancelTransfer(transferId),
@@ -380,28 +340,36 @@ export function TransferList(props: {
         },
     });
 
+    const pauseMutation = usePauseTransfer({
+        api: props.api,
+        onPaused: () => setToastMessage("Transfer paused"),
+    });
+
     if (props.transfers.length === 0) {
         return <EmptyTransferList />;
     }
 
     return (
-        <div className="overflow-x-auto bg-[#11141b]">
-            <table className="w-full min-w-[48rem] bg-[#11141b]">
+        <div className="overflow-x-auto bg-surface">
+            <table className="w-full min-w-[48rem] bg-surface">
                 <TransferTableHeader />
                 <tbody>
                     {props.transfers.map((transfer) => {
                         const hasEndpoints =
                             transfer.direction === "copy" ||
                             transfer.direction === "move";
+
                         const agent = props.agents.find(
                             (entry) => entry.id === transfer.agent_id,
                         );
+
                         const sourceAgent = transfer.source
                             ? props.agents.find(
                                   (entry) =>
                                       entry.id === transfer.source?.agent,
                               )
                             : undefined;
+
                         const destAgent = transfer.dest
                             ? props.agents.find(
                                   (entry) => entry.id === transfer.dest?.agent,
@@ -411,7 +379,7 @@ export function TransferList(props: {
                         return (
                             <tr
                                 key={transfer.request_id.toString()}
-                                className="border-b border-slate-800/60 last:border-b-0 hover:bg-white/5 align-top"
+                                className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint align-top"
                             >
                                 <td className="whitespace-nowrap p-3">
                                     <div className="flex flex-col">
@@ -501,7 +469,15 @@ export function TransferList(props: {
                                 <TransferStatusCell transfer={transfer} />
                                 <TransferActionsCell
                                     transfer={transfer}
-                                    disabled={cancelMutation.isPending}
+                                    disabled={
+                                        cancelMutation.isPending ||
+                                        pauseMutation.isPending
+                                    }
+                                    onPause={() =>
+                                        pauseMutation.mutate(
+                                            transfer.request_id,
+                                        )
+                                    }
                                     onCancel={() => {
                                         cancelMutation.reset();
                                         setSelectedTransfer(transfer);
@@ -512,12 +488,20 @@ export function TransferList(props: {
                     })}
                 </tbody>
             </table>
+            {pauseMutation.error ? (
+                <Toast tone="error" onDismiss={() => pauseMutation.reset()}>
+                    {pauseMutation.error.message}
+                </Toast>
+            ) : null}
             <TransferCancellationDialog
                 isOpen={selectedTransfer !== null}
                 isBusy={cancelMutation.isPending}
                 errorMessage={
-                    cancelMutation.error instanceof Error
-                        ? cancelMutation.error.message
+                    cancelMutation.isError
+                        ? getErrorMessage(
+                              cancelMutation.error,
+                              "Could not cancel the transfer",
+                          )
                         : null
                 }
                 onClose={() => {

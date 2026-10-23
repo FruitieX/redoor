@@ -8,5 +8,6 @@ export function isErrorCode(
     code: string,
 ): cause is { code: string } {
     const result = errorCodeSchema.safeParse(cause);
+
     return result.success && result.data.code === code;
 }

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type { BottomDrawerTabId } from "#ui/bottom-drawer-state";
-import { Tooltip } from "#ui/components/tooltip";
+import { Tab, TabList } from "#ui/components/tabs";
 import { IconButton } from "#ui/components/icon-button";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
 
@@ -10,7 +10,8 @@ export type BottomDrawerTab = {
     id: BottomDrawerTabId;
     label: string;
     icon?: React.ReactNode;
-    badge?: string;
+    /** A node rather than text so a fast-changing badge can live in its own leaf component. */
+    badge?: React.ReactNode;
     content: React.ReactNode;
 };
 
@@ -30,13 +31,16 @@ export function TabbedBottomDrawer(props: {
         isCollapsed: props.isCollapsed,
         defaultExpandedHeight: 400,
     });
+
     const isContentVisible = useDrawerSlideContentVisibility({
         isCollapsed: props.isCollapsed,
         panelRef: resize.panelRef,
     });
+
     const toggleLabel = props.isCollapsed
         ? "Expand bottom drawer"
         : "Minimize bottom drawer";
+
     const panelHeight = props.isCollapsed
         ? COLLAPSED_DRAWER_HEIGHT
         : (resize.expandedHeight ?? 400);
@@ -45,26 +49,6 @@ export function TabbedBottomDrawer(props: {
     const activateTab = (tab: BottomDrawerTabId) => {
         props.onActiveTabChange(tab);
         props.onCollapsedChange(false);
-    };
-
-    /** Gives the primary tab strip conventional horizontal arrow navigation. */
-    const handleTabKeyDown = (
-        event: React.KeyboardEvent<HTMLButtonElement>,
-        tabIndex: number,
-    ) => {
-        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
-            return;
-        }
-        const offset = event.key === "ArrowRight" ? 1 : -1;
-        const nextIndex =
-            (tabIndex + offset + props.tabs.length) % props.tabs.length;
-        const nextTab = props.tabs[nextIndex];
-        if (!nextTab) {
-            return;
-        }
-        activateTab(nextTab.id);
-        document.getElementById(`bottom-drawer-tab-${nextTab.id}`)?.focus();
-        event.preventDefault();
     };
 
     return (
@@ -81,7 +65,7 @@ export function TabbedBottomDrawer(props: {
                 style={{ height: props.isFullWindow ? "100%" : panelHeight }}
                 aria-label="Application tools"
                 data-overlay-bottom-panel=""
-                className={`absolute inset-x-0 bottom-0 flex min-h-0 flex-col overflow-hidden bg-[#11141b]/95 shadow-[0_-10px_30px_-12px_rgba(0,0,0,0.6)] backdrop-blur supports-backdrop-filter:bg-[#11141b]/80 motion-reduce:transition-none ${props.isFullWindow ? "" : "border-t border-slate-800"} ${
+                className={`absolute inset-x-0 bottom-0 flex min-h-0 flex-col overflow-hidden bg-surface/95 shadow-[0_-10px_30px_-12px_rgba(0,0,0,0.6)] backdrop-blur supports-backdrop-filter:bg-surface/80 motion-reduce:transition-none ${props.isFullWindow ? "" : "border-t border-slate-800"} ${
                     resize.isResizing || props.isFullWindow
                         ? ""
                         : "transition-[height] duration-150 ease-out"
@@ -114,23 +98,19 @@ export function TabbedBottomDrawer(props: {
                         hidden={props.isFullWindow}
                         className="flex min-w-0 shrink-0 items-center gap-1"
                     >
-                        <div
-                            role="tablist"
+                        <TabList
                             aria-label="Application tools"
                             className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overscroll-x-contain"
                         >
-                            {props.tabs.map((tab, tabIndex) => (
+                            {props.tabs.map((tab) => (
                                 <BottomDrawerTabButton
                                     key={tab.id}
                                     tab={tab}
                                     isActive={tab.id === props.activeTab}
                                     onActivate={() => activateTab(tab.id)}
-                                    onKeyDown={(event) =>
-                                        handleTabKeyDown(event, tabIndex)
-                                    }
                                 />
                             ))}
-                        </div>
+                        </TabList>
                         <div className="flex shrink-0 items-center gap-1">
                             <div className="mx-1 h-5 w-px bg-slate-800" />
                             <IconButton
@@ -140,7 +120,8 @@ export function TabbedBottomDrawer(props: {
                                 onClick={() =>
                                     props.onCollapsedChange(!props.isCollapsed)
                                 }
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                                variant="ghost"
+                                size="lg"
                             >
                                 {props.isCollapsed ? (
                                     <ChevronUp className="h-4 w-4" />
@@ -158,6 +139,7 @@ export function TabbedBottomDrawer(props: {
                     >
                         {props.tabs.map((tab) => {
                             const isActive = tab.id === props.activeTab;
+
                             return (
                                 <div
                                     key={tab.id}
@@ -187,26 +169,33 @@ function useDrawerSlideContentVisibility(props: {
     const [isContentVisible, setIsContentVisible] = React.useState(
         !props.isCollapsed,
     );
+
     const wasCollapsedRef = React.useRef(props.isCollapsed);
 
     React.useEffect(() => {
         const wasCollapsed = wasCollapsedRef.current;
         wasCollapsedRef.current = props.isCollapsed;
+
         if (!props.isCollapsed) {
             setIsContentVisible(true);
+
             return;
         }
+
         if (wasCollapsed) {
             setIsContentVisible(false);
+
             return;
         }
 
         const panel = props.panelRef.current;
+
         if (
             !panel ||
             window.matchMedia("(prefers-reduced-motion: reduce)").matches
         ) {
             setIsContentVisible(false);
+
             return;
         }
 
@@ -214,26 +203,37 @@ function useDrawerSlideContentVisibility(props: {
         const hideContent = () => {
             setIsContentVisible(false);
         };
+
         const handleTransitionEnd = (event: TransitionEvent) => {
             if (event.target !== panel || event.propertyName !== "height") {
                 return;
             }
+
             hideContent();
         };
+
         panel.addEventListener("transitionend", handleTransitionEnd);
         const fallback = window.setTimeout(hideContent, 200);
+
         return () => {
             panel.removeEventListener("transitionend", handleTransitionEnd);
             window.clearTimeout(fallback);
         };
     }, [props.isCollapsed, props.panelRef]);
 
-    return isContentVisible;
+    // Reveal during the opening render so child focus effects never target hidden controls.
+    return !props.isCollapsed || isContentVisible;
 }
 
 /** Builds the compact tooltip from the same label and badge the wide tabs already show. */
-function tabDetails(tab: BottomDrawerTab): string {
-    return tab.badge ? `${tab.label} ${tab.badge}` : tab.label;
+function tabDetails(tab: BottomDrawerTab): React.ReactNode {
+    return tab.badge ? (
+        <>
+            {tab.label} {tab.badge}
+        </>
+    ) : (
+        tab.label
+    );
 }
 
 /** Hides label text on small screens while keeping the tab name available to assistive tech. */
@@ -241,23 +241,21 @@ function BottomDrawerTabButton(props: {
     tab: BottomDrawerTab;
     isActive: boolean;
     onActivate: () => void;
-    onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
 }) {
     const isBelowSm = useIsBelowBreakpoint("sm");
-    const button = (
-        <button
+
+    return (
+        <Tab
             id={`bottom-drawer-tab-${props.tab.id}`}
-            type="button"
-            role="tab"
-            aria-selected={props.isActive}
+            selected={props.isActive}
             aria-controls={`bottom-drawer-panel-${props.tab.id}`}
-            tabIndex={props.isActive ? 0 : -1}
+            tooltip={isBelowSm ? <>Show {tabDetails(props.tab)}</> : undefined}
+            tooltipClassName="shrink-0"
             onClick={props.onActivate}
-            onKeyDown={props.onKeyDown}
             className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors sm:px-3 ${
                 props.isActive
                     ? "bg-slate-800 text-slate-100"
-                    : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                    : "text-slate-400 hover:bg-tint hover:text-slate-200"
             }`}
         >
             {props.tab.icon}
@@ -267,17 +265,7 @@ function BottomDrawerTabButton(props: {
                     {props.tab.badge}
                 </span>
             ) : null}
-        </button>
-    );
-
-    if (!isBelowSm) {
-        return button;
-    }
-
-    return (
-        <Tooltip content={`Show ${tabDetails(props.tab)}`} className="shrink-0">
-            {button}
-        </Tooltip>
+        </Tab>
     );
 }
 
@@ -289,9 +277,11 @@ function useBottomPanelResize(props: {
     const [expandedHeight, setExpandedHeight] = React.useState<number | null>(
         props.defaultExpandedHeight ?? null,
     );
+
     const [isResizing, setIsResizing] = React.useState(false);
     const panelRef = React.useRef<HTMLElement | null>(null);
     const headerRef = React.useRef<HTMLDivElement | null>(null);
+
     const resizeRef = React.useRef<{
         pointerId: number;
         startY: number;
@@ -304,11 +294,13 @@ function useBottomPanelResize(props: {
     const getHeightBounds = () => {
         const panel = panelRef.current;
         const header = headerRef.current;
+
         if (!panel || !header) {
             return null;
         }
 
         const panelRect = panel.getBoundingClientRect();
+
         return {
             currentHeight: panelRect.height,
             minHeight: header.getBoundingClientRect().height + 48,
@@ -321,7 +313,9 @@ function useBottomPanelResize(props: {
         if (props.isCollapsed || event.button !== 0) {
             return;
         }
+
         const bounds = getHeightBounds();
+
         if (!bounds) {
             return;
         }
@@ -341,6 +335,7 @@ function useBottomPanelResize(props: {
     /** Applies a drag while keeping the panel within its measured layout bounds. */
     const handleResizeMove = (event: React.PointerEvent<HTMLDivElement>) => {
         const activeResize = resizeRef.current;
+
         if (!activeResize || activeResize.pointerId !== event.pointerId) {
             return;
         }
@@ -366,6 +361,7 @@ function useBottomPanelResize(props: {
 
         resizeRef.current = null;
         setIsResizing(false);
+
         if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
         }
@@ -381,7 +377,9 @@ function useBottomPanelResize(props: {
         ) {
             return;
         }
+
         const bounds = getHeightBounds();
+
         if (!bounds) {
             return;
         }

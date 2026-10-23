@@ -8,6 +8,7 @@ type ReleaseBump = "patch" | "minor" | "major";
 /** Fail early so a dirty tree cannot leak into the version bump commit. */
 async function requireCleanWorkingTree(): Promise<void> {
     const statusOutput = await $`git status --porcelain`.nothrow();
+
     if (statusOutput.stdout.trim() !== "") {
         console.error(
             "Error: There are uncommitted changes or untracked files. Please commit or stash them before releasing.",
@@ -21,6 +22,7 @@ async function requireMainBranch(): Promise<void> {
     const currentBranch = (
         await $`git rev-parse --abbrev-ref HEAD`
     ).stdout.trim();
+
     if (currentBranch !== "main") {
         console.error(
             `Error: You must be on the 'main' branch to release. Current branch: '${currentBranch}'.`,
@@ -32,6 +34,7 @@ async function requireMainBranch(): Promise<void> {
 /** A rejected push is the remote saying this tip cannot become the release. */
 async function requireSyncedWithOriginMain(): Promise<void> {
     const pushResult = await $`git push origin main`.nothrow();
+
     if (pushResult.exitCode !== 0) {
         console.error(
             "Error: Local main is not in sync with origin/main. Pull until `git push origin main` succeeds.",
@@ -56,6 +59,7 @@ function parseReleaseBump(argument: string | undefined): ReleaseBump {
 /** Increment the latest published tag so the next version cannot collide with an existing release. */
 function resolveNextVersion(latestTag: string, bump: ReleaseBump): string {
     const currentVersion = latestTag.replace(/^v/, "");
+
     if (!semver.valid(currentVersion)) {
         console.error(
             `Invalid latest tag ${latestTag}; expected a v-prefixed semver.`,
@@ -64,6 +68,7 @@ function resolveNextVersion(latestTag: string, bump: ReleaseBump): string {
     }
 
     const newVersion = semver.inc(currentVersion, bump);
+
     if (newVersion === null) {
         console.error(
             `Could not increment ${currentVersion} as a ${bump} release.`,
@@ -77,8 +82,10 @@ function resolveNextVersion(latestTag: string, bump: ReleaseBump): string {
 /** Refuse to rewrite a published tag; non-interactive releases must never be destructive. */
 async function requireUnusedTag(newTag: string): Promise<void> {
     const localTagOutput = await $`git tag -l ${newTag}`.nothrow();
+
     const remoteTagOutput =
         await $`git ls-remote --tags origin ${newTag}`.nothrow();
+
     if (
         localTagOutput.stdout.trim() === newTag ||
         remoteTagOutput.stdout.trim().includes(`refs/tags/${newTag}`)
@@ -91,12 +98,17 @@ async function requireUnusedTag(newTag: string): Promise<void> {
 }
 
 const bump = parseReleaseBump(process.argv[2]);
+
 await requireCleanWorkingTree();
+
 await requireMainBranch();
+
 await requireSyncedWithOriginMain();
 
 const tagOutput = await $`git tag -l 'v*' | sort -V | tail -n 1`;
+
 const latestTag = tagOutput.stdout.trim();
+
 if (latestTag === "") {
     console.error(
         "Error: No release tags found. Cannot compute the next version.",
@@ -105,24 +117,34 @@ if (latestTag === "") {
 }
 
 console.log(`Latest release tag: ${latestTag}`);
+
 const newVersion = resolveNextVersion(latestTag, bump);
+
 const newTag = `v${newVersion}`;
+
 console.log(`Releasing ${newTag} (${bump})`);
+
 await requireUnusedTag(newTag);
 
 const cargoTomlPath = "Cargo.toml";
+
 const cargoTomlContent = await readFile(cargoTomlPath, "utf-8");
+
 const updatedCargoToml = cargoTomlContent.replace(
     /^version = ".*"$/m,
     `version = "${newVersion}"`,
 );
+
 await writeFile(cargoTomlPath, updatedCargoToml);
 
 console.log("Running cargo build to update Cargo.lock...");
+
 await $`cargo build`;
+
 await $`git add ${cargoTomlPath} Cargo.lock`;
 
 const stagedOutput = await $`git diff --cached --name-only`.nothrow();
+
 if (stagedOutput.stdout.trim() !== "") {
     await $`git commit -m "Bump version to ${newVersion}"`;
 } else {
@@ -130,6 +152,9 @@ if (stagedOutput.stdout.trim() !== "") {
 }
 
 await $`git tag -a ${newTag} -m "Release ${newTag}"`;
+
 await $`git push origin HEAD`;
+
 await $`git push origin ${newTag}`;
+
 console.log(`Released ${newTag}`);

@@ -33,12 +33,14 @@ test.describe.serial("File Browser Listing", () => {
 
         // The icon link must return directly to the agent's published home from nested paths.
         await expect(
-            page.getByRole("link", { name: "Agent home" }),
+            page.getByRole("link", { name: "Device home" }),
         ).toHaveAttribute("href", new URL(ctx.agentBrowserUrl).pathname);
+
         const backToAgentButton = page.getByRole("link", {
             name: ctx.agentName,
             exact: true,
         });
+
         await backToAgentButton.click();
 
         await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentId}$`));
@@ -75,6 +77,14 @@ test.describe.serial("File Browser Listing", () => {
             .click();
         // Opening a file must make that exact file the second tab's destination.
         await expect(page).toHaveURL(agent2FileUrl);
+        // The location is remembered only once the file route resolves, so switching tabs
+        // before that would leave the directory as the remembered destination.
+        await expect(
+            page.getByRole("link", { name: "agent2_custom, connected" }),
+        ).toHaveAttribute(
+            "href",
+            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(agent2FilePath)}`,
+        );
 
         await page
             .getByRole("link", {
@@ -112,21 +122,25 @@ test.describe.serial("File Browser Listing", () => {
         const dirLinks = page.getByRole("link", {
             name: /^(subdir1|subdir2|subdir3)$/,
         });
+
         await expect(dirLinks).toHaveCount(3);
 
         const fileEntries = page
             .locator("td")
             .filter({ hasText: /^(file1|file2)\.txt$/ });
+
         await expect(fileEntries).toHaveCount(2);
 
         const dirSizeColumn = page.getByRole("cell", {
             name: "Size for subdir1",
         });
+
         await expect(dirSizeColumn).toBeVisible();
 
         const fileSizeColumn = page.getByRole("cell", {
             name: "Size for file1.txt",
         });
+
         await expect(fileSizeColumn).not.toHaveText("-");
     });
 
@@ -143,6 +157,7 @@ test.describe.serial("File Browser Listing", () => {
             ctx.testDirPath,
             "appeared-on-focus.txt",
         );
+
         await fs.writeFile(appearedPath, "new listing entry");
         await simulateTabRefocus(page);
 
@@ -168,6 +183,7 @@ test.describe.serial("File Browser Listing", () => {
             ctx.testDirPath,
             "appeared-from-reload.txt",
         );
+
         await fs.writeFile(appearedPath, "new listing entry");
         await page
             .getByRole("button", { name: "Reload directory listing" })
@@ -256,6 +272,7 @@ test.describe.serial("File Browser Listing", () => {
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         const filesActions = page.getByLabel("Files view actions");
+
         const toolbarTooltips = [
             {
                 control: filesActions.getByRole("button", {
@@ -294,7 +311,7 @@ test.describe.serial("File Browser Listing", () => {
                 control: filesActions.getByRole("button", {
                     name: "Reload directory listing",
                 }),
-                text: "Reload directory listing from the agent",
+                text: "Reload directory listing from the device",
             },
         ] as const;
 
@@ -319,7 +336,7 @@ test.describe.serial("File Browser Listing", () => {
         // A second trigger must replace the first tooltip instead of stacking.
         await expect(page.getByRole("tooltip")).toHaveCount(1);
         await expect(page.getByRole("tooltip")).toHaveText(
-            "Reload directory listing from the agent",
+            "Reload directory listing from the device",
         );
 
         await page.mouse.move(0, 0);

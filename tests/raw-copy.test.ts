@@ -8,7 +8,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { ApiClient, Agent } from "#ui/api-client";
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import path from "node:path";
 import fs from "node:fs/promises";
 import {
@@ -68,6 +68,7 @@ describe("Raw Copy API", () => {
             description: "completed copy transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -111,17 +112,20 @@ describe("Raw Copy API", () => {
         const sourceContent = "cross-agent-copy".repeat(4096);
         const sourcePath = tempFiles.create(sourceContent, { suffix: ".txt" });
         const destPath = tempFiles.tempFile({ suffix: ".txt" });
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const secondAgentName = "raw-copy-target-agent";
 
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(`Transfer socket registered: agent_id=${secondAgentName},`),
+            new RegExp(
+                `Agent registered: agent_id=${secondAgentName},`,
+            ),
             10000,
         );
 
@@ -141,6 +145,7 @@ describe("Raw Copy API", () => {
             description: "second copy agent",
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 return agents.find((agent) => agent.name === secondAgentName);
             },
         });
@@ -154,6 +159,7 @@ describe("Raw Copy API", () => {
             description: "completed cross-agent copy transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -186,6 +192,7 @@ describe("Raw Copy API", () => {
             description: "completed empty copy transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -241,6 +248,7 @@ describe("Raw Copy API", () => {
             description: "completed same-agent directory copy transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -266,10 +274,12 @@ describe("Raw Copy API", () => {
             path.join(destRoot, "top.txt"),
             "utf-8",
         );
+
         const nestedFileContent = await fs.readFile(
             path.join(destRoot, "nested", "deeper", "child.txt"),
             "utf-8",
         );
+
         const emptyDirStat = await fs.stat(path.join(destRoot, "empty"));
 
         // Reading the copied top-level file confirms the tar stream preserved root entries.
@@ -283,7 +293,7 @@ describe("Raw Copy API", () => {
     it("should copy a directory across agents", async () => {
         const sourceRoot = tempFiles.tempFile({ suffix: "-cross-source-dir" });
         const destRoot = tempFiles.tempFile({ suffix: "-cross-dest-dir" });
-        const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+        const wsUrl = `ws://127.0.0.1:${serverPort}`;
         const secondAgentName = "raw-copy-target-agent-dir";
 
         await fs.mkdir(path.join(sourceRoot, "nested"), { recursive: true });
@@ -294,13 +304,16 @@ describe("Raw Copy API", () => {
         );
 
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(`Transfer socket registered: agent_id=${secondAgentName},`),
+            new RegExp(
+                `Agent registered: agent_id=${secondAgentName},`,
+            ),
             10000,
         );
 
@@ -322,6 +335,7 @@ describe("Raw Copy API", () => {
             description: "second directory copy agent",
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 return agents.find((agent) => agent.name === secondAgentName);
             },
         });
@@ -335,6 +349,7 @@ describe("Raw Copy API", () => {
             description: "completed cross-agent directory copy transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -370,6 +385,7 @@ describe("Raw Copy API", () => {
             description: "completed empty directory copy transfer",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -414,6 +430,22 @@ describe("Raw Copy API", () => {
         ).rejects.toThrow(/different/i);
     });
 
+    it("should reject sources that are neither files nor directories", async () => {
+        // A character device has neither a byte length nor a tree to archive.
+        await expect(
+            testAgent.copyTo(
+                {
+                    agent: testAgent.id,
+                    path: tempFiles.tempFile({ suffix: ".txt" }),
+                },
+                "/dev/null",
+            ),
+        ).rejects.toMatchObject({
+            status: 400,
+            message: "Copy supports regular files and directories only",
+        });
+    });
+
     it("should reject the same source and destination directory", async () => {
         const sourceRoot = tempFiles.tempFile({ suffix: "-same-dir" });
         await fs.mkdir(sourceRoot, { recursive: true });
@@ -430,6 +462,7 @@ describe("Raw Copy API", () => {
         const sourceRoot = tempFiles.tempFile({
             suffix: "-existing-dest-source",
         });
+
         const destRoot = tempFiles.tempFile({
             suffix: "-existing-dest-target",
         });
@@ -452,6 +485,7 @@ describe("Raw Copy API", () => {
                 "errored directory copy transfer with existing destination",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -476,11 +510,13 @@ describe("Raw Copy API", () => {
         beforeAll(async () => {
             if (scope === "same-agent") {
                 destAgentId = testAgent.id;
+
                 return;
             }
 
             const secondAgentName = "raw-copy-on-existing-target-agent";
             const serverProcess = processManager.getProcess(serverPid);
+
             if (!serverProcess) {
                 throw new Error("Server process not found");
             }
@@ -488,13 +524,13 @@ describe("Raw Copy API", () => {
             const waitForSecondAgent = waitForLogMessage(
                 serverProcess,
                 new RegExp(
-                    `Transfer socket registered: agent_id=${secondAgentName},`,
+                    `Agent registered: agent_id=${secondAgentName},`,
                 ),
                 10000,
             );
 
             secondAgentPid = processManager.spawnAgent({
-                wsAddress: `ws://127.0.0.1:${serverPort}/ws`,
+                wsAddress: `ws://127.0.0.1:${serverPort}`,
                 name: secondAgentName,
                 cwd: tempFiles.tempDirectory({
                     suffix: "-on-existing-target-agent-cwd",
@@ -507,9 +543,13 @@ describe("Raw Copy API", () => {
                 description: "on_existing cross-agent destination agent",
                 predicate: async () => {
                     const agents = await apiClient.listAgents();
-                    return agents.find((agent) => agent.name === secondAgentName);
+
+                    return agents.find(
+                        (agent) => agent.name === secondAgentName,
+                    );
                 },
             });
+
             destAgentId = secondAgent.id;
         }, 30000);
 
@@ -523,6 +563,7 @@ describe("Raw Copy API", () => {
             const sourceRoot = tempFiles.tempFile({
                 suffix: `-on-existing-error-source-${scope}`,
             });
+
             const destRoot = tempFiles.tempFile({
                 suffix: `-on-existing-error-dest-${scope}`,
             });
@@ -550,6 +591,7 @@ describe("Raw Copy API", () => {
                 description: `${scope} errored copy with on_existing=error`,
                 predicate: async () => {
                     const progress = await apiClient.getTransferProgress();
+
                     return progress.transfers.find(
                         (transfer: TransferProgressEntry) =>
                             transfer.request_id === response.copy_request_id &&
@@ -576,11 +618,14 @@ describe("Raw Copy API", () => {
             const sourceRoot = tempFiles.tempFile({
                 suffix: `-on-existing-override-source-${scope}`,
             });
+
             const destRoot = tempFiles.tempFile({
                 suffix: `-on-existing-override-dest-${scope}`,
             });
 
-            await fs.mkdir(path.join(sourceRoot, "nested"), { recursive: true });
+            await fs.mkdir(path.join(sourceRoot, "nested"), {
+                recursive: true,
+            });
             await fs.mkdir(destRoot, { recursive: true });
             await fs.writeFile(
                 path.join(sourceRoot, "nested", "file.txt"),
@@ -608,6 +653,7 @@ describe("Raw Copy API", () => {
                 description: `${scope} completed override directory copy`,
                 predicate: async () => {
                     const progress = await apiClient.getTransferProgress();
+
                     return progress.transfers.find(
                         (transfer: TransferProgressEntry) =>
                             transfer.request_id === response.copy_request_id &&
@@ -638,11 +684,14 @@ describe("Raw Copy API", () => {
             const sourceRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-source-${scope}`,
             });
+
             const destRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-dest-${scope}`,
             });
 
-            await fs.mkdir(path.join(sourceRoot, "shared"), { recursive: true });
+            await fs.mkdir(path.join(sourceRoot, "shared"), {
+                recursive: true,
+            });
             await fs.mkdir(path.join(destRoot, "shared"), { recursive: true });
             await fs.writeFile(
                 path.join(sourceRoot, "shared", "conflict.txt"),
@@ -675,6 +724,7 @@ describe("Raw Copy API", () => {
                 description: `${scope} completed merge directory copy`,
                 predicate: async () => {
                     const progress = await apiClient.getTransferProgress();
+
                     return progress.transfers.find(
                         (transfer: TransferProgressEntry) =>
                             transfer.request_id === response.copy_request_id &&
@@ -694,11 +744,17 @@ describe("Raw Copy API", () => {
             ).toBe("from-source");
             // Source-only files must be added beside existing destination entries.
             expect(
-                await fs.readFile(path.join(destRoot, "source-only.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(destRoot, "source-only.txt"),
+                    "utf-8",
+                ),
             ).toBe("source-only");
             // Dest-only files must survive merge because only overlapping paths are replaced.
             expect(
-                await fs.readFile(path.join(destRoot, "dest-only.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(destRoot, "dest-only.txt"),
+                    "utf-8",
+                ),
             ).toBe("dest-only");
         });
 
@@ -706,9 +762,11 @@ describe("Raw Copy API", () => {
             const sourceRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-symlink-root-source-${scope}`,
             });
+
             const externalRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-symlink-root-external-${scope}`,
             });
+
             const destRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-symlink-root-dest-${scope}`,
             });
@@ -737,6 +795,7 @@ describe("Raw Copy API", () => {
                 description: `${scope} errored merge onto destination root symlink`,
                 predicate: async () => {
                     const progress = await apiClient.getTransferProgress();
+
                     return progress.transfers.find(
                         (transfer: TransferProgressEntry) =>
                             transfer.request_id === response.copy_request_id &&
@@ -749,7 +808,10 @@ describe("Raw Copy API", () => {
             expect(erroredTransfer.dest?.agent).toBe(destAgentId);
             // External content must stay untouched so merge never follows the destination root link.
             expect(
-                await fs.readFile(path.join(externalRoot, "secret.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(externalRoot, "secret.txt"),
+                    "utf-8",
+                ),
             ).toBe("external-secret");
             // Source files must not appear outside the requested destination via the symlink target.
             await expect(
@@ -761,14 +823,18 @@ describe("Raw Copy API", () => {
             const sourceRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-nested-symlink-source-${scope}`,
             });
+
             const externalRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-nested-symlink-external-${scope}`,
             });
+
             const destRoot = tempFiles.tempFile({
                 suffix: `-on-existing-merge-nested-symlink-dest-${scope}`,
             });
 
-            await fs.mkdir(path.join(sourceRoot, "linked"), { recursive: true });
+            await fs.mkdir(path.join(sourceRoot, "linked"), {
+                recursive: true,
+            });
             await fs.mkdir(destRoot, { recursive: true });
             await fs.mkdir(externalRoot, { recursive: true });
             await fs.writeFile(
@@ -798,6 +864,7 @@ describe("Raw Copy API", () => {
                 description: `${scope} completed merge that replaces nested symlinks`,
                 predicate: async () => {
                     const progress = await apiClient.getTransferProgress();
+
                     return progress.transfers.find(
                         (transfer: TransferProgressEntry) =>
                             transfer.request_id === response.copy_request_id &&
@@ -821,11 +888,17 @@ describe("Raw Copy API", () => {
             ).toBe("from-source");
             // Dest-only files must survive merge beside the replaced symlink path.
             expect(
-                await fs.readFile(path.join(destRoot, "dest-only.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(destRoot, "dest-only.txt"),
+                    "utf-8",
+                ),
             ).toBe("dest-only");
             // The previous symlink target must remain untouched outside the destination tree.
             expect(
-                await fs.readFile(path.join(externalRoot, "secret.txt"), "utf-8"),
+                await fs.readFile(
+                    path.join(externalRoot, "secret.txt"),
+                    "utf-8",
+                ),
             ).toBe("external-secret");
             await expect(
                 fs.stat(path.join(externalRoot, "file.txt")),
@@ -843,6 +916,7 @@ describe("Raw Copy API", () => {
             { agent: testAgent.id, path: destPath },
             sourcePath,
         );
+
         const elapsedMs = Date.now() - startedAt;
 
         // A fast response shows the API only starts background work instead of waiting for copy completion.
@@ -853,6 +927,7 @@ describe("Raw Copy API", () => {
             timeoutMs: 30000,
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === response.copy_request_id &&
@@ -875,6 +950,7 @@ describe("Raw Copy API", () => {
                       predicate: async () => {
                           const progress =
                               await apiClient.getTransferProgress();
+
                           return progress.transfers.find(
                               (transfer: TransferProgressEntry) =>
                                   transfer.request_id ===

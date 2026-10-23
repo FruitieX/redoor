@@ -1,27 +1,34 @@
-[package]
-name = "redoor"
-version = "0.1.30"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.1.0"
 edition = "2024"
 
-[[bin]]
-name = "redoor"
-path = "src/main.rs"
+[workspace.dependencies]
+blake3 = "1.8"
+redoor-protocol = { path = "crates/redoor-protocol" }
+redoor-core = { path = "crates/redoor-core" }
+redoor-agent = { path = "crates/redoor-agent" }
+redoor-server = { path = "crates/redoor-server" }
+redoor-cli = { path = "crates/redoor-cli" }
 
-[dependencies]
-tokio = { version = "1.53.1", features = ["full"] }
+# Each crate lists the tokio features it uses; only the binary needs the multi-thread runtime.
+tokio = "1.53.1"
 axum = { version = "0.8.9", features = ["ws"] }
 axum-extra = { version = "0.12.6", features = ["typed-header"] }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
 rustls = "0.23.43"
 futures-util = "0.3.33"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
-chrono = "0.4.45"
+jiff = { version = "0.2.35", features = ["serde"] }
 ts-rs = "12.0.1"
 sysinfo = "0.39.6"
-tower-http = { version = "0.7.0", features = ["cors"] }
-nix = { version = "0.31.3", features = ["user", "signal", "process", "event"] }
+tower-http = { version = "0.6.11", features = ["cors", "limit"] }
+nix = { version = "0.31.3", features = ["user", "signal", "process", "event", "hostname", "term"] }
 libc = "0.2"
 fastrand = "2.5.0"
 async-stream = "0.3.6"
@@ -32,17 +39,23 @@ tar = "0.4.46"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 anyhow = "1.0.104"
 thiserror = "2.0.20"
-reqwest = { version = "0.13.4", features = ["stream"] }
+# No `charset`: responses are JSON/bytes, so encoding_rs-based text decoding is unused.
+reqwest = { version = "0.13.4", default-features = false, features = ["default-tls", "http2", "stream", "system-proxy"] }
+url = "2.5.8"
+# Terminal prompts for `redoor remote login`; only the console backend, no editor/tempfile.
+dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 semver = "1.0.27"
 axum-embed = "0.1.0"
 rust-embed = "8.12.0"
 toml_edit = "0.25.13"
 pty-process = { version = "0.5.3", features = ["async"] }
-argon2 = "0.5.3"
+# Only the hasher: salts come from getrandom, so the rand_core/getrandom 0.2 stack is not needed.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
 subtle = "2.6.1"
 sha1 = "0.10.6"
-sha2 = "0.10.9"
-rand_core = { version = "0.6.4", features = ["getrandom"] }
+sha2 = "0.11"
+getrandom = "0.4"
+base64 = "0.22.1"
 nucleo-matcher = "0.3.1"
 async-compression = { version = "0.4.43", features = ["tokio", "gzip"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
@@ -53,17 +66,9 @@ grep-regex = "0.1.14"
 gix = { version = "0.87.0", default-features = false, features = ["status", "parallel", "sha1"] }
 # Names status-walk enums returned by gix without enabling any additional Git capabilities.
 gix-dir = "0.29.0"
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
 mountpoints = "0.2.1"
-
-[target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.9.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "FoundationErrors", "NSError", "NSFileManager", "NSObject", "NSString", "NSURL"] }
-
-[dev-dependencies]
 rcgen = "0.14.5"
 tokio-rustls = "0.26.4"

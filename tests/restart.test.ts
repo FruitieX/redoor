@@ -6,7 +6,8 @@ import {
     afterAll,
     onTestFinished,
 } from "vitest";
-import { ApiClient, ApiError } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import { writeFileSync, rmSync, readFileSync } from "node:fs";
 import {
     ProcessManager,
@@ -20,19 +21,29 @@ import {
 } from "./test-utils";
 
 const AGENT_NAME = "restart-agent";
+
 const SECOND_AGENT_NAME = "restart-agent-two";
 
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
 
 let serverPort: number;
+
 let apiClient: ApiClient;
+
 let configPath: string;
+
 let serverLogPath: string;
+
 let serverPid: number;
+
 let agentDir: string;
+
 let agentLogPath: string;
+
 let secondAgentDir: string;
+
 let secondAgentLogPath: string;
 
 function writeValidConfig(options?: { includeSecondAgent?: boolean }) {
@@ -107,14 +118,17 @@ describe("process restart APIs", () => {
         writeFileSync(configPath, "this is not valid toml [[[");
 
         let restartError: ApiError | undefined;
+
         try {
             await apiClient.restartServer();
         } catch (error) {
             if (!(error instanceof ApiError)) {
                 throw error;
             }
+
             restartError = error;
         }
+
         // Invalid TOML must be rejected pre-restart so the operator keeps the running process.
         expect(restartError).toMatchObject({
             status: 400,
@@ -133,8 +147,11 @@ describe("process restart APIs", () => {
         let agent = (await apiClient.listAgents()).find(
             (entry) => entry.name === AGENT_NAME,
         );
+
         expect(agent).toBeDefined();
+
         if (!agent) return;
+
         if (agent.status !== "connected") {
             await agent.start();
             await apiClient.waitForConnectedAgentNames([AGENT_NAME], 15000);
@@ -143,9 +160,12 @@ describe("process restart APIs", () => {
             );
             // Starting must retain the configured inventory record for the restart request.
             expect(agent).toBeDefined();
+
             if (!agent) return;
         }
+
         const detailsBefore = await agent.getDetails();
+
         const loadedBefore = (
             readFileSync(agentLogPath, "utf8").match(/Starting agent/g) ?? []
         ).length;
@@ -163,13 +183,17 @@ describe("process restart APIs", () => {
                         /Starting agent/g,
                     ) ?? []
                 ).length;
+
                 return loadedAfter > loadedBefore || undefined;
             },
         });
+
         const restartedAgent = (await apiClient.listAgents()).find(
             (entry) => entry.name === AGENT_NAME,
         );
+
         expect(restartedAgent).toBeDefined();
+
         if (!restartedAgent) return;
         const detailsAfter = await restartedAgent.getDetails();
         // Self-exec deliberately preserves the PID for watchdog and SSH ownership.
@@ -192,6 +216,7 @@ describe("process restart APIs", () => {
                 try {
                     const agents = await apiClient.listAgents();
                     const names = agents.map((agent) => agent.name);
+
                     return (
                         names.includes(AGENT_NAME) &&
                         names.includes(SECOND_AGENT_NAME)

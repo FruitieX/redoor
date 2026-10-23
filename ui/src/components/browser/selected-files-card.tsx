@@ -1,7 +1,12 @@
+import type { ResumeMode } from "#bindings/ResumeMode";
 import React from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import { useMutation } from "@tanstack/react-query";
-import { useRouter, useRouterState } from "@tanstack/react-router";
+import {
+    useMutation,
+    useQueryClient,
+    type QueryClient,
+} from "@tanstack/react-query";
+import { useRouterState } from "@tanstack/react-router";
 import {
     Copy,
     Files,
@@ -19,19 +24,23 @@ import {
 } from "#ui/components/browser/delete-paths-dialog";
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
-import { Tooltip } from "#ui/components/tooltip";
-import type { Agent, ApiClient, CopyExistingMode } from "#ui/api-client";
+import type { Agent, ApiClient } from "#ui/api-client";
+import type { CopyExistingMode } from "#bindings/CopyExistingMode";
+import type { LsEntry } from "#bindings/LsEntry";
+import { invalidateAgentData } from "#ui/queries";
+import { waitForTransfers } from "#ui/transfer-wait";
 import {
     selectedFilesAtom,
     clearSelectedFilesAtom,
+    getSelectedFileKey,
     unselectFileAtom,
     type SelectedPath,
 } from "#ui/selected-files";
 import {
-    getErrorMessage,
     isBrowserPathInside,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import {
     SelectedFilesTransferTrigger,
     type SelectedFilesTransferOperation,
@@ -40,6 +49,12 @@ import {
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
 import { AffectedPathsList } from "#ui/components/browser/affected-paths-list";
+
+/** A selection paired with the name it lands under, which differs only when renamed. */
+type TransferItem = {
+    file: SelectedPath;
+    destinationName: string;
+};
 
 type TransferSelectedFilesState =
     | { type: "idle" }
@@ -64,47 +79,90 @@ const transferActionMove = {
 };
 
 /**
- * Polls public transfer rows so only finished items are unselected. Returns
- * false when the run was aborted and the caller must not update UI state.
+ * Waits on the shared transfers query so only finished items are unselected. Returns false
+ * when the run was aborted and the caller must not update UI state.
  */
 async function waitForPendingTransfers(props: {
+    queryClient: QueryClient;
     api: ApiClient;
-    pendingTransfers: Map<number, SelectedPath>;
+    pendingTransfers: Map<number, TransferItem>;
     completedFiles: SelectedPath[];
+    pausedFiles: SelectedPath[];
+    destinationAgentId: string;
+    directoryPath: string;
     failures: unknown[];
     failedLabel: string;
     signal: AbortSignal;
 }): Promise<boolean> {
-    try {
-        while (props.pendingTransfers.size > 0 && !props.signal.aborted) {
-            // Read the public list directly so a transfers_changed invalidation
-            // cannot abort this wait as a TanStack Query CancelledError.
-            const progress = await props.api.getTransferProgress();
-            if (props.signal.aborted) {
-                return false;
-            }
-
-            for (const transfer of progress.transfers) {
-                const file = props.pendingTransfers.get(transfer.request_id);
-                if (!file) continue;
-                if (transfer.state === "completed") {
-                    props.completedFiles.push(file);
-                    props.pendingTransfers.delete(transfer.request_id);
-                } else if (transfer.state === "errored") {
-                    props.failures.push(transfer.error ?? props.failedLabel);
-                    props.pendingTransfers.delete(transfer.request_id);
-                }
-            }
-
-            if (props.pendingTransfers.size > 0) {
-                await new Promise((resolve) => window.setTimeout(resolve, 500));
-            }
-        }
-    } catch (error) {
-        props.failures.push(error);
+    if (props.pendingTransfers.size === 0) {
+        return !props.signal.aborted;
     }
 
-    return !props.signal.aborted;
+    try {
+        return await waitForTransfers({
+            queryClient: props.queryClient,
+            api: props.api,
+            signal: props.signal,
+            isSettled: async (transfers) => {
+                for (const transfer of transfers) {
+                    const item = props.pendingTransfers.get(
+                        transfer.request_id,
+                    );
+
+                    if (!item) continue;
+
+                    if (transfer.state === "completed") {
+                        props.completedFiles.push(item.file);
+                        props.pendingTransfers.delete(transfer.request_id);
+                    } else if (transfer.state === "errored") {
+                        props.failures.push(
+                            transfer.error ?? props.failedLabel,
+                        );
+                        props.pendingTransfers.delete(transfer.request_id);
+                    }
+                }
+
+                const visibleIds = new Set(
+                    transfers.map((transfer) => transfer.request_id),
+                );
+
+                const missingTransfers = [...props.pendingTransfers].filter(
+                    ([id]) => !visibleIds.has(id),
+                );
+
+                if (missingTransfers.length > 0) {
+                    // A paused copy drops its row, so its kept partial is the only trace.
+                    const inventory = await props.api.listPartials();
+
+                    for (const [id, item] of missingTransfers) {
+                        const paused = inventory.partials.some(
+                            (partial) =>
+                                partial.source.agent === item.file.agentId &&
+                                partial.source.path === item.file.path &&
+                                partial.dest_agent_id ===
+                                    props.destinationAgentId &&
+                                partial.dest.path ===
+                                    joinBrowserPath(
+                                        props.directoryPath,
+                                        item.destinationName,
+                                    ),
+                        );
+
+                        if (paused) {
+                            props.pausedFiles.push(item.file);
+                            props.pendingTransfers.delete(id);
+                        }
+                    }
+                }
+
+                return props.pendingTransfers.size === 0;
+            },
+        });
+    } catch (error) {
+        props.failures.push(error);
+
+        return !props.signal.aborted;
+    }
 }
 
 /**
@@ -133,6 +191,7 @@ function canTransferSelectedFiles(props: {
             file.agentId === props.destinationAgentId &&
             file.path === joinBrowserPath(props.directoryPath, file.fileName),
     );
+
     if (allLandOnThemselves) {
         return false;
     }
@@ -143,6 +202,73 @@ function canTransferSelectedFiles(props: {
             file.agentId === props.destinationAgentId &&
             isBrowserPathInside(file.path, props.directoryPath),
     );
+}
+
+/** Starts selected transfers through one mutation shared by copy and move. */
+function useTransferStarts(props: {
+    agents: Agent[];
+    destinationAgent: Agent;
+    directoryPath: string;
+    operation: SelectedFilesTransferOperation;
+}) {
+    const isCopy = props.operation === "copy";
+
+    return useMutation({
+        mutationFn: (request: {
+            itemsToTransfer: TransferItem[];
+            existingMode: CopyExistingMode;
+            resume: ResumeMode;
+        }) => {
+            const agentsById = new Map(
+                props.agents.map((agent) => [agent.id, agent]),
+            );
+
+            return Promise.allSettled(
+                request.itemsToTransfer.map(
+                    async ({ file, destinationName }) => {
+                        const sourceAgent = agentsById.get(file.agentId);
+
+                        if (!sourceAgent) {
+                            throw new Error(
+                                `Source device unavailable for selected item: ${file.agentId}`,
+                            );
+                        }
+
+                        const destination = {
+                            agent: props.destinationAgent.id,
+                            path: joinBrowserPath(
+                                props.directoryPath,
+                                destinationName,
+                            ),
+                        };
+
+                        const options = {
+                            on_existing: request.existingMode,
+                            resume: request.resume,
+                        };
+
+                        if (isCopy) {
+                            const response = await sourceAgent.copyTo(
+                                destination,
+                                file.path,
+                                options,
+                            );
+
+                            return response.copy_request_id;
+                        }
+
+                        const response = await sourceAgent.moveTo(
+                            destination,
+                            file.path,
+                            options,
+                        );
+
+                        return response.move_request_id;
+                    },
+                ),
+            );
+        },
+    });
 }
 
 /**
@@ -156,69 +282,29 @@ function TransferSelectedFilesAction(props: {
     agents: Agent[];
     destinationAgent: Agent;
     directoryPath: string;
-    destinationFileNames: string[];
+    destinationEntries: LsEntry[];
     isSiblingTransferring: boolean;
     onTransferringChange: (isTransferring: boolean) => void;
     children: (trigger: SelectedFilesTransferTriggerApi) => React.ReactNode;
 }) {
+    const queryClient = useQueryClient();
     const selectedFiles = useAtomValue(selectedFilesAtom);
     const unselectFile = useSetAtom(unselectFileAtom);
+
     const isRoutePending = useRouterState({
         select: (state) => state.status === "pending",
     });
+
     const [transferState, setTransferState] =
         React.useState<TransferSelectedFilesState>({
             type: "idle",
         });
+
     const activeTransferRef = React.useRef<AbortController | null>(null);
     const isCopy = props.operation === "copy";
     const labels = isCopy ? transferActionCopy : transferActionMove;
-    const transferStartsMutation = useMutation({
-        mutationFn: (request: {
-            filesToTransfer: SelectedPath[];
-            existingMode: CopyExistingMode;
-        }) => {
-            const agentsById = new Map(
-                props.agents.map((agent) => [agent.id, agent]),
-            );
-            return Promise.allSettled(
-                request.filesToTransfer.map(async (file) => {
-                    const sourceAgent = agentsById.get(file.agentId);
 
-                    if (!sourceAgent) {
-                        throw new Error(
-                            `Source agent unavailable for selected item: ${file.agentId}`,
-                        );
-                    }
-
-                    const destination = {
-                        agent: props.destinationAgent.id,
-                        path: joinBrowserPath(
-                            props.directoryPath,
-                            file.fileName,
-                        ),
-                    };
-                    const options = { on_existing: request.existingMode };
-
-                    if (isCopy) {
-                        const response = await sourceAgent.copyTo(
-                            destination,
-                            file.path,
-                            options,
-                        );
-                        return response.copy_request_id;
-                    }
-
-                    const response = await sourceAgent.moveTo(
-                        destination,
-                        file.path,
-                        options,
-                    );
-                    return response.move_request_id;
-                }),
-            );
-        },
-    });
+    const transferStartsMutation = useTransferStarts(props);
 
     React.useEffect(() => {
         return () => activeTransferRef.current?.abort();
@@ -230,7 +316,9 @@ function TransferSelectedFilesAction(props: {
             : transferState.type === "idle"
               ? null
               : transferState.message;
+
     const isTransferring = transferState.type === "transferring";
+
     const canTransfer = canTransferSelectedFiles({
         selectedFiles,
         destinationAgentId: props.destinationAgent.id,
@@ -240,13 +328,27 @@ function TransferSelectedFilesAction(props: {
         isRoutePending,
     });
 
-    /** Starts every selected transfer with one consistent destination conflict policy. */
-    const transferSelectedFiles = async (mode: CopyExistingMode) => {
+    /**
+     * Starts every selected transfer with one consistent destination conflict policy.
+     * Items the user renamed land under their new names; the rest keep their own.
+     */
+    const transferSelectedFiles = async (
+        mode: CopyExistingMode,
+        resume: ResumeMode,
+        destinationNames: ReadonlyMap<string, string>,
+    ) => {
         if (selectedFiles.length === 0) {
             return;
         }
 
         const filesToTransfer = [...selectedFiles];
+
+        const itemsToTransfer = filesToTransfer.map((file) => ({
+            file,
+            destinationName:
+                destinationNames.get(getSelectedFileKey(file)) ?? file.fileName,
+        }));
+
         const controller = new AbortController();
         activeTransferRef.current?.abort();
         activeTransferRef.current = controller;
@@ -259,32 +361,44 @@ function TransferSelectedFilesAction(props: {
 
         try {
             const results = await transferStartsMutation.mutateAsync({
-                filesToTransfer,
+                itemsToTransfer,
                 existingMode: mode,
+                resume,
             });
+
             if (controller.signal.aborted) return;
 
             const completedFiles: SelectedPath[] = [];
+            const pausedFiles: SelectedPath[] = [];
             const failures: unknown[] = [];
+
             const pendingTransfers = new Map(
                 results.flatMap((result, index) => {
-                    const file = filesToTransfer[index];
+                    const item = itemsToTransfer[index];
+
                     if (result.status === "rejected") {
                         failures.push(result.reason);
+
                         return [];
                     }
-                    return file ? [[result.value, file] as const] : [];
+
+                    return item ? [[result.value, item] as const] : [];
                 }),
             );
 
             const stillActive = await waitForPendingTransfers({
+                queryClient,
                 api: props.api,
                 pendingTransfers,
                 completedFiles,
+                pausedFiles,
+                destinationAgentId: props.destinationAgent.id,
+                directoryPath: props.directoryPath,
                 failures,
                 failedLabel: labels.failed,
                 signal: controller.signal,
             });
+
             if (!stillActive) return;
             activeTransferRef.current = null;
 
@@ -308,15 +422,18 @@ function TransferSelectedFilesAction(props: {
                             ? `${isCopy ? "Copied" : "Moved"} ${completedFiles.length} of ${filesToTransfer.length} items. ${failureMessage}`
                             : failureMessage,
                 });
+
                 return;
             }
 
             setTransferState({
                 type: "success",
                 message:
-                    filesToTransfer.length === 1
-                        ? `${isCopy ? "Copied" : "Moved"} ${filesToTransfer[0]?.fileName ?? "item"}`
-                        : `${isCopy ? "Copied" : "Moved"} ${filesToTransfer.length} items`,
+                    pausedFiles.length > 0
+                        ? `Paused ${pausedFiles.length} ${pausedFiles.length === 1 ? "item" : "items"}`
+                        : filesToTransfer.length === 1
+                          ? `${isCopy ? "Copied" : "Moved"} ${filesToTransfer[0]?.fileName ?? "item"}`
+                          : `${isCopy ? "Copied" : "Moved"} ${filesToTransfer.length} items`,
             });
         } catch (error) {
             if (controller.signal.aborted) return;
@@ -333,13 +450,16 @@ function TransferSelectedFilesAction(props: {
     return (
         <>
             <SelectedFilesTransferTrigger
+                api={props.api}
                 operation={props.operation}
                 selectedFiles={selectedFiles}
                 destinationAgent={props.destinationAgent}
                 directoryPath={props.directoryPath}
-                destinationFileNames={props.destinationFileNames}
+                destinationEntries={props.destinationEntries}
                 canTransfer={canTransfer}
-                onConfirm={(mode) => void transferSelectedFiles(mode)}
+                onConfirm={(mode, resume, destinationNames) =>
+                    void transferSelectedFiles(mode, resume, destinationNames)
+                }
             >
                 {props.children}
             </SelectedFilesTransferTrigger>
@@ -372,18 +492,17 @@ function SelectedFilesTransferButton(props: {
     }
 
     return (
-        <Tooltip content={props.trigger.labels.buttonTooltip}>
-            <Button
-                type="button"
-                onClick={props.trigger.start}
-                aria-label={props.trigger.labels.buttonAriaLabel}
-                size="sm"
-                className="h-9 rounded-md px-3.5 py-0 font-semibold shadow-sm shadow-blue-950/30"
-            >
-                <props.trigger.labels.Icon className="h-3.5 w-3.5" />
-                {props.trigger.labels.buttonLabel}
-            </Button>
-        </Tooltip>
+        <Button
+            tooltip={props.trigger.labels.buttonTooltip}
+            type="button"
+            onClick={props.trigger.start}
+            aria-label={props.trigger.labels.buttonAriaLabel}
+            size="sm"
+            className="h-9 rounded-md px-3.5 py-0 font-semibold shadow-sm shadow-blue-950/30"
+        >
+            <props.trigger.labels.Icon className="h-3.5 w-3.5" />
+            {props.trigger.labels.buttonLabel}
+        </Button>
     );
 }
 
@@ -461,22 +580,21 @@ function SelectedFilesCardActions(props: {
                     <SelectedFilesTransferButton trigger={props.copyTrigger} />
                     <SelectedFilesTransferButton trigger={props.moveTrigger} />
                     {props.canDelete ? (
-                        <Tooltip content="Delete selected items">
-                            <Button
-                                type="button"
-                                variant="danger"
-                                aria-label="Delete selected items"
-                                onClick={props.onDelete}
-                                size="sm"
-                                className="h-9 rounded-md border-red-500/40 bg-red-500/10 px-3.5 py-0 font-semibold text-red-200 hover:border-red-500/60 hover:bg-red-500/20"
-                            >
-                                <Trash2
-                                    className="h-3.5 w-3.5"
-                                    aria-hidden="true"
-                                />
-                                Delete
-                            </Button>
-                        </Tooltip>
+                        <Button
+                            tooltip="Delete selected items"
+                            type="button"
+                            variant="danger"
+                            aria-label="Delete selected items"
+                            onClick={props.onDelete}
+                            size="sm"
+                            className="h-9 rounded-md border-red-500/40 bg-red-500/10 px-3.5 py-0 font-semibold text-red-200 hover:border-red-500/60 hover:bg-red-500/20"
+                        >
+                            <Trash2
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                            />
+                            Delete
+                        </Button>
                     ) : null}
                 </>
             )}
@@ -484,7 +602,8 @@ function SelectedFilesCardActions(props: {
                 type="button"
                 label="Clear selection"
                 onClick={props.onClear}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                variant="ghost"
+                size="xl"
             >
                 <X className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -498,40 +617,46 @@ export function SelectedFilesCard(props: {
     agents: Agent[];
     destinationAgent: Agent;
     directoryPath: string;
-    destinationFileNames: string[];
+    destinationEntries: LsEntry[];
 }) {
-    const router = useRouter();
+    const queryClient = useQueryClient();
     const selectedFiles = useAtomValue(selectedFilesAtom);
     const unselectFile = useSetAtom(unselectFileAtom);
     const clearSelectedFiles = useSetAtom(clearSelectedFilesAtom);
     const activateBottomDrawerTab = useSetAtom(activateBottomDrawerTabAtom);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
+
     // One lock so Copy cannot start while Move is still reading or deleting sources.
     const [busyTransferOperation, setBusyTransferOperation] =
         React.useState<SelectedFilesTransferOperation | null>(null);
+
     const fileCount = selectedFiles.filter(
         (file) => file.entryType === "file",
     ).length;
+
     const directoryCount = selectedFiles.length - fileCount;
     const isMobile = useIsBelowBreakpoint("sm");
     const hasSelection = selectedFiles.length > 0;
     const canDelete = hasSelection;
     const selectionSummary = `${fileCount} ${fileCount === 1 ? "file" : "files"}, ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} selected`;
+
+    // Clearing the selection dismisses the delete prompt. Resetting while rendering keeps it from
+    // reappearing when something is selected again.
+    if (isDeleteDialogOpen && !hasSelection) {
+        setIsDeleteDialogOpen(false);
+    }
+
     /** Opens confirm from both the desktop Delete button and the mobile Actions menu. */
     const openDeleteDialog = () => {
         setIsDeleteDialogOpen(true);
     };
+
     const agentsById = new Map(props.agents.map((agent) => [agent.id, agent]));
+
     const deleteTargets: DeletePathTarget[] = selectedFiles.map((file) => ({
         agent: agentsById.get(file.agentId) ?? null,
         path: file.path,
     }));
-
-    React.useEffect(() => {
-        if (isDeleteDialogOpen && !hasSelection) {
-            setIsDeleteDialogOpen(false);
-        }
-    }, [hasSelection, isDeleteDialogOpen]);
 
     return (
         <>
@@ -541,7 +666,7 @@ export function SelectedFilesCard(props: {
                 agents={props.agents}
                 destinationAgent={props.destinationAgent}
                 directoryPath={props.directoryPath}
-                destinationFileNames={props.destinationFileNames}
+                destinationEntries={props.destinationEntries}
                 isSiblingTransferring={busyTransferOperation === "move"}
                 onTransferringChange={(isTransferring) =>
                     setBusyTransferOperation(isTransferring ? "copy" : null)
@@ -554,7 +679,7 @@ export function SelectedFilesCard(props: {
                         agents={props.agents}
                         destinationAgent={props.destinationAgent}
                         directoryPath={props.directoryPath}
-                        destinationFileNames={props.destinationFileNames}
+                        destinationEntries={props.destinationEntries}
                         isSiblingTransferring={busyTransferOperation === "copy"}
                         onTransferringChange={(isTransferring) =>
                             setBusyTransferOperation(
@@ -565,39 +690,34 @@ export function SelectedFilesCard(props: {
                         {(moveTrigger) => (
                             <section
                                 aria-label="Selected files actions"
-                                className="mb-3 flex h-14 min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-blue-500/25 bg-blue-500/5 px-2 sm:gap-3 sm:px-3"
+                                className="flex min-w-0 items-center gap-2 overflow-hidden border-b border-slate-800 bg-surface p-4 sm:p-5"
                             >
-                                <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-blue-500/15 text-blue-300">
+                                <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center text-blue-400">
                                     <Files
-                                        className="h-4 w-4"
+                                        className="h-5 w-5"
                                         aria-hidden="true"
                                     />
                                 </span>
                                 {hasSelection ? (
-                                    <Tooltip
-                                        content="Show selected items"
-                                        className="min-w-0 flex-1"
+                                    <Button
+                                        tooltip="Show selected items"
+                                        tooltipClassName="min-w-0 flex-1"
+                                        type="button"
+                                        variant="ghost"
+                                        aria-label={`${selectionSummary}. Show selected items`}
+                                        onClick={() =>
+                                            activateBottomDrawerTab("selected")
+                                        }
+                                        className="h-9 min-w-0 w-full justify-start gap-2 px-2 py-0 text-left"
                                     >
-                                        <Button
-                                            type="button"
-                                            variant="subtle"
-                                            aria-label={`${selectionSummary}. Show selected items`}
-                                            onClick={() =>
-                                                activateBottomDrawerTab(
-                                                    "selected",
-                                                )
-                                            }
-                                            className="h-9 min-w-0 w-full justify-start gap-2 px-2 py-0 text-left text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white"
-                                        >
-                                            <span className="truncate">
-                                                {selectionSummary}
-                                            </span>
-                                            <PanelBottom
-                                                className="h-4 w-4 shrink-0 text-slate-400"
-                                                aria-hidden="true"
-                                            />
-                                        </Button>
-                                    </Tooltip>
+                                        <span className="truncate">
+                                            {selectionSummary}
+                                        </span>
+                                        <PanelBottom
+                                            className="h-4 w-4 shrink-0 text-slate-400"
+                                            aria-hidden="true"
+                                        />
+                                    </Button>
                                 ) : (
                                     <p className="flex h-9 min-w-0 flex-1 items-center truncate px-2 text-sm font-medium text-slate-200">
                                         {selectionSummary}
@@ -618,47 +738,64 @@ export function SelectedFilesCard(props: {
                     </TransferSelectedFilesAction>
                 )}
             </TransferSelectedFilesAction>
-            <DeletePathsDialog
-                isOpen={isDeleteDialogOpen}
-                title={`Delete ${selectedFiles.length === 1 ? "this selected item" : "these selected items"}?`}
-                description={`Move ${fileCount} ${fileCount === 1 ? "file" : "files"} and ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} to trash.`}
-                targets={deleteTargets}
-                trashConfirmLabel={
-                    selectedFiles.length === 1
-                        ? "Move selected item to trash"
-                        : `Move ${selectedFiles.length} selected items to trash`
-                }
-                permanentConfirmLabel={
-                    selectedFiles.length === 1
-                        ? "Delete selected item"
-                        : `Delete ${selectedFiles.length} selected items`
-                }
-                requiredConfirmationText="DELETE"
-                onClose={() => setIsDeleteDialogOpen(false)}
-                onDeleted={async (targets) => {
-                    targets.forEach((target) => {
-                        const selected = selectedFiles.find(
-                            (file) =>
-                                file.path === target.path &&
-                                file.agentId === target.agent?.id,
-                        );
-                        if (selected) {
-                            unselectFile({
-                                agentId: selected.agentId,
-                                path: selected.path,
-                            });
-                        }
-                    });
-                    await router.invalidate();
-                }}
-            >
-                <AffectedPathsList
-                    paths={selectedFiles}
-                    onDeselect={(path) =>
-                        unselectFile({ agentId: path.agentId, path: path.path })
+            {isDeleteDialogOpen && hasSelection ? (
+                <DeletePathsDialog
+                    title={`Delete ${selectedFiles.length === 1 ? "this selected item" : "these selected items"}?`}
+                    description={`Move ${fileCount} ${fileCount === 1 ? "file" : "files"} and ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} to trash.`}
+                    targets={deleteTargets}
+                    trashConfirmLabel={
+                        selectedFiles.length === 1
+                            ? "Move selected item to trash"
+                            : `Move ${selectedFiles.length} selected items to trash`
                     }
-                />
-            </DeletePathsDialog>
+                    permanentConfirmLabel={
+                        selectedFiles.length === 1
+                            ? "Delete selected item"
+                            : `Delete ${selectedFiles.length} selected items`
+                    }
+                    requiredConfirmationText="DELETE"
+                    onClose={() => setIsDeleteDialogOpen(false)}
+                    onDeleted={async (targets) => {
+                        targets.forEach((target) => {
+                            const selected = selectedFiles.find(
+                                (file) =>
+                                    file.path === target.path &&
+                                    file.agentId === target.agent?.id,
+                            );
+
+                            if (selected) {
+                                unselectFile({
+                                    agentId: selected.agentId,
+                                    path: selected.path,
+                                });
+                            }
+                        });
+
+                        // Deleted items may live on several agents, including this directory's.
+                        const agentIds = new Set(
+                            targets.flatMap((target) =>
+                                target.agent ? [target.agent.id] : [],
+                            ),
+                        );
+
+                        await Promise.all(
+                            [...agentIds].map((agentId) =>
+                                invalidateAgentData(queryClient, agentId),
+                            ),
+                        );
+                    }}
+                >
+                    <AffectedPathsList
+                        paths={selectedFiles}
+                        onDeselect={(path) =>
+                            unselectFile({
+                                agentId: path.agentId,
+                                path: path.path,
+                            })
+                        }
+                    />
+                </DeletePathsDialog>
+            ) : null}
         </>
     );
 }

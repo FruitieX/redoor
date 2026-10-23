@@ -1,11 +1,6 @@
 import * as React from "react";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import {
-    getRouteApi,
-    Link,
-    useLocation,
-    useMatches,
-} from "@tanstack/react-router";
+import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import {
     CaseLower,
     CaseSensitive,
@@ -25,19 +20,30 @@ import type { FileSearchEntry } from "#bindings/FileSearchEntry";
 import type { FileSearchResponse } from "#bindings/FileSearchResponse";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import { type Agent } from "#ui/api-client";
-import { isLsDirectoryResponse, isLsFileResponse } from "#ui/ls-response";
+import { browserRoute } from "#ui/browser-route";
 import { getImmediateParentPath } from "#ui/components/browser/utils";
 import { Dialog } from "#ui/components/dialog";
 import { IconButton } from "#ui/components/icon-button";
 import { InputControl } from "#ui/components/input-control";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { Tooltip } from "#ui/components/tooltip";
-import { contentGrepQueryOptions, fileSearchQueryOptions } from "#ui/queries";
+import {
+    contentGrepQueryOptions,
+    fileSearchQueryOptions,
+    gitContextQueryOptions,
+} from "#ui/queries";
+import type { AgentSearch } from "#ui/agent-search";
+import { useAgentSearchNavigation } from "#ui/search-navigation";
+import {
+    useBrowserLocation,
+    type BrowserLocation,
+} from "#ui/use-browser-location";
 import { useUserState } from "#ui/user-state";
-import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { isPlainKey } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
 
-const agentRoute = getRouteApi("/agents/$agentId");
+const agentRoute = getRouteApi("/_app/agents/$agentId");
 
 /** Cycles smart → sensitive → insensitive so the control can name the next click. */
 const nextCaseSensitivity = {
@@ -67,51 +73,60 @@ function gitRootFromContext(gitContext: GitContextResponse | undefined) {
         : null;
 }
 
-/** Derives the agent-wide search scope from browser loader data, with cwd as fallback. */
-function useSearchScope(agent: Agent): {
-    directory: string | null;
-    gitRoot: string | null;
-} {
-    return useMatches({
-        select: (matches) => {
-            const browserMatch = matches.find(
-                (match) => match.routeId === "/agents/$agentId/browser/$",
-            );
-            const lsResult = browserMatch?.loaderData?.lsResult;
-            const gitRoot = gitRootFromContext(
-                browserMatch?.loaderData?.gitContext,
-            );
-            if (lsResult && isLsDirectoryResponse(lsResult)) {
-                return { directory: lsResult.path, gitRoot };
-            }
-            if (lsResult && isLsFileResponse(lsResult)) {
-                return {
-                    directory: getImmediateParentPath(lsResult.path) ?? "/",
-                    gitRoot,
-                };
-            }
-            return {
-                directory: agent.status === "connected" ? agent.cwd : null,
-                gitRoot: null,
-            };
-        },
+/** Derives the agent-wide search scope from the browsed location, with cwd as fallback. */
+function useSearchScope(agent: Agent) {
+    const browser = useBrowserLocation();
+
+    // The browser route caches repository discovery under its requested path.
+    const gitContextPath = browser?.isConnected ? browser.path : null;
+
+    // Reading the cached context means searching never probes git again.
+    const gitRootQuery = useQuery({
+        ...gitContextQueryOptions(agent, gitContextPath ?? ""),
+        enabled: gitContextPath !== null,
+        select: gitRootFromContext,
     });
+
+    return {
+        directory: resolveSearchDirectory(agent, browser),
+        gitRoot: gitRootQuery.data ?? null,
+    };
 }
 
-type SearchChanges = Record<string, string | number | boolean | undefined>;
+/** Searches the directory on screen, the folder of the open file, or the agent's home. */
+function resolveSearchDirectory(
+    agent: Agent,
+    browser: BrowserLocation | null,
+): string | null {
+    if (browser?.entry === "directory") {
+        return browser.resolvedPath;
+    }
+
+    if (browser?.entry === "file" && browser.resolvedPath !== null) {
+        return getImmediateParentPath(browser.resolvedPath) ?? "/";
+    }
+
+    return agent.status === "connected" ? agent.cwd : null;
+}
 
 /** Shared ?q= seeds the field; keystrokes stay local so the caret is not reset. */
 function useSearchQuery(urlQuery: string | undefined) {
     const [query, setQuery] = React.useState(urlQuery ?? "");
     const [debouncedQuery, setDebouncedQuery] = React.useState(query);
 
-    React.useEffect(() => {
-        // Editor search and opened/shared URLs populate the input without controlling it.
+    const [seededFrom, setSeededFrom] = React.useState(urlQuery);
+
+    // Editor search and opened/shared URLs populate the input without controlling it. Seeding
+    // while rendering, only when the URL value changes, avoids an effect and a frame that shows
+    // the old text.
+    if (seededFrom !== urlQuery) {
+        setSeededFrom(urlQuery);
         setQuery(urlQuery ?? "");
-    }, [urlQuery]);
+    }
 
     React.useEffect(() => {
         const timer = window.setTimeout(() => setDebouncedQuery(query), 200);
+
         return () => window.clearTimeout(timer);
     }, [query]);
 
@@ -119,54 +134,48 @@ function useSearchQuery(urlQuery: string | undefined) {
 }
 
 /** Cmd/Ctrl+K stays available in text controls; unmodified s does not intercept typing. */
-function useOpenSearchShortcut(args: {
-    isOpen: boolean;
-    location: { hash: string; pathname: string; searchStr: string };
-    navigate: ReturnType<typeof agentRoute.useNavigate>;
-}) {
-    React.useEffect(() => {
-        const openSearch = (event: KeyboardEvent) => {
-            if (args.isOpen) {
-                return;
-            }
+function useOpenSearchShortcut(isOpen: boolean) {
+    const { openSearch } = useAgentSearchNavigation();
 
-            const isCommandK =
+    const open = () => {
+        void openSearch();
+    };
+
+    useShortcut(
+        {
+            name: "open-search-command-k",
+            phase: "bubble",
+            priority: shortcutPriority.app,
+            match: (event) =>
                 event.key.toLowerCase() === "k" &&
                 !event.altKey &&
                 !event.shiftKey &&
-                (event.metaKey || event.ctrlKey);
-            const isUnmodifiedS =
-                event.key === "s" && !shouldIgnoreKeyboardShortcut(event);
+                (event.metaKey || event.ctrlKey),
+            run: open,
+        },
+        !isOpen,
+    );
 
-            if (!isCommandK && !isUnmodifiedS) {
-                return;
-            }
-
-            event.preventDefault();
-            const params = new URLSearchParams(args.location.searchStr);
-            params.set("q", "");
-            params.delete("mode");
-            void args.navigate({
-                to: `${args.location.pathname}?${params.toString()}${args.location.hash}`,
-                replace: true,
-            });
-        };
-        window.addEventListener("keydown", openSearch);
-        return () => window.removeEventListener("keydown", openSearch);
-    }, [
-        args.isOpen,
-        args.location.hash,
-        args.location.pathname,
-        args.location.searchStr,
-        args.navigate,
-    ]);
+    useShortcut(
+        {
+            name: "open-search-s",
+            phase: "bubble",
+            priority: shortcutPriority.app,
+            skipTypingTargets: true,
+            match: (event) => isPlainKey(event, "s", { allowShift: true }),
+            run: open,
+        },
+        !isOpen,
+    );
 }
+
+/** Names where a search result leads, with the line a content match should reveal. */
+type SearchResultTarget = { path: string; line?: number };
 
 /** Leaves modified clicks on the real href so middle-click and new-tab still work. */
 function handleSearchResultClick(
     event: React.MouseEvent<HTMLAnchorElement>,
-    href: string,
-    openSelectedResult: (href: string) => void,
+    openSelectedResult: () => void,
 ) {
     if (
         event.button !== 0 ||
@@ -177,39 +186,45 @@ function handleSearchResultClick(
     ) {
         return;
     }
+
     event.preventDefault();
-    openSelectedResult(href);
+    openSelectedResult();
 }
 
 /** Owns the single route-wide path and content search workflow. */
 export function SearchDialog(props: { agent: Agent }) {
     const search = agentRoute.useSearch();
-    const navigate = agentRoute.useNavigate();
-    const location = useLocation();
+    const navigate = useNavigate();
+    const { updateSearch } = useAgentSearchNavigation();
     const { directory, gitRoot } = useSearchScope(props.agent);
     const [userState, setUserState] = useUserState();
     const isOpen = search.q !== undefined;
     const isContentSearch = search.mode === "content";
     const { query, setQuery, debouncedQuery } = useSearchQuery(search.q);
+
     const timeoutSeconds =
         search.timeout ?? userState.recursiveSearchTimeoutSeconds;
+
     const includeHidden =
         search.hidden ?? userState.recursiveSearchIncludeHidden;
+
     const respectGitignore =
         search.gitignore ?? userState.recursiveSearchRespectGitignore;
+
     const regex = search.regex ?? false;
     const contextSize = search.context ?? 2;
     const caseSensitivity = search.case ?? "smart";
     const searchFromGitRoot = gitRoot !== null && (search.gitroot ?? false);
     const searchDirectory = searchFromGitRoot ? gitRoot : directory;
     const resultsRef = React.useRef<HTMLDivElement>(null);
-    useOpenSearchShortcut({ isOpen, location, navigate });
+    useOpenSearchShortcut(isOpen);
 
     const canSearch =
         isOpen &&
         props.agent.status === "connected" &&
         searchDirectory !== null &&
         debouncedQuery.trim() !== "";
+
     const pathSearch = useQuery({
         ...fileSearchQueryOptions(props.agent, searchDirectory ?? "", {
             query: canSearch && !isContentSearch ? debouncedQuery : "",
@@ -220,6 +235,7 @@ export function SearchDialog(props: { agent: Agent }) {
         }),
         enabled: canSearch && !isContentSearch,
     });
+
     const contentSearch = useQuery({
         ...contentGrepQueryOptions(props.agent, searchDirectory ?? "", {
             query: canSearch && isContentSearch ? debouncedQuery : "",
@@ -232,6 +248,7 @@ export function SearchDialog(props: { agent: Agent }) {
         }),
         enabled: canSearch && isContentSearch,
     });
+
     const getResults = React.useCallback(
         () =>
             resultsRef.current
@@ -239,28 +256,19 @@ export function SearchDialog(props: { agent: Agent }) {
                 : [],
         [],
     );
-    useArrayKeyboardFocus(getResults, isOpen);
 
-    /** Changes only dialog-owned URL state so child-view parameters survive. */
-    const updateSearch = (changes: SearchChanges, replace = true) => {
-        const params = new URLSearchParams(location.searchStr);
-        for (const [key, value] of Object.entries(changes)) {
-            if (value === undefined) params.delete(key);
-            else params.set(key, String(value));
-        }
-        const searchString = params.toString();
-        return navigate({
-            to: `${location.pathname}${searchString ? `?${searchString}` : ""}${location.hash}`,
-            replace,
-        });
-    };
+    useArrayKeyboardFocus(getResults, isOpen, shortcutPriority.modal);
 
     /** Snapshots the typed query onto this history entry so Back can restore the search. */
-    const openSelectedResult = async (href: string) => {
+    const openSelectedResult = async (target: SearchResultTarget) => {
         if (query !== (search.q ?? "")) {
             await updateSearch({ q: query });
         }
-        await navigate({ to: href });
+
+        await navigate({
+            ...browserRoute(props.agent.id, target.path),
+            search: { line: target.line },
+        });
     };
 
     const close = () =>
@@ -278,7 +286,7 @@ export function SearchDialog(props: { agent: Agent }) {
 
     /** Persists common traversal defaults while keeping the current URL shareable. */
     const updateOption = (
-        changes: SearchChanges,
+        changes: AgentSearch,
         preferenceChanges: Partial<typeof userState>,
     ) => {
         setUserState((current) => ({ ...current, ...preferenceChanges }));
@@ -288,7 +296,7 @@ export function SearchDialog(props: { agent: Agent }) {
     return (
         <Dialog
             isOpen={isOpen}
-            title="Search agent"
+            title="Search device"
             description={
                 searchDirectory ? (
                     <span>
@@ -298,7 +306,7 @@ export function SearchDialog(props: { agent: Agent }) {
                         </span>
                     </span>
                 ) : (
-                    "Search is unavailable while this agent is disconnected."
+                    "Search is unavailable while this device is disconnected."
                 )
             }
             closeAriaLabel="Close search"
@@ -345,7 +353,11 @@ export function SearchDialog(props: { agent: Agent }) {
                               <ContentResult
                                   key={`${result.path}:${result.line_number}:${result.line}`}
                                   result={result}
-                                  href={`${props.agent.getBrowserUrl(result.path)}?line=${result.line_number}`}
+                                  agentId={props.agent.id}
+                                  target={{
+                                      path: result.path,
+                                      line: result.line_number,
+                                  }}
                                   onOpen={openSelectedResult}
                               />
                           ))
@@ -353,7 +365,8 @@ export function SearchDialog(props: { agent: Agent }) {
                               <PathResult
                                   key={result.path}
                                   result={result}
-                                  href={props.agent.getBrowserUrl(result.path)}
+                                  agentId={props.agent.id}
+                                  target={{ path: result.path }}
                                   onOpen={openSelectedResult}
                               />
                           ))}
@@ -378,15 +391,16 @@ function SearchControls(props: {
     disabled: boolean;
     onModeChange: (checked: boolean) => void;
     onQueryChange: (query: string) => void;
-    onUpdate: (changes: SearchChanges) => Promise<void>;
+    onUpdate: (changes: AgentSearch) => Promise<void>;
     onUpdateOption: (
-        changes: SearchChanges,
+        changes: AgentSearch,
         preferences: Record<string, number | boolean>,
     ) => void;
 }) {
     const queryLabel = props.isContentSearch
         ? "Text to find"
         : "File or folder name";
+
     const caseSensitivityIcon = {
         smart: <SmartCaseIcon className="h-4 w-4" />,
         sensitive: <CaseSensitive className="h-4 w-4" />,
@@ -460,7 +474,7 @@ function SearchControls(props: {
                                     ? "Exclude hidden files and directories"
                                     : "Include hidden files and directories"
                             }
-                            className="h-9 w-9"
+                            size="lg"
                             onClick={() =>
                                 props.onUpdateOption(
                                     { hidden: !props.includeHidden },
@@ -485,7 +499,7 @@ function SearchControls(props: {
                                     ? "Include files ignored by .gitignore"
                                     : "Respect .gitignore files"
                             }
-                            className="h-9 w-9"
+                            size="lg"
                             onClick={() =>
                                 props.onUpdateOption(
                                     { gitignore: !props.respectGitignore },
@@ -507,7 +521,7 @@ function SearchControls(props: {
                                         ? "Search as literal text"
                                         : "Use regular expressions"
                                 }
-                                className="h-9 w-9"
+                                size="lg"
                                 onClick={() =>
                                     void props.onUpdate({ regex: !props.regex })
                                 }
@@ -522,7 +536,9 @@ function SearchControls(props: {
                                     props.caseSensitivity
                                 ]
                             }
-                            className="h-9 w-9 rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                            variant="outline"
+                            size="xl"
+                            className="bg-slate-900 hover:bg-transparent hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                             onClick={() =>
                                 void props.onUpdate({
                                     case: nextCaseSensitivity[
@@ -542,7 +558,7 @@ function SearchControls(props: {
                                         ? "Search the current directory only"
                                         : "Search the entire Git repository instead of the current directory"
                                 }
-                                className="h-9 w-9"
+                                size="lg"
                                 onClick={() =>
                                     void props.onUpdate({
                                         gitroot: !props.searchFromGitRoot,
@@ -571,9 +587,9 @@ function SearchNumberInputs(props: {
     isContentSearch: boolean;
     timeoutSeconds: number;
     contextSize: number;
-    onUpdate: (changes: SearchChanges) => Promise<void>;
+    onUpdate: (changes: AgentSearch) => Promise<void>;
     onUpdateOption: (
-        changes: SearchChanges,
+        changes: AgentSearch,
         preferences: Record<string, number | boolean>,
     ) => void;
 }) {
@@ -589,6 +605,7 @@ function SearchNumberInputs(props: {
                     value={props.timeoutSeconds}
                     onChange={(event) => {
                         const value = event.target.valueAsNumber;
+
                         if (Number.isInteger(value)) {
                             const timeout = Math.min(60, Math.max(1, value));
                             props.onUpdateOption(
@@ -611,6 +628,7 @@ function SearchNumberInputs(props: {
                         value={props.contextSize}
                         onChange={(event) => {
                             const value = event.target.valueAsNumber;
+
                             if (Number.isInteger(value)) {
                                 void props.onUpdate({
                                     context: Math.min(20, Math.max(0, value)),
@@ -628,17 +646,20 @@ function SearchNumberInputs(props: {
 /** Presents one fuzzy path match with enough context to distinguish duplicate names. */
 function PathResult(props: {
     result: FileSearchEntry;
-    href: string;
-    onOpen: (href: string) => void;
+    agentId: string;
+    target: SearchResultTarget;
+    onOpen: (target: SearchResultTarget) => void;
 }) {
     const ResultIcon = props.result.type === "directory" ? Folder : File;
+
     return (
         <Link
-            to={props.href}
+            {...browserRoute(props.agentId, props.target.path)}
+            search={{ line: props.target.line }}
             className="flex w-full items-start gap-3 rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
             aria-label={`Open path ${props.result.path}`}
             onClick={(event) =>
-                handleSearchResultClick(event, props.href, props.onOpen)
+                handleSearchResultClick(event, () => props.onOpen(props.target))
             }
         >
             <ResultIcon className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
@@ -657,16 +678,18 @@ function PathResult(props: {
 /** Presents a grep match with its line preview and exact navigation destination. */
 function ContentResult(props: {
     result: ContentGrepMatch;
-    href: string;
-    onOpen: (href: string) => void;
+    agentId: string;
+    target: SearchResultTarget;
+    onOpen: (target: SearchResultTarget) => void;
 }) {
     return (
         <Link
-            to={props.href}
+            {...browserRoute(props.agentId, props.target.path)}
+            search={{ line: props.target.line }}
             className="block w-full rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
             aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}
             onClick={(event) =>
-                handleSearchResultClick(event, props.href, props.onOpen)
+                handleSearchResultClick(event, () => props.onOpen(props.target))
             }
         >
             <span className="block text-xs text-blue-300 sm:text-sm">
@@ -726,6 +749,7 @@ function SearchStatus(props: {
     const activeSearch = props.isContentSearch
         ? props.contentSearch
         : props.pathSearch;
+
     if (props.query.trim() === "") {
         return (
             <p role="status" className="text-sm text-slate-400">
@@ -735,6 +759,7 @@ function SearchStatus(props: {
             </p>
         );
     }
+
     if (props.query !== props.debouncedQuery || activeSearch.isFetching) {
         return (
             <p role="status" className="text-sm text-slate-400">
@@ -742,6 +767,7 @@ function SearchStatus(props: {
             </p>
         );
     }
+
     if (activeSearch.isError) {
         return (
             <p role="alert" className="text-sm text-red-300">
@@ -751,9 +777,12 @@ function SearchStatus(props: {
             </p>
         );
     }
+
     if (props.isContentSearch) {
         const data = props.contentSearch.data;
+
         if (!data) return null;
+
         const notices = [
             data.timed_out ? "Search timed out." : null,
             data.cancelled ? "Search was cancelled." : null,
@@ -762,14 +791,18 @@ function SearchStatus(props: {
                 ? `${data.omitted_long_lines} long lines omitted.`
                 : null,
         ].filter((notice): notice is string => notice !== null);
+
         return (
             <p role="status" className="text-sm text-slate-400">
                 {data.results.length} results. {notices.join(" ")}
             </p>
         );
     }
+
     const data = props.pathSearch.data;
+
     if (!data) return null;
+
     return (
         <p role="status" className="text-sm text-slate-400">
             Found{" "}
@@ -777,7 +810,7 @@ function SearchStatus(props: {
                 <span>{data.results.length}</span>
             </Tooltip>{" "}
             {data.results.length === 1 ? "result" : "results"} in{" "}
-            <Tooltip content="Search duration was measured on the agent.">
+            <Tooltip content="Search duration was measured on the device.">
                 <span>{data.duration_ms}ms</span>
             </Tooltip>
             . {data.timed_out ? "Search timed out." : ""}

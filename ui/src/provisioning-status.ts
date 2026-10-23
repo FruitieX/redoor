@@ -1,7 +1,9 @@
-import { atom } from "jotai";
+import * as React from "react";
+import { atom, useSetAtom } from "jotai";
 import { z } from "zod";
 
 import type { ProvisioningStatusMessage } from "#bindings/ProvisioningStatusMessage";
+import type { Agent } from "#ui/api-client";
 
 const STORAGE_KEY = "redoor.provisioning-status";
 
@@ -35,9 +37,11 @@ export function parseProvisioningStatusStore(
 export function readProvisioningStatusStore(): ProvisioningStatusStore {
     try {
         const raw = globalThis.localStorage.getItem(STORAGE_KEY);
+
         if (raw === null) {
             return {};
         }
+
         return parseProvisioningStatusStore(raw);
     } catch {
         return {};
@@ -70,11 +74,39 @@ export const rememberProvisioningStatusAtom = atom(
         if (update.messages.length === 0) {
             return;
         }
+
         const next = {
             ...get(provisioningStatusStoreAtom),
             [update.agentName]: update.messages,
         };
+
         set(provisioningStatusStoreAtom, next);
         writeProvisioningStatusStore(next);
     },
 );
+
+/**
+ * Persists an agent's provisioning messages while any of its pages is open. The messages only
+ * exist in the inventory during a start attempt, so they must be saved as they arrive for the
+ * home page to show the last attempt after the agent connected. Writing to localStorage is
+ * the external side effect that justifies the effect.
+ */
+export function useRememberProvisioningStatus(agent: Agent | undefined) {
+    const rememberProvisioningStatus = useSetAtom(
+        rememberProvisioningStatusAtom,
+    );
+
+    const agentName = agent?.name;
+    const provisioningStatus = agent?.provisioningStatus;
+
+    React.useEffect(() => {
+        if (agentName === undefined || !provisioningStatus?.length) {
+            return;
+        }
+
+        rememberProvisioningStatus({
+            agentName,
+            messages: provisioningStatus,
+        });
+    }, [agentName, provisioningStatus, rememberProvisioningStatus]);
+}

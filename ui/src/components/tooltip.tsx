@@ -13,6 +13,7 @@ type TooltipProps = {
 };
 
 type TooltipHide = () => void;
+
 type HoverTimerRef = React.RefObject<number | null>;
 
 let activeTooltipHide: TooltipHide | null = null;
@@ -30,6 +31,7 @@ function claimActiveTooltip(hide: TooltipHide) {
     if (activeTooltipHide !== null && activeTooltipHide !== hide) {
         activeTooltipHide();
     }
+
     activeTooltipHide = hide;
 }
 
@@ -43,11 +45,13 @@ function releaseActiveTooltip(hide: TooltipHide) {
 /**
  * Shows a small tooltip after 500ms of hover or immediately on keyboard focus and touch.
  *
- * Pointer activation focuses links and buttons, but that focus must not keep the
- * tooltip open after the cursor leaves. Keyboard and programmatic focus still
- * open it. On touch devices the tooltip opens on the trigger's touchstart and
- * closes on that same gesture's touchend, so it cannot linger after the finger
- * lifts. This wrapper is also useful for disabled controls when the tooltip
+ * Focus opens it only when the browser marks the focused element `:focus-visible`,
+ * the same signal that decides whether to draw a focus ring. Clicks focus links and
+ * buttons, and dialogs move focus by script when they open (to their first control)
+ * and close (back to their trigger); after mouse use none of that is keyboard
+ * navigation, so a tooltip there would pop up far from the cursor. On touch devices
+ * the tooltip opens on the trigger's touchstart and closes on that same gesture's
+ * touchend, so it cannot linger after the finger lifts. This wrapper is also useful for disabled controls when the tooltip
  * needs to be attached to a non-disabled parent element instead of the control.
  */
 export function Tooltip(props: TooltipProps) {
@@ -55,13 +59,13 @@ export function Tooltip(props: TooltipProps) {
     const triggerRef = React.useRef<HTMLSpanElement>(null);
     const tooltipRef = React.useRef<HTMLSpanElement>(null);
     const hoverTimerRef = React.useRef<number | null>(null);
-    const ignoreFocusFromPointerRef = React.useRef(false);
     // Touch synthesizes mouseenter; ignore that hover until a real mouse leave.
     const ignoreHoverFromTouchRef = React.useRef(false);
     const [isHovered, setIsHovered] = React.useState(false);
     const [isFocused, setIsFocused] = React.useState(false);
     const [isTouchOpen, setIsTouchOpen] = React.useState(false);
     const isOpen = isHovered || isFocused || isTouchOpen;
+
     const hideAll = React.useCallback(() => {
         clearHoverTimer(hoverTimerRef);
         setIsHovered(false);
@@ -75,6 +79,7 @@ export function Tooltip(props: TooltipProps) {
         },
         [],
     );
+
     const [position, setPosition] = React.useState<{
         top: number;
         left: number;
@@ -91,6 +96,7 @@ export function Tooltip(props: TooltipProps) {
         const updatePosition = () => {
             const trigger = triggerRef.current;
             const tooltip = tooltipRef.current;
+
             if (!trigger || !tooltip) {
                 return;
             }
@@ -100,34 +106,43 @@ export function Tooltip(props: TooltipProps) {
             const gap = 8;
             const viewportPadding = 8;
             const spaceAbove = triggerRect.top - gap - viewportPadding;
+
             const spaceBelow =
                 window.innerHeight - triggerRect.bottom - gap - viewportPadding;
+
             const placement =
                 tooltipRect.height <= spaceAbove || spaceAbove >= spaceBelow
                     ? "above"
                     : "below";
+
             const desiredTop =
                 placement === "above"
                     ? triggerRect.top - gap - tooltipRect.height
                     : triggerRect.bottom + gap;
+
             const maximumTop = Math.max(
                 viewportPadding,
                 window.innerHeight - tooltipRect.height - viewportPadding,
             );
+
             const top = Math.min(
                 Math.max(desiredTop, viewportPadding),
                 maximumTop,
             );
+
             const triggerCenter = triggerRect.left + triggerRect.width / 2;
             const desiredLeft = triggerCenter - tooltipRect.width / 2;
+
             const maximumLeft = Math.max(
                 viewportPadding,
                 window.innerWidth - tooltipRect.width - viewportPadding,
             );
+
             const left = Math.min(
                 Math.max(desiredLeft, viewportPadding),
                 maximumLeft,
             );
+
             const arrowLeft = Math.max(
                 8,
                 Math.min(triggerCenter - left, tooltipRect.width - 8),
@@ -138,12 +153,15 @@ export function Tooltip(props: TooltipProps) {
 
         updatePosition();
         const resizeObserver = new ResizeObserver(updatePosition);
+
         if (triggerRef.current) {
             resizeObserver.observe(triggerRef.current);
         }
+
         if (tooltipRef.current) {
             resizeObserver.observe(tooltipRef.current);
         }
+
         window.addEventListener("resize", updatePosition);
         window.addEventListener("scroll", updatePosition, true);
 
@@ -157,10 +175,12 @@ export function Tooltip(props: TooltipProps) {
     React.useEffect(() => {
         if (!isOpen) {
             releaseActiveTooltip(hideAll);
+
             return;
         }
 
         claimActiveTooltip(hideAll);
+
         return () => {
             releaseActiveTooltip(hideAll);
         };
@@ -189,36 +209,29 @@ export function Tooltip(props: TooltipProps) {
             />
         </span>
     ) : null;
+
     const childProps = props.children.props;
+
     const describedBy = [childProps["aria-describedby"], isOpen && tooltipId]
         .filter(Boolean)
         .join(" ");
+
     const tooltipChildProps: TooltipChildProps = {
         "aria-describedby": describedBy || undefined,
         tabIndex: childProps.tabIndex ?? 0,
     };
+
     const child = React.cloneElement(props.children, tooltipChildProps);
 
-    /** Prevents a click-induced focus from pinning the tooltip after mouseleave. */
-    const handlePointerDown = () => {
-        ignoreFocusFromPointerRef.current = true;
-        setIsFocused(false);
-    };
-
-    /** Drops the pointer flag when this press never focused the trigger. */
-    const handlePointerUp = () => {
-        window.setTimeout(() => {
-            ignoreFocusFromPointerRef.current = false;
-        }, 0);
-    };
-
-    /** Opens on keyboard or programmatic focus, but not on the focus that follows a click. */
-    const handleFocus = () => {
-        if (ignoreFocusFromPointerRef.current) {
-            ignoreFocusFromPointerRef.current = false;
-            return;
+    /**
+     * Opens only for keyboard-style focus. Script focus after mouse use, such as a
+     * dialog focusing its close button or restoring focus to its trigger, does not
+     * match `:focus-visible`, so it no longer looks like the user tabbed there.
+     */
+    const handleFocus = (event: React.FocusEvent) => {
+        if (event.target.matches(":focus-visible")) {
+            setIsFocused(true);
         }
-        setIsFocused(true);
     };
 
     return (
@@ -229,6 +242,7 @@ export function Tooltip(props: TooltipProps) {
                 if (ignoreHoverFromTouchRef.current) {
                     return;
                 }
+
                 clearHoverTimer(hoverTimerRef);
                 hoverTimerRef.current = window.setTimeout(() => {
                     hoverTimerRef.current = null;
@@ -240,9 +254,8 @@ export function Tooltip(props: TooltipProps) {
                 clearHoverTimer(hoverTimerRef);
                 setIsHovered(false);
             }}
-            onPointerDown={handlePointerDown}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
+            // A click on a keyboard-focused trigger hands control back to the cursor.
+            onPointerDown={() => setIsFocused(false)}
             onFocus={handleFocus}
             onBlur={() => setIsFocused(false)}
             onTouchStart={() => {
@@ -265,5 +278,42 @@ export function Tooltip(props: TooltipProps) {
                   )
                 : null}
         </span>
+    );
+}
+
+/** Props every button-like control accepts so a tooltip is declared the same way everywhere. */
+export type ControlTooltipProps = {
+    /**
+     * Explains the control on hover and keyboard focus. Nothing renders when it is missing,
+     * `null` or `false`, so a control can opt out without a conditional wrapper at the call site.
+     */
+    tooltip?: React.ReactNode;
+    /** Lets the tooltip's trigger wrapper take part in layout, for example `shrink-0`. */
+    tooltipClassName?: string;
+};
+
+/**
+ * Attaches the tooltip declared through `ControlTooltipProps` and otherwise leaves the control
+ * alone, so Button, IconButton, ToggleButton and Tab share one rule instead of each
+ * re-implementing "wrap only when there is something to say".
+ */
+export function OptionalTooltip(
+    props: ControlTooltipProps & {
+        children: React.ReactElement<TooltipChildProps>;
+    },
+) {
+    if (
+        props.tooltip === undefined ||
+        props.tooltip === null ||
+        props.tooltip === false ||
+        props.tooltip === ""
+    ) {
+        return props.children;
+    }
+
+    return (
+        <Tooltip content={props.tooltip} className={props.tooltipClassName}>
+            {props.children}
+        </Tooltip>
     );
 }

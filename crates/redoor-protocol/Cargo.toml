@@ -1,0 +1,13 @@
+[package]
+name = "redoor-protocol"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true

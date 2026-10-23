@@ -70,11 +70,13 @@ describe("Raw Delete API", () => {
         const deletedDirectoryPath = await fs.mkdtemp(
             path.join(os.tmpdir(), "redoor-delete-dir-"),
         );
+
         const nestedDirectoryPath = path.join(
             deletedDirectoryPath,
             "nested",
             "child",
         );
+
         const nestedFilePath = path.join(nestedDirectoryPath, "file.txt");
 
         await fs.mkdir(nestedDirectoryPath, { recursive: true });

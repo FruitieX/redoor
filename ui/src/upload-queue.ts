@@ -1,32 +1,44 @@
-import React from "react";
-import { useMutation } from "@tanstack/react-query";
-import { atom, useAtomValue, useSetAtom } from "jotai";
-import type { Agent } from "#ui/api-client";
-import { getErrorMessage, joinBrowserPath } from "#ui/components/browser/utils";
+import { MutationObserver, type QueryClient } from "@tanstack/react-query";
 
+import type { CopyExistingMode } from "#bindings/CopyExistingMode";
+import type { Agent } from "#ui/api-client";
+import { joinBrowserPath } from "#ui/components/browser/utils";
+import { ExternalStore } from "#ui/utils/external-store";
+import { getErrorMessage } from "#ui/utils/error";
+
+/** Bounds memory held by queued `File` handles, since they keep their sources reachable. */
 export const MAX_QUEUED_UPLOADS = 100;
+
+/** Keeps uploads from filling the connection, so control requests stay responsive. */
 export const MAX_CONCURRENT_UPLOADS = 5;
 
+/** One file to upload and where it goes below the destination directory. */
 export type UploadSourceFile = {
     file: File;
     relativePath: string;
 };
 
+/** A complete selection, queued all at once or not at all. */
 export type UploadBatch = {
     agentId: string;
     destinationPath: string;
     files: UploadSourceFile[];
     directories?: string[];
+    /** The conflict policy the user chose for this batch, so uploads never replace silently. */
+    onExisting: CopyExistingMode;
 };
 
+/** A queued file with its progress, kept after completion so the queue view can settle. */
 export type UploadQueueItem = UploadSourceFile & {
     id: number;
     agentId: string;
     destinationPath: string;
+    onExisting: CopyExistingMode;
     status: "waiting" | "uploading" | "done";
     error: string | null;
 };
 
+/** An empty directory to create, which does not occupy an upload slot. */
 type UploadDirectory = {
     id: number;
     agentId: string;
@@ -35,25 +47,44 @@ type UploadDirectory = {
     status: "waiting" | "creating" | "done";
 };
 
-type UploadQueue = {
-    items: UploadQueueItem[];
-    directories: UploadDirectory[];
+/** What the UI reads: the rows of the current batch and their directories. */
+export type UploadQueueSnapshot = {
+    readonly items: readonly UploadQueueItem[];
+    readonly directories: readonly UploadDirectory[];
 };
 
-type EnqueueResult =
+/** Tells the caller how many files were accepted, or why the whole batch was refused. */
+export type EnqueueResult =
     { ok: true; fileCount: number } | { ok: false; message: string };
 
-let nextUploadId = 1;
+/** What the queue needs from the application. */
+export type UploadQueueOptions = {
+    /** Mutations run through the query client so they show up like every other mutation. */
+    queryClient: QueryClient;
+    /** Looks up the request client of an agent when its upload starts, so status changes apply. */
+    resolveAgent: (agentId: string) => Agent | undefined;
+    /** Called once when the last pending upload finishes, to refresh listings it changed. */
+    onSettled: () => void;
+    /** Where the unload warning is attached; omitted where there is no window, as in tests. */
+    unloadTarget?: EventTarget;
+};
 
-export const uploadQueueAtom = atom<UploadQueue>({
-    items: [],
-    directories: [],
-});
+/** One request the queue sends to an agent. */
+type UploadOperation =
+    | { type: "directory"; agent: Agent; path: string }
+    | {
+          type: "file";
+          agent: Agent;
+          path: string;
+          file: File;
+          onExisting: CopyExistingMode;
+      };
 
 /** Rejects paths that could address files outside the selected destination. */
-function normalizeRelativePath(path: string) {
+export function normalizeRelativePath(path: string) {
     const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
     const components = normalized.split("/");
+
     if (
         normalized.length === 0 ||
         normalized.startsWith("/") ||
@@ -66,13 +97,59 @@ function normalizeRelativePath(path: string) {
     ) {
         throw new Error(`Invalid upload path: ${path || "(empty)"}`);
     }
+
     return normalized;
 }
 
-/** Adds one complete source manifest so oversized selections never enter partially. */
-export const enqueueUploadBatchAtom = atom(
-    null,
-    (get, set, batch: UploadBatch): EnqueueResult => {
+/** Returns a safe parent path for creating directories before a nested file upload. */
+function getUploadParentPath(item: UploadQueueItem) {
+    const separator = item.relativePath.lastIndexOf("/");
+
+    return separator === -1
+        ? item.destinationPath
+        : joinBrowserPath(
+              item.destinationPath,
+              item.relativePath.slice(0, separator),
+          );
+}
+
+/**
+ * Owns the upload queue: its rows, its concurrency limit and the requests it sends. It lives
+ * for the whole page, so uploads continue while the user navigates, and React only enqueues
+ * into it and subscribes to its snapshot.
+ *
+ * Files stay `File` handles from the picker or the drop all the way to `Agent.upload`, which
+ * streams them as the request body, so a large file is never read into memory here. At most
+ * `MAX_CONCURRENT_UPLOADS` run at once, which leaves room on the agent's connection for
+ * control requests while uploads are in flight.
+ */
+export class UploadQueue extends ExternalStore<UploadQueueSnapshot> {
+    private nextId = 1;
+    private readonly preparedDirectories = new Map<string, Promise<void>>();
+    private readonly requests: MutationObserver<void, Error, UploadOperation>;
+    private isGuardingUnload = false;
+
+    /** Binds the request runner to the query client so uploads are visible as mutations. */
+    constructor(private readonly options: UploadQueueOptions) {
+        super({ items: [], directories: [] });
+
+        this.requests = new MutationObserver(options.queryClient, {
+            mutationFn: async (operation: UploadOperation) => {
+                if (operation.type === "directory") {
+                    await operation.agent.createDirectory(operation.path);
+
+                    return;
+                }
+
+                await operation.agent.upload(operation.path, operation.file, {
+                    on_existing: operation.onExisting,
+                });
+            },
+        });
+    }
+
+    /** Adds one complete source manifest so oversized selections never enter partially. */
+    enqueue(batch: UploadBatch): EnqueueResult {
         if (
             batch.files.length === 0 &&
             (batch.directories?.length ?? 0) === 0
@@ -80,12 +157,11 @@ export const enqueueUploadBatchAtom = atom(
             return { ok: false, message: "No files were selected." };
         }
 
-        const queue = get(uploadQueueAtom);
-        const hasPendingUploads = queue.items.some(
-            (item) => item.status !== "done",
-        );
-        const retainedItems = hasPendingUploads ? queue.items : [];
-        const retainedDirectories = hasPendingUploads ? queue.directories : [];
+        const current = this.getSnapshot();
+        const hasPending = this.hasPendingWork();
+        const retainedItems = hasPending ? current.items : [];
+        const retainedDirectories = hasPending ? current.directories : [];
+
         if (retainedItems.length + batch.files.length > MAX_QUEUED_UPLOADS) {
             return {
                 ok: false,
@@ -97,19 +173,22 @@ export const enqueueUploadBatchAtom = atom(
             const items = batch.files.map((source) => ({
                 ...source,
                 relativePath: normalizeRelativePath(source.relativePath),
-                id: nextUploadId++,
+                id: this.takeId(),
                 agentId: batch.agentId,
                 destinationPath: batch.destinationPath,
+                onExisting: batch.onExisting,
                 status: "waiting" as const,
                 error: null,
             }));
+
             const uniqueDirectories = new Set(
                 (batch.directories ?? []).map(normalizeRelativePath),
             );
+
             const directories = Array.from(
                 uniqueDirectories,
                 (relativePath) => ({
-                    id: nextUploadId++,
+                    id: this.takeId(),
                     agentId: batch.agentId,
                     destinationPath: batch.destinationPath,
                     relativePath,
@@ -117,10 +196,13 @@ export const enqueueUploadBatchAtom = atom(
                 }),
             );
 
-            set(uploadQueueAtom, {
+            this.update({
                 items: [...retainedItems, ...items],
                 directories: [...retainedDirectories, ...directories],
             });
+
+            this.pump();
+
             return { ok: true, fileCount: items.length };
         } catch (error) {
             return {
@@ -131,227 +213,219 @@ export const enqueueUploadBatchAtom = atom(
                 ),
             };
         }
-    },
-);
+    }
 
-/** Atomically reserves available upload slots before asynchronous work starts. */
-const claimWaitingUploadsAtom = atom(null, (get, set) => {
-    const queue = get(uploadQueueAtom);
-    const activeCount = queue.items.filter(
-        (item) => item.status === "uploading",
-    ).length;
-    const claimedIds = new Set(
-        queue.items
+    /** Hands out ids that stay unique across batches, so rows keep a stable React key. */
+    private takeId(): number {
+        const id = this.nextId;
+        this.nextId += 1;
+
+        return id;
+    }
+
+    /** True while anything of the current batch is waiting or running. */
+    private hasPendingWork(): boolean {
+        const snapshot = this.getSnapshot();
+
+        return (
+            snapshot.items.some((item) => item.status !== "done") ||
+            snapshot.directories.some(
+                (directory) => directory.status !== "done",
+            )
+        );
+    }
+
+    /** Publishes a snapshot, then keeps the unload warning in step with whether work is pending. */
+    private update(next: UploadQueueSnapshot): void {
+        this.publish(next);
+        this.syncUnloadGuard();
+    }
+
+    /** Warns before the page unloads, because active `File` handles would be lost with it. */
+    private readonly warnBeforeUnload = (event: Event) => {
+        event.preventDefault();
+    };
+
+    /** Attaches the warning while work is pending and removes it afterwards. */
+    private syncUnloadGuard(): void {
+        const target = this.options.unloadTarget;
+        const shouldGuard = this.hasPendingWork();
+
+        if (target === undefined || shouldGuard === this.isGuardingUnload) {
+            return;
+        }
+
+        this.isGuardingUnload = shouldGuard;
+
+        if (shouldGuard) {
+            target.addEventListener("beforeunload", this.warnBeforeUnload);
+        } else {
+            target.removeEventListener("beforeunload", this.warnBeforeUnload);
+        }
+    }
+
+    /**
+     * Starts everything that may run now: all waiting directories, and as many waiting files
+     * as there are free slots. Claiming happens in the same synchronous step as starting, so
+     * two quick calls can never start the same row twice.
+     */
+    private pump(): void {
+        const snapshot = this.getSnapshot();
+
+        const freeSlots = Math.max(
+            0,
+            MAX_CONCURRENT_UPLOADS -
+                snapshot.items.filter((item) => item.status === "uploading")
+                    .length,
+        );
+
+        const claimedItems = snapshot.items
             .filter((item) => item.status === "waiting")
-            .slice(0, Math.max(0, MAX_CONCURRENT_UPLOADS - activeCount))
-            .map((item) => item.id),
-    );
-    if (claimedIds.size === 0) {
-        return [];
+            .slice(0, freeSlots);
+
+        const claimedDirectories = snapshot.directories.filter(
+            (directory) => directory.status === "waiting",
+        );
+
+        if (claimedItems.length === 0 && claimedDirectories.length === 0) {
+            return;
+        }
+
+        const claimedItemIds = new Set(claimedItems.map((item) => item.id));
+
+        const claimedDirectoryIds = new Set(
+            claimedDirectories.map((directory) => directory.id),
+        );
+
+        this.update({
+            items: snapshot.items.map((item) =>
+                claimedItemIds.has(item.id)
+                    ? { ...item, status: "uploading" as const }
+                    : item,
+            ),
+            directories: snapshot.directories.map((directory) =>
+                claimedDirectoryIds.has(directory.id)
+                    ? { ...directory, status: "creating" as const }
+                    : directory,
+            ),
+        });
+
+        for (const directory of claimedDirectories) {
+            this.runDirectory(directory);
+        }
+
+        for (const item of claimedItems) {
+            this.runItem(item);
+        }
     }
 
-    const claimedItems = queue.items.filter((item) => claimedIds.has(item.id));
-    set(uploadQueueAtom, {
-        ...queue,
-        items: queue.items.map((item) =>
-            claimedIds.has(item.id)
-                ? { ...item, status: "uploading" as const }
-                : item,
-        ),
-    });
-    return claimedItems;
-});
+    /** Creates one requested empty directory; failures surface through file uploads instead. */
+    private runDirectory(directory: UploadDirectory): void {
+        const agent = this.options.resolveAgent(directory.agentId);
 
-/** Reserves empty-directory work separately because it does not consume upload slots. */
-const claimWaitingDirectoriesAtom = atom(null, (get, set) => {
-    const queue = get(uploadQueueAtom);
-    const claimed = queue.directories.filter(
-        (directory) => directory.status === "waiting",
-    );
-    if (claimed.length === 0) {
-        return [];
+        const path = joinBrowserPath(
+            directory.destinationPath,
+            directory.relativePath,
+        );
+
+        const operation = agent
+            ? this.prepareDirectory(agent, path)
+            : Promise.reject(new Error("Upload agent is unavailable."));
+
+        void operation
+            .catch(() => undefined)
+            .finally(() => this.finishDirectory(directory.id));
     }
-    const claimedIds = new Set(claimed.map((directory) => directory.id));
-    set(uploadQueueAtom, {
-        ...queue,
-        directories: queue.directories.map((directory) =>
-            claimedIds.has(directory.id)
-                ? { ...directory, status: "creating" as const }
-                : directory,
-        ),
-    });
-    return claimed;
-});
 
-/** Records one terminal result while retaining rows for the queue view. */
-const finishUploadAtom = atom(
-    null,
-    (get, set, result: { id: number; error: string | null }) => {
-        const queue = get(uploadQueueAtom);
-        set(uploadQueueAtom, {
-            ...queue,
-            items: queue.items.map((item) =>
-                item.id === result.id
-                    ? {
-                          ...item,
-                          status: "done" as const,
-                          error: result.error,
-                      }
+    /** Ensures the parent exists, uploads the file and records the outcome on its row. */
+    private runItem(item: UploadQueueItem): void {
+        const agent = this.options.resolveAgent(item.agentId);
+
+        const operation = agent
+            ? this.prepareDirectory(agent, getUploadParentPath(item)).then(() =>
+                  this.requests.mutate({
+                      type: "file",
+                      agent,
+                      path: joinBrowserPath(
+                          item.destinationPath,
+                          item.relativePath,
+                      ),
+                      file: item.file,
+                      onExisting: item.onExisting,
+                  }),
+              )
+            : Promise.reject(new Error("Upload agent is unavailable."));
+
+        void operation
+            .then(() => this.finishItem(item.id, null))
+            .catch((cause: unknown) =>
+                this.finishItem(
+                    item.id,
+                    getErrorMessage(cause, "Upload failed"),
+                ),
+            );
+    }
+
+    /** Shares one directory request between every file that needs the same parent. */
+    private prepareDirectory(agent: Agent, path: string): Promise<void> {
+        const key = `${agent.id}\0${path}`;
+        const existing = this.preparedDirectories.get(key);
+
+        if (existing) {
+            return existing;
+        }
+
+        const request = this.requests.mutate({
+            type: "directory",
+            agent,
+            path,
+        });
+
+        this.preparedDirectories.set(key, request);
+
+        return request;
+    }
+
+    /** Records one terminal result while retaining the row for the queue view. */
+    private finishItem(id: number, error: string | null): void {
+        const snapshot = this.getSnapshot();
+
+        this.update({
+            ...snapshot,
+            items: snapshot.items.map((item) =>
+                item.id === id
+                    ? { ...item, status: "done" as const, error }
                     : item,
             ),
         });
-    },
-);
 
-/** Marks directory preparation complete even when its error is surfaced by a file upload. */
-const finishDirectoryAtom = atom(null, (get, set, id: number) => {
-    const queue = get(uploadQueueAtom);
-    set(uploadQueueAtom, {
-        ...queue,
-        directories: queue.directories.map((directory) =>
-            directory.id === id
-                ? { ...directory, status: "done" as const }
-                : directory,
-        ),
-    });
-});
+        this.afterWorkFinished();
+    }
 
-/** Returns a safe parent path for creating directories before a nested file upload. */
-function getUploadParentPath(item: UploadQueueItem) {
-    const separator = item.relativePath.lastIndexOf("/");
-    return separator === -1
-        ? item.destinationPath
-        : joinBrowserPath(
-              item.destinationPath,
-              item.relativePath.slice(0, separator),
-          );
-}
+    /** Marks directory preparation complete even when its error is surfaced by a file upload. */
+    private finishDirectory(id: number): void {
+        const snapshot = this.getSnapshot();
 
-/** Runs the page-lifetime scheduler and keeps full document unloads from losing active files. */
-export function UploadQueueManager(props: {
-    agents: Agent[];
-    onUploadsChanged: () => Promise<void>;
-}) {
-    const queue = useAtomValue(uploadQueueAtom);
-    const claimWaitingUploads = useSetAtom(claimWaitingUploadsAtom);
-    const claimWaitingDirectories = useSetAtom(claimWaitingDirectoriesAtom);
-    const finishUpload = useSetAtom(finishUploadAtom);
-    const finishDirectory = useSetAtom(finishDirectoryAtom);
-    const agentsRef = React.useRef(props.agents);
-    const preparedDirectories = React.useRef(new Map<string, Promise<void>>());
-    const hadActiveUploads = React.useRef(false);
-    const uploadMutation = useMutation({
-        mutationFn: async (
-            operation:
-                | { type: "directory"; agent: Agent; path: string }
-                | {
-                      type: "file";
-                      agent: Agent;
-                      path: string;
-                      file: File;
-                  },
-        ) => {
-            if (operation.type === "directory") {
-                await operation.agent.createDirectory(operation.path);
-                return;
-            }
-            await operation.agent.upload(operation.path, operation.file);
-        },
-    });
-
-    agentsRef.current = props.agents;
-
-    React.useEffect(() => {
-        const prepareDirectory = (agent: Agent, path: string) => {
-            const key = `${agent.id}\0${path}`;
-            const existing = preparedDirectories.current.get(key);
-            if (existing) {
-                return existing;
-            }
-            const request = uploadMutation.mutateAsync({
-                type: "directory",
-                agent,
-                path,
-            });
-            preparedDirectories.current.set(key, request);
-            return request;
-        };
-        const claimedDirectories = claimWaitingDirectories();
-        claimedDirectories.forEach((directory) => {
-            const agent = agentsRef.current.find(
-                (candidate) => candidate.id === directory.agentId,
-            );
-            const path = joinBrowserPath(
-                directory.destinationPath,
-                directory.relativePath,
-            );
-            const operation = agent
-                ? prepareDirectory(agent, path)
-                : Promise.reject(new Error("Upload agent is unavailable."));
-            void operation
-                .catch(() => undefined)
-                .finally(() => finishDirectory(directory.id));
+        this.update({
+            ...snapshot,
+            directories: snapshot.directories.map((directory) =>
+                directory.id === id
+                    ? { ...directory, status: "done" as const }
+                    : directory,
+            ),
         });
 
-        const claimedItems = claimWaitingUploads();
-        claimedItems.forEach((item) => {
-            const agent = agentsRef.current.find(
-                (candidate) => candidate.id === item.agentId,
-            );
-            const operation = agent
-                ? prepareDirectory(agent, getUploadParentPath(item)).then(() =>
-                      uploadMutation.mutateAsync({
-                          type: "file",
-                          agent,
-                          path: joinBrowserPath(
-                              item.destinationPath,
-                              item.relativePath,
-                          ),
-                          file: item.file,
-                      }),
-                  )
-                : Promise.reject(new Error("Upload agent is unavailable."));
+        this.afterWorkFinished();
+    }
 
-            void operation
-                .then(() => finishUpload({ id: item.id, error: null }))
-                .catch((cause: unknown) =>
-                    finishUpload({
-                        id: item.id,
-                        error: getErrorMessage(cause, "Upload failed"),
-                    }),
-                );
-        });
-    }, [
-        claimWaitingDirectories,
-        claimWaitingUploads,
-        finishDirectory,
-        finishUpload,
-        queue,
-        uploadMutation,
-    ]);
+    /** Frees slots for waiting files, and once everything is done refreshes what it changed. */
+    private afterWorkFinished(): void {
+        this.pump();
 
-    React.useEffect(() => {
-        const hasActiveUploads = queue.items.some(
-            (item) => item.status !== "done",
-        );
-        if (hadActiveUploads.current && !hasActiveUploads) {
-            void props.onUploadsChanged();
+        if (!this.hasPendingWork()) {
+            // A later batch must not reuse a directory result that may be stale by then.
+            this.preparedDirectories.clear();
+            this.options.onSettled();
         }
-        hadActiveUploads.current = hasActiveUploads;
-    }, [props, queue.items]);
-
-    React.useEffect(() => {
-        if (!queue.items.some((item) => item.status !== "done")) {
-            return;
-        }
-        /** Lets the browser present its standard warning when active File objects would be lost. */
-        const preventUnload = (event: BeforeUnloadEvent) => {
-            event.preventDefault();
-            event.returnValue = "";
-        };
-        window.addEventListener("beforeunload", preventUnload);
-        return () => window.removeEventListener("beforeunload", preventUnload);
-    }, [queue.items]);
-
-    return null;
+    }
 }

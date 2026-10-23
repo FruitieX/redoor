@@ -1,16 +1,19 @@
 import * as React from "react";
-import { AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useRouter, type ErrorComponentProps } from "@tanstack/react-router";
 import { z } from "zod";
-import { ApiError } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import { Button } from "#ui/components/button";
+import { FoldingSection } from "#ui/components/folding-section";
 
 /** True for browser network failures that never received an HTTP response. */
 function isNetworkError(cause: unknown): boolean {
     if (!(cause instanceof Error)) {
         return false;
     }
+
     const message = cause.message.toLowerCase();
+
     return (
         cause.name === "TypeError" ||
         message.includes("failed to fetch") ||
@@ -40,35 +43,44 @@ function titleForError(cause: unknown): string {
                 if (cause.status >= 500) {
                     return "Server error";
                 }
+
                 if (cause.status >= 400) {
                     return "Request failed";
                 }
         }
     }
+
     if (isNetworkError(cause)) {
         return "Connection failed";
     }
+
     if (cause instanceof Error) {
         const message = cause.message.toLowerCase();
+
         if (message.includes("agent not found")) {
-            return "Agent not found";
+            return "Device not found";
         }
+
         if (
             message.includes("no such file or directory") ||
             message.includes("directory not found")
         ) {
             return "Path not found";
         }
+
         if (message.includes("not a directory")) {
             return "Not a directory";
         }
+
         if (message.includes("permission denied")) {
             return "Permission denied";
         }
+
         if (message.includes("not editable")) {
             return "File is not editable";
         }
     }
+
     return "Something went wrong";
 }
 
@@ -88,9 +100,11 @@ function hintForError(cause: unknown): string | null {
                 return null;
         }
     }
+
     if (isNetworkError(cause)) {
         return "The browser could not reach the API. Check that the server is running and that your network connection is up.";
     }
+
     return null;
 }
 
@@ -99,10 +113,13 @@ function messageForError(cause: unknown): string {
     if (cause instanceof Error) {
         return cause.message || cause.name;
     }
+
     const stringCause = z.string().safeParse(cause);
+
     if (stringCause.success) {
         return stringCause.data;
     }
+
     try {
         return JSON.stringify(cause, null, 2);
     } catch {
@@ -121,14 +138,19 @@ export function RouteError(
     const hint = hintForError(props.error);
     const message = messageForError(props.error);
     const status = props.error instanceof ApiError ? props.error.status : null;
+
     const responseBody =
         props.error instanceof ApiError ? props.error.body : null;
+
     const errorName = props.error instanceof Error ? props.error.name : "Error";
+
     const stack =
         props.error instanceof Error && props.error.stack
             ? props.error.stack
             : null;
+
     const componentStack = props.info?.componentStack?.trim() || null;
+
     const hasTechnicalDetails = Boolean(
         stack || componentStack || responseBody,
     );
@@ -137,8 +159,10 @@ export function RouteError(
     const retry = () => {
         if (props.reset) {
             props.reset();
+
             return;
         }
+
         void router.invalidate();
     };
 
@@ -147,7 +171,7 @@ export function RouteError(
             role="alert"
             className="flex min-h-full items-center justify-center p-6"
         >
-            <div className="w-full max-w-xl rounded-xl border border-red-900/60 bg-[#141821] shadow-lg shadow-black/40">
+            <div className="w-full max-w-xl rounded-xl border border-red-900/60 bg-surface-error shadow-lg shadow-black/40">
                 <div className="border-b border-red-900/40 px-5 py-4">
                     <div className="flex items-start gap-3">
                         <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-500/10 text-red-400">
@@ -199,56 +223,42 @@ export function RouteError(
                     </dl>
 
                     {hasTechnicalDetails ? (
-                        <div className="rounded-lg border border-slate-800 bg-[#0b0d12]">
-                            <button
-                                type="button"
-                                aria-expanded={detailsOpen}
-                                onClick={() => setDetailsOpen((open) => !open)}
-                                className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-medium text-slate-400 hover:bg-white/5 hover:text-slate-200"
-                            >
-                                Technical details
-                                <ChevronDown
-                                    className={`h-4 w-4 shrink-0 transition-transform ${
-                                        detailsOpen ? "rotate-180" : ""
-                                    }`}
-                                    aria-hidden="true"
-                                />
-                            </button>
-                            {detailsOpen ? (
-                                <div className="space-y-3 border-t border-slate-800 px-3 py-3">
-                                    {responseBody ? (
-                                        <div>
-                                            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                                                Response body
-                                            </p>
-                                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
-                                                {responseBody}
-                                            </pre>
-                                        </div>
-                                    ) : null}
-                                    {stack ? (
-                                        <div>
-                                            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                                                Stack
-                                            </p>
-                                            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
-                                                {stack}
-                                            </pre>
-                                        </div>
-                                    ) : null}
-                                    {componentStack ? (
-                                        <div>
-                                            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                                                Component stack
-                                            </p>
-                                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-500">
-                                                {componentStack}
-                                            </pre>
-                                        </div>
-                                    ) : null}
+                        <FoldingSection
+                            title="Technical details"
+                            open={detailsOpen}
+                            onOpenChange={setDetailsOpen}
+                        >
+                            {responseBody ? (
+                                <div>
+                                    <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                                        Response body
+                                    </p>
+                                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
+                                        {responseBody}
+                                    </pre>
                                 </div>
                             ) : null}
-                        </div>
+                            {stack ? (
+                                <div>
+                                    <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                                        Stack
+                                    </p>
+                                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-400">
+                                        {stack}
+                                    </pre>
+                                </div>
+                            ) : null}
+                            {componentStack ? (
+                                <div>
+                                    <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                                        Component stack
+                                    </p>
+                                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-slate-500">
+                                        {componentStack}
+                                    </pre>
+                                </div>
+                            ) : null}
+                        </FoldingSection>
                     ) : null}
 
                     <div className="flex flex-wrap gap-2 pt-1">

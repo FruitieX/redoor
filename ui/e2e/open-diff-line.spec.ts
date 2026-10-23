@@ -11,6 +11,7 @@ import {
 
 /** Tall enough that a middle-line jump must scroll and virtualize the ends. */
 const TARGET_LINE = 250;
+
 const TARGET_TEXT = `middle line ${String(TARGET_LINE)}`;
 
 test.describe("Open diff line", () => {
@@ -20,6 +21,7 @@ test.describe("Open diff line", () => {
         if (testDirPath === "") {
             return;
         }
+
         await teardownTestDir(testDirPath);
         testDirPath = "";
     });
@@ -33,6 +35,7 @@ test.describe("Open diff line", () => {
         const filePath = path.join(repositoryPath, "tall.txt");
         await fs.mkdir(repositoryPath);
         await fs.writeFile(path.join(repositoryPath, "README"), "baseline\n");
+
         const lines = [
             "FIRST_VISIBLE_LINE",
             ...Array.from(
@@ -41,6 +44,7 @@ test.describe("Open diff line", () => {
             ),
             "LAST_BUFFER_LINE",
         ];
+
         await fs.writeFile(filePath, `${lines.join("\n")}\n`);
         await $`git -C ${repositoryPath} init`;
         await $`git -C ${repositoryPath} config user.email playwright@redoor.test`;
@@ -84,9 +88,11 @@ test.describe("Open diff line", () => {
         const lineBox = await targetLine.boundingBox();
         expect(viewportBox).not.toBeNull();
         expect(lineBox).not.toBeNull();
+
         if (viewportBox === null || lineBox === null) {
             return;
         }
+
         const viewportCenter = viewportBox.y + viewportBox.height / 2;
         const lineCenter = lineBox.y + lineBox.height / 2;
         // nearest-only jumps can leave the target at the edge; center keeps it in view.
@@ -98,6 +104,7 @@ test.describe("Open diff line", () => {
             scrollHeight: element.scrollHeight,
             clientHeight: element.clientHeight,
         }));
+
         // Vertical scrolling must stay in CodeMirror after the inbound jump.
         expect(pageScroll.scrollHeight).toBeLessThanOrEqual(
             pageScroll.clientHeight + 1,

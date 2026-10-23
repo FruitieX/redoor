@@ -26,6 +26,7 @@ describe("directory size", () => {
             agentName: AGENT_NAME,
             agentCwd: tempFiles.tempDirectory({ suffix: "-agent-cwd" }),
         });
+
         testAgent = setup.testAgent;
     }, 30000);
 

@@ -1,13 +1,13 @@
 import * as React from "react";
 import { Link } from "@tanstack/react-router";
 import { Button } from "#ui/components/button";
-import { Tooltip } from "#ui/components/tooltip";
 import { Check, Copy } from "lucide-react";
 
 /** Writes text to the clipboard, with a textarea fallback when the async API is unavailable. */
 async function writeClipboardText(value: string): Promise<void> {
     if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(value);
+
         return;
     }
 
@@ -20,6 +20,7 @@ async function writeClipboardText(value: string): Promise<void> {
     textarea.select();
     const copied = document.execCommand("copy");
     document.body.removeChild(textarea);
+
     if (!copied) {
         throw new Error("clipboard copy failed");
     }
@@ -45,9 +46,11 @@ export function useCopyFeedback(value: string) {
             setIsCopied(true);
             // Restart the CSS flash without remounting this component.
             setFlashKey((key) => key + 1);
+
             if (resetTimerRef.current !== null) {
                 window.clearTimeout(resetTimerRef.current);
             }
+
             resetTimerRef.current = window.setTimeout(() => {
                 setIsCopied(false);
                 resetTimerRef.current = null;
@@ -66,6 +69,8 @@ export function CopyableCodeRow(props: {
     value: string;
     copyAriaLabel?: string;
     multiline?: boolean;
+    /** Prose such as AI agent prompts reads better wrapped than horizontally scrolled. */
+    wrap?: boolean;
 }) {
     const { isCopied, flashKey, copy } = useCopyFeedback(props.value);
 
@@ -97,7 +102,7 @@ export function CopyableCodeRow(props: {
                     className={
                         isCopied
                             ? "inline-flex items-center gap-1.5 rounded-md bg-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300"
-                            : "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-white/5 hover:text-slate-100"
+                            : "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-tint hover:text-slate-100"
                     }
                     aria-label={
                         isCopied
@@ -117,9 +122,11 @@ export function CopyableCodeRow(props: {
             <code
                 aria-label={`${props.label} contents`}
                 className={
-                    props.multiline
-                        ? "relative block overflow-x-auto whitespace-pre px-3 py-2.5 font-mono text-sm leading-6 text-slate-200"
-                        : "relative block overflow-x-auto whitespace-nowrap px-3 py-2.5 font-mono text-sm text-slate-200"
+                    props.wrap
+                        ? "relative block whitespace-pre-wrap wrap-anywhere px-3 py-2.5 font-mono text-sm leading-6 text-slate-200"
+                        : props.multiline
+                          ? "relative block overflow-x-auto whitespace-pre px-3 py-2.5 font-mono text-sm leading-6 text-slate-200"
+                          : "relative block overflow-x-auto whitespace-nowrap px-3 py-2.5 font-mono text-sm text-slate-200"
                 }
             >
                 {props.value}
@@ -169,30 +176,30 @@ export function CopyablePath(props: {
                     {props.value}
                 </code>
             )}
-            <Tooltip content={props.copyAriaLabel} className="shrink-0">
-                <Button
-                    type="button"
-                    variant="subtle"
-                    onClick={() => {
-                        void copy();
-                    }}
-                    className={
-                        isCopied
-                            ? "relative mr-1 shrink-0 gap-1 rounded bg-emerald-500/20 px-1.5 py-1 text-xs text-emerald-300"
-                            : "relative mr-1 shrink-0 rounded px-1.5 py-1 text-slate-400 hover:bg-white/5 hover:text-slate-100"
-                    }
-                    aria-label={isCopied ? "Copied!" : props.copyAriaLabel}
-                >
-                    {isCopied ? (
-                        <>
-                            <Check className="h-3.5 w-3.5" />
-                            <span>Copied!</span>
-                        </>
-                    ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                    )}
-                </Button>
-            </Tooltip>
+            <Button
+                tooltip={props.copyAriaLabel}
+                tooltipClassName="shrink-0"
+                type="button"
+                variant="subtle"
+                onClick={() => {
+                    void copy();
+                }}
+                className={
+                    isCopied
+                        ? "relative mr-1 shrink-0 gap-1 rounded bg-emerald-500/20 px-1.5 py-1 text-xs text-emerald-300"
+                        : "relative mr-1 shrink-0 rounded px-1.5 py-1 text-slate-400 hover:bg-tint hover:text-slate-100"
+                }
+                aria-label={isCopied ? "Copied!" : props.copyAriaLabel}
+            >
+                {isCopied ? (
+                    <>
+                        <Check className="h-3.5 w-3.5" />
+                        <span>Copied!</span>
+                    </>
+                ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                )}
+            </Button>
         </div>
     );
 }

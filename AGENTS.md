@@ -24,13 +24,15 @@
 - Do not add one-line passthrough wrappers that only call another function or re-export a type. Call the real module directly.
 - When adding a retust api always create a dedicated struct for it's reponse with `#[ts(export)]` derive macro which genertes the related typescript interface.
 - Put behaviorally distinct REST endpoints in dedicated modules instead of adding them to an unrelated resource module. Group handlers only when they operate on the same domain and share a clear responsibility.
+- After every architectural change (new or changed crates, actors, flows, wire protocol, lifecycles, trust boundaries, or the reasons behind them) update `ARCHITECTURE.md` in the same change so it never describes a design that no longer exists
 - When creating or updating structs or enums with `#[ts(export)]` always run `scripts/generate-ts-bindings` afterwards to generate the typescript interfaces
 - The generated ts bindings are put in the `bindings` directory
 - Never sleep in tests. Instead wait for a log message to appear or poll some API until the desired state is set
 - Integration tests for the server and agent are in the `tests` directory. The tests are authored in Typescript and vitest. Run with `pn integration-test`
 - Add comments to test assertions why they are there
 - Add integration tests for all rest api features
-- Always after changes run `pn test` with a timeout of at least 1200 seconds so cargo, integration, and Playwright can finish without the runner aborting mid-suite
+- Run `pn test` only after real code changes, including changes to executable scripts, tests, or configuration that affects application or build behavior. Use a timeout of at least 1200 seconds so cargo, integration, and Playwright can finish without the runner aborting mid-suite.
+- Do not run tests or builds for changes limited to documentation, plans, or code comments. If those edits accompany real code changes, run the checks required for the code changes.
 - If the changes are purely visual, running `pn build-and-restart` is enough instead of `pn test`; it builds the UI and server binary and restarts the `redoor-dev` systemd unit
 - Always add `| cat` to git commands to avoid getting stuck in interactive pager
 - When making git commits always add description explaining why the change was made, not what it does
@@ -41,6 +43,7 @@
 - Always write multiline strings with real newlines inside the quotes, never escaped `\n` sequences.
 - If you are asked to write a plan: Write a .md file to ./plans dir. Come up with short name
 - When you see a transient flaky test that succeeds on second run log them to `./flaky-tests.md`
+- When `./flaky-tests.md` shows the same test has been flaky more than once, spawn a subagent to fix its flakiness at the root cause, or to remove the test if it cannot be made reliable
 
 # UI
 
@@ -82,4 +85,4 @@ Use `Tooltip` to clarify the purpose of most buttons and other form controls, es
 
 Do not use use plain <button> or <input> elements. Always use reusable component or create one.
 
-Reusable components (update this list when adding new ones): ActionMenu, ActionMenuButton, AddButton, BrowserViewCard, Button, Checkbox, ConfirmationDialog, ContentSearchButton, ContextMenu, CopyableCodeRow, CopyablePath, DetailCard, Dialog, DialogActions, FoldingSection, FullWindowToggle, IconButton, InputControl, LogViewer, OverlayChromeLayout, Password, RadioCardGroup, RadioCardOption, ResponsiveAnchoredDialog, Select, SidebarModeToggle, SideMenu, TabbedBottomDrawer, TextField, ThemeToggle, Toast, ToggleButton, Tooltip
+Reusable components (update this list when adding new ones): ActionMenu, ActionMenuButton, AgentLifecycle, AgentRestartButton, AgentStatusDot, BrowserViewCard, Button, Checkbox, ClearableInput, ConfirmationDialog, ContextMenu, CopyableCodeRow, CopyablePath, DetailCard, Dialog, DialogActions, FileInput, FoldingSection, FullWindowToggle, IconButton, IconLinkButton, InputControl, LinkButton, LogViewer, OptionalTooltip, OverlayChromeLayout, Password, ProvisioningStatusList, RadioCardGroup, RadioCardOption, ResponsiveAnchoredDialog, SearchButton, SegmentedControl, Select, SidebarModeToggle, SideMenu, SortableItem, SortableList, Tab, TabbedBottomDrawer, TabList, TextField, ThemeToggle, Toast, ToggleButton, Tooltip, ViewCardHeader

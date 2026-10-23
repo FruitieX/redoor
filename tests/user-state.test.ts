@@ -21,6 +21,7 @@ import {
 } from "./test-utils";
 
 const processManager = new ProcessManager();
+
 const baseUrl = `http://127.0.0.1:${VITEST_SERVER_PORT}`;
 
 function userStatePath() {
@@ -76,6 +77,7 @@ describe("user state", () => {
             showHiddenFiles: false,
             nested: { theme: "dark", count: 3 },
         };
+
         const directResponse = await fetch(`${baseUrl}/api/v1/user/state`, {
             method: "PUT",
             headers: {
@@ -84,12 +86,14 @@ describe("user state", () => {
             },
             body: JSON.stringify({ state: document }),
         });
+
         // The replacement contract accepts PUT directly and no longer aliases POST.
         expect(directResponse.status).toBe(200);
         // Direct readback proves the request body was accepted by the new method.
         await expect(directResponse.json()).resolves.toEqual({
             state: document,
         });
+
         const removedPostResponse = await fetch(
             `${baseUrl}/api/v1/user/state`,
             {
@@ -101,6 +105,7 @@ describe("user state", () => {
                 body: JSON.stringify({ state: { stale: true } }),
             },
         );
+
         // The former POST alias is absent so clients cannot silently depend on both verbs.
         expect(removedPostResponse.status).toBe(405);
         const written = await api.updateUserState({ state: document });
@@ -112,6 +117,48 @@ describe("user state", () => {
         const readBack = await api.getUserState();
         // Reloads and other browsers restore exactly what was posted.
         expect(readBack.state).toEqual(document);
+
+        const ordered = {
+            pinnedFiles: [
+                {
+                    agentId: "b",
+                    path: "/b",
+                    name: "b",
+                    agentName: "Device B",
+                },
+                {
+                    agentId: "a",
+                    path: "/a",
+                    name: "a",
+                    agentName: "Device A",
+                },
+            ],
+            bookmarks: [
+                {
+                    agentId: "a",
+                    path: "/a1",
+                    name: "a1",
+                    entryType: "file",
+                },
+                {
+                    agentId: "b",
+                    path: "/b1",
+                    name: "b1",
+                    entryType: "directory",
+                },
+                {
+                    agentId: "a",
+                    path: "/a2",
+                    name: "a2",
+                    entryType: "file",
+                },
+            ],
+            deviceOrder: ["b", "missing", "a"],
+        };
+
+        await api.updateUserState({ state: ordered });
+        // Array order is the contract; the server must not sort pins, bookmarks, or devices.
+        expect((await api.getUserState()).state).toEqual(ordered);
 
         const replacement = { only: "this" };
         await api.updateUserState({ state: replacement });

@@ -1,4 +1,4 @@
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 
 /** Shares one projected snapshot so the pie, percent, and ETA cannot drift apart. */
 export type AnimatedTransferProgress = {
@@ -12,11 +12,15 @@ export function getTransferSpeedBytesPerSecond(
     transfer: TransferProgressEntry,
     measuredAtMilliseconds: number = Date.now(),
 ): number | null {
+    if (transfer.verifying) return null;
+
     const endTime =
         transfer.ended_at === null || transfer.ended_at === undefined
             ? measuredAtMilliseconds / 1000
             : transfer.ended_at;
+
     const measuredElapsedSeconds = endTime - transfer.started_at;
+
     const elapsedSeconds =
         transfer.ended_at !== null &&
         transfer.ended_at !== undefined &&
@@ -28,7 +32,12 @@ export function getTransferSpeedBytesPerSecond(
         return null;
     }
 
-    return transfer.transferred_bytes / elapsedSeconds;
+    return (
+        Math.max(
+            0,
+            transfer.transferred_bytes - (transfer.resumed_bytes ?? 0),
+        ) / elapsedSeconds
+    );
 }
 
 /** Projects progress from one API snapshot while reserving 100% for API-confirmed completion. */
@@ -57,11 +66,13 @@ export function getAnimatedTransferProgress(
         transfer,
         refreshedAtMilliseconds,
     );
+
     const projectedBytes =
         transfer.state === "active" && speed !== null
             ? transfer.transferred_bytes +
               speed * Math.max(0, elapsedSinceRefreshSeconds)
             : transfer.transferred_bytes;
+
     const transferredBytes = Math.min(
         Math.max(0, projectedBytes),
         transfer.total_bytes * 0.99,
@@ -92,9 +103,11 @@ export function getLastEstimatedTransferProgress(
             elapsedSinceRefreshSeconds,
             refreshedAtMilliseconds,
         );
+
         if (progress.remainingSeconds === null) {
             continue;
         }
+
         if (
             lastProgress === null ||
             lastProgress.remainingSeconds === null ||
@@ -126,6 +139,7 @@ export function getTransferRemainingSeconds(
     }
 
     const remainingBytes = transfer.total_bytes - transferredBytes;
+
     if (remainingBytes <= 0) {
         return 0;
     }

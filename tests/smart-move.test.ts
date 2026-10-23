@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { ApiClient, Agent, type TransferProgressEntry } from "#ui/api-client";
+import { ApiClient, Agent } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import {
     ProcessManager,
     TempFileManager,
@@ -25,23 +26,28 @@ describe("Smart Move API", () => {
             agentName: AGENT_NAME,
             agentCwd: tempFiles.tempDirectory({ suffix: "-move-source-cwd" }),
         });
+
         apiClient = setup.apiClient;
         sourceAgent = setup.testAgent;
 
         const serverProcess = processManager.getProcess(setup.serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
+
         const destinationName = "smart-move-destination-agent";
+
         const connected = waitForLogMessage(
             serverProcess,
             new RegExp(
-                `Transfer socket registered: agent_id=${destinationName},`,
+                `Agent registered: agent_id=${destinationName},`,
             ),
             10000,
         );
+
         processManager.spawnAgent({
-            wsAddress: `ws://127.0.0.1:${setup.serverPort}/ws`,
+            wsAddress: `ws://127.0.0.1:${setup.serverPort}`,
             name: destinationName,
             cwd: tempFiles.tempDirectory({ suffix: "-move-destination-cwd" }),
         });
@@ -77,11 +83,14 @@ describe("Smart Move API", () => {
         const sourcePath = tempFiles.create("same-agent move", {
             suffix: ".txt",
         });
+
         const destPath = tempFiles.tempFile({ suffix: ".txt" });
+
         const response = await sourceAgent.moveTo(
             { agent: sourceAgent.id, path: destPath },
             sourcePath,
         );
+
         const move = await waitForMove(response.move_request_id);
 
         // A distinct direction lets transfer history identify move semantics rather than copy.
@@ -96,6 +105,7 @@ describe("Smart Move API", () => {
         await expect(fs.stat(sourcePath)).rejects.toMatchObject({
             code: "ENOENT",
         });
+
         const related = (
             await apiClient.getTransferProgress()
         ).transfers.filter(
@@ -103,6 +113,7 @@ describe("Smart Move API", () => {
                 transfer.source?.path === sourcePath ||
                 transfer.dest?.path === destPath,
         );
+
         // Internal copy/delete commands must remain hidden behind one public move row.
         expect(related).toHaveLength(1);
     });
@@ -117,10 +128,12 @@ describe("Smart Move API", () => {
         );
 
         const sourceInode = (await fs.lstat(sourcePath, { bigint: true })).ino;
+
         const response = await sourceAgent.moveTo(
             { agent: sourceAgent.id, path: destPath },
             sourcePath,
         );
+
         const move = await waitForMove(response.move_request_id);
 
         // Same-FS missing directory destinations must use filesystem rename, not copy/delete.
@@ -151,6 +164,7 @@ describe("Smart Move API", () => {
             { agent: destinationAgent.id, path: destPath },
             sourcePath,
         );
+
         const move = await waitForMove(response.move_request_id);
 
         // Destination endpoint identity confirms the cross-agent route was retained publicly.
@@ -180,6 +194,7 @@ describe("Smart Move API", () => {
             { agent: destinationAgent.id, path: destPath },
             sourcePath,
         );
+
         await waitForMove(response.move_request_id);
 
         // Nested destination content proves tar-backed directory transport completed successfully.
@@ -205,6 +220,7 @@ describe("Smart Move API", () => {
             sourcePath,
             { on_existing: "override" },
         );
+
         const move = await waitForMove(response.move_request_id);
 
         // Same-filesystem overrides exchange the destination atomically before cleanup.
@@ -225,14 +241,17 @@ describe("Smart Move API", () => {
         const directorySource = tempFiles.tempFile({
             suffix: "-override-directory-source",
         });
+
         const fileDestination = tempFiles.create("old file", {
             suffix: "-override-file-destination",
         });
+
         await fs.mkdir(directorySource);
         await fs.writeFile(
             path.join(directorySource, "source.txt"),
             "directory",
         );
+
         const directoryInode = (
             await fs.lstat(directorySource, { bigint: true })
         ).ino;
@@ -242,6 +261,7 @@ describe("Smart Move API", () => {
             directorySource,
             { on_existing: "override" },
         );
+
         const directoryMove = await waitForMove(
             directoryResponse.move_request_id,
         );
@@ -264,9 +284,11 @@ describe("Smart Move API", () => {
         const fileSource = tempFiles.create("file over directory", {
             suffix: "-override-file-source",
         });
+
         const directoryDestination = tempFiles.tempFile({
             suffix: "-override-directory-destination",
         });
+
         await fs.mkdir(directoryDestination);
         await fs.writeFile(
             path.join(directoryDestination, "old.txt"),
@@ -279,6 +301,7 @@ describe("Smart Move API", () => {
             fileSource,
             { on_existing: "override" },
         );
+
         const fileMove = await waitForMove(fileResponse.move_request_id);
 
         // File-over-directory must stay on the atomic exchange path.
@@ -299,13 +322,17 @@ describe("Smart Move API", () => {
         const symlinkSource = tempFiles.create("file over symlink", {
             suffix: "-override-symlink-source",
         });
+
         const symlinkDestination = tempFiles.tempFile({
             suffix: "-override-symlink-destination",
         });
+
         const missingTarget = tempFiles.tempFile({
             suffix: "-override-missing-link-target",
         });
+
         await fs.symlink(missingTarget, symlinkDestination);
+
         const symlinkSourceInode = (
             await fs.lstat(symlinkSource, { bigint: true })
         ).ino;
@@ -315,6 +342,7 @@ describe("Smart Move API", () => {
             symlinkSource,
             { on_existing: "override" },
         );
+
         const symlinkMove = await waitForMove(symlinkResponse.move_request_id);
 
         // File-over-symlink must stay on the atomic exchange path.
@@ -335,9 +363,11 @@ describe("Smart Move API", () => {
         const directoryOverDirectorySource = tempFiles.tempFile({
             suffix: "-override-directory-over-directory-source",
         });
+
         const directoryOverDirectoryDestination = tempFiles.tempFile({
             suffix: "-override-directory-over-directory-destination",
         });
+
         await fs.mkdir(directoryOverDirectorySource);
         await fs.mkdir(directoryOverDirectoryDestination);
         await fs.writeFile(
@@ -348,6 +378,7 @@ describe("Smart Move API", () => {
             path.join(directoryOverDirectoryDestination, "old.txt"),
             "old directory",
         );
+
         const directoryOverDirectoryInode = (
             await fs.lstat(directoryOverDirectorySource, { bigint: true })
         ).ino;
@@ -357,6 +388,7 @@ describe("Smart Move API", () => {
             directoryOverDirectorySource,
             { on_existing: "override" },
         );
+
         const directoryOverDirectoryMove = await waitForMove(
             directoryOverDirectoryResponse.move_request_id,
         );
@@ -408,6 +440,7 @@ describe("Smart Move API", () => {
             sourcePath,
             { on_existing: "merge" },
         );
+
         await waitForMove(response.move_request_id);
 
         // Merge replaces conflicting entries with source content.
@@ -432,14 +465,17 @@ describe("Smart Move API", () => {
         const sourcePath = tempFiles.create("source remains", {
             suffix: ".txt",
         });
+
         const destPath = tempFiles.create("destination remains", {
             suffix: ".txt",
         });
+
         const response = await sourceAgent.moveTo(
             { agent: sourceAgent.id, path: destPath },
             sourcePath,
             { on_existing: "error" },
         );
+
         const errored = await waitForValue({
             description: "errored conflicting move",
             predicate: async () =>
@@ -462,14 +498,17 @@ describe("Smart Move API", () => {
         const sourcePath = tempFiles.create("remote source remains", {
             suffix: ".txt",
         });
+
         const destPath = tempFiles.create("remote destination remains", {
             suffix: ".txt",
         });
+
         const response = await sourceAgent.moveTo(
             { agent: destinationAgent.id, path: destPath },
             sourcePath,
             { on_existing: "error" },
         );
+
         await waitForValue({
             description: "errored cross-agent conflicting move",
             predicate: async () =>
@@ -494,12 +533,15 @@ describe("Smart Move API", () => {
         const sourcePath = tempFiles.create("source after failed setup", {
             suffix: ".txt",
         });
+
         const missingParent = tempFiles.tempFile({ suffix: "-missing-parent" });
         const destPath = path.join(missingParent, "destination.txt");
+
         const response = await sourceAgent.moveTo(
             { agent: destinationAgent.id, path: destPath },
             sourcePath,
         );
+
         const errored = await waitForValue({
             description: "errored cross-agent destination setup",
             predicate: async () =>
@@ -517,6 +559,25 @@ describe("Smart Move API", () => {
             "source after failed setup",
         );
         // Failed setup must not create a partial destination tree.
+        await expect(fs.stat(destPath)).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
+    it("rejects sources that are neither files nor directories", async () => {
+        const destPath = tempFiles.tempFile({ suffix: ".txt" });
+
+        // The shared transfer service names the requested operation in its rejection.
+        await expect(
+            sourceAgent.moveTo(
+                { agent: sourceAgent.id, path: destPath },
+                "/dev/null",
+            ),
+        ).rejects.toMatchObject({
+            status: 400,
+            message: "Move supports regular files and directories only",
+        });
+        // Rejection happens before any destination is created.
         await expect(fs.stat(destPath)).rejects.toMatchObject({
             code: "ENOENT",
         });

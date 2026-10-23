@@ -42,6 +42,7 @@ export function RadioCardOption(props: {
 }) {
     const inputId = React.useId();
     const inputRef = React.useRef<HTMLInputElement>(null);
+
     const cardClassName = twMerge(
         "cursor-pointer rounded-lg border px-4 py-3 transition has-[:disabled]:cursor-default",
         props.checked
@@ -53,6 +54,7 @@ export function RadioCardOption(props: {
               : "border-slate-700 bg-slate-950/50 hover:border-slate-600 has-[:disabled]:hover:border-slate-700",
         props.className,
     );
+
     const input = (
         <input
             ref={inputRef}
@@ -73,6 +75,7 @@ export function RadioCardOption(props: {
     /** Extends the native label target across compact card padding without capturing help interactions. */
     const selectFromCard = (event: React.MouseEvent<HTMLDivElement>) => {
         const target = event.target;
+
         if (
             !(target instanceof Element) ||
             target.closest("label, [data-radio-card-help]") ||

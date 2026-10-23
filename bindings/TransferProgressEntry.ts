@@ -6,6 +6,10 @@ import type { TransferId } from "./TransferId";
 import type { TransferProgressState } from "./TransferProgressState";
 import type { UnixTimestampSeconds } from "./UnixTimestampSeconds";
 
+/**
+ * Public view of one upload, download, edit, copy or move, including its terminal state,
+ * so finished transfers stay visible after the HTTP request that started them ends.
+ */
 export type TransferProgressEntry = { request_id: TransferId, agent_id: AgentId, path: string, source: CopyEndpoint | null, dest: CopyEndpoint | null, direction: TransferDirection, total_bytes: number, transferred_bytes: number, started_at: UnixTimestampSeconds, ended_at: UnixTimestampSeconds | null, state: TransferProgressState, 
 /**
  * Tells clients whether the active operation is still before its non-cancelable commit boundary.
@@ -14,4 +18,16 @@ cancelable: boolean, error: string | null,
 /**
  * Stamped only after a same-agent filesystem rename so the UI can skip copy speeds.
  */
-atomic: boolean, };
+atomic: boolean, 
+/**
+ * Only signed regular-file staging supports pause.
+ */
+pausable: boolean, 
+/**
+ * Prefix hashing remains an active transfer with a distinct visible phase.
+ */
+verifying: boolean, 
+/**
+ * Speeds count only bytes transferred in this attempt.
+ */
+resumed_bytes: number, };

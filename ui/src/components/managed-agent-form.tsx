@@ -1,17 +1,14 @@
 import * as React from "react";
 import { LoaderCircle, Server, TerminalSquare } from "lucide-react";
 
-import type {
-    CreateLocalAgentRequest,
-    CreateSshAgentRequest,
-    ManagedLocalAgentConfigurationResponse,
-    ManagedSshAgentConfigurationResponse,
-} from "#ui/api-client";
+import type { CreateLocalAgentRequest } from "#bindings/CreateLocalAgentRequest";
+import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
+import type { ManagedLocalAgentConfigurationResponse } from "#bindings/ManagedLocalAgentConfigurationResponse";
+import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
 import { Button } from "#ui/components/button";
 import { Password } from "#ui/components/password";
 import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { TextField } from "#ui/components/text-field";
-import { Tooltip } from "#ui/components/tooltip";
 
 type FormState = Record<
     | "target"
@@ -55,6 +52,7 @@ function initialForm(configuration?: ManagedAgentFormConfiguration): FormState {
             password: "",
         };
     }
+
     return {
         target: configuration?.value.target ?? "",
         username: configuration?.value.username ?? "",
@@ -79,6 +77,7 @@ function initialAuthMode(
     ) {
         return "password";
     }
+
     return "key";
 }
 
@@ -92,6 +91,7 @@ function initialKind(
 /** Builds the local POST/PUT body from trimmed optional inputs. */
 function localSubmitRequest(form: FormState): ManagedAgentSubmitRequest {
     const optional = (value: string) => value.trim() || null;
+
     return {
         kind: "local",
         request: {
@@ -114,19 +114,24 @@ function sshSubmitRequest(
 ): SshSubmitResult {
     const optional = (value: string) => value.trim() || null;
     const target = form.target.trim();
+
     if (!target) {
         return { ok: false, error: "SSH target is required" };
     }
+
     const sshPort = form.sshPort ? Number(form.sshPort) : null;
+
     if (
         sshPort !== null &&
         (!Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65_535)
     ) {
         return { ok: false, error: "SSH port must be between 1 and 65535" };
     }
+
     if (authMode === "password" && !form.password && !hasStoredPassword) {
         return { ok: false, error: "SSH password is required" };
     }
+
     return {
         ok: true,
         request: {
@@ -166,15 +171,19 @@ export function ManagedAgentForm(props: {
     const [form, setForm] = React.useState<FormState>(() =>
         initialForm(props.configuration),
     );
+
     const [kind, setKind] = React.useState<ManagedAgentKind>(() =>
         initialKind(props.configuration),
     );
+
     const [authMode, setAuthMode] = React.useState<SshAuthMode>(() =>
         initialAuthMode(props.mode, props.configuration),
     );
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const hasStoredPassword =
         props.configuration?.kind === "ssh" &&
         props.configuration.value.has_password === true;
@@ -196,9 +205,11 @@ export function ManagedAgentForm(props: {
     /** Switching to key mode drops the typed secret so a later password-mode save cannot reuse it. */
     const updateAuthMode = (mode: SshAuthMode) => {
         setAuthMode(mode);
+
         if (mode === "key") {
             setForm((current) => ({ ...current, password: "" }));
         }
+
         setValidationError(null);
         props.onChange();
     };
@@ -206,15 +217,21 @@ export function ManagedAgentForm(props: {
     /** Converts blank optional inputs to null so TOML only receives explicit settings. */
     const submit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+
         if (kind === "local") {
             props.onSubmit(localSubmitRequest(form));
+
             return;
         }
+
         const result = sshSubmitRequest(form, authMode, hasStoredPassword);
+
         if (!result.ok) {
             setValidationError(result.error);
+
             return;
         }
+
         props.onSubmit(result.request);
     };
 
@@ -223,8 +240,8 @@ export function ManagedAgentForm(props: {
     const isDisabled = props.isSubmitting || props.isDisabled === true;
 
     return (
-        <div className="min-h-full bg-[#0b0d12] px-4 py-8 sm:px-8">
-            <main className="mx-auto max-w-4xl overflow-hidden rounded-xl border border-slate-800 bg-[#11141b] shadow-2xl shadow-black/20">
+        <div className="min-h-full bg-canvas px-4 py-8 sm:px-8">
+            <main className="mx-auto max-w-4xl overflow-hidden rounded-xl border border-slate-800 bg-surface shadow-2xl shadow-black/20">
                 <FormHeader mode={props.mode} kind={kind} />
                 <form onSubmit={submit} className="space-y-7 p-6 sm:p-8">
                     {isEdit ? null : (
@@ -294,9 +311,7 @@ function FormHeader(props: { mode: "add" | "edit"; kind: ManagedAgentKind }) {
                 </div>
                 <div>
                     <h1 className="text-2xl font-bold text-slate-100">
-                        {props.mode === "edit"
-                            ? "Edit managed agent"
-                            : "Add managed agent"}
+                        {props.mode === "edit" ? "Edit device" : "Add device"}
                     </h1>
                     <p className="mt-1 text-sm text-slate-400">
                         {props.kind === "local"
@@ -322,19 +337,21 @@ function FormActions(props: {
     submitTooltip?: string;
 }) {
     const isEdit = props.mode === "edit";
+
     const defaultSubmitTooltip = props.isDisabled
         ? "Wait for the current save or delete to finish"
         : props.kind === "local"
           ? isEdit
               ? "Save the managed local configuration"
-              : "Add this local agent to the server configuration"
+              : "Add this device to the server configuration with a local agent"
           : isEdit
             ? "Save the managed SSH configuration"
-            : "Add this SSH-backed agent to the server configuration";
+            : "Add this device to the server configuration using SSH";
+
     return (
         <div className="flex flex-col gap-4 border-t border-slate-800 pt-6 sm:flex-row sm:items-end sm:justify-between">
             <p className="min-w-0 text-xs text-slate-500">
-                Agent configuration will be saved to
+                Device connection settings will be saved to
                 <code className="mt-1 block break-all text-slate-400">
                     {props.configPath}
                 </code>
@@ -344,29 +361,26 @@ function FormActions(props: {
                     </span>
                 ) : null}
             </p>
-            <Tooltip content={props.submitTooltip ?? defaultSubmitTooltip}>
-                <Button
-                    type="submit"
-                    size="lg"
-                    disabled={props.isDisabled}
-                    isLoading={props.isSubmitting}
-                    className="shrink-0 rounded-md px-5 disabled:opacity-60"
-                >
-                    {props.isSubmitting ? (
-                        <LoaderCircle
-                            className="h-4 w-4 animate-spin"
-                            aria-hidden="true"
-                        />
-                    ) : null}
-                    {props.isSubmitting
-                        ? (props.submittingLabel ??
-                          (isEdit ? "Saving agent..." : "Adding agent..."))
-                        : (props.submitLabel ??
-                          (isEdit
-                              ? "Save managed agent"
-                              : "Add managed agent"))}
-                </Button>
-            </Tooltip>
+            <Button
+                tooltip={props.submitTooltip ?? defaultSubmitTooltip}
+                type="submit"
+                size="lg"
+                disabled={props.isDisabled}
+                isLoading={props.isSubmitting}
+                className="shrink-0 rounded-md px-5 disabled:opacity-60"
+            >
+                {props.isSubmitting ? (
+                    <LoaderCircle
+                        className="h-4 w-4 animate-spin"
+                        aria-hidden="true"
+                    />
+                ) : null}
+                {props.isSubmitting
+                    ? (props.submittingLabel ??
+                      (isEdit ? "Saving device..." : "Adding device..."))
+                    : (props.submitLabel ??
+                      (isEdit ? "Save device" : "Add device"))}
+            </Button>
         </div>
     );
 }
@@ -379,7 +393,7 @@ function KindFields(props: {
 }) {
     return (
         <RadioCardGroup
-            legend="Agent type"
+            legend="Connection type"
             disabled={props.disabled}
             description={
                 <p className="text-xs text-slate-500">
@@ -426,7 +440,7 @@ function LocalFields(props: {
             </h2>
             <div className="mt-4 grid gap-5 sm:grid-cols-2">
                 <TextField
-                    label="Agent name"
+                    label="Device name"
                     value={props.form.name}
                     placeholder="Defaults to hostname"
                     description="Name shown in the UI. Defaults to this server's hostname when omitted."
@@ -466,8 +480,10 @@ function ConnectionFields(props: {
     onAuthModeChange: (mode: SshAuthMode) => void;
 }) {
     const passwordMode = props.authMode === "password";
+
     const keepExistingPassword =
         props.mode === "edit" && props.hasStoredPassword && passwordMode;
+
     return (
         <section>
             <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-300">
@@ -486,7 +502,7 @@ function ConnectionFields(props: {
                     onChange={(value) => props.onChange("target", value)}
                 />
                 <TextField
-                    label="Agent name"
+                    label="Device name"
                     value={props.form.name}
                     placeholder="Defaults to target hostname"
                     description="Name shown in the UI. Defaults to the target hostname when omitted."

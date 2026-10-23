@@ -25,19 +25,23 @@ test.describe("Agent view navigation", () => {
         await page.setViewportSize({ width: 360, height: 844 });
         await page.goto(`${WEB_BASE_URL}/agents/${context.agentId}`);
 
-        const agentView = page.getByLabel("Agent view");
+        const agentView = page.getByLabel("Device view");
+
         const agentLink = agentView.getByRole("link", {
             name: context.agentName,
             exact: true,
         });
+
         const agentViewScroll = await agentView.evaluate((element) => {
             element.scrollLeft = element.scrollWidth;
+
             return {
                 clientWidth: element.clientWidth,
                 scrollLeft: element.scrollLeft,
                 scrollWidth: element.scrollWidth,
             };
         });
+
         // The tab strip under the touch point must own the mobile overflow.
         expect(agentViewScroll.scrollWidth).toBeGreaterThan(
             agentViewScroll.clientWidth,
@@ -55,7 +59,7 @@ test.describe("Agent view navigation", () => {
             .click();
         // Files must open the connected agent's published browser location.
         await expect(page).toHaveURL(context.agentBrowserUrl);
-        const browserAgentView = page.getByLabel("Agent view");
+        const browserAgentView = page.getByLabel("Device view");
         // Browser routes retain the global Files destination and identify it as current.
         await expect(
             browserAgentView.getByRole("link", {
@@ -63,28 +67,36 @@ test.describe("Agent view navigation", () => {
                 exact: true,
             }),
         ).toHaveAttribute("aria-current", "page");
+
         const homeBox = await page
-            .getByRole("link", { name: "Agent home" })
+            .getByRole("link", { name: "Device home" })
             .boundingBox();
+
         const upBox = await page
             .getByRole("link", { name: "Go to the parent directory" })
             .boundingBox();
+
         const breadcrumbsBox = await page
             .getByRole("navigation", { name: "Breadcrumbs" })
             .boundingBox();
+
         // Path controls must read from home to parent navigation and then breadcrumbs.
         expect(homeBox?.x ?? 1).toBeLessThan(upBox?.x ?? 0);
         expect(upBox?.x ?? 1).toBeLessThan(breadcrumbsBox?.x ?? 0);
         const filesActions = page.getByLabel("Files view actions");
+
         const uploadBox = await filesActions
             .getByRole("button", { name: "Upload", exact: true })
             .boundingBox();
+
         const downloadBox = await filesActions
             .getByRole("link", { name: "Download", exact: true })
             .boundingBox();
+
         const moreBox = await filesActions
             .getByRole("button", { name: "More", exact: true })
             .boundingBox();
+
         // Upload, Download, and overflow actions must remain on one horizontally scrollable row.
         const uploadCenter = (uploadBox?.y ?? 0) + (uploadBox?.height ?? 0) / 2;
         expect(
@@ -126,6 +138,7 @@ test.describe("Agent view navigation", () => {
             name: "Logs",
             exact: true,
         });
+
         // Agent logs must remain the final contextual tab on the agent page.
         await expect(agentView.getByRole("link").last()).toHaveText("Logs");
         await logsLink.click();
@@ -135,8 +148,8 @@ test.describe("Agent view navigation", () => {
         );
         await expect(logsLink).toHaveAttribute("aria-current", "page");
 
-        await page.getByRole("button", { name: "Open agent menu" }).click();
-        const agentDialog = page.getByRole("dialog", { name: "Agent menu" });
+        await page.getByRole("button", { name: "Open device menu" }).click();
+        const agentDialog = page.getByRole("dialog", { name: "Device menu" });
         await agentDialog
             .getByRole("link", { name: "agent2_custom, connected" })
             .click();

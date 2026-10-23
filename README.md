@@ -1,10 +1,12 @@
 # redoor
 
-Manual computer management using server-agent architecture.
+Manage servers, laptops, workstations, and Android phones running Termux from one place.
 
 Agents connect directly to the server via HTTP/WebSocket, or the server can provision and spawn agents using SSH. When direct connection is not possible in either direction, agents can connect via a relay agent that can reach both the server and the agent.
 
-The server provides an unified Web UI for the agents with file browser and remote shell. The file browser features search, file editing, download/upload and streaming file and directory copying between agents.
+The server provides a unified Web UI for your devices with a file browser and remote shell. The file browser features search, file editing, download/upload and streaming file and directory copying between devices.
+
+A **device** is a machine you access through Redoor. A **Redoor agent** is the process running on that device. Connecting or disconnecting a managed device starts or stops its agent; restarting or updating an agent does not reboot or update the device's operating system.
 
 ### Screenshots
 
@@ -58,6 +60,72 @@ $HOME/.local/bin/redoor server
 ```
 
 and see `$HOME/.local/bin/redoor --help`
+
+### Docker
+
+Run the `linux/amd64` or `linux/arm64` container with one command:
+
+```bash
+docker run --rm --init --publish 127.0.0.1:7666:7666 ghcr.io/esamattis/redoor:latest
+```
+
+Open `http://127.0.0.1:7666` and log in with username `redoor` and password `redoor`.
+
+These credentials and the agent token built into the image are only for a local demo. See [Docker Compose deployment](docs/docker.md) for persistent storage and private credentials.
+
+## Remote CLI
+
+The `redoor remote` subcommand lists devices, copies, moves, searches and deletes files, and executes commands through your Redoor server. Use it to give AI agents control of multiple servers at once.
+
+```sh
+redoor remote login https://redoor.example.com
+redoor remote devices
+redoor remote cp ./report.csv workstation:/srv/report.csv
+redoor remote exec workstation -- uptime
+redoor remote ls workstation:/srv
+redoor remote grep workstation:/srv/app "TODO"
+```
+
+Remote paths are written `DEVICE:/absolute/path`. The commands are `devices`, `start`, `stop`,
+`exec`, `cp`, `mv`, `ls`, `stat`, `mkdir`, `rm` (to the trash unless `--permanent`), `find`
+and `grep`, plus `login`, `logout`, `status` and `create-token`. Most take `--json` for
+scripts.
+
+`redoor remote login` asks for your username and password, then lets you choose what the
+CLI may do. It creates an **access token** with those permissions and saves only the token;
+the password is not stored:
+
+```
+Permissions (space toggles, enter accepts):
+  [x] files:read — List, stat, read, search and download files
+  [x] files:write — Upload, create, overwrite and copy into files
+  [ ] files:delete — Trash and delete files, move sources
+  [x] commands:execute — Run commands as the agent's OS user (high trust)
+  [x] agents:manage — Start/stop managed agents, used by auto-start
+Devices: All devices (including devices added later)
+Token name: redoor remote on laptop
+Expires: 90 days
+```
+
+Every prompt also has a flag (`--username`, `--password-stdin`, `--permissions`,
+`--devices`, `--name`, `--expires`, `--yes`), so scripts can log in without a terminal.
+`redoor remote status` shows the token's permissions, and `redoor remote logout` revokes it.
+Tokens are listed, edited and revoked under **Access tokens** in the web UI. Earlier
+versions saved a browser session in `remote-session.json`; that file is no longer used and
+can be deleted.
+
+For CI jobs and AI agents, skip the login and pass a token through the environment:
+
+```sh
+export REDOOR_REMOTE_SERVER=https://redoor.example.com
+export REDOOR_REMOTE_TOKEN=redoor_at_...
+redoor remote devices
+```
+
+`redoor remote create-token` creates a token the same way but prints it as JSON instead of
+saving it, for configuring MCP clients (see [MCP](docs/mcp.md)).
+
+See `redoor remote --help` for available commands and options.
 
 ## Configuration
 

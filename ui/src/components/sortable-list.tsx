@@ -1,0 +1,653 @@
+import * as React from "react";
+import {
+    closestCenter,
+    pointerWithin,
+    DndContext,
+    KeyboardSensor,
+    MouseSensor,
+    TouchSensor,
+    useSensor,
+    useSensors,
+    type Announcements,
+    type CollisionDetection,
+    type DragEndEvent,
+    type Modifier,
+    type UniqueIdentifier,
+} from "@dnd-kit/core";
+import {
+    horizontalListSortingStrategy,
+    SortableContext,
+    sortableKeyboardCoordinates,
+    useSortable,
+    verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS, type Transform } from "@dnd-kit/utilities";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import type { ItemMove } from "#ui/utils/reorder";
+
+type SortableOrientation = "vertical" | "horizontal";
+
+/** Bindings a row needs without learning about sensors or user state. */
+export type SortableItemState = {
+    setNodeRef: (element: HTMLElement | null) => void;
+    dragProps: React.HTMLAttributes<HTMLElement> & {
+        "data-dragging": boolean;
+        "data-sortable-item": boolean;
+    };
+    style: React.CSSProperties;
+    isDragging: boolean;
+    isOver: boolean;
+};
+
+type SortableListContextValue = {
+    orientation: SortableOrientation;
+    canReorder: boolean;
+    registerHandle: (itemId: string, element: HTMLElement | null) => void;
+};
+
+const SortableListContext =
+    React.createContext<SortableListContextValue | null>(null);
+
+/** Keeps a pointer drag from selecting a row after the dragged row has left the list. */
+function visibleBounds(element: HTMLElement) {
+    const rect = element.getBoundingClientRect();
+    let top = Math.max(rect.top, 0);
+    let left = Math.max(rect.left, 0);
+    let bottom = Math.min(rect.bottom, window.innerHeight);
+    let right = Math.min(rect.right, window.innerWidth);
+    let parent = element.parentElement;
+
+    while (parent) {
+        const style = getComputedStyle(parent);
+        const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`;
+
+        if (/(auto|scroll|hidden|clip)/.test(overflow)) {
+            const parentRect = parent.getBoundingClientRect();
+            top = Math.max(top, parentRect.top);
+            left = Math.max(left, parentRect.left);
+            bottom = Math.min(bottom, parentRect.bottom);
+            right = Math.min(right, parentRect.right);
+        }
+
+        // A full-window fixed surface escapes the document's normal scroll clipping.
+        if (style.position === "fixed") {
+            break;
+        }
+
+        parent = parent.parentElement;
+    }
+
+    return { top, left, bottom, right };
+}
+
+/** Rejects pointer drops outside the scope while keyboard sorting uses item centers. */
+function boundedCollision(
+    listRef: React.RefObject<HTMLElement | null>,
+): CollisionDetection {
+    return (args) => {
+        const list = listRef.current;
+
+        if (args.pointerCoordinates) {
+            if (!list) {
+                return [];
+            }
+
+            const bounds = visibleBounds(list);
+            const pointer = args.pointerCoordinates;
+
+            if (
+                pointer.x < bounds.left ||
+                pointer.x > bounds.right ||
+                pointer.y < bounds.top ||
+                pointer.y > bounds.bottom
+            ) {
+                return [];
+            }
+
+            // The moving source can overlap the destination, especially on wide editor pins.
+            return pointerWithin({
+                ...args,
+                droppableContainers: args.droppableContainers.filter(
+                    (container) => container.id !== args.active.id,
+                ),
+            });
+        }
+
+        return closestCenter(args);
+    };
+}
+
+/** Limits keyboard movement to the collection's orientation. */
+function axisCoordinates(orientation: SortableOrientation) {
+    return (
+        event: KeyboardEvent,
+        args: Parameters<typeof sortableKeyboardCoordinates>[1],
+    ) => {
+        const vertical = event.code === "ArrowUp" || event.code === "ArrowDown";
+
+        const horizontal =
+            event.code === "ArrowLeft" || event.code === "ArrowRight";
+
+        if (orientation === "vertical" && !vertical) {
+            return undefined;
+        }
+
+        if (orientation === "horizontal" && !horizontal) {
+            return undefined;
+        }
+
+        return sortableKeyboardCoordinates(event, args);
+    };
+}
+
+const restrictToVerticalAxis: Modifier = ({ transform }) => ({
+    ...transform,
+    x: 0,
+});
+
+const restrictToHorizontalAxis: Modifier = ({ transform }) => ({
+    ...transform,
+    y: 0,
+});
+
+/** Normalizes library identifiers so callers can consistently use stable string keys. */
+function textId(id: UniqueIdentifier) {
+    return String(id);
+}
+
+/** Keeps the source footprint in layout while lifting the moving row above siblings. */
+function sortableStyle(
+    transform: Transform | null,
+    transition: string | undefined,
+    isDragging: boolean,
+): React.CSSProperties {
+    return {
+        transform: CSS.Translate.toString(transform),
+        transition,
+        zIndex: isDragging ? 1 : undefined,
+        position: "relative",
+    };
+}
+
+/** Disables movement transitions when the user's motion preference changes. */
+function usePrefersReducedMotion() {
+    const [reduced, setReduced] = React.useState(false);
+    React.useEffect(() => {
+        const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+        const update = () => {
+            setReduced(media.matches);
+        };
+
+        update();
+        media.addEventListener("change", update);
+
+        return () => {
+            media.removeEventListener("change", update);
+        };
+    }, []);
+
+    return reduced;
+}
+
+/** Describes destination positions in the owning collection rather than opaque ids. */
+function collectionAnnouncements(
+    label: string,
+    labelFor: (id: UniqueIdentifier) => string,
+    positionOf: (id: UniqueIdentifier) => string | null,
+): Announcements {
+    return {
+        onDragStart({ active }) {
+            return `Picked up ${labelFor(active.id)} in ${label}.`;
+        },
+        onDragOver({ active, over }) {
+            if (!over) {
+                return `${labelFor(active.id)} is no longer over a drop target.`;
+            }
+
+            const position = positionOf(over.id);
+
+            if (!position) {
+                return undefined;
+            }
+
+            return `${labelFor(active.id)} is now in position ${position}.`;
+        },
+        onDragEnd({ active, over }) {
+            if (!over || textId(over.id) === textId(active.id)) {
+                return `Cancelled reordering ${labelFor(active.id)}.`;
+            }
+
+            const position = positionOf(over.id);
+
+            if (!position) {
+                return `Cancelled reordering ${labelFor(active.id)}.`;
+            }
+
+            return `Dropped ${labelFor(active.id)} in position ${position}.`;
+        },
+        onDragCancel({ active }) {
+            return `Cancelled reordering ${labelFor(active.id)}.`;
+        },
+    };
+}
+
+/** Tracks whether this list is mid-drag so the click that ends a drag cannot activate a row. */
+function useDragSession() {
+    const draggingRef = React.useRef(false);
+    const suppressClickRef = React.useRef(false);
+
+    const markActive = React.useCallback(() => {
+        if (draggingRef.current) {
+            return;
+        }
+
+        draggingRef.current = true;
+        suppressClickRef.current = true;
+    }, []);
+
+    const markInactive = React.useCallback(() => {
+        draggingRef.current = false;
+    }, []);
+
+    /** Forgets a stale suppression so the next real click after a cancelled drag still works. */
+    const resetForNextInteraction = React.useCallback(() => {
+        if (!draggingRef.current) {
+            suppressClickRef.current = false;
+        }
+    }, []);
+
+    // A key press starts a new interaction too. The observer tier sees every key, even the
+    // ones another binding claims.
+    useShortcut({
+        name: "sortable-reset-click-suppression",
+        phase: "capture",
+        priority: shortcutPriority.observer,
+        match: () => true,
+        run: () => {
+            resetForNextInteraction();
+
+            return false;
+        },
+    });
+
+    React.useEffect(() => markInactive, [markInactive]);
+    React.useEffect(() => {
+        // Register before sensors: dnd-kit stops click propagation but does not cancel native links.
+        const suppressDragClick = (event: MouseEvent) => {
+            if (suppressClickRef.current) {
+                event.preventDefault();
+                suppressClickRef.current = false;
+            }
+        };
+
+        document.addEventListener("click", suppressDragClick, true);
+        document.addEventListener("mousedown", resetForNextInteraction, true);
+        document.addEventListener("touchstart", resetForNextInteraction, true);
+
+        return () => {
+            document.removeEventListener("click", suppressDragClick, true);
+            document.removeEventListener(
+                "mousedown",
+                resetForNextInteraction,
+                true,
+            );
+            document.removeEventListener(
+                "touchstart",
+                resetForNextInteraction,
+                true,
+            );
+        };
+    }, [resetForNextInteraction]);
+
+    return { markActive, markInactive };
+}
+
+/**
+ * Claims drag cancellation before drawers and menus see it, and hides modified and
+ * text-entry keys from the page while a keyboard sort is in progress. Escape keeps
+ * propagating so dnd-kit's own sensor can cancel the drag; it is claimed, so no drawer or
+ * page shortcut treats the same press as a dismissal.
+ */
+function useSortableKeys(activeId: string | null) {
+    const isDragging = activeId !== null;
+
+    useShortcut(
+        {
+            name: "sortable-cancel-drag",
+            phase: "capture",
+            priority: shortcutPriority.interaction,
+            match: (event) => event.key === "Escape",
+            run: () => true,
+        },
+        isDragging,
+    );
+
+    useShortcut(
+        {
+            name: "sortable-shield-keys",
+            phase: "capture",
+            priority: shortcutPriority.interaction,
+            effect: "shield",
+            match: (event) =>
+                event.key !== "Escape" && shouldIgnoreKeyboardShortcut(event),
+            run: () => true,
+        },
+        isDragging,
+    );
+}
+
+/** Invalidates a gesture permanently if its membership changes before the drop. */
+function useDragScope(itemIds: string[]) {
+    const dragIdsRef = React.useRef<string[] | null>(null);
+    React.useEffect(() => {
+        const initialIds = dragIdsRef.current;
+
+        if (
+            initialIds &&
+            (initialIds.length !== itemIds.length ||
+                initialIds.some((id) => !itemIds.includes(id)))
+        ) {
+            // Invalidate permanently, even if the same membership later reappears.
+            dragIdsRef.current = null;
+        }
+    }, [itemIds]);
+
+    return dragIdsRef;
+}
+
+/**
+ * Shares sortable activation, cancellation, and announcements across navigation lists.
+ * Domain rows and preference writes stay at the call site.
+ */
+export function SortableList(props: {
+    itemIds: string[];
+    orientation: SortableOrientation;
+    label: string;
+    listRef: React.RefObject<HTMLElement | null>;
+    getItemLabel: (itemId: string) => string;
+    onMove: (move: ItemMove) => void;
+    children: React.ReactNode;
+}) {
+    const contextId = React.useId();
+    const [activeId, setActiveId] = React.useState<string | null>(null);
+    const [announcement, setAnnouncement] = React.useState("");
+
+    const [libraryContainer, setLibraryContainer] =
+        React.useState<HTMLElement | null>(null);
+
+    const handles = React.useRef(new Map<string, HTMLElement>());
+    const pendingFocusId = React.useRef<string | null>(null);
+    const itemIdsRef = React.useRef(props.itemIds);
+    const dragIdsRef = useDragScope(props.itemIds);
+    const lastOverIdRef = React.useRef<string | null>(null);
+    const onMoveRef = React.useRef(props.onMove);
+    const labelRef = React.useRef(props.getItemLabel);
+    const { markActive, markInactive } = useDragSession();
+    itemIdsRef.current = props.itemIds;
+    onMoveRef.current = props.onMove;
+    labelRef.current = props.getItemLabel;
+
+    const coordinateGetter = React.useMemo(
+        () => axisCoordinates(props.orientation),
+        [props.orientation],
+    );
+
+    const sensors = useSensors(
+        useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+        useSensor(TouchSensor, {
+            activationConstraint: { delay: 200, tolerance: 8 },
+        }),
+        useSensor(KeyboardSensor, { coordinateGetter }),
+    );
+
+    const collisionDetection = React.useMemo(
+        () => boundedCollision(props.listRef),
+        [props.listRef],
+    );
+
+    const announcements = React.useMemo(
+        () =>
+            collectionAnnouncements(
+                props.label,
+                (id) => labelRef.current(textId(id)),
+                (id) => {
+                    const index = itemIdsRef.current.indexOf(textId(id));
+
+                    if (index < 0) {
+                        return null;
+                    }
+
+                    return `${index + 1} of ${itemIdsRef.current.length}`;
+                },
+            ),
+        [props.label],
+    );
+
+    useSortableKeys(activeId);
+
+    React.useEffect(() => {
+        const focusId = pendingFocusId.current;
+
+        if (!focusId) {
+            return;
+        }
+
+        pendingFocusId.current = null;
+        handles.current.get(focusId)?.focus();
+    });
+
+    const finishDrag = (focusId: string) => {
+        markInactive();
+        setActiveId(null);
+        pendingFocusId.current = focusId;
+    };
+
+    const handleDragEnd = (event: DragEndEvent) => {
+        const active = textId(event.active.id);
+        const over = event.over ? textId(event.over.id) : null;
+        finishDrag(active);
+
+        if (!over || active === over) {
+            return;
+        }
+
+        const ids = itemIdsRef.current;
+        const initialIds = dragIdsRef.current;
+        dragIdsRef.current = null;
+
+        if (
+            !initialIds ||
+            initialIds.length !== ids.length ||
+            initialIds.some((id) => !ids.includes(id)) ||
+            !ids.includes(active) ||
+            !ids.includes(over)
+        ) {
+            return;
+        }
+
+        onMoveRef.current({ activeId: active, overId: over });
+    };
+
+    const registerHandle = React.useCallback(
+        (itemIdToRegister: string, element: HTMLElement | null) => {
+            if (element) {
+                handles.current.set(itemIdToRegister, element);
+
+                return;
+            }
+
+            handles.current.delete(itemIdToRegister);
+        },
+        [],
+    );
+
+    const listContext = React.useMemo(
+        () => ({
+            orientation: props.orientation,
+            canReorder: props.itemIds.length >= 2,
+            registerHandle,
+        }),
+        [props.itemIds.length, props.orientation, registerHandle],
+    );
+
+    return (
+        <SortableListContext.Provider value={listContext}>
+            <DndContext
+                id={contextId}
+                sensors={sensors}
+                collisionDetection={collisionDetection}
+                modifiers={[
+                    props.orientation === "vertical"
+                        ? restrictToVerticalAxis
+                        : restrictToHorizontalAxis,
+                ]}
+                autoScroll
+                cancelDrop={() => dragIdsRef.current === null}
+                accessibility={{
+                    container: libraryContainer ?? undefined,
+                    screenReaderInstructions: {
+                        draggable: `To reorder an item in ${props.label}, press Space or Enter. Use the arrow keys to move within the list. Press Space or Enter to drop, or Escape to cancel.`,
+                    },
+                    announcements,
+                }}
+                onDragStart={(event) => {
+                    dragIdsRef.current = [...itemIdsRef.current];
+                    lastOverIdRef.current = textId(event.active.id);
+                    markActive();
+                    setActiveId(textId(event.active.id));
+                    setAnnouncement(
+                        announcements.onDragStart({ active: event.active }) ??
+                            "",
+                    );
+                }}
+                onDragOver={(event) => {
+                    const overId = event.over ? textId(event.over.id) : null;
+
+                    // Initial collision with the source must not immediately replace pickup guidance.
+                    if (overId === lastOverIdRef.current) {
+                        return;
+                    }
+
+                    lastOverIdRef.current = overId;
+                    const message = announcements.onDragOver(event);
+
+                    if (message) {
+                        setAnnouncement(message);
+                    }
+                }}
+                onDragCancel={(event) => {
+                    setAnnouncement(
+                        announcements.onDragCancel({
+                            active: event.active,
+                            over: event.over,
+                        }) ?? "",
+                    );
+
+                    if (activeId) {
+                        finishDrag(activeId);
+                    }
+                }}
+                onDragEnd={(event) => {
+                    setAnnouncement(
+                        announcements.onDragEnd({
+                            active: event.active,
+                            over: event.over,
+                        }) ?? "",
+                    );
+                    handleDragEnd(event);
+                }}
+            >
+                <SortableContext
+                    id={contextId}
+                    items={props.itemIds}
+                    strategy={
+                        props.orientation === "vertical"
+                            ? verticalListSortingStrategy
+                            : horizontalListSortingStrategy
+                    }
+                >
+                    {props.children}
+                </SortableContext>
+            </DndContext>
+            {/* Library status nodes would collide with transfer and agent status alerts. */}
+            <div ref={setLibraryContainer} hidden aria-hidden="true" />
+            <div
+                aria-live="assertive"
+                aria-atomic="true"
+                aria-label={`${props.label} reorder announcement`}
+                className="sr-only"
+            >
+                {announcement}
+            </div>
+        </SortableListContext.Provider>
+    );
+}
+
+/**
+ * Makes the whole row sortable without changing its list semantics or ordinary clicks.
+ * Keyboard sorting starts only with the row itself focused, leaving child controls alone.
+ */
+export function SortableItem(props: {
+    id: string;
+    children: (item: SortableItemState) => React.ReactNode;
+}) {
+    const list = React.useContext(SortableListContext);
+    const reducedMotion = usePrefersReducedMotion();
+
+    const sortable = useSortable({
+        id: props.id,
+        disabled: !list?.canReorder,
+        transition: reducedMotion ? null : undefined,
+    });
+
+    const item: SortableItemState = {
+        setNodeRef: (element) => {
+            sortable.setNodeRef(element);
+            sortable.setActivatorNodeRef(element);
+            list?.registerHandle(props.id, element);
+        },
+        dragProps: {
+            tabIndex: list?.canReorder ? 0 : undefined,
+            "aria-roledescription": list?.canReorder ? "sortable" : undefined,
+            "aria-describedby": sortable.attributes["aria-describedby"],
+            "data-dragging": sortable.isDragging,
+            "data-sortable-item": true,
+            onMouseDown: (event) => {
+                sortable.listeners?.onMouseDown?.(event);
+            },
+            onTouchStart: (event) => {
+                sortable.listeners?.onTouchStart?.(event);
+            },
+            onDragStart: (event) => event.preventDefault(),
+            onKeyDown: (event) => {
+                if (
+                    event.target !== event.currentTarget ||
+                    shouldIgnoreKeyboardShortcut(event.nativeEvent)
+                ) {
+                    return;
+                }
+
+                sortable.listeners?.onKeyDown?.(event);
+            },
+        },
+        style: {
+            ...sortableStyle(
+                sortable.transform,
+                sortable.transition,
+                sortable.isDragging,
+            ),
+            cursor: list?.canReorder
+                ? sortable.isDragging
+                    ? "grabbing"
+                    : "grab"
+                : undefined,
+            userSelect: list?.canReorder ? "none" : undefined,
+        },
+        isDragging: sortable.isDragging,
+        isOver: sortable.isOver,
+    };
+
+    return props.children(item);
+}

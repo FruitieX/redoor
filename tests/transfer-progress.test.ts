@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import {
     formatRemainingTime,
     getAnimatedTransferProgress,
@@ -27,7 +27,7 @@ function transfer(
         state: "active",
         cancelable: true,
         error: null,
-        atomic: false,
+        atomic: false, pausable: false, verifying: false, resumed_bytes: 0,
         ...overrides,
     };
 }
@@ -46,6 +46,7 @@ describe("transfer progress animation", () => {
 
     it("caps projected and reported active progress at 99 percent", () => {
         const projected = getAnimatedTransferProgress(transfer(), 10, 102_000);
+
         const reportedComplete = getAnimatedTransferProgress(
             transfer({ transferred_bytes: 1000 }),
             0,

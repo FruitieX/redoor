@@ -33,6 +33,23 @@ test.describe("Authentication", () => {
         await expect(page).toHaveURL(`${WEB_BASE_URL}${returnPath}`);
     });
 
+    test("renders the login form without application chrome", async ({
+        page,
+    }) => {
+        await page.context().clearCookies();
+        await page.goto(`${WEB_BASE_URL}/login`);
+        await expect(
+            page.getByRole("heading", { name: "Sign in to Redoor" }),
+        ).toBeVisible();
+        // The public form lives outside the authenticated layout, so no menus may render around it.
+        await expect(
+            page.getByRole("navigation", { name: "Application" }),
+        ).toHaveCount(0);
+        await expect(
+            page.getByRole("complementary", { name: "Device menu" }),
+        ).toHaveCount(0);
+    });
+
     test("reveals the login password with the visibility toggle", async ({
         page,
     }) => {
@@ -83,10 +100,12 @@ test.describe("Authentication", () => {
             page.getByRole("heading", { name: "Build date" }),
         ).toBeVisible();
         await expect(page.getByText("debug", { exact: true })).toBeVisible();
+
         // Account actions remain available in the persistent application sidebar.
         const applicationNavigation = page.getByRole("navigation", {
             name: "Application",
         });
+
         await expect(applicationNavigation).toBeVisible();
         await expect(
             applicationNavigation.getByRole("link", { name: "Server home" }),

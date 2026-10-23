@@ -1,16 +1,11 @@
 import React from "react";
+import { useAtom, useAtomValue } from "jotai";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-    getRouteApi,
-    Link,
-    type ShouldBlockFn,
-    useBlocker,
-    useLocation,
-} from "@tanstack/react-router";
+import { type ShouldBlockFn, useBlocker } from "@tanstack/react-router";
 import {
     ClipboardCopy,
     Download,
-    History,
+    Image as ImageIcon,
     LoaderCircle,
     MoreHorizontal,
     RefreshCw,
@@ -18,13 +13,26 @@ import {
     Save,
     Search,
     ScanText,
+    Terminal,
+    Trash2,
     X,
 } from "lucide-react";
-import { getBrowserUrl, type Agent } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import {
+    bottomDrawerActiveTabAtom,
+    bottomDrawerCollapsedAtom,
+} from "#ui/bottom-drawer-state";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { useActiveTerminalTarget, useTerminals } from "#ui/use-terminals";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
+import { ViewCardHeader } from "#ui/components/view-card-header";
 import { Button } from "#ui/components/button";
-import { BookmarkButton } from "#ui/components/browser/bookmark-action";
+import { BookmarkMenuButton } from "#ui/components/browser/bookmark-action";
+import {
+    PinButton,
+    usePinOnFirstEdit,
+} from "#ui/components/browser/pin-action";
 import {
     CodeEditor,
     type EditorSelection,
@@ -34,108 +42,23 @@ import {
     PersistentPathActions,
     SelectPathMenuButton,
 } from "#ui/components/browser/path-actions";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import { getImmediateParentPath } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
+import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { FullWindowToggle } from "#ui/components/full-window-toggle";
+import { EditorPinnedFiles } from "#ui/components/browser/editor-pinned-files";
 import { IconButton } from "#ui/components/icon-button";
-import { ResponsiveAnchoredDialog } from "#ui/components/responsive-anchored-dialog";
 import { Toast } from "#ui/components/toast";
-import { Tooltip } from "#ui/components/tooltip";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { fileContentQueryOptions } from "#ui/queries";
+import { useAgentSearchNavigation } from "#ui/search-navigation";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
-import {
-    rememberRecentEditorFile,
-    removeRecentEditorFile,
-    useUserState,
-    type RecentEditorFile,
-} from "#ui/user-state";
+import { useUserState } from "#ui/user-state";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { MarkdownPreview } from "#ui/components/browser/markdown-preview";
-
-const agentRoute = getRouteApi("/agents/$agentId");
-
-/** Renders one recent path compactly in the toolbar or as a full dialog row. */
-function RecentEditorFileItem(props: {
-    agentId: string;
-    file: RecentEditorFile;
-    variant: "inline" | "dialog";
-    onRemove: (path: string) => void;
-}) {
-    const isDialog = props.variant === "dialog";
-    return (
-        <span
-            className={
-                isDialog
-                    ? "flex min-w-0 items-center gap-1 rounded-md px-2 py-1 hover:bg-white/5"
-                    : "hidden min-w-0 items-center gap-0.5 2xl:inline-flex"
-            }
-        >
-            <Tooltip
-                content={`Open ${props.file.path}`}
-                className={isDialog ? "min-w-0 flex-1" : undefined}
-            >
-                <Link
-                    to={getBrowserUrl(props.agentId, props.file.path)}
-                    aria-label={`Open ${props.file.name} from recent files`}
-                    className={
-                        isDialog
-                            ? "block min-w-0 flex-1 truncate py-1 text-sm text-blue-400 hover:underline"
-                            : "max-w-32 truncate px-1 text-xs text-blue-400 hover:underline"
-                    }
-                >
-                    {props.file.name}
-                </Link>
-            </Tooltip>
-            <IconButton
-                type="button"
-                label={`Remove ${props.file.name} from recent files`}
-                onClick={() => props.onRemove(props.file.path)}
-                className="h-6 w-6 shrink-0 rounded text-slate-500 hover:bg-white/5 hover:text-slate-200"
-            >
-                <X className="h-3 w-3" aria-hidden="true" />
-            </IconButton>
-        </span>
-    );
-}
-
-/** Makes the longer recent-file history available without crowding the editor toolbar. */
-function RecentEditorFilesDialog(props: {
-    isOpen: boolean;
-    anchorRef: React.RefObject<HTMLElement | null>;
-    agentId: string;
-    recentFiles: RecentEditorFile[];
-    onRemove: (path: string) => void;
-    onClose: () => void;
-}) {
-    return (
-        <ResponsiveAnchoredDialog
-            isOpen={props.isOpen}
-            title="Recent files"
-            closeAriaLabel="Close recent files"
-            desktopAnchorRef={props.anchorRef}
-            onClose={props.onClose}
-        >
-            {props.recentFiles.length === 0 ? (
-                <p className="mt-4 text-sm text-slate-400">No recent files.</p>
-            ) : (
-                <div className="mt-4 space-y-1">
-                    {props.recentFiles.map((file) => (
-                        <RecentEditorFileItem
-                            key={file.path}
-                            agentId={props.agentId}
-                            file={file}
-                            variant="dialog"
-                            onRemove={props.onRemove}
-                        />
-                    ))}
-                </div>
-            )}
-        </ResponsiveAnchoredDialog>
-    );
-}
 
 /** Keeps save state and editor mutations inside the representation they affect. */
 function FileEditActions(props: {
@@ -151,56 +74,52 @@ function FileEditActions(props: {
         name: string;
         entryType: "file";
     };
+    agentName: string;
     selection: EditorSelection | null;
-    recentFiles: RecentEditorFile[];
     preview?: boolean;
     isSearchOpen: boolean;
     onSave: () => void;
     onToggleSearch: () => void;
-    onRemoveRecentFile: (path: string) => void;
     onPreviewChange?: (preview: boolean) => void;
 }) {
-    const navigate = agentRoute.useNavigate();
-    const location = useLocation();
-    const recentFilesButtonRef = React.useRef<HTMLButtonElement>(null);
-    const [recentFilesOpen, setRecentFilesOpen] = React.useState(false);
+    const { updateSearch } = useAgentSearchNavigation();
+
     const copyMutation = useMutation({
         mutationFn: async () => {
             if (props.selection === null) {
                 throw new Error("Select text in the editor before copying");
             }
+
             const reference = `\`\`\`${props.bookmark.path}#L${props.selection.startLine}
 ${props.selection.text}
 \`\`\``;
+
             await navigator.clipboard.writeText(reference);
         },
     });
 
     return (
         <>
-            <Tooltip content="Save file (Ctrl+S)">
-                <Button
-                    type="button"
-                    aria-label="Save file"
-                    onClick={props.onSave}
-                    disabled={!props.canEdit || !props.isDirty}
-                    isLoading={props.isSaving}
-                    size="sm"
-                    className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
-                >
-                    <Save className="h-4 w-4" aria-hidden="true" />
-                </Button>
-            </Tooltip>
-            <IconButton
-                ref={recentFilesButtonRef}
+            <Button
+                tooltip="Save file (Ctrl+S)"
                 type="button"
-                label="Recent files"
-                tooltip="Show recent files"
-                onClick={() => setRecentFilesOpen(true)}
-                className="h-9 w-9 rounded-md border border-slate-700 text-slate-200 hover:bg-white/5"
+                aria-label="Save file"
+                onClick={props.onSave}
+                disabled={!props.canEdit || !props.isDirty}
+                isLoading={props.isSaving}
+                size="sm"
+                className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
             >
-                <History className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
+                <Save className="h-4 w-4" aria-hidden="true" />
+            </Button>
+            <PinButton
+                file={{
+                    agentId: props.bookmark.agentId,
+                    path: props.bookmark.path,
+                    name: props.bookmark.name,
+                    agentName: props.agentName,
+                }}
+            />
             {props.preview !== undefined && props.onPreviewChange ? (
                 <ToggleButton
                     pressed={props.preview}
@@ -215,9 +134,8 @@ ${props.selection.text}
                     <ScanText className="h-4 w-4" aria-hidden="true" />
                 </ToggleButton>
             ) : null}
-            <BookmarkButton bookmark={props.bookmark} />
-            <IconButton
-                type="button"
+            <ToggleButton
+                pressed={props.isSearchOpen}
                 label="Toggle search and replace"
                 tooltip={
                     props.isSearchOpen
@@ -225,58 +143,46 @@ ${props.selection.text}
                         : "Search and replace in the file (Ctrl+F)"
                 }
                 onClick={props.onToggleSearch}
-                className="h-9 w-9 rounded-md border border-slate-700 text-slate-200 hover:bg-white/5"
+                size="lg"
+                className="aria-[pressed=false]:text-slate-200 aria-[pressed=false]:hover:bg-tint"
             >
                 <Replace className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-            <Tooltip content="Copy the selection as a fenced code block headed by path#Lline, ready to reference this file in prompts to AI agents.">
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    aria-label="Copy selection with file reference"
-                    disabled={props.selection === null}
-                    isLoading={copyMutation.isPending}
-                    onClick={() => copyMutation.mutate()}
-                    className="h-9 w-9 rounded-md p-0 font-semibold"
-                >
-                    <ClipboardCopy className="h-4 w-4" aria-hidden="true" />
-                </Button>
-            </Tooltip>
-            <Tooltip content="Search the selected text from the git repository root when the file is in a worktree.">
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    aria-label="Search selected text"
-                    disabled={props.selection === null}
-                    onClick={() => {
-                        if (props.selection === null) {
-                            return;
-                        }
-                        const params = new URLSearchParams(location.searchStr);
-                        params.set("q", props.selection.text);
-                        params.set("mode", "content");
-                        params.set("gitroot", "true");
-                        void navigate({
-                            to: `${location.pathname}?${params.toString()}${location.hash}`,
-                            replace: true,
-                        });
-                    }}
-                    className="h-9 w-9 rounded-md p-0 font-semibold"
-                >
-                    <Search className="h-4 w-4" aria-hidden="true" />
-                </Button>
-            </Tooltip>
-            {props.recentFiles.slice(0, 5).map((file) => (
-                <RecentEditorFileItem
-                    key={file.path}
-                    agentId={props.bookmark.agentId}
-                    file={file}
-                    variant="inline"
-                    onRemove={props.onRemoveRecentFile}
-                />
-            ))}
+            </ToggleButton>
+            <Button
+                tooltip="Copy the selection as a fenced code block headed by path#Lline, ready to reference this file in prompts to AI agents."
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-label="Copy selection with file reference"
+                disabled={props.selection === null}
+                isLoading={copyMutation.isPending}
+                onClick={() => copyMutation.mutate()}
+                className="h-9 w-9 rounded-md p-0 font-semibold"
+            >
+                <ClipboardCopy className="h-4 w-4" aria-hidden="true" />
+            </Button>
+            <Button
+                tooltip="Search the selected text from the git repository root when the file is in a worktree."
+                type="button"
+                variant="secondary"
+                size="sm"
+                aria-label="Search selected text"
+                disabled={props.selection === null}
+                onClick={() => {
+                    if (props.selection === null) {
+                        return;
+                    }
+
+                    void updateSearch({
+                        q: props.selection.text,
+                        mode: "content",
+                        gitroot: true,
+                    });
+                }}
+                className="h-9 w-9 rounded-md p-0 font-semibold"
+            >
+                <Search className="h-4 w-4" aria-hidden="true" />
+            </Button>
             {props.statusMessage ? (
                 <span
                     role="status"
@@ -308,20 +214,12 @@ ${props.selection.text}
                         : "Copied selection with file reference"}
                 </Toast>
             ) : null}
-            <RecentEditorFilesDialog
-                isOpen={recentFilesOpen}
-                anchorRef={recentFilesButtonRef}
-                agentId={props.bookmark.agentId}
-                recentFiles={props.recentFiles}
-                onRemove={props.onRemoveRecentFile}
-                onClose={() => setRecentFilesOpen(false)}
-            />
         </>
     );
 }
 
-/** Keeps editor-specific preferences close to the surface they immediately affect. */
-function EditorOptionsMenu(props: {
+/** Keeps file operations and editor preferences close to the surface they affect. */
+function EditorActionsMenu(props: {
     agent: Agent;
     path: string;
     fileName: string;
@@ -330,14 +228,15 @@ function EditorOptionsMenu(props: {
     isSaving: boolean;
     downloadUrl: string;
     onReload: () => void;
+    onDelete: () => void;
 }) {
     const [userState, setUserState] = useUserState();
 
     return (
         <ActionMenu
-            label="Editor options"
-            title="Editor options"
-            closeAriaLabel="Close editor options"
+            label="Editor actions"
+            title="Editor actions"
+            closeAriaLabel="Close editor actions"
             hideTitle={false}
             icon={<MoreHorizontal className="h-4 w-4" />}
             variant="icon"
@@ -368,12 +267,36 @@ function EditorOptionsMenu(props: {
                             Download
                         </a>
                     </ActionMenuButton>
+                    <ActionMenuButton
+                        tone="danger"
+                        disabled={
+                            !props.canEdit ||
+                            props.isSaving ||
+                            getImmediateParentPath(props.path) === null
+                        }
+                        onClick={() => {
+                            close();
+                            props.onDelete();
+                        }}
+                    >
+                        <Trash2 className="h-4 w-4" />
+                        Delete file
+                    </ActionMenuButton>
                     <div className="my-1 border-t border-slate-800" />
                     <SelectPathMenuButton
                         agent={props.agent}
                         path={props.path}
                         fileName={props.fileName}
                         entryType="file"
+                        close={close}
+                    />
+                    <BookmarkMenuButton
+                        bookmark={{
+                            agentId: props.agent.id,
+                            path: props.path,
+                            name: props.fileName,
+                            entryType: "file",
+                        }}
                         close={close}
                     />
                     <div className="my-1 border-t border-slate-800" />
@@ -419,7 +342,9 @@ function CloseMarkdownPreviewButton(props: { onClose: () => void }) {
             label="Close markdown preview"
             tooltip="Edit markdown"
             onClick={props.onClose}
-            className="h-8 w-8 rounded-md bg-[#11141b]/90 text-slate-300 hover:bg-white/5 hover:text-slate-50"
+            variant="ghost"
+            size="lg"
+            className="bg-surface/90 text-slate-300 hover:text-slate-50"
         >
             <X className="h-4 w-4" aria-hidden="true" />
         </IconButton>
@@ -438,15 +363,47 @@ function FileEditorSecondaryActions(props: {
     isFullWindow: boolean;
     onToggleFullWindow: () => void;
     onReload: () => void;
+    onDelete: () => void;
 }) {
+    const terminals = useTerminals();
+    const terminalTarget = useActiveTerminalTarget();
+
+    const [isDrawerCollapsed, setDrawerCollapsed] = useAtom(
+        bottomDrawerCollapsedAtom,
+    );
+
+    const activeDrawerTab = useAtomValue(bottomDrawerActiveTabAtom);
+    const isTerminalOpen = !isDrawerCollapsed && activeDrawerTab === "terminal";
+
     return (
         <div className="flex shrink-0 items-center gap-1">
+            <IconButton
+                type="button"
+                label="Open terminal"
+                tooltip={
+                    isTerminalOpen
+                        ? "Fold down terminal"
+                        : "Open terminal (t, Alt+t / Option+T)"
+                }
+                aria-expanded={isTerminalOpen}
+                onClick={() => {
+                    if (isTerminalOpen) {
+                        setDrawerCollapsed(true);
+                    } else {
+                        terminals.openOrFocus(terminalTarget);
+                    }
+                }}
+                variant="ghost"
+                size="xl"
+            >
+                <Terminal className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
             <FullWindowToggle
                 targetName="editor"
                 isFullWindow={props.isFullWindow}
                 onToggle={props.onToggleFullWindow}
             />
-            <EditorOptionsMenu
+            <EditorActionsMenu
                 agent={props.agent}
                 path={props.path}
                 fileName={props.fileName}
@@ -455,33 +412,31 @@ function FileEditorSecondaryActions(props: {
                 isSaving={props.isSaving}
                 downloadUrl={props.downloadUrl}
                 onReload={props.onReload}
+                onDelete={props.onDelete}
             />
         </div>
     );
 }
 
-/** Makes browser save invoke the editor unless another interactive surface owns it. */
+/**
+ * The single owner of Mod-S, whether or not CodeMirror has focus, so the browser's save-page
+ * dialog never opens over the editor. The capture phase runs before the editor's own handlers,
+ * which is why CodeMirror needs no binding of its own. The terminal keeps its keystrokes.
+ */
 function useFileSaveShortcut(onSave: () => void) {
-    React.useEffect(() => {
-        const handleSaveShortcut = (event: KeyboardEvent) => {
-            if (
-                !(
-                    (event.ctrlKey || event.metaKey) &&
-                    !event.altKey &&
-                    event.key === "s"
-                ) ||
-                event.defaultPrevented ||
-                isTerminalInputTarget(event.target)
-            ) {
-                return;
-            }
-            event.preventDefault();
-            onSave();
-        };
-
-        window.addEventListener("keydown", handleSaveShortcut);
-        return () => window.removeEventListener("keydown", handleSaveShortcut);
-    }, [onSave]);
+    useShortcut({
+        name: "editor-save",
+        phase: "capture",
+        priority: shortcutPriority.editor,
+        effect: "swallow",
+        match: (event) =>
+            (event.ctrlKey || event.metaKey) &&
+            !event.altKey &&
+            event.key === "s" &&
+            !event.defaultPrevented &&
+            !isTerminalInputTarget(event.target),
+        run: onSave,
+    });
 }
 
 /** Selects the editor body without coupling its loading states to draft ownership. */
@@ -499,6 +454,7 @@ function FileEditorSurface(props: {
     preview: boolean;
     scrollToLine?: number;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
+    isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
     onChange: (content: string) => void;
     onFocus: () => void;
@@ -509,6 +465,7 @@ function FileEditorSurface(props: {
     if (props.isPending) {
         return <p className="p-4 text-sm text-slate-400">Loading file...</p>;
     }
+
     if (props.error !== undefined) {
         return (
             <p className="p-4 text-sm text-red-300">
@@ -516,6 +473,7 @@ function FileEditorSurface(props: {
             </p>
         );
     }
+
     return (
         <>
             <div
@@ -534,6 +492,7 @@ function FileEditorSurface(props: {
                     onSave={props.onSave}
                     onSelectionChange={props.onSelectionChange}
                     searchHandleRef={props.searchHandleRef}
+                    isSearchOpen={props.isSearchOpen}
                     onSearchOpenChange={props.onSearchOpenChange}
                     captureFindKeys={!props.preview}
                 />
@@ -570,66 +529,48 @@ function getFileEditorStatus(props: {
     isDirty: boolean;
 }): string | null {
     if (props.isLoading) return "Loading file...";
+
     if (props.loadError) {
         return getErrorMessage(props.loadError, "Failed to load file");
     }
+
     if (props.isSaving) return "Saving...";
+
     if (props.isSaved) return "Saved";
+
     if (props.saveError) {
         return getErrorMessage(props.saveError, "Failed to save file");
     }
+
     return props.isDirty ? "Unsaved changes" : null;
 }
 
-/** Records editor visits and exposes up to ten prior files for the active agent. */
-function useEditorUserState(props: {
-    agentId: string;
+/** Makes file removal confirm draft loss for both trash and permanent deletion. */
+function EditorDeleteDialog(props: {
+    agent: Agent;
     filePath: string;
     fileName: string;
+    isDirty: boolean;
+    onClose: () => void;
+    onDeleted: () => void;
 }) {
-    const [userState, setUserState] = useUserState();
-    const recentFiles = (
-        userState.recentEditorFilesByAgent[props.agentId] ?? []
-    )
-        .filter((file) => file.path !== props.filePath)
-        .slice(0, 10);
-
-    React.useEffect(() => {
-        setUserState((current) => {
-            const agentRecentFiles =
-                current.recentEditorFilesByAgent[props.agentId] ?? [];
-            const nextAgentRecentFiles = rememberRecentEditorFile(
-                agentRecentFiles,
-                { path: props.filePath, name: props.fileName },
-            );
-            if (nextAgentRecentFiles === agentRecentFiles) {
-                return current;
-            }
-            return {
-                ...current,
-                recentEditorFilesByAgent: {
-                    ...current.recentEditorFilesByAgent,
-                    [props.agentId]: nextAgentRecentFiles,
-                },
-            };
-        });
-    }, [props.agentId, props.fileName, props.filePath, setUserState]);
-
-    /** Removes the selected history entry while preserving histories for other agents. */
-    const removeRecentFile = (path: string) => {
-        setUserState((current) => ({
-            ...current,
-            recentEditorFilesByAgent: {
-                ...current.recentEditorFilesByAgent,
-                [props.agentId]: removeRecentEditorFile(
-                    current.recentEditorFilesByAgent[props.agentId] ?? [],
-                    path,
-                ),
-            },
-        }));
-    };
-
-    return { userState, recentFiles, removeRecentFile };
+    return (
+        <DeletePathDialog
+            agent={props.agent}
+            path={props.filePath}
+            name={props.fileName}
+            entryType="file"
+            leaveToParent
+            onClose={props.onClose}
+            onDeleted={props.onDeleted}
+        >
+            {props.isDirty ? (
+                <p className="mt-3 text-sm text-amber-300">
+                    Unsaved edits will be discarded if you remove this file.
+                </p>
+            ) : null}
+        </DeletePathDialog>
+    );
 }
 
 /** Presents reload and navigation discard decisions without conflating their callbacks. */
@@ -676,7 +617,80 @@ type FileEditViewProps = {
     scrollToLine?: number;
     preview: boolean;
     onPreviewChange: (preview: boolean) => void;
+    isFullWindow: boolean;
+    onToggleFullWindow: () => void;
 };
+
+/** Groups editor toolbar actions so the edit view can stay focused on buffer state. */
+function FileEditHeader(props: {
+    fileName: string;
+    statusMessage: string | null;
+    hasError: boolean;
+    isSaved: boolean;
+    canEdit: boolean;
+    isDirty: boolean;
+    isSaving: boolean;
+    agent: Agent;
+    filePath: string;
+    selection: EditorSelection | null;
+    preview: boolean | undefined;
+    isSearchOpen: boolean;
+    isReloading: boolean;
+    downloadUrl: string;
+    isFullWindow: boolean;
+    onSave: () => void;
+    onToggleSearch: () => void;
+    onPreviewChange: ((preview: boolean) => void) | undefined;
+    onToggleFullWindow: () => void;
+    onReload: () => void;
+    onDelete: () => void;
+}) {
+    return (
+        <header className="shrink-0 border-b border-slate-800 p-3">
+            <h1 aria-label="File name" className="sr-only">
+                {props.fileName}
+            </h1>
+            <div className="flex flex-wrap items-center justify-between gap-1">
+                <div className="flex flex-wrap items-center justify-start gap-2">
+                    <FileEditActions
+                        statusMessage={props.statusMessage}
+                        hasError={props.hasError}
+                        isSaved={props.isSaved}
+                        canEdit={props.canEdit}
+                        isDirty={props.isDirty}
+                        isSaving={props.isSaving}
+                        bookmark={{
+                            agentId: props.agent.id,
+                            path: props.filePath,
+                            name: props.fileName,
+                            entryType: "file",
+                        }}
+                        agentName={props.agent.name}
+                        selection={props.selection}
+                        preview={props.preview}
+                        isSearchOpen={props.isSearchOpen}
+                        onSave={props.onSave}
+                        onToggleSearch={props.onToggleSearch}
+                        onPreviewChange={props.onPreviewChange}
+                    />
+                </div>
+                <FileEditorSecondaryActions
+                    agent={props.agent}
+                    path={props.filePath}
+                    fileName={props.fileName}
+                    canEdit={props.canEdit}
+                    isReloading={props.isReloading}
+                    isSaving={props.isSaving}
+                    downloadUrl={props.downloadUrl}
+                    isFullWindow={props.isFullWindow}
+                    onToggleFullWindow={props.onToggleFullWindow}
+                    onReload={props.onReload}
+                    onDelete={props.onDelete}
+                />
+            </div>
+        </header>
+    );
+}
 
 /**
  * Edits file contents in a viewport-bounded CodeMirror with explicit save/reload.
@@ -684,23 +698,27 @@ type FileEditViewProps = {
  */
 export function FileEditView(props: FileEditViewProps) {
     const queryClient = useQueryClient();
-    const editorUserState = useEditorUserState({
-        agentId: props.agent.id,
-        filePath: props.filePath,
-        fileName: props.fileName,
-    });
+
+    const [deleteConfirmationOpen, setDeleteConfirmationOpen] =
+        React.useState(false);
+
+    const isDeletedRef = React.useRef(false);
+    const [userState] = useUserState();
     const fileQuery = fileContentQueryOptions(props.agent, props.filePath);
     const contentQuery = useQuery(fileQuery);
     const [draft, setDraft] = React.useState<string | null>(null);
+
     const [selection, setSelection] = React.useState<EditorSelection | null>(
         null,
     );
+
     const [reloadConfirmationOpen, setReloadConfirmationOpen] =
         React.useState(false);
-    const [isFullWindow, setIsFullWindow] = React.useState(false);
+
     const [isSearchOpen, setIsSearchOpen] = React.useState(false);
     const searchHandleRef = React.useRef<EditorSearchHandle | null>(null);
     const reloadPromiseRef = React.useRef<Promise<unknown> | null>(null);
+
     const saveMutation = useMutation({
         mutationFn: (nextContent: string) =>
             props.agent.editFile(
@@ -717,11 +735,24 @@ export function FileEditView(props: FileEditViewProps) {
             );
         },
     });
+
     const savedContent = contentQuery.data ?? "";
     const content = draft ?? savedContent;
     const isDirty = draft !== null && draft !== savedContent;
+
+    // Opening a file must not pin it; only the first change away from the saved text does.
+    const pinOnFirstEdit = usePinOnFirstEdit({
+        file: {
+            agentId: props.agent.id,
+            path: props.filePath,
+            name: props.fileName,
+            agentName: props.agent.name,
+        },
+    });
+
     // Saving must not flip CodeMirror read-only, or Mod-s and :w steal editor focus.
     const canEdit = contentQuery.isSuccess;
+
     const isMarkdown =
         syntaxLanguageFromFileName(props.fileName) === "markdown";
 
@@ -730,27 +761,36 @@ export function FileEditView(props: FileEditViewProps) {
         path: props.filePath,
         isDirty,
     });
-    const navigationBlocker = useUnsavedEditorNavigationGuard(isDirty);
+
+    const navigationBlocker = useUnsavedEditorNavigationGuard(
+        isDirty,
+        isDeletedRef,
+    );
 
     const reloadFile = React.useCallback(() => {
         if (!canEdit || saveMutation.isPending || reloadPromiseRef.current) {
             return;
         }
+
         setDraft(null);
         saveMutation.reset();
+
         const reloadPromise = contentQuery
             .refetch({ cancelRefetch: false })
             .finally(() => {
                 reloadPromiseRef.current = null;
             });
+
         reloadPromiseRef.current = reloadPromise;
     }, [canEdit, contentQuery, saveMutation]);
 
     const handleReload = () => {
         if (isDirty) {
             setReloadConfirmationOpen(true);
+
             return;
         }
+
         reloadFile();
     };
 
@@ -758,6 +798,7 @@ export function FileEditView(props: FileEditViewProps) {
         if (!canEdit || saveMutation.isPending || !isDirty) {
             return;
         }
+
         saveMutation.mutate(content);
     }, [canEdit, content, isDirty, saveMutation]);
 
@@ -776,69 +817,46 @@ export function FileEditView(props: FileEditViewProps) {
         <div className="flex min-h-0 flex-1 flex-col">
             <article
                 aria-label="Editing panel"
-                className={`flex min-h-0 flex-1 flex-col overflow-hidden border border-slate-800 bg-[#11141b] shadow-2xl shadow-black/20 ${
-                    isFullWindow
-                        ? "fixed inset-0 z-[60] rounded-none"
-                        : "rounded-lg"
+                data-editor-full-window={props.isFullWindow}
+                className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-surface shadow-2xl shadow-black/20 ${
+                    props.isFullWindow ? "fixed inset-0 z-[60]" : ""
                 }`}
             >
-                <header className="shrink-0 border-b border-slate-800 p-4">
-                    <h1 aria-label="File name" className="sr-only">
-                        {props.fileName}
-                    </h1>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center justify-start gap-2">
-                            <FileEditActions
-                                statusMessage={statusMessage}
-                                hasError={
-                                    contentQuery.isError || saveMutation.isError
-                                }
-                                isSaved={saveMutation.isSuccess}
-                                canEdit={canEdit}
-                                isDirty={isDirty}
-                                isSaving={saveMutation.isPending}
-                                bookmark={{
-                                    agentId: props.agent.id,
-                                    path: props.filePath,
-                                    name: props.fileName,
-                                    entryType: "file",
-                                }}
-                                selection={selection}
-                                recentFiles={editorUserState.recentFiles}
-                                preview={isMarkdown ? props.preview : undefined}
-                                isSearchOpen={isSearchOpen}
-                                onSave={handleSave}
-                                onToggleSearch={() => {
-                                    if (!searchHandleRef.current?.close()) {
-                                        searchHandleRef.current?.open();
-                                    }
-                                }}
-                                onRemoveRecentFile={
-                                    editorUserState.removeRecentFile
-                                }
-                                onPreviewChange={
-                                    isMarkdown
-                                        ? props.onPreviewChange
-                                        : undefined
-                                }
-                            />
-                        </div>
-                        <FileEditorSecondaryActions
-                            agent={props.agent}
-                            path={props.filePath}
-                            fileName={props.fileName}
-                            canEdit={canEdit}
-                            isReloading={contentQuery.isFetching}
-                            isSaving={saveMutation.isPending}
-                            downloadUrl={props.downloadUrl}
-                            isFullWindow={isFullWindow}
-                            onToggleFullWindow={() =>
-                                setIsFullWindow((current) => !current)
-                            }
-                            onReload={handleReload}
-                        />
-                    </div>
-                </header>
+                {props.isFullWindow ? (
+                    <EditorPinnedFiles
+                        agentId={props.agent.id}
+                        filePath={props.filePath}
+                    />
+                ) : null}
+                <FileEditHeader
+                    fileName={props.fileName}
+                    statusMessage={statusMessage}
+                    hasError={contentQuery.isError || saveMutation.isError}
+                    isSaved={saveMutation.isSuccess}
+                    canEdit={canEdit}
+                    isDirty={isDirty}
+                    isSaving={saveMutation.isPending}
+                    agent={props.agent}
+                    filePath={props.filePath}
+                    selection={selection}
+                    preview={isMarkdown ? props.preview : undefined}
+                    isSearchOpen={isSearchOpen}
+                    isReloading={contentQuery.isFetching}
+                    downloadUrl={props.downloadUrl}
+                    isFullWindow={props.isFullWindow}
+                    onSave={handleSave}
+                    onToggleSearch={() => {
+                        if (!searchHandleRef.current?.close()) {
+                            searchHandleRef.current?.open();
+                        }
+                    }}
+                    onPreviewChange={
+                        isMarkdown ? props.onPreviewChange : undefined
+                    }
+                    onToggleFullWindow={props.onToggleFullWindow}
+                    onReload={handleReload}
+                    onDelete={() => setDeleteConfirmationOpen(true)}
+                />
 
                 <div className="flex min-h-0 flex-1 flex-col">
                     <FileEditorSurface
@@ -854,13 +872,21 @@ export function FileEditView(props: FileEditViewProps) {
                         content={content}
                         fileName={props.fileName}
                         editable={canEdit}
-                        vimMode={editorUserState.userState.vimMode}
-                        wrapLines={editorUserState.userState.wrapEditorLines}
+                        vimMode={userState.vimMode}
+                        wrapLines={userState.wrapEditorLines}
                         preview={isMarkdown && props.preview}
                         scrollToLine={props.scrollToLine}
                         onChange={(nextContent) => {
+                            const startingEdit =
+                                !isDirty && nextContent !== savedContent;
+
                             setDraft(nextContent);
+
                             if (saveMutation.isSuccess) saveMutation.reset();
+
+                            if (startingEdit) {
+                                pinOnFirstEdit();
+                            }
                         }}
                         onFocus={() => {
                             if (!isDirty) reloadFile();
@@ -868,11 +894,26 @@ export function FileEditView(props: FileEditViewProps) {
                         onSave={handleSave}
                         onSelectionChange={setSelection}
                         searchHandleRef={searchHandleRef}
+                        isSearchOpen={isSearchOpen}
                         onSearchOpenChange={setIsSearchOpen}
                         onClosePreview={() => props.onPreviewChange(false)}
                     />
                 </div>
             </article>
+            {deleteConfirmationOpen ? (
+                <EditorDeleteDialog
+                    agent={props.agent}
+                    filePath={props.filePath}
+                    fileName={props.fileName}
+                    isDirty={isDirty}
+                    onClose={() => setDeleteConfirmationOpen(false)}
+                    onDeleted={() => {
+                        // Deletion already confirms losing the buffer; do not ask again while leaving.
+                        isDeletedRef.current = true;
+                        setDraft(null);
+                    }}
+                />
+            ) : null}
             <EditorConfirmations
                 reloadOpen={reloadConfirmationOpen}
                 navigationOpen={navigationBlocker.status === "blocked"}
@@ -891,17 +932,25 @@ export function FileEditView(props: FileEditViewProps) {
 /**
  * Blocks in-app navigation and tab close/refresh so a dirty buffer cannot disappear silently.
  */
-function useUnsavedEditorNavigationGuard(isDirty: boolean) {
+function useUnsavedEditorNavigationGuard(
+    isDirty: boolean,
+    isDeletedRef: React.RefObject<boolean>,
+) {
     const isDirtyRef = React.useRef(isDirty);
     isDirtyRef.current = isDirty;
 
     const shouldBlockFn: ShouldBlockFn = React.useCallback(
         (args) =>
             isDirtyRef.current &&
+            !isDeletedRef.current &&
             !isPreviewOnlyNavigation(args.current, args.next),
-        [],
+        [isDeletedRef],
     );
-    const enableBeforeUnload = React.useCallback(() => isDirtyRef.current, []);
+
+    const enableBeforeUnload = React.useCallback(
+        () => isDirtyRef.current && !isDeletedRef.current,
+        [isDeletedRef],
+    );
 
     return useBlocker({
         shouldBlockFn,
@@ -918,15 +967,19 @@ function isPreviewOnlyNavigation(
     if (current.pathname !== next.pathname) {
         return false;
     }
+
     const currentSearch = JSON.stringify(current.search);
     const nextSearch = JSON.stringify(next.search);
+
     const currentWithoutPreview = JSON.stringify(
         current.search,
         (key, value) => (key === "preview" ? undefined : value),
     );
+
     const nextWithoutPreview = JSON.stringify(next.search, (key, value) =>
         key === "preview" ? undefined : value,
     );
+
     return (
         currentSearch !== nextSearch &&
         currentWithoutPreview === nextWithoutPreview
@@ -942,29 +995,22 @@ export function FileImageView(props: {
 }) {
     return (
         <BrowserViewCard>
-            <header className="border-b border-slate-800 p-6 md:p-8">
-                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">
-                    Image
-                </p>
-                <div className="flex flex-wrap items-center gap-3">
-                    <h1
-                        aria-label="File name"
-                        className="min-w-0 break-all text-2xl font-bold tracking-tight text-slate-50 md:text-3xl"
-                    >
-                        {props.fileName}
-                    </h1>
-                    <div className="ml-auto shrink-0">
-                        <PersistentPathActions
-                            agent={props.agent}
-                            path={props.path}
-                            currentName={props.fileName}
-                            entryType="file"
-                            downloadUrl={props.downloadUrl}
-                            downloadName={props.fileName}
-                        />
-                    </div>
-                </div>
-            </header>
+            <ViewCardHeader
+                icon={<ImageIcon className="h-5 w-5" aria-hidden="true" />}
+                eyebrow="Image"
+                title={props.fileName}
+                titleAriaLabel="File name"
+                actions={
+                    <PersistentPathActions
+                        agent={props.agent}
+                        path={props.path}
+                        currentName={props.fileName}
+                        entryType="file"
+                        downloadUrl={props.downloadUrl}
+                        downloadName={props.fileName}
+                    />
+                }
+            />
 
             <div className="flex items-center justify-center p-4 md:p-6">
                 <img

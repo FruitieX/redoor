@@ -59,6 +59,25 @@
     --breakpoint-2xl: theme(--breakpoint-2xl);
 }
 
+/*
+ * Semantic surface colors for utilities such as bg-surface. They point at the --app-* variables,
+ * which switch with the theme, so components never hard-code a dark hex value and no selector
+ * has to re-target one afterwards. "inline" keeps the var() reference in the generated class,
+ * which lets the theme switch without regenerating utilities and keeps opacity modifiers working.
+ */
+@theme inline {
+    --color-canvas: var(--app-canvas);
+    --color-chrome: var(--app-chrome);
+    --color-surface: var(--app-surface);
+    --color-surface-active: var(--app-active-surface);
+    --color-surface-raised: var(--app-raised-surface);
+    --color-surface-code: var(--app-code-surface);
+    --color-surface-error: var(--app-error-surface);
+    --color-error-tint: var(--app-error-tint);
+    --color-tint: var(--app-subtle-overlay);
+    --color-tint-strong: var(--app-hover-overlay);
+}
+
 :root.light {
     color-scheme: light;
 }
@@ -68,68 +87,13 @@
 }
 
 body {
-    @apply m-0 bg-[#0b0d12] text-slate-200 antialiased;
-    background-color: var(--app-canvas);
+    @apply m-0 bg-canvas text-slate-200 antialiased;
     font-family:
         -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
         "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
         sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-}
-
-/* Existing dark surfaces share semantic colors so all screens switch together. */
-.bg-\[\#0b0d12\] {
-    background-color: var(--app-canvas);
-}
-
-.bg-\[\#0f1218\] {
-    background-color: var(--app-chrome);
-}
-
-.bg-\[\#11141b\] {
-    background-color: var(--app-surface);
-}
-
-.bg-\[\#161a23\] {
-    background-color: var(--app-active-surface);
-}
-
-.bg-\[\#1a1f2a\] {
-    background-color: var(--app-raised-surface);
-}
-
-.bg-\[\#080a0e\] {
-    background-color: var(--app-code-surface);
-}
-
-.bg-\[\#141821\] {
-    background-color: var(--app-error-surface);
-}
-
-.bg-\[\#161018\]\/95 {
-    background-color: color-mix(
-        in srgb,
-        var(--app-error-tint) 95%,
-        transparent
-    );
-}
-
-.bg-\[\#11141b\]\/95 {
-    background-color: color-mix(in srgb, var(--app-surface) 95%, transparent);
-}
-
-.bg-white\/5,
-.hover\:bg-white\/5:hover {
-    background-color: var(--app-subtle-overlay);
-}
-
-.hover\:bg-white\/10:hover {
-    background-color: var(--app-hover-overlay);
-}
-
-.hover\:text-white:hover {
-    color: var(--color-slate-100);
 }
 
 /* Warning actions stay warm without inheriting dark-mode yellow text in light mode. */

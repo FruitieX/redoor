@@ -56,9 +56,11 @@ async function expectSelectionDoesNotShiftLayout(props: {
         props.page.getByRole("button", { name: "Show selected items" }),
     ).toHaveCount(0);
     await props.page.evaluate(async () => document.fonts.ready);
+
     const selectedActions = props.page.getByRole("region", {
         name: "Selected files actions",
     });
+
     const fileListing = props.page.getByRole("table").first();
     const selectedActionsBefore = await selectedActions.boundingBox();
     const fileListingBefore = await fileListing.boundingBox();
@@ -105,6 +107,7 @@ test.describe.serial("Copy Operations", () => {
         let copyButton = page.getByRole("button", {
             name: "Copy selected items to this directory",
         });
+
         const fileListing = page.getByRole("table").first();
 
         // An unavailable copy action no longer consumes a full row above the listing.
@@ -126,6 +129,7 @@ test.describe.serial("Copy Operations", () => {
         await expect(copyButton).toBeEnabled();
 
         await page.getByRole("button", { name: "Show selected items" }).click();
+
         const selectedItemsPanel = page.getByRole("tabpanel", {
             name: /Selected/,
         });
@@ -182,6 +186,7 @@ test.describe.serial("Copy Operations", () => {
         const selectedActions = page.getByRole("region", {
             name: "Selected files actions",
         });
+
         // Phone-width chrome must not spend a second row on Copy, Move, and Delete.
         await expect(
             selectedActions.getByRole("button", {
@@ -202,6 +207,7 @@ test.describe.serial("Copy Operations", () => {
         const actionsButton = selectedActions.getByRole("button", {
             name: "Actions",
         });
+
         const cardBox = await selectedActions.boundingBox();
         const actionsBox = await actionsButton.boundingBox();
         // The compact Actions control must stay inside the single-row card.
@@ -232,6 +238,7 @@ test.describe.serial("Copy Operations", () => {
                 response.url() === `${WEB_BASE_URL}/api/v1/copy` &&
                 response.request().method() === "POST",
         );
+
         await actionsDialog.getByRole("button", { name: "Copy" }).click();
         await confirmSelectedTransfer(page, "Copy");
         const copyResponse = await copyResponsePromise;
@@ -247,11 +254,13 @@ test.describe.serial("Copy Operations", () => {
     }) => {
         test.setTimeout(60_000);
         const copyTargetDirName = `selected-copy-target-${Date.now()}`;
+
         const copyTargetDirPath = path.join(
             ctx.testDirPath,
             "subdir1",
             copyTargetDirName,
         );
+
         const excludedName = `deselect-before-copy-${Date.now()}.txt`;
         await fs.writeFile(
             path.join(ctx.testDirPath, excludedName),
@@ -300,9 +309,11 @@ test.describe.serial("Copy Operations", () => {
                 name: "Copy selected items to this directory",
             })
             .click();
+
         const confirmation = page.getByRole("dialog", {
             name: "Copy selected items?",
         });
+
         // Every selected source must be visible before the batch starts.
         await expect(confirmation).toContainText("file1.txt");
         await expect(confirmation).toContainText("file2.txt");
@@ -340,19 +351,23 @@ test.describe.serial("Copy Operations", () => {
         ).rejects.toThrow();
     });
 
-    test("should keep an existing file when resolving a copy conflict", async ({
+    test("should copy under a new name when resolving a copy conflict", async ({
         page,
     }) => {
         test.setTimeout(60_000);
-        const sourceName = `keep-existing-${Date.now()}.txt`;
+        const stem = `rename-copy-${Date.now()}`;
+        const sourceName = `${stem}.txt`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
-        const destinationPath = path.join(
-            ctx.testDirPath,
-            "subdir1",
-            sourceName,
-        );
+        const destinationDirPath = path.join(ctx.testDirPath, "subdir1");
+        const destinationPath = path.join(destinationDirPath, sourceName);
+
         await fs.writeFile(sourcePath, "source content");
         await fs.writeFile(destinationPath, "destination content");
+        // A taken `_2` name proves the suggestion skips to the first free counter.
+        await fs.writeFile(
+            path.join(destinationDirPath, `${stem}_2.txt`),
+            "older copy",
+        );
 
         await openCopyConflict({
             page,
@@ -361,40 +376,90 @@ test.describe.serial("Copy Operations", () => {
             sourceType: "file",
             destinationDirectoryName: "subdir1",
         });
+
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // A same-named destination must interrupt the copy before any request starts.
         await expect(dialog).toBeVisible();
-        // Keeping the destination is the safe default conflict policy.
+        // Renaming keeps the destination intact, so it is the safe default policy.
         await expect(
-            dialog.getByRole("radio", { name: "Keep existing" }),
+            dialog.getByRole("radio", { name: "Rename" }),
         ).toBeChecked();
+        // Doing nothing is what Cancel is for, so there is no separate keep option.
+        await expect(
+            dialog.getByRole("radio", { name: /^Keep existing/ }),
+        ).toHaveCount(0);
+        // Merging a file into a file is just replacing it, so only directories offer Merge.
+        await expect(
+            dialog.getByRole("radio", {
+                name: "Merge directories and replace files",
+            }),
+        ).toHaveCount(0);
+
+        const nameField = dialog.getByRole("textbox", {
+            name: `New name for ${sourceName}`,
+        });
+
+        // The hint must say the existing item survives, since Rename never overwrites.
+        await expect(
+            dialog.getByText(`The existing ${sourceName} is kept.`),
+        ).toBeVisible();
+
+        // The counter goes before the extension and skips names already in the directory.
+        await expect(nameField).toHaveValue(`${stem}_3.txt`);
+
+        const continueButton = dialog.getByRole("button", {
+            name: "Continue copying",
+        });
+
+        await nameField.fill(sourceName);
+        // Renaming onto the conflicting name would just conflict again, so it is refused.
+        await expect(dialog.getByRole("alert")).toContainText(
+            "already exists in the destination",
+        );
+        await expect(continueButton).toBeDisabled();
+
+        const renamedName = `${stem}-renamed.txt`;
+
+        await nameField.fill(renamedName);
+        await expect(continueButton).toBeEnabled();
 
         const copyRequest = page.waitForRequest(
             (request) =>
                 request.url() === `${WEB_BASE_URL}/api/v1/copy` &&
                 request.method() === "POST",
         );
-        await dialog.getByRole("button", { name: "Continue copying" }).click();
-        // The selected dialog action must be forwarded to the copy API.
-        expect((await copyRequest).postDataJSON().on_existing).toBe("error");
-        // The terminal transfer error must be reported after choosing the safe policy.
-        await expect(page.getByRole("alert")).toContainText("Copy failed", {
-            timeout: 30_000,
-        });
-        // Error policy must preserve the destination bytes.
+
+        await continueButton.click();
+
+        const requestBody = (await copyRequest).postDataJSON();
+
+        // The new name must replace only the destination's last path segment.
+        expect(requestBody.dest.path).toBe(
+            path.join(destinationDirPath, renamedName),
+        );
+        // A rename must never overwrite, even if the new name got taken meanwhile.
+        expect(requestBody.on_existing).toBe("error");
+        // The copy lands under the new name next to the untouched existing file.
+        await expect
+            .poll(() =>
+                fs
+                    .readFile(
+                        path.join(destinationDirPath, renamedName),
+                        "utf8",
+                    )
+                    .catch(() => null),
+            )
+            .toBe("source content");
         await expect(fs.readFile(destinationPath, "utf8")).resolves.toBe(
             "destination content",
         );
-        // A failed copy must also preserve the source and its selection.
+        // Copy must leave the source in place.
         await expect(fs.readFile(sourcePath, "utf8")).resolves.toBe(
             "source content",
         );
-        await expect(
-            page.getByRole("button", { name: "Clear selection" }),
-        ).toBeVisible();
-        await page.getByRole("button", { name: "Clear selection" }).click();
     });
 
     test("should replace an existing directory when resolving a copy conflict", async ({
@@ -403,11 +468,13 @@ test.describe.serial("Copy Operations", () => {
         test.setTimeout(60_000);
         const sourceName = `replace-existing-${Date.now()}`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
+
         const destinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             sourceName,
         );
+
         await fs.mkdir(sourcePath);
         await fs.writeFile(path.join(sourcePath, "conflict.txt"), "source");
         await fs.writeFile(path.join(sourcePath, "source-only.txt"), "source");
@@ -428,15 +495,19 @@ test.describe.serial("Copy Operations", () => {
             sourceType: "directory",
             destinationDirectoryName: "subdir1",
         });
+
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         await dialog.getByRole("radio", { name: "Replace existing" }).check();
+
         const copyRequest = page.waitForRequest(
             (request) =>
                 request.url() === `${WEB_BASE_URL}/api/v1/copy` &&
                 request.method() === "POST",
         );
+
         await dialog.getByRole("button", { name: "Continue copying" }).click();
         // Choosing replacement must map to the API's override policy.
         expect((await copyRequest).postDataJSON().on_existing).toBe("override");
@@ -463,11 +534,13 @@ test.describe.serial("Copy Operations", () => {
         test.setTimeout(60_000);
         const sourceName = `merge-existing-${Date.now()}`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
+
         const destinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             sourceName,
         );
+
         await fs.mkdir(sourcePath);
         await fs.writeFile(path.join(sourcePath, "conflict.txt"), "source");
         await fs.writeFile(path.join(sourcePath, "source-only.txt"), "source");
@@ -488,19 +561,23 @@ test.describe.serial("Copy Operations", () => {
             sourceType: "directory",
             destinationDirectoryName: "subdir1",
         });
+
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         await dialog
             .getByRole("radio", {
                 name: "Merge directories and replace files",
             })
             .check();
+
         const copyRequest = page.waitForRequest(
             (request) =>
                 request.url() === `${WEB_BASE_URL}/api/v1/copy` &&
                 request.method() === "POST",
         );
+
         await dialog.getByRole("button", { name: "Continue copying" }).click();
         // Choosing merge must map directly to the API's merge policy.
         expect((await copyRequest).postDataJSON().on_existing).toBe("merge");
@@ -531,21 +608,26 @@ test.describe.serial("Copy Operations", () => {
         const suffix = Date.now();
         const conflictingName = `batch-conflict-${suffix}.txt`;
         const availableName = `batch-available-${suffix}.txt`;
+
         const conflictingSourcePath = path.join(
             ctx.testDirPath,
             conflictingName,
         );
+
         const availableSourcePath = path.join(ctx.testDirPath, availableName);
+
         const conflictingDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             conflictingName,
         );
+
         const availableDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             availableName,
         );
+
         await fs.writeFile(conflictingSourcePath, "new conflict content");
         await fs.writeFile(availableSourcePath, "available content");
         await fs.writeFile(conflictingDestinationPath, "old conflict content");
@@ -571,6 +653,7 @@ test.describe.serial("Copy Operations", () => {
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // The dialog must count only the conflicting member of the two-file batch.
         await expect(dialog).toContainText("1 selected item has the same name");
         await dialog.getByRole("radio", { name: "Replace existing" }).check();
@@ -595,21 +678,26 @@ test.describe.serial("Copy Operations", () => {
         const suffix = Date.now();
         const conflictingName = `batch-conflict-dir-${suffix}`;
         const availableName = `batch-available-dir-${suffix}`;
+
         const conflictingSourcePath = path.join(
             ctx.testDirPath,
             conflictingName,
         );
+
         const availableSourcePath = path.join(ctx.testDirPath, availableName);
+
         const conflictingDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             conflictingName,
         );
+
         const availableDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             availableName,
         );
+
         await fs.mkdir(conflictingSourcePath);
         await fs.writeFile(
             path.join(conflictingSourcePath, "conflict.txt"),
@@ -653,6 +741,7 @@ test.describe.serial("Copy Operations", () => {
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // The dialog must count only the conflicting member of the directory batch.
         await expect(dialog).toContainText("1 selected item has the same name");
         await dialog
@@ -691,11 +780,13 @@ test.describe.serial("Copy Operations", () => {
         page,
     }) => {
         test.setTimeout(60_000);
+
         const copiedFilePath = path.join(
             ctx.testDirPath,
             "subdir1",
             "file1.txt",
         );
+
         await fs.rm(copiedFilePath, { force: true });
 
         await page.goto(
@@ -713,6 +804,7 @@ test.describe.serial("Copy Operations", () => {
         const copyButton = page.getByRole("button", {
             name: "Copy selected items to this directory",
         });
+
         await expect(copyButton).toBeEnabled();
 
         const copyResponses: number[] = [];
@@ -785,6 +877,7 @@ test.describe.serial("Copy Operations", () => {
         const clearSelection = page.getByRole("button", {
             name: "Clear selection",
         });
+
         if (await clearSelection.isVisible()) {
             await clearSelection.click();
         }
@@ -795,9 +888,11 @@ test.describe.serial("Copy Operations", () => {
             .click();
 
         await page.getByRole("button", { name: "Show selected items" }).click();
+
         const selectedItemsPanel = page.getByRole("tabpanel", {
             name: /Selected/,
         });
+
         // The selected-items panel must show the file we just chose, not another row.
         await expect(
             selectedItemsPanel.getByRole("link", {
@@ -819,6 +914,7 @@ test.describe.serial("Copy Operations", () => {
         const copyButton = page.getByRole("button", {
             name: "Copy selected items to this directory",
         });
+
         await expect(copyButton).toBeEnabled();
         // The compact action keeps details in its accessible label and tooltip.
         await expect(copyButton).toHaveText("Copy");
@@ -828,6 +924,7 @@ test.describe.serial("Copy Operations", () => {
                 response.url() === `${WEB_BASE_URL}/api/v1/copy` &&
                 response.request().method() === "POST",
         );
+
         await copyButton.click();
         await confirmSelectedTransfer(page, "Copy");
         const copyResponse = await copyResponsePromise;
@@ -893,6 +990,7 @@ test.describe.serial("Copy Operations", () => {
         const copyButton = page.getByRole("button", {
             name: "Copy selected items to this directory",
         });
+
         await expect(copyButton).toBeEnabled();
 
         await copyButton.click();

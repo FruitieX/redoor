@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 const VERSION = "2.12.0";
+
 const RELEASE_BASE_URL = `https://github.com/Shopify/toxiproxy/releases/download/v${VERSION}`;
 
 if (process.platform !== "linux") {
@@ -22,12 +23,19 @@ if (releaseArchitecture === undefined) {
 }
 
 const archiveName = `toxiproxy_${VERSION}_linux_${releaseArchitecture}.tar.gz`;
+
 const homeDirectory = homedir();
+
 const binDirectory = join(homeDirectory, ".local", "bin");
+
 const systemdDirectory = join(homeDirectory, ".config", "systemd", "user");
+
 const unitPath = join(systemdDirectory, "toxiproxy.service");
+
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "toxiproxy-install-"));
+
 const archivePath = join(temporaryDirectory, archiveName);
+
 const checksumsPath = join(temporaryDirectory, "checksums.txt");
 
 try {
@@ -42,6 +50,7 @@ try {
     ]);
 
     const checksums = await readFile(checksumsPath, "utf8");
+
     const expectedChecksum = checksums
         .split("\n")
         .find((line) => line.trim().endsWith(archiveName))

@@ -1,12 +1,14 @@
 import React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "@tanstack/react-router";
+import {
+    useMutation,
+    useQuery,
+    useQueryClient,
+    useSuspenseQuery,
+} from "@tanstack/react-query";
 import { Check, Copy, Download, File, Folder } from "lucide-react";
-import type {
-    Agent,
-    LsDirectoryResponse,
-    LsFileResponse,
-} from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
+import type { LsFileResponse } from "#bindings/LsFileResponse";
 import type { AgentAccountGroup } from "#bindings/AgentAccountGroup";
 import type { AgentAccountUser } from "#bindings/AgentAccountUser";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -14,14 +16,26 @@ import { Button } from "#ui/components/button";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { Checkbox } from "#ui/components/checkbox";
 import { IconButton } from "#ui/components/icon-button";
-import { CopyableCodeRow } from "#ui/components/copyable-code-row";
+import {
+    CopyableCodeRow,
+    useCopyFeedback,
+} from "#ui/components/copyable-code-row";
+import { ViewCardHeader } from "#ui/components/view-card-header";
 import { PersistentPathActions } from "#ui/components/browser/path-actions";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
+import { getDirectoryArchiveName } from "#ui/utils/archive";
 import { formatSize } from "#ui/utils/path";
 import { Select } from "#ui/components/select";
 import { Tooltip } from "#ui/components/tooltip";
 import { Toast } from "#ui/components/toast";
-import { agentAccountsQueryOptions, queryKeys } from "#ui/queries";
+import type { LsResponse } from "#ui/ls-response";
+import {
+    agentAccountsQueryOptions,
+    browserListingQueryOptions,
+    invalidateAgentData,
+    metadataQueryOptions,
+    queryKeys,
+} from "#ui/queries";
 
 /** Converts permission bits to the compact notation people expect from Unix tools. */
 function formatSymbolicPermissions(permissions: number): string {
@@ -79,6 +93,7 @@ function PermissionsGrid(props: {
         { label: "Group", bits: [0o040, 0o020, 0o010] },
         { label: "Others", bits: [0o004, 0o002, 0o001] },
     ];
+
     const columns = ["Read", "Write", "Execute"];
 
     return (
@@ -111,13 +126,16 @@ function PermissionsGrid(props: {
                             </th>
                             {row.bits.map((bit, index) => {
                                 const column = columns[index];
+
                                 if (!column) return null;
 
                                 const isAllowed = Boolean(
                                     props.permissions & bit,
                                 );
+
                                 if (props.interactive) {
                                     const label = `${row.label} ${column}`;
+
                                     return (
                                         <td
                                             key={bit}
@@ -150,6 +168,7 @@ function PermissionsGrid(props: {
                                         </td>
                                     );
                                 }
+
                                 return (
                                     <td
                                         key={bit}
@@ -211,9 +230,11 @@ function withCurrentAccount<T extends { name: string }>(props: {
     fallback: T;
 }): T[] {
     const currentName = props.currentName ?? props.fallback.name;
+
     if (props.accounts.some((account) => account.name === currentName)) {
         return props.accounts;
     }
+
     return [props.fallback, ...props.accounts];
 }
 
@@ -236,6 +257,7 @@ function PermissionsSection(props: {
 }) {
     const symbolicPermissions = formatSymbolicPermissions(props.permissions);
     const octalPermissions = `0${props.permissions.toString(8).padStart(3, "0")}`;
+
     return (
         <section aria-labelledby={props.headingId}>
             <div className="mb-4 flex items-end justify-between gap-4">
@@ -295,121 +317,123 @@ function OwnershipSelect(props: {
     );
 }
 
-/** Keeps owner/mode UI on the last successful server values so stale loader props cannot roll them back. */
-function useDetailsOwnershipState(props: {
-    agent: Agent;
-    path: string;
-    metadata: FilesystemMetadata;
-}) {
-    const router = useRouter();
+/** Shows ownership and mode from the cached listing, which the mutations below edit optimistically. */
+function useDetailsOwnershipState(props: { agent: Agent; path: string }) {
     const queryClient = useQueryClient();
-    const serverPermissionsRef = React.useRef(props.metadata.permissions);
-    const serverOwnerRef = React.useRef(props.metadata.owner);
-    const serverGroupRef = React.useRef(props.metadata.group);
-    const chmodInFlightRef = React.useRef(false);
-    const chownInFlightRef = React.useRef(false);
-    const [displayedPermissions, setDisplayedPermissions] = React.useState(
-        props.metadata.permissions,
-    );
-    const [displayedOwner, setDisplayedOwner] = React.useState(
-        props.metadata.owner,
-    );
-    const [displayedGroup, setDisplayedGroup] = React.useState(
-        props.metadata.group,
-    );
-    const [displayedUid, setDisplayedUid] = React.useState(props.metadata.uid);
-    const [displayedGid, setDisplayedGid] = React.useState(props.metadata.gid);
+    const listingKey = queryKeys.browserListing(props.agent.id, props.path);
+
     const [feedback, setFeedback] = React.useState<{
         tone: "success" | "error";
         message: string;
     } | null>(null);
 
+    // Ownership lives in the same listing the browser shows, so edits made here and
+    // refreshes from anywhere else land in one place instead of a component-local copy.
+    const { data: displayed } = useSuspenseQuery({
+        ...browserListingQueryOptions(props.agent, props.path),
+        select: (listing): FilesystemMetadata => ({
+            owner: listing.owner,
+            group: listing.group,
+            uid: listing.uid,
+            gid: listing.gid,
+            permissions: listing.permissions,
+        }),
+    });
+
     const accountsQuery = useQuery({
         ...agentAccountsQueryOptions(props.agent),
         enabled: props.agent.isRoot,
     });
-    const displayedMetadata: FilesystemMetadata = {
-        owner: displayedOwner,
-        group: displayedGroup,
-        uid: displayedUid,
-        gid: displayedGid,
-        permissions: displayedPermissions,
+
+    /** Edits only the metadata fields so a concurrent listing refresh keeps its entries. */
+    const patchListing = (patch: Partial<FilesystemMetadata>) => {
+        queryClient.setQueryData<LsResponse>(listingKey, (listing) =>
+            listing ? { ...listing, ...patch } : listing,
+        );
     };
 
-    const refreshDetails = async () => {
-        await queryClient.invalidateQueries({
-            queryKey: [
-                ...queryKeys.all,
-                "agents",
-                props.agent.id,
-                "browser-listing",
-            ],
-        });
-        await router.invalidate();
+    /** Applies an edit before the server answers and returns what to restore on failure. */
+    const applyOptimistically = async (patch: Partial<FilesystemMetadata>) => {
+        // A refetch landing mid-request would flash the old value back over the edit.
+        await queryClient.cancelQueries({ queryKey: listingKey });
+
+        const previous: FilesystemMetadata = displayed;
+        patchListing(patch);
+
+        return { previous };
     };
 
     const chownMutation = useMutation({
         mutationFn: (request: Partial<ChownPathRequest>) =>
             props.agent.chown(props.path, request),
-        onSuccess: async (response) => {
-            serverOwnerRef.current = response.owner;
-            serverGroupRef.current = response.group;
-            setDisplayedOwner(response.owner);
-            setDisplayedGroup(response.group);
-            setDisplayedUid(response.uid);
-            setDisplayedGid(response.gid);
+        onMutate: (request) =>
+            applyOptimistically({
+                owner: request.owner ?? displayed.owner,
+                group: request.group ?? displayed.group,
+            }),
+        onSuccess: (response) => {
+            patchListing({
+                owner: response.owner,
+                group: response.group,
+                uid: response.uid,
+                gid: response.gid,
+            });
             setFeedback({
                 tone: "success",
                 message: "Ownership updated",
             });
-            await refreshDetails();
         },
-        onError: (error) => {
-            setDisplayedOwner(serverOwnerRef.current);
-            setDisplayedGroup(serverGroupRef.current);
+        onError: (error, _request, context) => {
+            if (context) {
+                patchListing({
+                    owner: context.previous.owner,
+                    group: context.previous.group,
+                });
+            }
+
             setFeedback({
                 tone: "error",
                 message: getErrorMessage(error, "Could not change ownership"),
             });
         },
-        onSettled: () => {
-            chownInFlightRef.current = false;
-        },
+        // Parent listings and metadata elsewhere show the same fields.
+        onSettled: () => invalidateAgentData(queryClient, props.agent.id),
     });
+
     const chmodMutation = useMutation({
         mutationFn: (permissions: number) =>
             props.agent.chmod(props.path, permissions),
-        onSuccess: async (response) => {
-            serverPermissionsRef.current = response.permissions;
-            setDisplayedPermissions(response.permissions);
+        onMutate: (permissions) => applyOptimistically({ permissions }),
+        onSuccess: (response) => {
+            patchListing({ permissions: response.permissions });
             setFeedback({
                 tone: "success",
                 message: "Permissions updated",
             });
-            await refreshDetails();
         },
-        onError: (error) => {
-            setDisplayedPermissions(serverPermissionsRef.current);
+        onError: (error, _permissions, context) => {
+            if (context) {
+                patchListing({ permissions: context.previous.permissions });
+            }
+
             setFeedback({
                 tone: "error",
                 message: getErrorMessage(error, "Could not change permissions"),
             });
         },
-        onSettled: () => {
-            chmodInFlightRef.current = false;
-        },
+        onSettled: () => invalidateAgentData(queryClient, props.agent.id),
     });
 
     return {
-        displayed: displayedMetadata,
-        canChmod: props.agent.isRoot || props.agent.uid === displayedUid,
+        displayed,
+        canChmod: props.agent.isRoot || props.agent.uid === displayed.uid,
         showOwnerSelect: props.agent.isRoot && accountsQuery.data !== undefined,
         ownerOptions: ownerSelectOptions(
-            displayedMetadata,
+            displayed,
             accountsQuery.data?.users ?? [],
         ),
         groupOptions: groupSelectOptions(
-            displayedMetadata,
+            displayed,
             accountsQuery.data?.groups ?? [],
         ),
         chownPending: chownMutation.isPending,
@@ -426,30 +450,28 @@ function useDetailsOwnershipState(props: {
             void accountsQuery.refetch();
         },
         togglePermissionBit: (bit: number, enabled: boolean) => {
-            if (chmodInFlightRef.current) {
+            if (chmodMutation.isPending) {
                 return;
             }
-            const nextPermissions = enabled
-                ? displayedPermissions | bit
-                : displayedPermissions & ~bit;
-            chmodInFlightRef.current = true;
-            setDisplayedPermissions(nextPermissions);
-            chmodMutation.mutate(nextPermissions);
+
+            chmodMutation.mutate(
+                enabled
+                    ? displayed.permissions | bit
+                    : displayed.permissions & ~bit,
+            );
         },
         changeOwner: (owner: string) => {
-            if (chownInFlightRef.current) {
+            if (chownMutation.isPending) {
                 return;
             }
-            chownInFlightRef.current = true;
-            setDisplayedOwner(owner);
+
             chownMutation.mutate({ owner });
         },
         changeGroup: (group: string) => {
-            if (chownInFlightRef.current) {
+            if (chownMutation.isPending) {
                 return;
             }
-            chownInFlightRef.current = true;
-            setDisplayedGroup(group);
+
             chownMutation.mutate({ group });
         },
     };
@@ -459,7 +481,6 @@ function useDetailsOwnershipState(props: {
 function FilesystemMetadataSections(props: {
     agent: Agent;
     path: string;
-    metadata: FilesystemMetadata;
     size?: number;
     sizeLabel?: string;
     sizeAction?: React.ReactNode;
@@ -469,12 +490,12 @@ function FilesystemMetadataSections(props: {
     const ownership = useDetailsOwnershipState({
         agent: props.agent,
         path: props.path,
-        metadata: props.metadata,
     });
+
     const headingIdPrefix = props.headingPrefix.toLowerCase();
 
     return (
-        <div className="grid gap-8 p-6 md:p-8 lg:grid-cols-[minmax(0,1fr)_minmax(21rem,0.72fr)]">
+        <div className="grid gap-4 p-4 sm:p-5 lg:grid-cols-[minmax(0,1fr)_minmax(21rem,0.72fr)]">
             <section aria-labelledby={`${headingIdPrefix}-metadata-heading`}>
                 <div className="mb-4">
                     <h2
@@ -584,98 +605,90 @@ function FilesystemMetadataSections(props: {
     );
 }
 
+/** Copies the full path and confirms it, reusing the shared clipboard feedback. */
+function CopyFullPathButton(props: { path: string }) {
+    const { isCopied, copy } = useCopyFeedback(props.path);
+
+    return (
+        <Button
+            type="button"
+            variant="subtle"
+            onClick={() => {
+                void copy();
+            }}
+            className="inline-flex items-center gap-1.5 p-0 text-xs font-medium text-slate-500 transition hover:text-slate-200"
+            aria-label="Copy full path"
+        >
+            {isCopied ? (
+                <Check className="h-3.5 w-3.5 text-emerald-400" />
+            ) : (
+                <Copy className="h-3.5 w-3.5" />
+            )}
+            {isCopied ? "Copied" : "Copy"}
+        </Button>
+    );
+}
+
 /** Presents file and directory identity consistently while allowing file-only path copying. */
 function PathDetailHeader(props: {
     entryType: "file" | "directory";
     name: string;
     path: string;
-    pathCopied?: boolean;
-    onCopyPath?: () => void;
+    canCopyPath?: boolean;
     nameActions?: React.ReactNode;
 }) {
     const isDirectory = props.entryType === "directory";
     const typeLabel = isDirectory ? "Directory" : "File";
 
     return (
-        <header className="relative overflow-hidden border-b border-slate-800 bg-linear-to-br from-blue-500/10 via-transparent to-transparent p-6 md:p-8">
-            <div className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-blue-500/5 blur-3xl" />
-            <div className="relative flex min-w-0 items-start gap-4">
-                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-blue-400/20 bg-blue-500/15 shadow-inner shadow-blue-400/10">
-                    {isDirectory ? (
-                        <Folder className="h-7 w-7 text-blue-400" />
-                    ) : (
-                        <File className="h-7 w-7 text-blue-400" />
-                    )}
-                </div>
-                <div className="min-w-0 flex-1 pt-0.5">
-                    <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-blue-400">
-                        {typeLabel} details
-                    </p>
-                    <div className="flex flex-wrap items-center gap-3">
-                        <h1
-                            aria-label={`${typeLabel} name`}
-                            className="break-all text-2xl font-bold tracking-tight text-slate-50 md:text-3xl"
-                        >
-                            {props.name}
-                        </h1>
-                        {props.nameActions ? (
-                            <div className="ml-auto shrink-0">
-                                {props.nameActions}
-                            </div>
-                        ) : null}
-                    </div>
-                </div>
-            </div>
-            <div className="relative mt-6">
+        <ViewCardHeader
+            icon={
+                isDirectory ? (
+                    <Folder className="h-5 w-5" />
+                ) : (
+                    <File className="h-5 w-5" />
+                )
+            }
+            eyebrow={`${typeLabel} details`}
+            title={props.name}
+            titleAriaLabel={`${typeLabel} name`}
+            actions={props.nameActions}
+        >
+            <div className="mt-3">
                 <div className="mb-2 flex items-center justify-between gap-3">
                     <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
                         Full Path
                     </p>
-                    {props.onCopyPath ? (
-                        <Button
-                            type="button"
-                            variant="subtle"
-                            onClick={props.onCopyPath}
-                            className="inline-flex items-center gap-1.5 p-0 text-xs font-medium text-slate-500 transition hover:text-slate-200"
-                            aria-label="Copy full path"
-                        >
-                            {props.pathCopied ? (
-                                <Check className="h-3.5 w-3.5 text-emerald-400" />
-                            ) : (
-                                <Copy className="h-3.5 w-3.5" />
-                            )}
-                            {props.pathCopied ? "Copied" : "Copy"}
-                        </Button>
+                    {props.canCopyPath ? (
+                        <CopyFullPathButton path={props.path} />
                     ) : null}
                 </div>
-                <code className="block overflow-x-auto whitespace-nowrap rounded-xl border border-slate-800/80 bg-slate-950/60 px-4 py-3 font-mono text-sm text-slate-300">
+                <code className="block overflow-x-auto whitespace-nowrap rounded-md border border-slate-800/80 bg-slate-950/60 px-2 py-1.5 font-mono text-sm text-slate-300">
                     {props.path}
                 </code>
             </div>
-        </header>
+        </ViewCardHeader>
     );
 }
 
-/** Presents directory metadata while the query-selected details view replaces the file list. */
+/**
+ * Presents directory metadata while the query-selected details view replaces the file list.
+ * The route keys it by path, so each directory starts without the previous one's size result.
+ */
 export function DirectoryDetailView(props: {
     agent: Agent;
     path: string;
     directoryName: string;
     lsResult: LsDirectoryResponse;
 }) {
-    const archiveName = `${props.directoryName === "/" ? "archive" : props.directoryName}.tar.gz`;
     const [sizeWarningDismissed, setSizeWarningDismissed] =
         React.useState(false);
+
     const directorySizeMutation = useMutation({
         mutationFn: () =>
             props.agent.calculateDirectorySize(props.lsResult.path),
         onSuccess: () => setSizeWarningDismissed(false),
     });
-
-    React.useEffect(() => {
-        directorySizeMutation.reset();
-        setSizeWarningDismissed(false);
-    }, [props.lsResult.path]);
 
     const skippedEntryCount = directorySizeMutation.data?.errors.length ?? 0;
 
@@ -695,7 +708,9 @@ export function DirectoryDetailView(props: {
                         downloadUrl={props.agent.getRawUrl(props.path, {
                             download: true,
                         })}
-                        downloadName={archiveName}
+                        downloadName={getDirectoryArchiveName(
+                            props.directoryName,
+                        )}
                         downloadTooltip="Downloads this directory as a .tar.gz archive."
                     />
                 }
@@ -705,22 +720,20 @@ export function DirectoryDetailView(props: {
                 key={props.lsResult.path}
                 agent={props.agent}
                 path={props.lsResult.path}
-                metadata={props.lsResult}
                 size={directorySizeMutation.data?.size}
                 sizeLabel="Directory size value"
                 sizeAction={
-                    <Tooltip content="Recursively totals the contents of regular files in this directory.">
-                        <Button
-                            type="button"
-                            variant="subtle"
-                            isLoading={directorySizeMutation.isPending}
-                            onClick={() => directorySizeMutation.mutate()}
-                        >
-                            {directorySizeMutation.isPending
-                                ? "Calculating..."
-                                : "Calculate size"}
-                        </Button>
-                    </Tooltip>
+                    <Button
+                        tooltip="Recursively totals the contents of regular files in this directory."
+                        type="button"
+                        variant="subtle"
+                        isLoading={directorySizeMutation.isPending}
+                        onClick={() => directorySizeMutation.mutate()}
+                    >
+                        {directorySizeMutation.isPending
+                            ? "Calculating..."
+                            : "Calculate size"}
+                    </Button>
                 }
                 entryCount={props.lsResult.files.length}
                 headingPrefix="directory"
@@ -749,42 +762,46 @@ export function DirectoryDetailView(props: {
     );
 }
 
-/** Presents file metadata and destructive actions with clear visual separation. */
+/**
+ * Presents file metadata and destructive actions with clear visual separation. The route keys
+ * it by path, so each file starts without the previous one's link-creation error.
+ */
 export function FileDetailView(props: {
     agent: Agent;
     path: string;
     fileName: string;
     lsResult: LsFileResponse;
     downloadUrl: string;
-    initialOneTimeTokens: Array<string>;
 }) {
-    const [copiedCommand, setCopiedCommand] = React.useState<string | null>(
-        null,
+    const queryClient = useQueryClient();
+
+    const metadataOptions = metadataQueryOptions(
+        props.agent,
+        props.lsResult.path,
     );
-    const [oneTimeTokens, setOneTimeTokens] = React.useState(
-        props.initialOneTimeTokens,
-    );
+
+    // The server owns the token list, so refreshes and new links share one cache entry.
+    const { data: oneTimeTokens } = useSuspenseQuery({
+        ...metadataOptions,
+        select: (metadata) => metadata.one_time_tokens,
+    });
+
     const createShareableLinkMutation = useMutation({
         mutationFn: () => props.agent.createOneTimeToken(props.lsResult.path),
         onSuccess: (response) => {
-            setOneTimeTokens((tokens) => [...tokens, response.one_time_token]);
+            queryClient.setQueryData(metadataOptions.queryKey, (metadata) =>
+                metadata
+                    ? {
+                          ...metadata,
+                          one_time_tokens: [
+                              ...metadata.one_time_tokens,
+                              response.one_time_token,
+                          ],
+                      }
+                    : metadata,
+            );
         },
     });
-
-    React.useEffect(() => {
-        setOneTimeTokens(props.initialOneTimeTokens);
-        createShareableLinkMutation.reset();
-    }, [props.path, props.initialOneTimeTokens]);
-
-    const copyToClipboard = async (text: string, commandType: string) => {
-        try {
-            await navigator.clipboard.writeText(text);
-            setCopiedCommand(commandType);
-            setTimeout(() => setCopiedCommand(null), 2000);
-        } catch (err) {
-            console.error("Failed to copy:", err);
-        }
-    };
 
     return (
         <BrowserViewCard>
@@ -792,7 +809,7 @@ export function FileDetailView(props: {
                 entryType="file"
                 name={props.fileName}
                 path={props.lsResult.path}
-                pathCopied={copiedCommand === "path"}
+                canCopyPath
                 nameActions={
                     <PersistentPathActions
                         agent={props.agent}
@@ -804,14 +821,12 @@ export function FileDetailView(props: {
                         downloadName={props.fileName}
                     />
                 }
-                onCopyPath={() => copyToClipboard(props.lsResult.path, "path")}
             />
 
             <FilesystemMetadataSections
                 key={props.lsResult.path}
                 agent={props.agent}
                 path={props.lsResult.path}
-                metadata={props.lsResult}
                 size={props.lsResult.size}
                 headingPrefix="file"
             />
@@ -828,9 +843,7 @@ export function FileDetailView(props: {
                           )
                         : null
                 }
-                copiedCommand={copiedCommand}
                 onCreate={() => createShareableLinkMutation.mutate()}
-                onCopy={copyToClipboard}
             />
         </BrowserViewCard>
     );
@@ -842,14 +855,12 @@ function ShareableLinksSection(props: {
     oneTimeTokens: Array<string>;
     isCreating: boolean;
     errorMessage: string | null;
-    copiedCommand: string | null;
     onCreate: () => void;
-    onCopy: (text: string, commandType: string) => void;
 }) {
     return (
         <section
             aria-labelledby="shareable-links-heading"
-            className="border-t border-slate-800 bg-slate-950/15 p-6 md:p-8"
+            className="border-t border-slate-800 bg-slate-950/15 p-4 sm:p-5"
         >
             <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
@@ -895,8 +906,6 @@ function ShareableLinksSection(props: {
                             token={token}
                             linkNumber={index + 1}
                             downloadUrl={props.downloadUrl}
-                            copiedCommand={props.copiedCommand}
-                            onCopy={props.onCopy}
                         />
                     ))}
                 </div>
@@ -910,13 +919,11 @@ function ShareableLinkCard(props: {
     token: string;
     linkNumber: number;
     downloadUrl: string;
-    copiedCommand: string | null;
-    onCopy: (text: string, commandType: string) => void;
 }) {
     const shareableUrl = `${props.downloadUrl}?one_time_token=${encodeURIComponent(props.token)}`;
     const wgetCommand = `wget --content-disposition "${shareableUrl}"`;
     const curlCommand = `curl -JO "${shareableUrl}"`;
-    const copyKeyPrefix = `one-time-${props.token}`;
+    const { isCopied, copy } = useCopyFeedback(shareableUrl);
 
     return (
         <article
@@ -940,13 +947,15 @@ function ShareableLinkCard(props: {
                 <IconButton
                     type="button"
                     tooltipClassName="shrink-0"
-                    onClick={() =>
-                        props.onCopy(shareableUrl, `${copyKeyPrefix}-link`)
-                    }
+                    onClick={() => {
+                        void copy();
+                    }}
                     label={`Copy shareable link ${props.linkNumber}`}
-                    className="shrink-0 rounded-md p-2 text-slate-400 transition hover:bg-white/5 hover:text-slate-100"
+                    variant="ghost"
+                    size="md"
+                    className="shrink-0"
                 >
-                    {props.copiedCommand === `${copyKeyPrefix}-link` ? (
+                    {isCopied ? (
                         <Check className="h-4 w-4 text-emerald-400" />
                     ) : (
                         <Copy className="h-4 w-4" />

@@ -1,39 +1,35 @@
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
+import type { ApiClient } from "#ui/api-client";
+import type { ResumeMode } from "#bindings/ResumeMode";
+import { formatSize } from "#ui/utils/path";
 import { useSetAtom } from "jotai";
 import { Copy, FolderInput } from "lucide-react";
-import type { Agent, CopyExistingMode } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
+import type { CopyExistingMode } from "#bindings/CopyExistingMode";
 import { Button } from "#ui/components/button";
 import { Dialog } from "#ui/components/dialog";
 import { DialogActions } from "#ui/components/dialog-actions";
 import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { joinBrowserPath } from "#ui/components/browser/utils";
-import { type SelectedPath, unselectFileAtom } from "#ui/selected-files";
+import {
+    getSelectedFileKey,
+    type SelectedPath,
+    unselectFileAtom,
+} from "#ui/selected-files";
 import { AffectedPathsList } from "#ui/components/browser/affected-paths-list";
-
-/** Shared conflict policies so Copy and Move ask the same destination question. */
-export const existingItemOptions: Array<{
-    value: CopyExistingMode;
-    label: string;
-    description: string;
-}> = [
-    {
-        value: "error",
-        label: "Keep existing",
-        description:
-            "Report a conflict and leave each existing destination unchanged.",
-    },
-    {
-        value: "override",
-        label: "Replace existing",
-        description:
-            "Replace the entire existing file or directory with the source.",
-    },
-    {
-        value: "merge",
-        label: "Merge directories and replace files",
-        description: "Replace conflicts but preserve destination-only entries.",
-    },
-];
+import {
+    canMergeConflicts,
+    type ConflictCandidate,
+    describeDestinationEntries,
+    type ConflictResolution,
+    ExistingItemOptions,
+    getEffectiveResolution,
+    NewNameFields,
+    planRenames,
+    toExistingMode,
+} from "#ui/components/browser/destination-conflict";
+import type { LsEntry } from "#bindings/LsEntry";
 
 /**
  * Operation-specific chrome lives here so Copy keeps its existing accessible
@@ -68,120 +64,161 @@ export type SelectedFilesTransferTriggerApi = {
     labels: typeof transferTriggerCopy;
 };
 
-/** Reuses one Keep / Replace / Merge prompt for listing transfers and the Sync workspace. */
-export function DestinationConflictDialog(props: {
-    isOpen: boolean;
-    title: string;
-    description: string;
-    closeAriaLabel: string;
-    confirmLabel: string;
-    radioGroupName: string;
-    onClose: () => void;
-    onConfirm: (mode: CopyExistingMode) => void;
+/** Offers resuming an interrupted transfer, independently of the conflict choice. */
+function ResumeOptions(props: {
+    candidate: { partial_bytes: number; total_bytes: number };
+    value: ResumeMode;
+    onChange: (value: ResumeMode) => void;
 }) {
-    const [existingMode, setExistingMode] =
-        React.useState<CopyExistingMode>("error");
-
-    // Reset to the safe default whenever the dialog reopens for a new conflict.
-    React.useEffect(() => {
-        if (props.isOpen) {
-            setExistingMode("error");
-        }
-    }, [props.isOpen]);
-
     return (
-        <Dialog
-            isOpen={props.isOpen}
-            title={props.title}
-            description={props.description}
-            closeAriaLabel={props.closeAriaLabel}
-            onClose={props.onClose}
+        <RadioCardGroup
+            legend={`Interrupted transfer: ${formatSize(props.candidate.partial_bytes)} / ${formatSize(props.candidate.total_bytes)}`}
+            className="mt-5"
         >
-            <RadioCardGroup
-                legend="Existing item action"
-                className="mt-5"
-                legendClassName="sr-only"
-            >
-                {existingItemOptions.map((option) => (
-                    <RadioCardOption
-                        key={option.value}
-                        name={props.radioGroupName}
-                        value={option.value}
-                        label={option.label}
-                        description={option.description}
-                        checked={existingMode === option.value}
-                        layout="descriptive"
-                        onChange={() => setExistingMode(option.value)}
-                    />
-                ))}
-            </RadioCardGroup>
-            <DialogActions>
-                <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={props.onClose}
-                    className="rounded-md text-slate-300"
-                >
-                    Cancel
-                </Button>
-                <Button
-                    type="button"
-                    onClick={() => {
-                        props.onClose();
-                        props.onConfirm(existingMode);
-                    }}
-                    className="rounded-md font-semibold"
-                >
-                    {props.confirmLabel}
-                </Button>
-            </DialogActions>
-        </Dialog>
+            <RadioCardOption
+                layout="descriptive"
+                name="transfer-resume"
+                value="auto"
+                label="Resume"
+                description="Verify and continue the partial file."
+                checked={props.value === "auto"}
+                onChange={() => props.onChange("auto")}
+            />
+            <RadioCardOption
+                layout="descriptive"
+                name="transfer-resume"
+                value="restart"
+                label="Start over"
+                description="Discard partial progress and copy from the beginning."
+                checked={props.value === "restart"}
+                onChange={() => props.onChange("restart")}
+            />
+        </RadioCardGroup>
     );
 }
 
 /** Always confirms selected paths and includes a conflict policy when needed. */
 export function SelectedFilesTransferTrigger(props: {
+    api: ApiClient;
     operation: SelectedFilesTransferOperation;
     selectedFiles: SelectedPath[];
     destinationAgent: Agent;
     directoryPath: string;
-    destinationFileNames: string[];
+    /** The destination listing, whose entry types decide whether Merge is offered. */
+    destinationEntries: LsEntry[];
     canTransfer: boolean;
-    onConfirm: (mode: CopyExistingMode) => void;
+    /** Renamed destinations are keyed by `getSelectedFileKey`; others keep their names. */
+    onConfirm: (
+        mode: CopyExistingMode,
+        resume: ResumeMode,
+        destinationNames: ReadonlyMap<string, string>,
+    ) => void;
     children: (trigger: SelectedFilesTransferTriggerApi) => React.ReactNode;
 }) {
     const [isOpen, setIsOpen] = React.useState(false);
-    const [existingMode, setExistingMode] =
-        React.useState<CopyExistingMode>("error");
+
+    const [chosenResolution, setResolution] =
+        React.useState<ConflictResolution>("rename");
+
+    // Only names the user edited are stored; the rest follow the current suggestion.
+    const [editedNames, setEditedNames] = React.useState<
+        Record<string, string>
+    >({});
+
+    const [resumeMode, setResumeMode] = React.useState<ResumeMode>("auto");
+
+    const preflight = useQuery({
+        queryKey: [
+            "copy-preflight",
+            props.destinationAgent.id,
+            props.directoryPath,
+            props.selectedFiles,
+        ],
+        enabled: isOpen,
+        queryFn: async () =>
+            Promise.all(
+                props.selectedFiles.map((file) =>
+                    props.api.copyPreflight({
+                        source: { agent: file.agentId, path: file.path },
+                        dest: {
+                            agent: props.destinationAgent.id,
+                            path: joinBrowserPath(
+                                props.directoryPath,
+                                file.fileName,
+                            ),
+                        },
+                    }),
+                ),
+            ),
+    });
+
+    const candidate = preflight.data?.find(
+        (result) => result.resume_candidate,
+    )?.resume_candidate;
+
     const unselectFile = useSetAtom(unselectFileAtom);
     const copy = props.operation === "copy";
     const labels = copy ? transferTriggerCopy : transferTriggerMove;
-    const destinationFileNames = new Set(props.destinationFileNames);
+
+    const destination = describeDestinationEntries(props.destinationEntries);
+
+    const candidates: ConflictCandidate[] = props.selectedFiles.map((file) => ({
+        key: getSelectedFileKey(file),
+        fileName: file.fileName,
+        entryType: file.entryType,
+    }));
+
     const conflictingFiles = props.selectedFiles.filter((file) => {
         const destinationPath = joinBrowserPath(
             props.directoryPath,
             file.fileName,
         );
+
         const isSamePath =
             file.agentId === props.destinationAgent.id &&
             file.path === destinationPath;
-        return !isSamePath && destinationFileNames.has(file.fileName);
+
+        return !isSamePath && destination.fileNames.has(file.fileName);
+    });
+
+    const conflictingKeys = new Set(
+        conflictingFiles.map((file) => getSelectedFileKey(file)),
+    );
+
+    const conflicts = candidates.filter((candidate) =>
+        conflictingKeys.has(candidate.key),
+    );
+
+    const canMerge = canMergeConflicts(conflicts, destination.directoryNames);
+    const resolution = getEffectiveResolution(chosenResolution, canMerge);
+
+    const renames = planRenames({
+        items: candidates,
+        conflicts,
+        destinationFileNames: destination.fileNames,
+        editedNames,
     });
 
     /** Opens one confirmation surface for both ordinary and conflicting transfers. */
     const handleStart = () => {
-        setExistingMode("error");
+        setResolution("rename");
+        setEditedNames({});
+        setResumeMode("auto");
         setIsOpen(true);
     };
 
     const operationLabel = copy ? "Copy" : "Move";
     const hasConflicts = conflictingFiles.length > 0;
+    const isRenaming = hasConflicts && resolution === "rename";
 
-    React.useEffect(() => {
-        if (isOpen && props.selectedFiles.length === 0) {
-            setIsOpen(false);
-        }
-    }, [isOpen, props.selectedFiles.length]);
+    const hasInvalidName =
+        isRenaming && renames.some((rename) => rename.error !== null);
+
+    // Clearing the selection dismisses the prompt. Resetting the state while rendering, rather
+    // than hiding the dialog, keeps it from reappearing when something is selected again.
+    if (isOpen && props.selectedFiles.length === 0) {
+        setIsOpen(false);
+    }
 
     return (
         <>
@@ -212,25 +249,37 @@ export function SelectedFilesTransferTrigger(props: {
                         unselectFile({ agentId: path.agentId, path: path.path })
                     }
                 />
+                {candidate ? (
+                    <ResumeOptions
+                        candidate={candidate}
+                        value={resumeMode}
+                        onChange={setResumeMode}
+                    />
+                ) : null}
+                {preflight.error ? (
+                    <p role="alert" className="mt-5 text-sm text-amber-300">
+                        Cannot check for an interrupted transfer:{" "}
+                        {preflight.error.message}
+                    </p>
+                ) : null}
                 {hasConflicts ? (
-                    <RadioCardGroup
-                        legend="Existing item action"
-                        className="mt-5"
-                        legendClassName="sr-only"
-                    >
-                        {existingItemOptions.map((option) => (
-                            <RadioCardOption
-                                key={option.value}
-                                name={labels.radioGroupName}
-                                value={option.value}
-                                label={option.label}
-                                description={option.description}
-                                checked={existingMode === option.value}
-                                layout="descriptive"
-                                onChange={() => setExistingMode(option.value)}
-                            />
-                        ))}
-                    </RadioCardGroup>
+                    <ExistingItemOptions
+                        radioGroupName={labels.radioGroupName}
+                        value={resolution}
+                        canMerge={canMerge}
+                        onChange={setResolution}
+                    />
+                ) : null}
+                {isRenaming ? (
+                    <NewNameFields
+                        renames={renames}
+                        onChange={(key, value) =>
+                            setEditedNames((names) => ({
+                                ...names,
+                                [key]: value,
+                            }))
+                        }
+                    />
                 ) : null}
                 <DialogActions>
                     <Button
@@ -243,9 +292,25 @@ export function SelectedFilesTransferTrigger(props: {
                     </Button>
                     <Button
                         type="button"
+                        // A failed check must not block the copy; the server still resumes
+                        // a valid partial because the default mode is auto.
+                        disabled={preflight.isPending || hasInvalidName}
                         onClick={() => {
                             setIsOpen(false);
-                            props.onConfirm(existingMode);
+                            props.onConfirm(
+                                hasConflicts
+                                    ? toExistingMode(resolution)
+                                    : "error",
+                                resumeMode,
+                                new Map(
+                                    isRenaming
+                                        ? renames.map((rename) => [
+                                              rename.key,
+                                              rename.name,
+                                          ])
+                                        : [],
+                                ),
+                            );
                         }}
                         className="rounded-md font-semibold"
                     >

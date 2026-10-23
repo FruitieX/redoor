@@ -4,6 +4,10 @@ import { InputControl } from "#ui/components/input-control";
 /** Keeps form controls visually and accessibly consistent without hiding labels. */
 export function TextField(props: {
     label: string;
+    /** Overrides the accessible name when the visible label is only a short prompt. */
+    ariaLabel?: string;
+    /** Lets a caller place the caret, such as selecting a filename's stem on open. */
+    inputRef?: React.Ref<HTMLInputElement>;
     value: string;
     placeholder: string;
     description: string;
@@ -19,6 +23,7 @@ export function TextField(props: {
 }) {
     const inputId = React.useId();
     const descriptionId = React.useId();
+
     return (
         <div className={props.className}>
             <div className="flex items-baseline justify-between gap-3">
@@ -33,7 +38,9 @@ export function TextField(props: {
                 </span>
             </div>
             <InputControl
+                ref={props.inputRef}
                 id={inputId}
+                aria-label={props.ariaLabel}
                 value={props.value}
                 placeholder={props.placeholder}
                 required={props.required}

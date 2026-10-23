@@ -32,10 +32,12 @@ test.describe.serial("Unarchive file action", () => {
         const currentSource = path.join(ctx.testDirPath, "current-source");
         const subSource = path.join(ctx.testDirPath, "sub-source");
         const isolationSource = path.join(ctx.testDirPath, "isolation-source");
+
         const isolationDirectory = path.join(
             ctx.testDirPath,
             "refresh-isolation",
         );
+
         await fs.mkdir(currentSource);
         await fs.mkdir(subSource);
         await fs.mkdir(isolationSource);
@@ -138,9 +140,12 @@ test.describe.serial("Unarchive file action", () => {
             .getByRole("button", { name: "Unarchive", exact: true })
             .click();
 
-        const firstTerminal = page.getByRole("textbox", {
-            name: `agent1_src 1 for ${ctx.agentName}`,
-        });
+        const firstTerminal = page
+            .getByRole("textbox", {
+                name: `agent1_src 1 for ${ctx.agentName}`,
+            })
+            .filter({ has: page.locator("textarea") });
+
         // WTerm must initialize before the mocked clock releases its sizing frame.
         await expect(firstTerminal).toHaveAttribute(
             "data-terminal-initialized",
@@ -204,25 +209,30 @@ test.describe.serial("Unarchive file action", () => {
         expect(
             new URL(terminalSockets[0]?.url() ?? "").searchParams.get("cwd"),
         ).toBe(ctx.testDirPath);
+
         // Startup input must contain the generated archive-specific command rather than waiting for typing.
         const firstReadyIndex = terminalEvents[0]?.findIndex(
             (event) =>
                 event.direction === "received" &&
                 event.payload.includes('"type":"ready"'),
         );
+
         const firstCommandEvents = terminalEvents[0]?.filter(
             (event) =>
                 event.direction === "sent" &&
                 event.payload.includes("tar -xzf './current sample.tar.gz'"),
         );
+
         // The startup command must be sent once and only after the shell reports readiness.
         expect(firstReadyIndex).toBeGreaterThanOrEqual(0);
         expect(firstCommandEvents).toHaveLength(1);
+
         const firstCommandIndex = terminalEvents[0]?.findIndex(
             (event) =>
                 event.direction === "sent" &&
                 event.payload.includes("tar -xzf './current sample.tar.gz'"),
         );
+
         expect(firstCommandIndex).toBeGreaterThan(firstReadyIndex ?? -1);
 
         await page
@@ -258,6 +268,7 @@ test.describe.serial("Unarchive file action", () => {
         expect(
             new URL(terminalSockets[1]?.url() ?? "").searchParams.get("cwd"),
         ).toBe(ctx.testDirPath);
+
         // The startup command must create and target the suffix-stripped directory.
         const secondCommandEvents = terminalEvents[1]?.filter(
             (event) =>
@@ -266,6 +277,7 @@ test.describe.serial("Unarchive file action", () => {
                     "mkdir -- './sub stuff' && tar -xzf './sub stuff.tgz' -C './sub stuff'",
                 ),
         );
+
         // Each fresh terminal owns exactly one startup extraction command.
         expect(secondCommandEvents).toHaveLength(1);
 
@@ -281,9 +293,11 @@ test.describe.serial("Unarchive file action", () => {
         await customDialog
             .getByRole("radio", { name: /Custom directory/ })
             .check();
+
         const customTarget = customDialog.getByRole("textbox", {
             name: "Target directory name",
         });
+
         // Selecting custom reveals a labeled field rather than an unlabeled path control.
         await expect(customTarget).toBeVisible();
         await customDialog
@@ -327,23 +341,28 @@ test.describe.serial("Unarchive file action", () => {
         expect(
             new URL(terminalSockets[2]?.url() ?? "").searchParams.get("cwd"),
         ).toBe(ctx.testDirPath);
+
         const customReadyIndex = terminalEvents[2]?.findIndex(
             (event) =>
                 event.direction === "received" &&
                 event.payload.includes('"type":"ready"'),
         );
+
         const customCommand =
             "mkdir -- './custom output' && tar -xzf './sub stuff.tgz' -C './custom output'";
+
         const customCommandEvents = terminalEvents[2]?.filter(
             (event) =>
                 event.direction === "sent" &&
                 event.payload.includes(customCommand),
         );
+
         const customCommandIndex = terminalEvents[2]?.findIndex(
             (event) =>
                 event.direction === "sent" &&
                 event.payload.includes(customCommand),
         );
+
         // A fresh custom terminal sends the normalized command exactly once after readiness.
         expect(customReadyIndex).toBeGreaterThanOrEqual(0);
         expect(customCommandEvents).toHaveLength(1);
@@ -389,9 +408,13 @@ test.describe.serial("Unarchive file action", () => {
             .getByRole("dialog", { name: "Unarchive" })
             .getByRole("button", { name: "Unarchive", exact: true })
             .click();
-        const terminal = page.getByRole("textbox", {
-            name: `agent1_src 1 for ${ctx.agentName}`,
-        });
+
+        const terminal = page
+            .getByRole("textbox", {
+                name: `agent1_src 1 for ${ctx.agentName}`,
+            })
+            .filter({ has: page.locator("textarea") });
+
         // The frozen clock must release the renderer's initial sizing frame before connection.
         await expect(terminal).toHaveAttribute(
             "data-terminal-initialized",

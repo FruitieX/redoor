@@ -34,6 +34,7 @@ const archiveSuffixes: ReadonlyArray<{
 function isTerminalSafeFileName(fileName: string): boolean {
     return !Array.from(fileName).some((character) => {
         const codePoint = character.codePointAt(0) ?? 0;
+
         return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
     });
 }
@@ -48,13 +49,17 @@ export function getArchiveInfo(fileName: string): ArchiveInfo | null {
     if (!isTerminalSafeFileName(fileName)) {
         return null;
     }
+
     const lowerName = fileName.toLocaleLowerCase("en-US");
+
     const match = archiveSuffixes.find((entry) =>
         lowerName.endsWith(entry.suffix),
     );
+
     if (!match) {
         return null;
     }
+
     return {
         format: match.format,
         suffix: fileName.slice(fileName.length - match.suffix.length),
@@ -79,24 +84,32 @@ export function getCustomArchiveDirectoryError(value: string): string | null {
     if (!isTerminalSafeFileName(value)) {
         return "Directory name cannot contain terminal control characters";
     }
+
     const name = value.trim();
+
     if (name === "") {
         return "Directory name is required";
     }
+
     if (name === "." || name === "..") {
         return "Directory name must not be . or ..";
     }
+
     if (name.includes("/") || name.includes("\\")) {
         return "Directory name must be a single path component without path separators";
     }
+
     return null;
 }
 
 /** Chooses extraction flags explicitly so compressed tar aliases do not depend on inference. */
 function getTarCommand(format: ArchiveFormat, archive: string): string {
     if (format === "tar-gzip") return `tar -xzf ${archive}`;
+
     if (format === "tar-bzip2") return `tar -xjf ${archive}`;
+
     if (format === "tar-xz") return `tar -xJf ${archive}`;
+
     return `tar -xf ${archive}`;
 }
 
@@ -107,16 +120,22 @@ export function buildUnarchiveCommand(
     customDirectoryName = "",
 ): string | null {
     const archive = getArchiveInfo(fileName);
+
     if (!archive) {
         return null;
     }
+
     const archivePath = quoteLocalPath(fileName);
+
     if (destination === "current") {
         if (archive.format === "zip") return `unzip ${archivePath}`;
+
         if (archive.format.startsWith("tar")) {
             return getTarCommand(archive.format, archivePath);
         }
+
         if (archive.format === "rar") return `unrar x ${archivePath}`;
+
         return `7z x ${archivePath}`;
     }
 
@@ -124,22 +143,36 @@ export function buildUnarchiveCommand(
         destination === "custom"
             ? customDirectoryName.trim()
             : archive.directoryName;
+
     if (
         destination === "custom" &&
         getCustomArchiveDirectoryError(customDirectoryName)
     ) {
         return null;
     }
+
     const destinationPath = quoteLocalPath(directoryName);
     const mkdir = `mkdir -- ${destinationPath}`;
+
     if (archive.format === "zip") {
         return `${mkdir} && unzip ${archivePath} -d ${destinationPath}`;
     }
+
     if (archive.format.startsWith("tar")) {
         return `${mkdir} && ${getTarCommand(archive.format, archivePath)} -C ${destinationPath}`;
     }
+
     if (archive.format === "rar") {
         return `${mkdir} && unrar x ${archivePath} ${quoteLocalPath(directoryName, true)}`;
     }
+
     return `${mkdir} && 7z x ${archivePath} ${quoteShellArgument(`-o./${directoryName}`)}`;
+}
+
+/**
+ * Names the tarball a directory downloads as. The filesystem root has no name of its own, so
+ * it becomes "archive" instead of an unnamed ".tar.gz".
+ */
+export function getDirectoryArchiveName(directoryName: string): string {
+    return `${directoryName === "/" ? "archive" : directoryName}.tar.gz`;
 }

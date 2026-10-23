@@ -3,6 +3,7 @@
 import React from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
 import { Dialog } from "./dialog";
 
 afterEach(() => {
@@ -19,8 +20,10 @@ function AnchoredDialog(props: {
     anchorRight: number;
 }) {
     const anchorRef = React.useRef<HTMLButtonElement>(null);
+
     const setAnchor = (element: HTMLButtonElement | null) => {
         anchorRef.current = element;
+
         if (element) {
             element.getBoundingClientRect = () => ({
                 top: props.anchorTop,
@@ -64,19 +67,24 @@ function renderAnchoredDialog(anchor: {
     vi.stubGlobal("innerWidth", 1_000);
     vi.stubGlobal("innerHeight", 800);
     render(
-        <AnchoredDialog
-            anchorTop={anchor.top}
-            anchorBottom={anchor.bottom}
-            anchorLeft={anchor.left ?? 400}
-            anchorRight={anchor.right ?? 440}
-        />,
+        <ShortcutRegistryContext value={new ShortcutRegistry(window)}>
+            <AnchoredDialog
+                anchorTop={anchor.top}
+                anchorBottom={anchor.bottom}
+                anchorLeft={anchor.left ?? 400}
+                anchorRight={anchor.right ?? 440}
+            />
+        </ShortcutRegistryContext>,
     );
+
     const panel = screen.getByRole("dialog", {
         name: "Options",
     }).firstElementChild;
+
     if (!(panel instanceof HTMLElement)) {
         throw new Error("Expected the dialog panel to render");
     }
+
     return panel;
 }
 

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "#ui/components/button";
 import { Password } from "#ui/components/password";
 import { TextField } from "#ui/components/text-field";
+import { getErrorMessage } from "#ui/utils/error";
 
 const loginSearchSchema = z.object({
     redirect: z.string().optional(),
@@ -21,6 +22,7 @@ function safeRedirectPath(value: string | undefined): string {
     if (!value || !value.startsWith("/") || value.startsWith("//")) {
         return "/";
     }
+
     return value;
 }
 
@@ -29,11 +31,14 @@ function messageFromLocationHash(): string | null {
     const raw = window.location.hash.startsWith("#")
         ? window.location.hash.slice(1)
         : window.location.hash;
+
     if (!raw) {
         return null;
     }
+
     const params = new URLSearchParams(raw);
     const message = params.get("message")?.trim();
+
     return message ? message : null;
 }
 
@@ -43,9 +48,11 @@ function LoginPage() {
     const search = Route.useSearch();
     const [username, setUsername] = React.useState("");
     const [password, setPassword] = React.useState("");
-    const [firstRunMessage, setFirstRunMessage] = React.useState<string | null>(
-        null,
-    );
+
+    // The hint lives in the URL fragment, which the router does not parse and which never
+    // changes on this page, so reading it once on mount is enough.
+    const [firstRunMessage] = React.useState(messageFromLocationHash);
+
     const loginMutation = useMutation({
         mutationFn: (credentials: { username: string; password: string }) =>
             api.login(credentials.username, credentials.password),
@@ -57,10 +64,6 @@ function LoginPage() {
         },
     });
 
-    React.useEffect(() => {
-        setFirstRunMessage(messageFromLocationHash());
-    }, []);
-
     /** Keeps the password out of URLs and clears it immediately after either outcome. */
     const submit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -68,14 +71,13 @@ function LoginPage() {
     };
 
     const error = loginMutation.isError
-        ? loginMutation.error instanceof Error
-            ? loginMutation.error.message
-            : "Login failed"
+        ? getErrorMessage(loginMutation.error, "Login failed")
         : null;
+
     const isSubmitting = loginMutation.isPending;
 
     return (
-        <main className="flex min-h-screen items-center justify-center bg-[#0b0d12] p-6">
+        <main className="flex min-h-screen items-center justify-center bg-canvas p-6">
             <div className="flex w-full max-w-sm flex-col gap-4">
                 {firstRunMessage ? (
                     <div
@@ -91,7 +93,7 @@ function LoginPage() {
                         </p>
                     </div>
                 ) : null}
-                <div className="w-full rounded-xl border border-slate-800 bg-[#11141b] p-8 shadow-2xl">
+                <div className="w-full rounded-xl border border-slate-800 bg-surface p-8 shadow-2xl">
                     <div className="mb-8 flex items-center justify-center gap-3">
                         <span
                             className="relative h-9 w-9 shrink-0"

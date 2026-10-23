@@ -3,7 +3,8 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { Agent, ApiError } from "#ui/api-client";
+import { Agent } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
 import {
     ProcessManager,
     TempFileManager,
@@ -24,11 +25,13 @@ describe("Chmod Path API", () => {
 
     beforeAll(async () => {
         agentCwd = tempFiles.tempDirectory({ suffix: "-agent-cwd" });
+
         const setup = await startServerAndAgent({
             processManager,
             agentName: AGENT_NAME,
             agentCwd,
         });
+
         testAgent = setup.testAgent;
     }, 30000);
 
@@ -134,17 +137,22 @@ describe("Chmod Path API", () => {
         if (testAgent.isRoot) {
             return;
         }
+
         const uid = process.getuid?.();
+
         if (uid === undefined) {
             return;
         }
+
         const foreignPath = "/etc/hosts";
         let stats: fs.Stats;
+
         try {
             stats = fs.statSync(foreignPath);
         } catch {
             return;
         }
+
         if (stats.uid === uid) {
             return;
         }

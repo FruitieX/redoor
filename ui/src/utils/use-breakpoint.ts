@@ -7,6 +7,7 @@ function belowBreakpointQuery(breakpoint: TailwindBreakpoint): string {
     const value = getComputedStyle(document.documentElement)
         .getPropertyValue(`--breakpoint-${breakpoint}`)
         .trim();
+
     return `(width < ${value})`;
 }
 
@@ -18,11 +19,14 @@ export function useIsBelowBreakpoint(breakpoint: TailwindBreakpoint): boolean {
 
     React.useEffect(() => {
         const media = window.matchMedia(belowBreakpointQuery(breakpoint));
+
         const update = () => {
             setIsBelow(media.matches);
         };
+
         update();
         media.addEventListener("change", update);
+
         return () => media.removeEventListener("change", update);
     }, [breakpoint]);
 

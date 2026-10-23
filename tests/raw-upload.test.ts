@@ -8,7 +8,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { ApiClient, Agent } from "#ui/api-client";
-import type { TransferProgressEntry } from "#ui/api-client";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import path from "node:path";
 import fs from "node:fs";
 
@@ -75,9 +75,11 @@ describe("Raw Upload API", () => {
     it("should apply explicit numeric ownership to a new upload", async () => {
         const uid = process.getuid?.();
         const gid = process.getgid?.();
+
         if (uid === undefined || gid === undefined) {
             throw new Error("Unix ownership APIs are required for this test");
         }
+
         const uploadedFilePath = tempFiles.tempFile({ suffix: "-owned.txt" });
 
         await testAgent.upload(
@@ -96,6 +98,7 @@ describe("Raw Upload API", () => {
         const parentPath = tempFiles.tempDirectory({
             suffix: "-upload-inherit",
         });
+
         const uploadedFilePath = path.join(parentPath, "inherited.txt");
         const parentStats = fs.statSync(parentPath);
 
@@ -148,6 +151,7 @@ describe("Raw Upload API", () => {
     it("should replace existing file contents on upload", async () => {
         const originalContent = "old content";
         const replacementContent = "new content from upload";
+
         const uploadedFilePath = tempFiles.create(originalContent, {
             suffix: ".txt",
         });
@@ -156,7 +160,9 @@ describe("Raw Upload API", () => {
             type: "text/plain",
         });
 
-        await testAgent.upload(uploadedFilePath, uploadFile);
+        await testAgent.upload(uploadedFilePath, uploadFile, {
+            on_existing: "override",
+        });
 
         const downloadedContent = Buffer.from(
             await testAgent.raw(uploadedFilePath),
@@ -166,16 +172,60 @@ describe("Raw Upload API", () => {
         expect(downloadedContent).toBe(replacementContent);
     });
 
+    it("should preserve an existing file when no conflict policy is given", async () => {
+        const uploadedFilePath = tempFiles.create("original content", {
+            suffix: ".txt",
+        });
+
+        await expect(
+            testAgent.upload(
+                uploadedFilePath,
+                new File(["replacement content"], "replacement.txt"),
+            ),
+        ).rejects.toThrow("already exists");
+
+        // Replacing must be an explicit choice, so a plain upload leaves the bytes untouched.
+        expect(fs.readFileSync(uploadedFilePath, "utf8")).toBe(
+            "original content",
+        );
+    });
+
+    it("should replace a file but refuse a directory when merging", async () => {
+        const directory = tempFiles.tempDirectory({ suffix: "-merge-upload" });
+        const filePath = path.join(directory, "file.txt");
+        const directoryPath = path.join(directory, "folder");
+        fs.writeFileSync(filePath, "old");
+        fs.mkdirSync(directoryPath);
+
+        await testAgent.upload(filePath, new File(["new"], "file.txt"), {
+            on_existing: "merge",
+        });
+
+        // The UI merges uploaded directories file by file, so a file must replace a file.
+        expect(fs.readFileSync(filePath, "utf8")).toBe("new");
+
+        await expect(
+            testAgent.upload(directoryPath, new File(["new"], "folder"), {
+                on_existing: "merge",
+            }),
+        ).rejects.toThrow();
+
+        // Merging must never turn an existing directory into a file.
+        expect(fs.statSync(directoryPath).isDirectory()).toBe(true);
+    });
+
     it("should preserve existing permissions when replacing a file", async () => {
         const uploadedFilePath = tempFiles.create("old executable", {
             suffix: ".bin",
         });
+
         fs.chmodSync(uploadedFilePath, 0o751);
         onTestFinished(() => fs.chmodSync(uploadedFilePath, 0o600));
 
         await testAgent.upload(
             uploadedFilePath,
             new File(["new executable"], "replacement.bin"),
+            { on_existing: "override" },
         );
 
         // Replacement must update bytes while preserving the destination inode's prior role.
@@ -200,7 +250,11 @@ describe("Raw Upload API", () => {
             new File(["control"], "control.txt"),
         );
         const newFileMode = fs.statSync(controlPath).mode & 0o777;
-        await testAgent.upload(linkPath, new File(["replacement"], "link.txt"));
+        await testAgent.upload(
+            linkPath,
+            new File(["replacement"], "link.txt"),
+            { on_existing: "override" },
+        );
 
         // Upload publication must replace the symlink entry with a regular file.
         expect(fs.lstatSync(linkPath).isFile()).toBe(true);
@@ -216,11 +270,16 @@ describe("Raw Upload API", () => {
         const directory = tempFiles.tempDirectory({
             suffix: "-dangling-symlink",
         });
+
         const missingTarget = path.join(directory, "missing.txt");
         const linkPath = path.join(directory, "link.txt");
         fs.symlinkSync("missing.txt", linkPath);
 
-        await testAgent.upload(linkPath, new File(["replacement"], "link.txt"));
+        await testAgent.upload(
+            linkPath,
+            new File(["replacement"], "link.txt"),
+            { on_existing: "override" },
+        );
 
         // A dangling link entry must become the uploaded regular file.
         expect(fs.lstatSync(linkPath).isFile()).toBe(true);
@@ -234,6 +293,7 @@ describe("Raw Upload API", () => {
         const directory = tempFiles.tempDirectory({
             suffix: "-inaccessible-symlink",
         });
+
         const targetDirectory = path.join(directory, "private");
         const targetPath = path.join(targetDirectory, "target.txt");
         const linkPath = path.join(directory, "link.txt");
@@ -250,7 +310,11 @@ describe("Raw Upload API", () => {
         fs.chmodSync(targetDirectory, 0o000);
         onTestFinished(() => fs.chmodSync(targetDirectory, 0o700));
 
-        await testAgent.upload(linkPath, new File(["replacement"], "link.txt"));
+        await testAgent.upload(
+            linkPath,
+            new File(["replacement"], "link.txt"),
+            { on_existing: "override" },
+        );
         fs.chmodSync(targetDirectory, 0o700);
 
         // Publication must require access only to the selected link entry and its parent.
@@ -275,6 +339,7 @@ describe("Raw Upload API", () => {
         await testAgent.upload(
             selectedPath,
             new File(["selected new"], "selected.txt"),
+            { on_existing: "override" },
         );
         const selectedAfter = fs.statSync(selectedPath, { bigint: true });
         const peerAfter = fs.statSync(peerPath, { bigint: true });
@@ -319,6 +384,7 @@ describe("Raw Upload API", () => {
         const uploadedFilePath = tempFiles.tempFile({ suffix: ".txt" });
 
         let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+
         const uploadBody = new ReadableStream<Uint8Array>({
             start(streamController) {
                 controller = streamController;
@@ -336,6 +402,7 @@ describe("Raw Upload API", () => {
             body: uploadBody,
             duplex: "half",
         };
+
         const uploadPromise = fetch(
             testAgent.getRawUrl(uploadedFilePath),
             uploadOptions,
@@ -345,6 +412,7 @@ describe("Raw Upload API", () => {
             description: "active upload progress row",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -384,6 +452,7 @@ describe("Raw Upload API", () => {
             description: "completed upload progress row",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -416,6 +485,7 @@ describe("Raw Upload API", () => {
         const totalBytes = firstChunk.length * 2;
         const uploadedFilePath = tempFiles.tempFile({ suffix: ".bin" });
         const controller = new AbortController();
+
         let streamController:
             ReadableStreamDefaultController<Uint8Array> | undefined;
 
@@ -437,6 +507,7 @@ describe("Raw Upload API", () => {
             duplex: "half",
             signal: controller.signal,
         };
+
         const uploadPromise = fetch(
             testAgent.getRawUrl(uploadedFilePath),
             uploadOptions,
@@ -446,6 +517,7 @@ describe("Raw Upload API", () => {
             description: "active upload progress row before client abort",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -472,6 +544,7 @@ describe("Raw Upload API", () => {
             description: "errored upload progress row after client abort",
             predicate: async () => {
                 const response = await apiClient.getTransferProgress();
+
                 return response.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -537,7 +610,6 @@ describe("Raw Upload API", () => {
                 connection_issue: null,
                 provisioning_status: [],
                 binary: null,
-                supports_self_exec: false,
                 supports_native_open: false,
                 supports_move_to_trash: false,
                 supports_trash: false,
@@ -549,6 +621,7 @@ describe("Raw Upload API", () => {
                     apiClient.getAuthHeaders().Cookie ?? null,
             },
         );
+
         const uploadFile = new File(["content"], "content.txt", {
             type: "text/plain",
         });
@@ -565,6 +638,7 @@ describe("Raw Upload API", () => {
             "..",
             `blocked-dir-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         );
+
         fs.mkdirSync(protectedDir, 0o555);
 
         onTestFinished(() => {
@@ -573,6 +647,7 @@ describe("Raw Upload API", () => {
         });
 
         const uploadedFilePath = path.join(protectedDir, "blocked.txt");
+
         const uploadFile = new File(["secret"], "blocked.txt", {
             type: "text/plain",
         });

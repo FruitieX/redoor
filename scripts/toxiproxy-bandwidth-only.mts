@@ -23,15 +23,21 @@ const positiveIntegerSchema = z.coerce.number().int().positive();
 const apiBaseUrl = (
     process.env.TOXIPROXY_API_URL ?? "http://127.0.0.1:8474"
 ).replace(/\/$/, "");
+
 const proxyName = process.env.PROXY_NAME ?? "slow";
+
 const listenAddress = process.env.LISTEN_ADDR ?? "127.0.0.1:3001";
+
 const upstreamAddress = process.env.UPSTREAM_ADDR ?? "127.0.0.1:7666";
+
 const downstreamRateKbps = positiveIntegerSchema.parse(
     process.env.DOWNSTREAM_RATE_KBPS ?? "500",
 );
+
 const upstreamRateKbps = positiveIntegerSchema.parse(
     process.env.UPSTREAM_RATE_KBPS ?? "500",
 );
+
 const proxyPath = `/proxies/${encodeURIComponent(proxyName)}`;
 
 /**
@@ -43,9 +49,11 @@ async function requestJson<TSchema extends z.ZodType>(
     init?: RequestInit,
 ): Promise<z.output<TSchema>> {
     const headers = new Headers(init?.headers);
+
     if (!headers.has("content-type")) {
         headers.set("content-type", "application/json");
     }
+
     const response = await fetch(`${apiBaseUrl}${path}`, {
         ...init,
         headers,
@@ -99,6 +107,7 @@ async function addBandwidthToxic(
 }
 
 await deleteProxyIfPresent();
+
 await requestJson("/proxies", proxySchema, {
     method: "POST",
     body: JSON.stringify({
@@ -108,11 +117,15 @@ await requestJson("/proxies", proxySchema, {
         enabled: true,
     }),
 });
+
 await addBandwidthToxic("downstream", downstreamRateKbps);
+
 await addBandwidthToxic("upstream", upstreamRateKbps);
 
 const proxy = await requestJson(proxyPath, proxySchema);
+
 console.log(JSON.stringify(proxy, null, 2));
+
 console.log(
     `Recreated proxy '${proxyName}' with downstream bandwidth limit ${downstreamRateKbps}KB/s and upstream bandwidth limit ${upstreamRateKbps}KB/s from ${listenAddress} to ${upstreamAddress}`,
 );

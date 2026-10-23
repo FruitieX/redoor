@@ -20,39 +20,47 @@ import { InputControl } from "#ui/components/input-control";
 import { IconButton } from "#ui/components/icon-button";
 import { Tooltip } from "#ui/components/tooltip";
 import { SearchButton } from "#ui/components/search-button";
-import {
-    getBrowserPathHref,
-    type PathLoadError,
-} from "#ui/components/browser/utils";
-import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
+import type { PathLoadError } from "#ui/components/browser/utils";
+import { browserRoute } from "#ui/browser-route";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { isPlainKey } from "#ui/utils/keyboard";
+import { expandHomePath } from "#ui/utils/path";
+
+/** Names the representations of a path that the view tabs switch between. */
+export type BrowserView = "files" | "details" | "view" | "sync" | "git";
 
 /** Keeps location, navigation, view state, and object actions in a stable frame. */
-export function BrowserPageHeader(props: {
+function BrowserPageHeader(props: {
     agent: Agent;
-    agentId: string;
     path: string;
     startEditingPath?: boolean;
     navigation: React.ReactNode;
     viewToggle: React.ReactNode;
 }) {
     return (
-        <header className="mb-4">
+        <header>
             <div className="mb-3 min-w-0 overflow-x-auto overscroll-x-contain">
                 <div className="flex w-max min-w-full items-center gap-3">
-                    <Tooltip content="Open agent home directory">
+                    <Tooltip content="Open device home directory">
                         <Link
-                            to={props.agent.getBrowserUrl(
+                            {...browserRoute(
+                                props.agent.id,
                                 props.agent.cwd ?? "/",
                             )}
-                            aria-label="Agent home"
-                            className="inline-flex shrink-0 items-center rounded-md p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                            aria-label="Device home"
+                            className="inline-flex shrink-0 items-center rounded-md p-1.5 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
                         >
                             <Home className="h-4 w-4" aria-hidden="true" />
                         </Link>
                     </Tooltip>
-                    <SearchButton className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 [&_svg]:h-4 [&_svg]:w-4" />
+                    <SearchButton
+                        size="sm"
+                        className="shrink-0 [&_svg]:h-4 [&_svg]:w-4"
+                    />
                     {props.navigation}
                     <Breadcrumbs
+                        // A new location resets the path editor, so it starts closed (or open for a path that needs correcting).
+                        key={`${props.path}:${props.startEditingPath === true}`}
                         agent={props.agent}
                         path={props.path}
                         startEditing={props.startEditingPath}
@@ -60,7 +68,7 @@ export function BrowserPageHeader(props: {
                 </div>
             </div>
             {props.viewToggle ? (
-                <div className="mb-3 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800">
+                <div className="-mx-2 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800 px-2 lg:-mx-4 lg:px-4">
                     {props.viewToggle}
                 </div>
             ) : null}
@@ -73,84 +81,61 @@ export function ViewToggle(props: {
     agent: Agent;
     path: string;
     entryType: "directory" | "file";
-    activeView: "files" | "details" | "view" | "sync" | "git";
+    activeView: BrowserView;
     /** Names the content tab Edit only after the agent marks the file writable. */
     editable?: boolean;
     gitAvailable: boolean;
 }) {
-    const pathTarget = getBrowserPathHref(props.agent, props.path);
-    if (props.entryType === "directory") {
-        return (
-            <ViewSwitch label="Directory view" variant="page">
-                <ViewToggleLink
-                    to={pathTarget}
-                    label="Files"
-                    icon={<Files className="h-4 w-4" aria-hidden="true" />}
-                    active={props.activeView === "files"}
-                />
-                <ViewToggleLink
-                    to={pathTarget}
-                    search={{ view: "details" }}
-                    label="Details"
-                    icon={<Info className="h-4 w-4" aria-hidden="true" />}
-                    active={props.activeView === "details"}
-                />
-                <ViewToggleLink
-                    to={pathTarget}
-                    search={{ view: "sync" }}
-                    label="Sync"
-                    icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
-                    active={props.activeView === "sync"}
-                />
-                {props.gitAvailable ? (
-                    <ViewToggleLink
-                        to={pathTarget}
-                        search={{ view: "git" }}
-                        label="Git"
-                        icon={
-                            <GitBranch className="h-4 w-4" aria-hidden="true" />
-                        }
-                        active={props.activeView === "git"}
-                    />
-                ) : null}
-            </ViewSwitch>
-        );
-    }
+    const isDirectory = props.entryType === "directory";
 
-    const contentLabel = props.editable === true ? "Edit" : "View";
-    const contentIcon =
-        props.editable === true ? (
-            <Pencil className="h-4 w-4" aria-hidden="true" />
-        ) : (
-            <File className="h-4 w-4" aria-hidden="true" />
-        );
+    // A directory's default tab is its listing; a file's is its content, named by what it allows.
+    const contentLabel = isDirectory
+        ? "Files"
+        : props.editable === true
+          ? "Edit"
+          : "View";
+
+    const contentIcon = isDirectory ? (
+        <Files className="h-4 w-4" aria-hidden="true" />
+    ) : props.editable === true ? (
+        <Pencil className="h-4 w-4" aria-hidden="true" />
+    ) : (
+        <File className="h-4 w-4" aria-hidden="true" />
+    );
 
     return (
-        <ViewSwitch label="File view" variant="page">
+        <ViewSwitch
+            label={isDirectory ? "Directory view" : "File view"}
+            variant="page"
+        >
             <ViewToggleLink
-                to={pathTarget}
+                agentId={props.agent.id}
+                path={props.path}
                 label={contentLabel}
                 icon={contentIcon}
-                active={props.activeView === "view"}
+                active={props.activeView === (isDirectory ? "files" : "view")}
             />
             <ViewToggleLink
-                to={pathTarget}
-                search={{ view: "details" }}
+                agentId={props.agent.id}
+                path={props.path}
+                view="details"
                 label="Details"
                 icon={<Info className="h-4 w-4" aria-hidden="true" />}
                 active={props.activeView === "details"}
             />
             <ViewToggleLink
-                to={pathTarget}
-                search={{ view: "sync" }}
+                agentId={props.agent.id}
+                path={props.path}
+                view="sync"
                 label="Sync"
                 icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
                 active={props.activeView === "sync"}
             />
             {props.gitAvailable ? (
                 <ViewToggleLink
-                    to={pathTarget}
-                    search={{ view: "git" }}
+                    agentId={props.agent.id}
+                    path={props.path}
+                    view="git"
                     label="Git"
                     icon={<GitBranch className="h-4 w-4" aria-hidden="true" />}
                     active={props.activeView === "git"}
@@ -162,16 +147,18 @@ export function ViewToggle(props: {
 
 /** Applies current-page semantics to a filesystem representation link. */
 function ViewToggleLink(props: {
-    to: string;
-    search?: Record<string, string>;
+    agentId: string;
+    path: string;
+    /** Leaves the default representation, the listing or content, when omitted. */
+    view?: "details" | "sync" | "git";
     label: string;
     icon: React.ReactNode;
     active: boolean;
 }) {
     return (
         <Link
-            to={props.to}
-            search={props.search ?? {}}
+            {...browserRoute(props.agentId, props.path)}
+            search={{ view: props.view }}
             aria-current={props.active ? "page" : undefined}
             className={getPageViewTabClass(props.active)}
         >
@@ -192,6 +179,7 @@ export function ViewSwitch(props: {
         props.variant === "page"
             ? "top-tab-strip flex w-full min-w-0 items-stretch gap-0 overflow-x-auto overscroll-x-contain"
             : "top-tab-strip flex w-full min-w-0 items-end gap-1 overflow-x-auto overscroll-x-contain";
+
     return (
         <div aria-label={props.label} className={stripClass}>
             {props.children}
@@ -203,15 +191,17 @@ export function ViewSwitch(props: {
 export function getViewSwitchItemClass(isActive: boolean) {
     const baseClass =
         "inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-t-lg border border-b-0 px-4 py-2 text-sm font-medium transition-colors";
+
     return isActive
-        ? `${baseClass} border-slate-700 bg-[#161a23] text-slate-100 shadow-[0_-2px_0_0_rgb(59,130,246)_inset] [&_svg]:text-blue-400`
-        : `${baseClass} border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-100`;
+        ? `${baseClass} border-slate-700 bg-surface-active text-slate-100 shadow-[0_-2px_0_0_rgb(59,130,246)_inset] [&_svg]:text-blue-400`
+        : `${baseClass} border-transparent text-slate-400 hover:bg-tint hover:text-slate-100`;
 }
 
 /** Uses an underline so file and directory views read as in-page switches, not a second top bar. */
 function getPageViewTabClass(isActive: boolean) {
     const baseClass =
         "inline-flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-3 py-1.5 text-sm font-medium transition-colors";
+
     return isActive
         ? `${baseClass} border-blue-500 text-slate-100 [&_svg]:text-blue-400`
         : `${baseClass} border-transparent text-slate-400 hover:border-slate-600 hover:text-slate-100`;
@@ -220,11 +210,10 @@ function getPageViewTabClass(isActive: boolean) {
 /** Separates location context, navigation, and directory actions by purpose. */
 export function BrowserHeader(props: {
     agent: Agent;
-    agentId: string;
     path: string;
     parentPath: string | null;
     entryType: "directory" | "file";
-    activeView: "files" | "details" | "view" | "sync" | "git";
+    activeView: BrowserView;
     /** Forwards the content-tab label so file chrome matches the editable gate. */
     editable?: boolean;
     gitAvailable: boolean;
@@ -234,44 +223,40 @@ export function BrowserHeader(props: {
     const navigate = useNavigate();
     const pathUnavailable = props.pathUnavailable === true;
 
-    React.useEffect(() => {
-        /** Returns alternate directory views to the list before moving to the parent. */
-        const handleBackspace = (event: KeyboardEvent) => {
-            if (
-                event.key !== "Backspace" ||
-                shouldIgnoreKeyboardShortcut(event)
-            ) {
-                return;
-            }
+    /** Returns alternate directory views to the list before moving to the parent. */
+    const goUp = () => {
+        if (
+            props.entryType === "directory" &&
+            props.activeView !== "files" &&
+            !pathUnavailable
+        ) {
+            void navigate({
+                ...browserRoute(props.agent.id, props.path),
+                search: {},
+            });
 
-            if (
-                props.entryType === "directory" &&
-                props.activeView !== "files" &&
-                !pathUnavailable
-            ) {
-                event.preventDefault();
-                void navigate({
-                    to: props.agent.getBrowserUrl(props.path),
-                    search: {},
-                });
-                return;
-            }
-            if (props.parentPath === null) {
-                return;
-            }
+            return;
+        }
 
-            event.preventDefault();
-            void navigate({ to: props.agent.getBrowserUrl(props.parentPath) });
-        };
+        if (props.parentPath === null) {
+            return false;
+        }
 
-        window.addEventListener("keydown", handleBackspace);
-        return () => window.removeEventListener("keydown", handleBackspace);
-    }, [navigate, pathUnavailable, props]);
+        void navigate(browserRoute(props.agent.id, props.parentPath));
+    };
+
+    useShortcut({
+        name: "browser-go-up",
+        phase: "bubble",
+        priority: shortcutPriority.view,
+        skipTypingTargets: true,
+        match: (event) => isPlainKey(event, "Backspace", { allowShift: true }),
+        run: goUp,
+    });
 
     return (
         <BrowserPageHeader
             agent={props.agent}
-            agentId={props.agentId}
             path={props.path}
             startEditingPath={
                 pathUnavailable && props.startEditingPath !== false
@@ -280,16 +265,12 @@ export function BrowserHeader(props: {
                 <>
                     <Tooltip content="Go to the parent directory (Backspace)">
                         <Link
-                            to={
-                                props.parentPath
-                                    ? getBrowserPathHref(
-                                          props.agent,
-                                          props.parentPath,
-                                      )
-                                    : props.agent.getBrowserUrl("/")
-                            }
+                            {...browserRoute(
+                                props.agent.id,
+                                props.parentPath ?? "/",
+                            )}
                             aria-label="Go to the parent directory"
-                            className="inline-flex items-center rounded-md p-2 text-slate-200 transition-colors hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent"
+                            className="inline-flex items-center rounded-md p-2 text-slate-200 transition-colors hover:bg-tint hover:text-slate-100 disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent"
                             disabled={props.parentPath === null}
                         >
                             <ArrowUp className="h-4 w-4" aria-hidden="true" />
@@ -324,6 +305,7 @@ export function UnavailablePathState(props: {
         props.error.type === "missing"
             ? "File or directory not found"
             : "Could not read file or directory";
+
     return (
         <section
             role="status"
@@ -362,8 +344,8 @@ export function UnavailablePathState(props: {
                 </Button>
                 {props.parentPath ? (
                     <Link
-                        to={getBrowserPathHref(props.agent, props.parentPath)}
-                        className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-white/5"
+                        {...browserRoute(props.agent.id, props.parentPath)}
+                        className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-tint"
                     >
                         <ArrowUp className="h-4 w-4" aria-hidden="true" />
                         Open parent directory
@@ -383,9 +365,11 @@ function Breadcrumbs(props: {
 }) {
     const navigate = useNavigate();
     const pathInputRef = React.useRef<HTMLInputElement>(null);
+
     const [isEditing, setIsEditing] = React.useState(
         props.startEditing === true,
     );
+
     const [editedPath, setEditedPath] = React.useState(props.path);
     const { isCopied, copy } = useCopyFeedback(props.path);
 
@@ -393,21 +377,12 @@ function Breadcrumbs(props: {
     const isAtRoot = parts.length === 0;
     let accumulatedPath = "";
 
-    // Keep the editor aligned with route changes, including missing-path landings.
-    React.useEffect(() => {
-        setEditedPath(props.path);
-        if (props.startEditing) {
-            setIsEditing(true);
-        } else {
-            setIsEditing(false);
-        }
-    }, [props.path, props.startEditing]);
-
     // Focus after paint so keyboard correction works immediately on missing paths.
     React.useEffect(() => {
         if (!isEditing) {
             return;
         }
+
         pathInputRef.current?.focus();
         pathInputRef.current?.select();
     }, [isEditing, props.path]);
@@ -418,26 +393,29 @@ function Breadcrumbs(props: {
         setIsEditing(true);
     };
 
-    /** Navigates to the entered path, treating an empty or relative value helpfully. */
+    /** Resolves the agent's home shorthand before navigating to an entered path. */
     const navigateToEditedPath = async (
         event: React.FormEvent<HTMLFormElement>,
     ) => {
         event.preventDefault();
+
+        const expandedPath = expandHomePath(props.agent.cwd, editedPath);
+
         const targetPath =
-            editedPath === ""
+            expandedPath === ""
                 ? "/"
-                : editedPath.startsWith("/")
-                  ? editedPath
-                  : `/${editedPath}`;
+                : expandedPath.startsWith("/")
+                  ? expandedPath
+                  : `/${expandedPath}`;
 
         setIsEditing(false);
+
         if (targetPath === props.path) {
             return;
         }
+
         // Destination route decides whether the editor stays open (missing path).
-        await navigate({
-            to: props.agent.getBrowserUrl(targetPath),
-        });
+        await navigate(browserRoute(props.agent.id, targetPath));
     };
 
     return (
@@ -463,7 +441,9 @@ function Breadcrumbs(props: {
                     <IconButton
                         type="submit"
                         label="Navigate to path"
-                        className="shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100"
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0"
                     >
                         <Check className="h-4 w-4" />
                     </IconButton>
@@ -480,7 +460,7 @@ function Breadcrumbs(props: {
                             </span>
                         ) : (
                             <Link
-                                to={props.agent.getBrowserUrl("/")}
+                                {...browserRoute(props.agent.id, "/")}
                                 className="-my-1 shrink-0 rounded px-1.5 py-1 text-blue-400 hover:underline"
                             >
                                 /
@@ -506,7 +486,8 @@ function Breadcrumbs(props: {
                                         </span>
                                     ) : (
                                         <Link
-                                            to={props.agent.getBrowserUrl(
+                                            {...browserRoute(
+                                                props.agent.id,
                                                 accumulatedPath,
                                             )}
                                             className={`whitespace-nowrap font-medium text-blue-400 hover:underline ${part.length < 3 ? "-my-1 rounded px-1.5 py-1" : ""}`}
@@ -525,10 +506,12 @@ function Breadcrumbs(props: {
                         }}
                         label={isCopied ? "Copied!" : "Copy file path"}
                         tooltip="Copy file path"
+                        variant="ghost"
+                        size="sm"
                         className={
                             isCopied
-                                ? "shrink-0 rounded-md p-1.5 text-emerald-300"
-                                : "shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-100"
+                                ? "shrink-0 text-emerald-300 hover:bg-transparent hover:text-emerald-300"
+                                : "shrink-0 text-slate-500"
                         }
                     >
                         {isCopied ? (
@@ -541,7 +524,9 @@ function Breadcrumbs(props: {
                         type="button"
                         onClick={startEditing}
                         label="Edit file path"
-                        className="shrink-0 rounded-md p-1.5 text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-100"
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0 text-slate-500"
                     >
                         <Pencil className="h-3.5 w-3.5" />
                     </IconButton>

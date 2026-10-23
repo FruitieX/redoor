@@ -11,10 +11,15 @@ import {
 import type { Agent, ApiClient } from "#ui/api-client";
 
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
+
 const defaultDirectory = tempFiles.tempDirectory({ suffix: "-default" });
+
 const outsideDirectory = tempFiles.tempDirectory({ suffix: "-outside" });
+
 let agent: Agent;
+
 let api: ApiClient;
 
 beforeAll(async () => {
@@ -23,6 +28,7 @@ beforeAll(async () => {
         agentName: "absolute-path-agent",
         agentCwd: defaultDirectory,
     });
+
     agent = started.testAgent;
     api = started.apiClient;
 }, 30_000);
@@ -107,6 +113,7 @@ describe("absolute filesystem path contract", () => {
                 },
                 body: JSON.stringify(request),
             });
+
             // Both copy endpoints must reject relative values independently.
             expect(response.status).toBe(400);
             // Copy uses the same stable path validation error as direct operations.
@@ -141,9 +148,11 @@ describe("absolute filesystem path contract", () => {
                     );
                 },
             );
+
             request.on("error", reject);
             request.end();
         });
+
         // Terminal setup validates cwd before accepting a WebSocket upgrade.
         expect(terminalResponse.status).toBe(400);
         // The terminal boundary reports the same malformed-path contract.

@@ -81,6 +81,7 @@ test.describe.serial("Git browser", () => {
         await fs.writeFile(largePath, "L".repeat(2 * 1024 * 1024 + 1));
         await fs.rm(deletedPath);
         await fs.mkdir(autoLoadRepositoryPath, { recursive: true });
+
         for (let index = 0; index < 49; index += 1) {
             await fs.writeFile(
                 path.join(autoLoadRepositoryPath, `changed-${index}.txt`),
@@ -88,11 +89,13 @@ test.describe.serial("Git browser", () => {
 `,
             );
         }
+
         await $`git -C ${autoLoadRepositoryPath} init`;
         await $`git -C ${autoLoadRepositoryPath} config user.email playwright@redoor.test`;
         await $`git -C ${autoLoadRepositoryPath} config user.name Playwright`;
         await $`git -C ${autoLoadRepositoryPath} add .`;
         await $`git -C ${autoLoadRepositoryPath} commit -m baseline`;
+
         for (let index = 0; index < 49; index += 1) {
             await fs.writeFile(
                 path.join(autoLoadRepositoryPath, `changed-${index}.txt`),
@@ -100,7 +103,9 @@ test.describe.serial("Git browser", () => {
 `,
             );
         }
+
         await fs.mkdir(clickLoadRepositoryPath, { recursive: true });
+
         for (let index = 0; index < 50; index += 1) {
             await fs.writeFile(
                 path.join(clickLoadRepositoryPath, `changed-${index}.txt`),
@@ -108,11 +113,13 @@ test.describe.serial("Git browser", () => {
 `,
             );
         }
+
         await $`git -C ${clickLoadRepositoryPath} init`;
         await $`git -C ${clickLoadRepositoryPath} config user.email playwright@redoor.test`;
         await $`git -C ${clickLoadRepositoryPath} config user.name Playwright`;
         await $`git -C ${clickLoadRepositoryPath} add .`;
         await $`git -C ${clickLoadRepositoryPath} commit -m baseline`;
+
         for (let index = 0; index < 50; index += 1) {
             await fs.writeFile(
                 path.join(clickLoadRepositoryPath, `changed-${index}.txt`),
@@ -120,6 +127,7 @@ test.describe.serial("Git browser", () => {
 `,
             );
         }
+
         await fs.mkdir(outsidePath, { recursive: true });
     });
 
@@ -143,20 +151,24 @@ test.describe.serial("Git browser", () => {
         });
         const autoLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(autoLoadRepositoryPath)}?view=git`;
         await page.goto(autoLoadUrl);
+
         const autoLoadButton = page.getByRole("button", {
             name: "Load all diffs",
         });
+
         // The batch must not load until its control reaches the viewport.
         await expect(autoLoadButton).not.toBeInViewport();
         expect(
             diffRequests.some((body) => body.includes(autoLoadRepositoryPath)),
         ).toBe(false);
+
         const autoDiffRequest = page.waitForRequest(
             (request) =>
                 request.method() === "POST" &&
                 request.url().endsWith("/git/diff") &&
                 request.postData()?.includes(autoLoadRepositoryPath) === true,
         );
+
         await autoLoadButton.scrollIntoViewIfNeeded();
         await autoDiffRequest;
         // Forty-nine files activate from intersection without changing route state.
@@ -169,9 +181,11 @@ test.describe.serial("Git browser", () => {
         await page.goto(`${clickLoadUrl}&diff=true`);
         // Legacy query state is removed and cannot eagerly activate the batch.
         await expect(page).toHaveURL(clickLoadUrl);
+
         const clickLoadButton = page.getByRole("button", {
             name: "Load all diffs",
         });
+
         await clickLoadButton.scrollIntoViewIfNeeded();
         await expect(clickLoadButton).toBeInViewport();
         await page.evaluate(
@@ -186,12 +200,14 @@ test.describe.serial("Git browser", () => {
         expect(
             diffRequests.some((body) => body.includes(clickLoadRepositoryPath)),
         ).toBe(false);
+
         const clickDiffRequest = page.waitForRequest(
             (request) =>
                 request.method() === "POST" &&
                 request.url().endsWith("/git/diff") &&
                 request.postData()?.includes(clickLoadRepositoryPath) === true,
         );
+
         await clickLoadButton.click();
         await clickDiffRequest;
         // Explicit activation loads all 50 while preserving the URL.
@@ -213,9 +229,11 @@ test.describe.serial("Git browser", () => {
         await expect(
             directoryView.getByRole("link", { name: "Git", exact: true }),
         ).toBeVisible();
+
         const directoryTabs = await directoryView
             .getByRole("link")
             .allTextContents();
+
         // Git must follow Sync while remaining reachable in the phone-width tab strip.
         expect(directoryTabs.slice(-2)).toEqual(["Sync", "Git"]);
         await expect(
@@ -246,9 +264,11 @@ test.describe.serial("Git browser", () => {
         await page
             .getByRole("heading", { name: /Untracked files/ })
             .scrollIntoViewIfNeeded();
+
         const directoryDiffs = page.getByRole("region", {
             name: /Git diff for/,
         });
+
         await expect(directoryDiffs).toHaveCount(5);
         // Small batches activate in place without adding route search state.
         await expect(page).toHaveURL(directoryUrl);
@@ -278,9 +298,11 @@ test.describe.serial("Git browser", () => {
             `Git diff for ${largePath}`,
             `Git diff for ${untrackedPath}`,
         ]);
+
         const untrackedSection = page.getByRole("region", {
             name: `Git diff for ${untrackedPath}`,
         });
+
         // Untracked content is a real empty-to-worktree patch and uses the shared diff table.
         await expect(untrackedSection).toContainText("untracked content");
         await page
@@ -332,16 +354,20 @@ test.describe.serial("Git browser", () => {
         expect(fileTabs.slice(-2)).toEqual(["Sync", "Git"]);
 
         await page.getByRole("button", { name: "Git diff options" }).click();
+
         const stagedOnly = page
             .getByRole("dialog", { name: "Git diff options" })
             .getByRole("button", { name: "Staged changes only" });
+
         // Staged filtering belongs to the compact overflow menu and starts disabled.
         await expect(stagedOnly).toHaveAttribute("aria-pressed", "false");
         await stagedOnly.click();
         await expect(stagedOnly).toHaveAttribute("aria-pressed", "true");
+
         const stagedDiff = page.getByRole("region", {
             name: "Staged Git diff",
         });
+
         // Staged mode must switch query identity and display index content only.
         await expect(stagedDiff).toContainText("staged version");
         await expect(stagedDiff).not.toContainText("worktree version");

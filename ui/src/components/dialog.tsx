@@ -2,6 +2,8 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { IconButton } from "#ui/components/icon-button";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { useFocusTrap } from "#ui/utils/use-focus-trap";
 
 /**
  * Provides consistent modal structure and dismissal behavior for UI workflows.
@@ -42,6 +44,7 @@ export function Dialog(props: DialogProps) {
     const dialogRef = React.useRef<HTMLDialogElement>(null);
     const panelRef = React.useRef<HTMLDivElement>(null);
     const isAnchored = props.anchorRef != null || props.anchorPoint != null;
+
     const anchorPosition = useDialogBehavior({
         isOpen: props.isOpen,
         isBusy: props.isBusy,
@@ -66,10 +69,10 @@ export function Dialog(props: DialogProps) {
             tabIndex={props.initialFocus === "panel" ? -1 : undefined}
             className={
                 isAnchored
-                    ? "absolute w-56 rounded-xl border border-slate-700 bg-[#11141b] p-3 shadow-2xl shadow-black/40"
+                    ? "absolute w-56 rounded-xl border border-slate-700 bg-surface p-3 shadow-2xl shadow-black/40"
                     : props.size === "search"
-                      ? "min-h-dvh w-full bg-[#11141b] p-4 text-left shadow-2xl shadow-black/40 sm:min-h-0 sm:rounded-xl sm:border sm:border-slate-700 sm:p-6"
-                      : "w-full rounded-xl border border-slate-700 bg-[#11141b] p-6 text-left shadow-2xl shadow-black/40"
+                      ? "min-h-dvh w-full bg-surface p-4 text-left shadow-2xl shadow-black/40 sm:min-h-0 sm:rounded-xl sm:border sm:border-slate-700 sm:p-6"
+                      : "w-full rounded-xl border border-slate-700 bg-surface p-6 text-left shadow-2xl shadow-black/40"
             }
             style={
                 isAnchored && anchorPosition
@@ -113,7 +116,8 @@ export function Dialog(props: DialogProps) {
                         label={props.closeAriaLabel}
                         onClick={props.onClose}
                         disabled={props.isBusy}
-                        className="rounded p-2 text-slate-400 hover:bg-white/10 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        variant="ghost"
+                        size="md"
                     >
                         <X className="h-4 w-4" />
                     </IconButton>
@@ -164,6 +168,7 @@ export function Dialog(props: DialogProps) {
             className={`m-auto touch-pan-y overflow-y-auto overscroll-y-contain border-0 bg-transparent p-0 text-slate-200 backdrop:bg-black/60 ${props.size === "search" ? "h-dvh max-h-dvh w-full max-w-none sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:max-w-6xl" : `max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] ${props.size === "wide" ? "max-w-4xl" : "max-w-md"}`}`}
             onCancel={(event) => {
                 event.preventDefault();
+
                 if (!props.isBusy) {
                     props.onClose();
                 }
@@ -198,27 +203,27 @@ function useDialogBehavior(props: {
         left: number;
     } | null>(null);
 
-    React.useEffect(() => {
-        if (!props.isOpen || !props.isAnchored || props.isBusy) {
-            return;
-        }
+    // Modal tier and capture, so Escape dismisses the menu before a focused terminal or an
+    // editor panel beneath it can consume the key.
+    useShortcut(
+        {
+            name: "anchored-dialog-dismiss",
+            phase: "capture",
+            priority: shortcutPriority.modal,
+            effect: "swallow",
+            match: (event) => event.key === "Escape",
+            run: props.onClose,
+        },
+        props.isOpen && props.isAnchored && !props.isBusy,
+    );
 
-        /** Capture so Escape dismisses the menu before a focused terminal consumes it. */
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                props.onClose();
-            }
-        };
-
-        document.addEventListener("keydown", handleKeyDown, true);
-        return () =>
-            document.removeEventListener("keydown", handleKeyDown, true);
-    }, [props.isAnchored, props.isBusy, props.isOpen, props.onClose]);
+    // The native <dialog> traps focus itself; the portaled panel of an anchored menu does not,
+    // so it needs the same wrap-around the side-menu drawer uses.
+    useFocusTrap(props.panelRef, props.isOpen && props.isAnchored);
 
     React.useEffect(() => {
         const dialog = props.dialogRef.current;
+
         if (!props.isOpen || props.isAnchored || !dialog) {
             return;
         }
@@ -236,6 +241,7 @@ function useDialogBehavior(props: {
                 "input:not([type='hidden']):not([disabled]), textarea:not([disabled]), select:not([disabled])",
             ) ??
             (props.initialFocus === "panel" ? props.panelRef.current : null);
+
         autofocusTarget?.focus();
 
         return () => {
@@ -260,14 +266,17 @@ function useDialogBehavior(props: {
             const frame = window.requestAnimationFrame(() => {
                 props.panelRef.current?.focus();
             });
+
             return () => window.cancelAnimationFrame(frame);
         }
+
         return undefined;
     }, [props.initialFocus, props.isAnchored, props.isOpen, props.panelRef]);
 
     React.useLayoutEffect(() => {
         if (!props.isOpen || (!props.anchorRef && !props.anchorPoint)) {
             setAnchorPosition(null);
+
             return;
         }
 
@@ -278,6 +287,7 @@ function useDialogBehavior(props: {
                 point: props.anchorPoint,
                 anchor: props.anchorRef?.current,
             });
+
             if (nextPosition) {
                 setAnchorPosition(nextPosition);
             }
@@ -313,28 +323,35 @@ function getAnchoredDialogPosition(args: {
     const panelHeight = args.panel?.offsetHeight ?? 0;
     const gap = 8;
     const viewportPadding = 8;
+
     if (!args.point && !args.anchor) {
         return null;
     }
 
     const anchorRect = args.anchor?.getBoundingClientRect();
+
     const belowEdge = args.point
         ? args.point.y
         : (anchorRect?.bottom ?? 0) + gap;
+
     const aboveEdge = args.point ? args.point.y : (anchorRect?.top ?? 0) - gap;
     const availableBelow = window.innerHeight - viewportPadding - belowEdge;
     const availableAbove = aboveEdge - viewportPadding;
+
     let top =
         availableAbove > availableBelow ? aboveEdge - panelHeight : belowEdge;
+
     const leftEdge = args.point ? args.point.x : (anchorRect?.left ?? 0);
     const rightEdge = args.point ? args.point.x : (anchorRect?.right ?? 0);
     const availableLeft = leftEdge - viewportPadding;
     const availableRight = window.innerWidth - viewportPadding - rightEdge;
+
     let left =
         availableRight > availableLeft ? leftEdge : rightEdge - panelWidth;
 
     left = Math.min(left, window.innerWidth - panelWidth - viewportPadding);
     left = Math.max(viewportPadding, left);
     top = Math.max(viewportPadding, top);
+
     return { top, left };
 }

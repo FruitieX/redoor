@@ -7,12 +7,15 @@ import { expect, test } from "@playwright/test";
 import { z } from "zod";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
+
 const SERVER_PATH = path.join(PROJECT_ROOT, "target/debug/redoor");
 
 /** Linux first-run browser hint from `desktop::first_run_login_message`. */
 const LINUX_LOGIN_MESSAGE = "Log in with PAM (your Linux account credentials)";
+
 /** macOS first-run browser hint from `desktop::first_run_login_message`. */
 const MACOS_LOGIN_MESSAGE = "Log in with username redoor and password changeme";
+
 const tcpAddressSchema = z.object({ port: z.number().int().positive() });
 
 const FIRST_RUN_MESSAGE =
@@ -24,10 +27,13 @@ async function getAvailablePort(): Promise<number> {
         const server = createServer();
         server.listen(0, "127.0.0.1", () => {
             const address = tcpAddressSchema.safeParse(server.address());
+
             if (!address.success) {
                 reject(new Error("Failed to allocate ephemeral port"));
+
                 return;
             }
+
             server.close(() => resolve(address.data.port));
         });
         server.on("error", reject);
@@ -41,14 +47,17 @@ async function waitForPort(port: number): Promise<void> {
             const response = await fetch(
                 `http://127.0.0.1:${port}/api/v1/agents`,
             );
+
             if (response.ok || response.status === 401) {
                 return;
             }
         } catch {
             // Server has not bound yet.
         }
+
         await new Promise((resolve) => setTimeout(resolve, 100));
     }
+
     throw new Error(`Demo server on port ${port} did not become ready`);
 }
 
@@ -82,11 +91,13 @@ async function stopServer(child: ChildProcess | undefined): Promise<void> {
     if (!child?.pid) {
         return;
     }
+
     try {
         process.kill(child.pid, "SIGTERM");
     } catch {
         return;
     }
+
     await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
             try {
@@ -96,8 +107,10 @@ async function stopServer(child: ChildProcess | undefined): Promise<void> {
             } catch {
                 // Already gone.
             }
+
             resolve();
         }, 5_000);
+
         child.once("exit", () => {
             clearTimeout(timer);
             resolve();
@@ -131,6 +144,7 @@ password = "demo-password"
 `,
     );
     await fs.writeFile(configPath, content);
+
     return { username: "demo-user", password: "demo-password" };
 }
 
@@ -142,9 +156,11 @@ test.describe("First-run demo", () => {
         page,
     }) => {
         const port = await getAvailablePort();
+
         const home = await fs.mkdtemp(
             path.join(os.tmpdir(), "redoor-first-run-"),
         );
+
         const appName = `redoor-pw-demo-${port}`;
         const configPath = path.join(home, ".config", appName, "config.toml");
         const logPath = path.join(home, "server.log");
@@ -169,6 +185,7 @@ test.describe("First-run demo", () => {
             expect(generated).not.toContain("[agent]");
 
             const credentials = await ensureBrowserLoginCredentials(configPath);
+
             if (process.platform !== "darwin") {
                 // Restart so the injected TOML credentials take effect for the browser flow.
                 await stopServer(child);
@@ -211,7 +228,7 @@ test.describe("First-run demo", () => {
                 .getByRole("button", { name: "Connect", exact: true })
                 .click();
             await expect(
-                page.getByRole("heading", { name: "Starting local" }),
+                page.getByRole("heading", { name: "Connecting local" }),
             ).toBeVisible();
             await expect(
                 page.getByRole("link", { name: "local, connected" }),

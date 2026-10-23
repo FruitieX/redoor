@@ -1,16 +1,19 @@
 import React from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import { FilePlus, FolderPlus } from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { Button } from "#ui/components/button";
 import { TextField } from "#ui/components/text-field";
+import { browserRoute } from "#ui/browser-route";
+import { invalidateAgentData } from "#ui/queries";
 import {
-    getErrorMessage,
     getImmediateParentPath,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
+import { getBaseName, validatePathComponent } from "#ui/utils/path";
 
 type EntryType = "file" | "directory";
 
@@ -18,21 +21,31 @@ type EntryType = "file" | "directory";
 export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
     const navigate = useNavigate();
     const router = useRouter();
-    const initialName = props.path.split("/").filter(Boolean).pop() ?? "";
+    const queryClient = useQueryClient();
+    const initialName = getBaseName(props.path);
     const [fileName, setFileName] = React.useState(initialName);
+
     const [validationError, setValidationError] = React.useState<string | null>(
         null,
     );
+
     const parentPath = getImmediateParentPath(props.path) ?? "/";
     const trimmedFileName = fileName.trim();
+
     const createdPath = trimmedFileName
         ? joinBrowserPath(parentPath, trimmedFileName)
         : null;
+
     const createMutation = useMutation({
         mutationFn: async (entry: { type: EntryType; path: string }) => {
             if (entry.type === "directory") {
                 return props.agent.createDirectory(entry.path);
             }
+
+            // Upload requires an existing parent, even when the browser URL points deeper into a missing tree.
+            await props.agent.createDirectory(
+                getImmediateParentPath(entry.path) ?? "/",
+            );
 
             return props.agent.upload(
                 entry.path,
@@ -43,12 +56,17 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
         },
         onSuccess: async (_, entry) => {
             if (entry.path === props.path) {
-                await router.invalidate();
+                // The route must resolve again to turn this missing path into the new entry.
+                await Promise.all([
+                    invalidateAgentData(queryClient, props.agent.id),
+                    router.invalidate(),
+                ]);
+
                 return;
             }
 
             await navigate({
-                to: props.agent.getBrowserUrl(entry.path),
+                ...browserRoute(props.agent.id, entry.path),
                 search: {},
             });
         },
@@ -56,12 +74,11 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
 
     /** Validates the filename before choosing the corresponding remote creation API. */
     const createEntry = (type: EntryType) => {
-        if (!createdPath) {
-            setValidationError("File name is required");
-            return;
-        }
-        if (trimmedFileName.includes("/")) {
-            setValidationError("File name cannot contain a slash");
+        const nameError = validatePathComponent(trimmedFileName, "File");
+
+        if (nameError !== null || !createdPath) {
+            setValidationError(nameError ?? "File name is required");
+
             return;
         }
 

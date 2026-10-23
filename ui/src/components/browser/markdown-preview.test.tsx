@@ -19,6 +19,7 @@ const value = true;
 \`\`\``}
         />,
     );
+
     const code = view.container.querySelector("pre code");
 
     // Highlighting must preserve the complete source for readers and copying.
@@ -36,6 +37,7 @@ test("leaves inline code unhighlighted", () => {
             repositoryRoot={null}
         />,
     );
+
     const code = view.container.querySelector("code");
 
     // Inline snippets must retain normal Markdown code rendering without block tokens.
@@ -55,6 +57,7 @@ some readable source
 \`\`\``}
         />,
     );
+
     const code = view.container.querySelector("pre code");
 
     // Unsupported labels must fall back without hiding or rejecting their source.
@@ -74,6 +77,7 @@ test("escapes HTML-like source in a recognized fence", () => {
 \`\`\``}
         />,
     );
+
     const code = view.container.querySelector("pre code");
 
     // Highlighted source remains readable without creating executable source elements.
@@ -125,6 +129,7 @@ completions:
 `}
         />,
     );
+
     const table = view.getByRole("table", { name: "YAML frontmatter" });
     const valueCell = table.querySelector("td");
 
@@ -153,6 +158,7 @@ Visible body
 `}
         />,
     );
+
     const toggle = view.getByRole("button", { name: "YAML frontmatter" });
 
     // Frontmatter starts open so the metadata table is inspectable on first paint.

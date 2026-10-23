@@ -24,9 +24,10 @@ async function fillEditor(editor: Locator, text: string) {
 }
 
 /** Opens the editor overflow so secondary actions can be exercised by accessible name. */
-async function openEditorOptions(page: Page) {
-    await page.getByRole("button", { name: "Editor options" }).click();
-    return page.getByRole("dialog", { name: "Editor options" });
+async function openEditorActions(page: Page) {
+    await page.getByRole("button", { name: "Editor actions" }).click();
+
+    return page.getByRole("dialog", { name: "Editor actions" });
 }
 
 test.describe.serial("File Edit View", () => {
@@ -62,7 +63,10 @@ test.describe.serial("File Edit View", () => {
         ).toHaveAttribute("aria-current", "page");
         await expect(page).not.toHaveURL(/[?&]view=/);
         // The editor should contain the on-disk contents so edits start from truth.
-        await expectEditorText(page.getByLabel("File editor"), "content1");
+        await expectEditorText(
+            page.getByLabel("File editor", { exact: true }),
+            "content1",
+        );
         await expect(
             page.getByRole("button", { name: "Save file" }),
         ).toBeDisabled();
@@ -70,76 +74,47 @@ test.describe.serial("File Edit View", () => {
         await expect(
             page.getByRole("button", { name: "Save file" }),
         ).toHaveText("");
-        await expect(
-            page.getByRole("button", { name: "Bookmark", exact: true }),
-        ).toHaveText("");
-        await expect(
-            page.getByRole("button", { name: "Recent files", exact: true }),
-        ).toHaveText("");
+
         const saveBox = await page
             .getByRole("button", { name: "Save file" })
             .boundingBox();
-        const recentFilesBox = await page
-            .getByRole("button", { name: "Recent files", exact: true })
-            .boundingBox();
-        const bookmarkBox = await page
-            .getByRole("button", { name: "Bookmark", exact: true })
-            .boundingBox();
+
         const copyReferenceButton = page.getByRole("button", {
             name: "Copy selection with file reference",
         });
+
         const searchSelectionButton = page.getByRole("button", {
             name: "Search selected text",
         });
+
         const copyReferenceBox = await copyReferenceButton.boundingBox();
         const searchSelectionBox = await searchSelectionButton.boundingBox();
         expect(saveBox).not.toBeNull();
-        expect(recentFilesBox).not.toBeNull();
-        expect(bookmarkBox).not.toBeNull();
         expect(copyReferenceBox).not.toBeNull();
         expect(searchSelectionBox).not.toBeNull();
+
         if (
             saveBox === null ||
-            recentFilesBox === null ||
-            bookmarkBox === null ||
             copyReferenceBox === null ||
             searchSelectionBox === null
         ) {
             throw new Error("expected editor action measurements");
         }
-        // Recent files is available immediately after Save at every breakpoint.
-        expect(recentFilesBox.x).toBeGreaterThan(saveBox.x);
-        // Bookmark remains the next persistent path action.
-        expect(bookmarkBox.x).toBeGreaterThan(recentFilesBox.x);
-        // Copy reference follows Bookmark and stays unavailable without selected editor text.
-        expect(copyReferenceBox.x).toBeGreaterThan(bookmarkBox.x);
+
+        // Copy reference follows Save and stays unavailable without selected editor text.
+        expect(copyReferenceBox.x).toBeGreaterThan(saveBox.x);
         // Search selection follows Copy reference so the same selection can be grepped from git root.
         expect(searchSelectionBox.x).toBeGreaterThan(copyReferenceBox.x);
         await expect(copyReferenceButton).toBeDisabled();
         await expect(searchSelectionButton).toBeDisabled();
         await expect(copyReferenceButton).toHaveText("");
         await expect(searchSelectionButton).toHaveText("");
-        await page
-            .getByRole("button", { name: "Bookmark", exact: true })
-            .click();
+        const editorActions = await openEditorActions(page);
         await expect(
-            page.getByRole("button", {
-                name: "Remove bookmark",
-                exact: true,
-            }),
-        ).toHaveText("");
-        await page
-            .getByRole("button", {
-                name: "Remove bookmark",
-                exact: true,
-            })
-            .click();
-        const editorOptions = await openEditorOptions(page);
-        await expect(
-            editorOptions.getByRole("button", { name: "Reload", exact: true }),
+            editorActions.getByRole("button", { name: "Reload", exact: true }),
         ).toBeEnabled();
         await expect(
-            editorOptions.getByRole("link", { name: "Download", exact: true }),
+            editorActions.getByRole("link", { name: "Download", exact: true }),
         ).toHaveAttribute("href", /[?&]download=1$/);
     });
 
@@ -149,7 +124,7 @@ test.describe.serial("File Edit View", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
         );
         // Phone-width editor type must match the 9px git diff so more of each line stays on screen.
-        await expect(page.getByLabel("File editor")).toHaveCSS(
+        await expect(page.getByLabel("File editor", { exact: true })).toHaveCSS(
             "font-size",
             "9px",
         );
@@ -189,7 +164,9 @@ test.describe.serial("File Edit View", () => {
             if (request.method() !== "GET") {
                 return;
             }
+
             const url = new URL(request.url());
+
             // The editor buffer uses the bare /raw GET; Download adds ?download=1.
             if (url.pathname === rawPath && !url.searchParams.has("download")) {
                 rawGets.push(request.url());
@@ -199,7 +176,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "content1");
 
         const downloadsAfterOpen = rawGets.length;
@@ -208,14 +185,17 @@ test.describe.serial("File Edit View", () => {
         expect(downloadsAfterOpen).toBeLessThanOrEqual(2);
 
         const fileView = page.getByLabel("File view");
+
         const detailsLink = fileView.getByRole("link", {
             name: "Details",
             exact: true,
         });
+
         const editLink = fileView.getByRole("link", {
             name: "Edit",
             exact: true,
         });
+
         // Intent preload re-runs the edit loader; a stale buffer would download again.
         await detailsLink.hover();
         await editLink.hover();
@@ -236,6 +216,7 @@ test.describe.serial("File Edit View", () => {
         page,
     }) => {
         const filePath = path.join(ctx.testDirPath, "large-viewport.txt");
+
         const lines = [
             "FIRST_VISIBLE_LINE",
             ...Array.from(
@@ -244,24 +225,29 @@ test.describe.serial("File Edit View", () => {
             ),
             "LAST_BUFFER_LINE",
         ];
+
         await fs.writeFile(filePath, lines.join("\n"));
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
+
         const editorViewport = page.getByRole("region", {
             name: "Editor viewport",
         });
+
         await expect(editor.getByText("FIRST_VISIBLE_LINE")).toBeVisible();
 
         const editorBox = await editorViewport.boundingBox();
         const viewport = page.viewportSize();
         expect(editorBox).not.toBeNull();
         expect(viewport).not.toBeNull();
+
         if (editorBox === null || viewport === null) {
             throw new Error("expected editor and viewport measurements");
         }
+
         // The visible editor surface must stay inside the window, not grow with the buffer.
         expect(editorBox.height).toBeLessThan(viewport.height);
 
@@ -269,6 +255,7 @@ test.describe.serial("File Edit View", () => {
             scrollHeight: element.scrollHeight,
             clientHeight: element.clientHeight,
         }));
+
         // Vertical scrolling must stay in CodeMirror, not the overlay page scroller.
         expect(pageScroll.scrollHeight).toBeLessThanOrEqual(
             pageScroll.clientHeight + 1,
@@ -293,19 +280,24 @@ test.describe.serial("File Edit View", () => {
         const editorPanel = page.getByRole("article", {
             name: "Editing panel",
         });
+
         const expandButton = page.getByRole("button", {
             name: "Expand editor to full window",
         });
+
         const optionsButton = page.getByRole("button", {
-            name: "Editor options",
+            name: "Editor actions",
         });
+
         const expandBox = await expandButton.boundingBox();
         const optionsBox = await optionsButton.boundingBox();
         expect(expandBox).not.toBeNull();
         expect(optionsBox).not.toBeNull();
+
         if (expandBox === null || optionsBox === null) {
             throw new Error("expected editor toolbar measurements");
         }
+
         // The expansion control belongs immediately before the overflow menu.
         expect(expandBox.x).toBeLessThan(optionsBox.x);
 
@@ -316,9 +308,11 @@ test.describe.serial("File Edit View", () => {
         const viewport = page.viewportSize();
         expect(panelBox).not.toBeNull();
         expect(viewport).not.toBeNull();
+
         if (panelBox === null || viewport === null) {
             throw new Error("expected expanded editor measurements");
         }
+
         // Fixed edges make the editor and all of its controls fill the browser window.
         expect(panelBox.x).toBe(0);
         expect(panelBox.y).toBe(0);
@@ -327,26 +321,29 @@ test.describe.serial("File Edit View", () => {
         await expect(
             editorPanel.getByRole("button", { name: "Save file" }),
         ).toBeVisible();
-        const editorOptions = await openEditorOptions(page);
+        const editorActions = await openEditorActions(page);
         await expect(
-            editorOptions.getByRole("button", { name: "Reload", exact: true }),
+            editorActions.getByRole("button", { name: "Reload", exact: true }),
         ).toBeVisible();
         await page.keyboard.press("Escape");
-        await expect(editorOptions).toBeHidden();
+        await expect(editorActions).toBeHidden();
 
-        await page.getByLabel("File editor").press("ControlOrMeta+f");
+        await page
+            .getByLabel("File editor", { exact: true })
+            .press("ControlOrMeta+f");
         // Search remains inside the expanded panel rather than behind the overlay.
         await expect(editorPanel.getByLabel("Find in file")).toBeVisible();
 
         const restoreButton = editorPanel.getByRole("button", {
             name: "Restore editor size",
         });
+
         await restoreButton.click();
         // Restoring returns the card to the route layout without replacing the editor.
         await expect(editorPanel).toHaveCSS("position", "static");
-        await expect(page.getByLabel("File editor")).toHaveText(
-            "full window content",
-        );
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveText("full window content");
     });
 
     test("should select the open file from the editor options menu", async ({
@@ -355,16 +352,22 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
         );
-        await expectEditorText(page.getByLabel("File editor"), "content1");
+        await expectEditorText(
+            page.getByLabel("File editor", { exact: true }),
+            "content1",
+        );
 
-        await page.getByRole("button", { name: "Editor options" }).click();
-        const editorOptions = page.getByRole("dialog", {
-            name: "Editor options",
+        await page.getByRole("button", { name: "Editor actions" }).click();
+
+        const editorActions = page.getByRole("dialog", {
+            name: "Editor actions",
         });
-        const selectFile = editorOptions.getByRole("button", {
+
+        const selectFile = editorActions.getByRole("button", {
             name: "Select",
             exact: true,
         });
+
         // An unselected path must render the empty checkbox, not a checked icon.
         await expect(selectFile).toHaveAttribute("aria-pressed", "false");
         await selectFile.click();
@@ -384,11 +387,13 @@ test.describe.serial("File Edit View", () => {
             }),
         ).toBeVisible();
 
-        await page.getByRole("button", { name: "Editor options" }).click();
-        const unselectFile = editorOptions.getByRole("button", {
+        await page.getByRole("button", { name: "Editor actions" }).click();
+
+        const unselectFile = editorActions.getByRole("button", {
             name: "Unselect",
             exact: true,
         });
+
         // Reopening the menu must show the path as already selected.
         await expect(unselectFile).toHaveAttribute("aria-pressed", "true");
         await unselectFile.click();
@@ -408,7 +413,12 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        const editor = page.getByLabel("File editor");
+
+        const editor = page.getByRole("textbox", {
+            name: "File editor",
+            exact: true,
+        });
+
         await expectEditorText(editor, "original buffer");
 
         await fs.writeFile(filePath, "changed on disk");
@@ -426,7 +436,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
         await fillEditor(editor, "unsaved local edit");
 
@@ -445,6 +455,7 @@ test.describe.serial("File Edit View", () => {
         let rawGets = 0;
         page.on("request", (request) => {
             const url = new URL(request.url());
+
             if (
                 request.method() === "GET" &&
                 url.pathname === rawPath &&
@@ -457,7 +468,12 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        const editor = page.getByLabel("File editor");
+
+        const editor = page.getByRole("textbox", {
+            name: "File editor",
+            exact: true,
+        });
+
         await expectEditorText(editor, "original buffer");
         await page.waitForLoadState("networkidle");
         const downloadsAfterOpen = rawGets;
@@ -467,7 +483,7 @@ test.describe.serial("File Edit View", () => {
         expect(downloadsAfterOpen).toBeGreaterThan(0);
         expect(downloadsAfterOpen).toBeLessThanOrEqual(2);
         await page
-            .getByRole("button", { name: "Bookmark", exact: true })
+            .getByRole("button", { name: "Editor actions", exact: true })
             .focus();
         await fs.writeFile(filePath, "changed before refocus");
         await editor.focus();
@@ -491,25 +507,27 @@ test.describe.serial("File Edit View", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "content1");
 
         await fillEditor(editor, "temporary unsaved text");
         await expectEditorText(editor, "temporary unsaved text");
         // Reload must not discard the draft before the existing confirmation is accepted.
-        let editorOptions = await openEditorOptions(page);
-        await editorOptions
+        let editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
+
         const confirmDialog = page.getByRole("dialog", {
             name: "Discard unsaved changes?",
         });
+
         await expect(confirmDialog).toBeVisible();
         await confirmDialog.getByRole("button", { name: "Cancel" }).click();
         await expectEditorText(editor, "temporary unsaved text");
 
-        editorOptions = await openEditorOptions(page);
-        await editorOptions
+        editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         await confirmDialog
@@ -524,12 +542,12 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
 
         await fs.writeFile(filePath, "manually reloaded");
-        const editorOptions = await openEditorOptions(page);
-        await editorOptions
+        const editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
 
@@ -543,7 +561,7 @@ test.describe.serial("File Edit View", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "content1");
         await fillEditor(editor, "saved from ui");
         // Wait until React marks the buffer dirty so Save is actually clickable.
@@ -579,7 +597,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(linkPath)}`,
         );
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "symlink original");
         await fillEditor(editor, "saved through symlink");
         await expect(
@@ -723,7 +741,7 @@ test.describe.serial("File Edit View", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "shortcut original");
         await fillEditor(editor, "saved with shortcut");
         // The shortcut must wait for a dirty buffer just like the Save button.
@@ -749,7 +767,9 @@ test.describe.serial("File Edit View", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
         );
 
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         await page.getByRole("button", { name: "Save file" }).hover();
         // The tooltip keeps the accessible name as Save file while advertising Ctrl+S.
         await expect(page.getByRole("tooltip")).toHaveText(
@@ -775,10 +795,12 @@ gamma`,
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
+
         const copyReferenceButton = page.getByRole("button", {
             name: "Copy selection with file reference",
         });
+
         // CodeMirror renders line breaks between sibling elements, so DOM text is concatenated.
         await expect(editor).toHaveText("alphabetagamma");
         await editor.focus();
@@ -819,10 +841,12 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
+
         const searchSelectionButton = page.getByRole("button", {
             name: "Search selected text",
         });
+
         await expect(editor).toHaveText("search-selection-token");
         await expect(searchSelectionButton).toBeDisabled();
         await editor.focus();
@@ -838,14 +862,17 @@ gamma
         await expect(page.getByRole("tooltip")).toHaveText(
             "Search the selected text from the git repository root when the file is in a worktree.",
         );
+
         const grepRequest = page.waitForRequest((request) =>
             new URL(request.url()).pathname.includes("/grep/"),
         );
+
         await searchSelectionButton.click();
 
         const dialog = page.getByRole("dialog", {
-            name: "Search agent",
+            name: "Search device",
         });
+
         // The URL-owned dialog must open with the editor selection and git-root scope requested.
         await expect(
             dialog.getByRole("searchbox", { name: "Search file contents" }),
@@ -872,8 +899,13 @@ gamma
         );
 
         // Filename-based shell mapping must still produce an editable File editor.
-        await expect(page.getByLabel("File editor")).toBeVisible();
-        await expectEditorText(page.getByLabel("File editor"), "export FOO=1");
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
+        await expectEditorText(
+            page.getByLabel("File editor", { exact: true }),
+            "export FOO=1",
+        );
     });
 
     test("should keep the editor focused draft when Backspace is pressed", async ({
@@ -885,7 +917,7 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
         await fillEditor(editor, "keep this draft");
         await editor.click();
@@ -909,7 +941,7 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
         await fillEditor(editor, "keep this draft");
         await expect(
@@ -924,6 +956,7 @@ gamma
         const confirmDialog = page.getByRole("dialog", {
             name: "Discard unsaved changes?",
         });
+
         // In-app links must not drop the draft without an explicit confirm.
         await expect(confirmDialog).toBeVisible();
         await confirmDialog.getByRole("button", { name: "Cancel" }).click();
@@ -941,7 +974,7 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
         await fillEditor(editor, "throw this draft away");
         await expect(
@@ -956,6 +989,7 @@ gamma
         const confirmDialog = page.getByRole("dialog", {
             name: "Discard unsaved changes?",
         });
+
         await expect(confirmDialog).toBeVisible();
         await confirmDialog
             .getByRole("button", { name: "Discard changes" })
@@ -982,10 +1016,10 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await fillEditor(editor, "temporary draft");
-        const editorOptions = await openEditorOptions(page);
-        await editorOptions
+        const editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         await page
@@ -1019,7 +1053,7 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
         await fillEditor(editor, "do not lose this");
         await expect(
@@ -1030,13 +1064,15 @@ gamma
         const dirtyReloadBlocked = await page.evaluate(() => {
             const event = new Event("beforeunload", { cancelable: true });
             window.dispatchEvent(event);
+
             return event.defaultPrevented;
         });
+
         expect(dirtyReloadBlocked).toBe(true);
         await expectEditorText(editor, "do not lose this");
 
-        const editorOptions = await openEditorOptions(page);
-        await editorOptions
+        const editorActions = await openEditorActions(page);
+        await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
         await page
@@ -1044,11 +1080,14 @@ gamma
             .getByRole("button", { name: "Discard changes" })
             .click();
         await expectEditorText(editor, "original buffer");
+
         const cleanReloadBlocked = await page.evaluate(() => {
             const event = new Event("beforeunload", { cancelable: true });
             window.dispatchEvent(event);
+
             return event.defaultPrevented;
         });
+
         // A clean buffer must not trap refresh or tab close.
         expect(cleanReloadBlocked).toBe(false);
     });
@@ -1062,18 +1101,24 @@ gamma
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
+
         const editorViewport = page.getByRole("region", {
             name: "Editor viewport",
         });
+
         await expectEditorText(editor, "content1");
         await editor.focus();
         await expect(editor).toBeFocused();
         // A focused editor must show the same blue frame as a focused shell.
-        await expect(editorViewport).toHaveCSS(
-            "border-color",
-            "oklch(0.623 0.214 259.815)",
-        );
+        await expect
+            .poll(() =>
+                editorViewport.evaluate(
+                    (element) =>
+                        getComputedStyle(element, "::after").borderColor,
+                ),
+            )
+            .toBe("oklch(0.623 0.214 259.815)");
 
         await page.keyboard.press("ControlOrMeta+a");
         await page.keyboard.type("t");
@@ -1087,9 +1132,13 @@ gamma
         await expect(
             page.getByRole("status", { name: "agent1_src 1: Connected" }),
         ).toBeVisible();
-        const terminalInput = page.getByRole("textbox", {
-            name: `agent1_src 1 for ${ctx.agentName}`,
-        });
+
+        const terminalInput = page
+            .getByRole("textbox", {
+                name: `agent1_src 1 for ${ctx.agentName}`,
+            })
+            .filter({ has: page.locator("textarea") });
+
         // Alt+t from the editor must reuse the same open-or-focus action as t.
         await expectTerminalFocused(terminalInput);
         await expectEditorText(editor, "t");
@@ -1113,10 +1162,14 @@ gamma
         await page.keyboard.press("Alt+e");
         // Alt+e from the terminal must return keyboard ownership to CodeMirror.
         await expect(editor).toBeFocused();
-        await expect(editorViewport).toHaveCSS(
-            "border-color",
-            "oklch(0.623 0.214 259.815)",
-        );
+        await expect
+            .poll(() =>
+                editorViewport.evaluate(
+                    (element) =>
+                        getComputedStyle(element, "::after").borderColor,
+                ),
+            )
+            .toBe("oklch(0.623 0.214 259.815)");
         await expectEditorText(editor, "t");
     });
 });

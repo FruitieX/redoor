@@ -6,10 +6,16 @@ import {
     mkdirSync,
     realpathSync,
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { ApiClient, Agent } from "#ui/api-client";
+import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
+import type { DeviceScope } from "#bindings/DeviceScope";
+import type { Permission } from "#bindings/Permission";
+import { ApiError } from "#ui/api-transport";
+import { onTestFinished } from "vitest";
 import { Toxiproxy } from "toxiproxy-node-client";
 import type Proxy from "toxiproxy-node-client/dist/Proxy";
 import { testPorts } from "#test-ports";
@@ -24,6 +30,7 @@ export function webSocketDataToString(data: WebSocket.RawData): string {
     if (Array.isArray(data)) {
         return Buffer.concat(data).toString();
     }
+
     return data instanceof ArrayBuffer
         ? Buffer.from(data).toString()
         : data.toString();
@@ -34,8 +41,10 @@ export async function getAvailablePort(): Promise<number> {
         const server = createServer();
         server.listen(0, "127.0.0.1", () => {
             const address = tcpAddressSchema.safeParse(server.address());
+
             if (!address.success) {
                 reject(new Error("Failed to get ephemeral port"));
+
                 return;
             }
 
@@ -56,6 +65,7 @@ export async function createToxiproxyAgent(options: {
 }> {
     const toxiproxy = new Toxiproxy("http://127.0.0.1:8474");
     const proxyPort = await getAvailablePort();
+
     const proxy = await toxiproxy.createProxy({
         name: `${options.proxyNamePrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         listen: `127.0.0.1:${proxyPort}`,
@@ -78,7 +88,6 @@ export async function createToxiproxyAgent(options: {
             connection_issue: options.agent.connectionIssue,
             provisioning_status: options.agent.provisioningStatus,
             binary: options.agent.binary,
-            supports_self_exec: options.agent.supportsSelfExec,
             supports_native_open: options.agent.supportsNativeOpen,
             supports_move_to_trash: options.agent.supportsMoveToTrash,
             supports_trash: options.agent.supportsTrash,
@@ -121,11 +130,14 @@ export class TempFileManager {
                 mkdtempSync(join(tmpdir(), "redoor-test-")),
             );
         }
+
         const suffix = options?.suffix ?? ".tmp";
+
         const filePath = join(
             this.tempDir,
             `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`,
         );
+
         this.files.push(filePath);
 
         if (options?.content !== undefined) {
@@ -155,13 +167,17 @@ export class TempFileManager {
                 mkdtempSync(join(tmpdir(), "redoor-test-")),
             );
         }
+
         const suffix = options?.suffix ?? "";
+
         const directoryPath = join(
             this.tempDir,
             `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}${suffix}`,
         );
+
         mkdirSync(directoryPath, { recursive: true });
         this.dirs.push(directoryPath);
+
         return directoryPath;
     }
 
@@ -176,6 +192,7 @@ export class TempFileManager {
                 // File or directory may not exist, ignore
             }
         }
+
         this.files = [];
 
         if (this.tempDir) {
@@ -184,6 +201,7 @@ export class TempFileManager {
             } catch {
                 // Directory may not exist, ignore
             }
+
             this.tempDir = null;
         }
     }
@@ -204,24 +222,34 @@ export class TempFileManager {
 }
 
 const TESTS_DIRECTORY = dirname(import.meta.filename);
+
 const PROJECT_ROOT = join(TESTS_DIRECTORY, "..");
+
 export const SERVER_PATH =
     process.env.REDOOR_TEST_BINARY ??
     join(TESTS_DIRECTORY, "../target/debug/redoor");
+
 export const AGENT_PATH = SERVER_PATH;
+
 // A per-worktree port lets Vitest run alongside development and other worktrees.
 export const VITEST_SERVER_PORT = testPorts.vitest;
+
 export const TEST_USERNAME = "test-user";
+
 export const TEST_PASSWORD = "test-password";
+
 export const TEST_AGENT_TOKEN = "test-agent-token";
+
 const DEFAULT_TEST_CONFIG = join(
     tmpdir(),
     `redoor-vitest-${VITEST_SERVER_PORT}.toml`,
 );
+
 export const TEST_SERVER_HOME = join(
     tmpdir(),
     `redoor-vitest-home-${VITEST_SERVER_PORT}`,
 );
+
 export const TEST_APP_NAME = `redoor-vitest-${VITEST_SERVER_PORT}`;
 
 export type SpawnAgentArgs = {
@@ -230,7 +258,6 @@ export type SpawnAgentArgs = {
     name?: string;
     cwd: string;
     home?: string;
-    legacyDir?: string;
     log?: string;
     token?: string;
     env?: NodeJS.ProcessEnv;
@@ -239,6 +266,8 @@ export type SpawnAgentArgs = {
 export type SpawnServerArgs = {
     log?: string;
     config?: string;
+    /** Isolates durable server state while allowing restart tests to reuse the same home. */
+    home?: string;
 };
 
 /** Groups optional process settings so callers cannot confuse cwd and environment. */
@@ -268,11 +297,13 @@ export class ProcessManager {
         });
 
         const pid = proc.pid;
+
         if (pid === undefined) {
             throw new Error("Failed to get process PID");
         }
 
         this.processes.set(pid, proc);
+
         if (proc.stdout) {
             const stdoutBuffer = new OutputBuffer(5000);
             proc.stdout.on("data", (chunk: Buffer) => {
@@ -280,6 +311,7 @@ export class ProcessManager {
             });
             this.stdoutBuffers.set(pid, stdoutBuffer);
         }
+
         return pid;
     }
 
@@ -298,9 +330,6 @@ export class ProcessManager {
         if (args.home !== undefined) {
             cliArgs.push("--home", args.home);
         }
-        if (args.legacyDir !== undefined) {
-            cliArgs.push("--dir", args.legacyDir);
-        }
 
         if (args.log !== undefined) {
             rmSync(args.log, { force: true });
@@ -311,11 +340,13 @@ export class ProcessManager {
                 "log",
                 `${args.name ?? "hostname-agent"}.log`,
             );
+
             rmSync(logPath, { force: true });
             cliArgs.push("--log", logPath);
         }
 
         const appName = `${TEST_APP_NAME}-agent-${this.agentNamespace++}`;
+
         const pid = this.spawn(args.executablePath ?? AGENT_PATH, cliArgs, {
             cwd: args.cwd,
             env: {
@@ -323,13 +354,16 @@ export class ProcessManager {
                 ...args.env,
             },
         });
+
         this.agentAppNames.set(pid, appName);
+
         return pid;
     }
 
     spawnServer(args: SpawnServerArgs): number {
         const cliArgs: string[] = ["server"];
         const configPath = args.config ?? DEFAULT_TEST_CONFIG;
+
         if (args.config === undefined) {
             writeFileSync(
                 configPath,
@@ -341,6 +375,7 @@ password = "${TEST_PASSWORD}"
 `,
             );
         }
+
         cliArgs.push("--config", configPath);
 
         if (args.log !== undefined) {
@@ -348,11 +383,14 @@ password = "${TEST_PASSWORD}"
             cliArgs.push("--log", args.log);
         }
 
-        mkdirSync(TEST_SERVER_HOME, { recursive: true });
+        const serverHome = args.home ?? TEST_SERVER_HOME;
+
+        mkdirSync(serverHome, { recursive: true });
+
         return this.spawn(SERVER_PATH, cliArgs, {
             cwd: PROJECT_ROOT,
             env: {
-                HOME: TEST_SERVER_HOME,
+                HOME: serverHome,
                 REDOOR_APP_NAME: TEST_APP_NAME,
             },
         });
@@ -368,25 +406,30 @@ password = "${TEST_PASSWORD}"
                 throw error;
             }
         }
+
         this.processes.delete(pid);
         this.stdoutBuffers.delete(pid);
         const appName = this.agentAppNames.get(pid);
         const home = process.env.HOME;
+
         if (appName !== undefined && home !== undefined) {
             rmSync(join(home, ".local", "share", appName), {
                 recursive: true,
                 force: true,
             });
         }
+
         this.agentAppNames.delete(pid);
     }
 
     /** Terminates one owned process and waits for its resources to be released. */
     async killAndWait(pid: number): Promise<void> {
         const child = this.processes.get(pid);
+
         if (child === undefined) {
             return;
         }
+
         const exit = this.waitForChildExit(pid, child);
         this.kill(pid);
         await exit;
@@ -395,12 +438,15 @@ password = "${TEST_PASSWORD}"
     /** Reaps every owned process before the next serial test file can reuse its port. */
     async killAll(): Promise<void> {
         const processes = [...this.processes.entries()];
+
         const exits = processes.map(([pid, child]) =>
             this.waitForChildExit(pid, child),
         );
+
         for (const [pid] of processes) {
             this.kill(pid);
         }
+
         await Promise.all(exits);
     }
 
@@ -417,6 +463,7 @@ password = "${TEST_PASSWORD}"
         timeoutMs: number = 10000,
     ): Promise<number | null> {
         const process = this.processes.get(pid);
+
         if (!process) {
             throw new Error(`Process not found: ${pid}`);
         }
@@ -463,7 +510,7 @@ export async function startServerAndAgent(options: {
 }> {
     const serverPort = VITEST_SERVER_PORT;
     const apiClient = new ApiClient(`http://127.0.0.1:${serverPort}`);
-    const wsUrl = `ws://127.0.0.1:${serverPort}/ws`;
+    const wsUrl = `ws://127.0.0.1:${serverPort}/api/v1/agent/ws`;
 
     process.env.REDOOR_PORT = serverPort.toString();
     const serverPid = options.processManager.spawnServer({});
@@ -472,6 +519,7 @@ export async function startServerAndAgent(options: {
     await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
 
     const serverProcess = options.processManager.getProcess(serverPid);
+
     if (!serverProcess) {
         throw new Error("Server process not found");
     }
@@ -481,7 +529,8 @@ export async function startServerAndAgent(options: {
         new RegExp(`Agent registered:.*agent_name=${options.agentName}`),
         10000,
     );
-    const waitForTransferPromise = waitForAgentTransfer(
+
+    const waitForTransferPromise = waitForAgentReady(
         serverProcess,
         options.agentName,
     );
@@ -499,6 +548,7 @@ export async function startServerAndAgent(options: {
 
     const agents = await apiClient.listAgents();
     const testAgent = agents.find((agent) => agent.name === options.agentName);
+
     if (!testAgent) {
         throw new Error(`Agent ${options.agentName} was not registered`);
     }
@@ -513,35 +563,40 @@ export async function startServerAndAgent(options: {
     };
 }
 
-/** Waits until the agent's payload socket is router-owned before tests start streamed work. */
-export async function waitForAgentTransfer(
+/** Waits until the router accepted the agent's connection, which carries all of its streams. */
+export async function waitForAgentReady(
     serverProcess: ChildProcess,
     agentId: string,
 ): Promise<void> {
     await waitForLogMessage(
         serverProcess,
-        new RegExp(`Transfer socket registered: agent_id=${agentId},`),
+        new RegExp(`Agent registered: agent_id=${agentId},`),
         10000,
     );
 }
 
+/**
+ * Waits until a server answers its API on `port`.
+ *
+ * The budget is time-based and generous because a debug server can take well over five
+ * seconds to start while the integration and Playwright suites run in parallel.
+ */
 export async function waitForPort(
     port: number,
-    maxRetries = 50,
+    timeoutMs = 30_000,
 ): Promise<void> {
-    for (let i = 0; i < maxRetries; i++) {
-        try {
+    await waitForValue({
+        timeoutMs,
+        intervalMs: 100,
+        description: `server API on port ${port}`,
+        predicate: async () => {
             const response = await fetch(
                 `http://127.0.0.1:${port}/api/v1/agents`,
             );
-            if (response.ok || response.status === 401) {
-                return;
-            }
-        } catch {
-            await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-    }
-    throw new Error(`Port ${port} not ready after ${maxRetries} retries`);
+
+            return response.ok || response.status === 401;
+        },
+    });
 }
 
 /**
@@ -558,6 +613,7 @@ class OutputBuffer {
 
     add(chunk: string): void {
         this.chunks.push(chunk);
+
         if (this.chunks.length > this.maxSize) {
             this.chunks.shift();
         }
@@ -634,6 +690,7 @@ export async function waitForLogMessage(
     return promise;
 }
 
+/** Polls until a value or successful boolean condition is available instead of racing async cleanup. */
 export async function waitForValue<T>(options: {
     predicate: () => Promise<T | undefined>;
     timeoutMs?: number;
@@ -648,9 +705,11 @@ export async function waitForValue<T>(options: {
     while (Date.now() - start < timeoutMs) {
         try {
             const value = await options.predicate();
-            if (value !== undefined) {
+
+            if (value !== undefined && value !== false) {
                 return value;
             }
+
             lastError = undefined;
         } catch (error) {
             lastError =
@@ -662,4 +721,103 @@ export async function waitForValue<T>(options: {
 
     const errorSuffix = lastError ? `: ${lastError.message}` : "";
     throw new Error(`Timeout waiting for ${options.description}${errorSuffix}`);
+}
+
+/** Counts startups recorded in a server log; a restart re-executes startup and appends one. */
+async function countServerStartups(serverLog: string): Promise<number> {
+    try {
+        const log = await readFile(serverLog, "utf8");
+
+        return log.match(/Loaded server config/g)?.length ?? 0;
+    } catch (error) {
+        if (isErrorCode(error, "ENOENT")) {
+            return 0;
+        }
+
+        throw error;
+    }
+}
+
+/**
+ * Restarts the server and waits until the re-executed process answers API requests.
+ *
+ * The restart endpoint replies before the old process shuts down, so polling the API alone
+ * can be answered by the old process, and the next request then finds nothing listening on
+ * the port. Waiting for the new startup in the log first rules that out.
+ */
+export async function restartServerAndWait(options: {
+    apiClient: ApiClient;
+    serverLog: string;
+    timeoutMs?: number;
+}): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? 15_000;
+    const startups = await countServerStartups(options.serverLog);
+    await options.apiClient.restartServer();
+    await waitForValue({
+        timeoutMs,
+        description: "restarted server startup in its log",
+        predicate: async () =>
+            (await countServerStartups(options.serverLog)) > startups,
+    });
+    await waitForValue({
+        timeoutMs,
+        description: "restarted server to serve API requests",
+        predicate: async () => {
+            await options.apiClient.listAgents();
+
+            return true;
+        },
+    });
+}
+
+/** Every grantable permission, for tokens that should behave like the old full-access CLI. */
+export const ALL_PERMISSIONS: Permission[] = [
+    "files:read",
+    "files:write",
+    "files:delete",
+    "commands:execute",
+    "agents:manage",
+];
+
+/**
+ * Mints an access token through the session-authenticated REST API. Inside a test the token is
+ * deleted when the test finishes, so tests cannot leak credentials into later tests.
+ */
+export async function createAccessToken(
+    apiClient: ApiClient,
+    options: {
+        name?: string;
+        permissions: Permission[];
+        devices?: DeviceScope;
+        expiresAt?: string | null;
+    },
+): Promise<{ token: string; metadata: AccessTokenResponse }> {
+    const created = await apiClient.createAccessToken({
+        name: options.name ?? "integration test token",
+        permissions: options.permissions,
+        devices: options.devices ?? { kind: "all" },
+        expires_at: options.expiresAt ?? null,
+    });
+
+    try {
+        onTestFinished(async () => {
+            try {
+                await apiClient.deleteAccessToken(created.metadata.id);
+            } catch (error) {
+                // Tests that revoke or rotate-and-delete their token already cleaned up.
+                if (!(error instanceof ApiError && error.status === 404)) {
+                    throw error;
+                }
+            }
+        });
+    } catch {
+        // Outside a test (beforeAll) the token lives as long as the test server.
+    }
+
+    return { token: created.token, metadata: created.metadata };
+}
+
+/** Environment that lets the remote CLI authenticate with a token without a saved login. */
+export function remoteEnv(baseUrl: string, token: string) {
+    return { REDOOR_REMOTE_SERVER: baseUrl, REDOOR_REMOTE_TOKEN: token };
 }

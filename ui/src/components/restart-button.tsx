@@ -1,25 +1,28 @@
 import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
+import type { RestartResponse } from "#bindings/RestartResponse";
 
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
+import { getErrorMessage } from "#ui/utils/error";
 
 /** Normalizes failures from both API requests and readiness polling. */
 function restartErrorMessage(cause: unknown): string {
-    return cause instanceof Error ? cause.message : "Restart failed";
+    return getErrorMessage(cause, "Restart failed");
 }
 
 /** Provides the same confirmed restart workflow for server and agent process homes. */
 export function RestartButton(props: {
     target: string;
     description: React.ReactNode;
-    restart: () => Promise<unknown>;
+    restart: () => Promise<RestartResponse>;
     waitUntilReady: () => Promise<void>;
     className?: string;
     ariaLabel?: string;
 }) {
     const [isOpen, setIsOpen] = React.useState(false);
+
     const restartMutation = useMutation({
         mutationFn: async () => {
             await props.restart();
@@ -72,22 +75,4 @@ export function RestartButton(props: {
             />
         </>
     );
-}
-
-/** Polls a target-specific probe until it proves the replacement process is ready. */
-export async function waitForRestart(
-    probe: () => Promise<unknown>,
-    timeoutMessage: string,
-): Promise<void> {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < 30_000) {
-        try {
-            await probe();
-            return;
-        } catch {
-            // The target is still shutting down or starting up.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    throw new Error(timeoutMessage);
 }

@@ -59,6 +59,7 @@ test.describe.serial("Move Operations", () => {
         let moveButton = page.getByRole("button", {
             name: "Move selected items to this directory",
         });
+
         // An empty selection has no destination action to offer.
         await expect(moveButton).toHaveCount(0);
 
@@ -96,16 +97,19 @@ test.describe.serial("Move Operations", () => {
         const secondName = `move-file-b-${suffix}.txt`;
         const firstSourcePath = path.join(ctx.testDirPath, firstName);
         const secondSourcePath = path.join(ctx.testDirPath, secondName);
+
         const firstDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             firstName,
         );
+
         const secondDestinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             secondName,
         );
+
         await fs.writeFile(firstSourcePath, "move content a");
         await fs.writeFile(secondSourcePath, "move content b");
 
@@ -139,9 +143,11 @@ test.describe.serial("Move Operations", () => {
                 name: "Move selected items to this directory",
             })
             .click();
+
         const confirmation = page.getByRole("dialog", {
             name: "Move selected items?",
         });
+
         // The confirmation lists every source before either move request starts.
         await expect(confirmation).toContainText(firstName);
         await expect(confirmation).toContainText(secondName);
@@ -183,11 +189,13 @@ test.describe.serial("Move Operations", () => {
         const nestedName = `nested-${suffix}.txt`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
         const nestedSourcePath = path.join(sourcePath, nestedName);
+
         const destinationPath = path.join(
             ctx.testDirPath,
             "subdir1",
             sourceName,
         );
+
         await fs.mkdir(sourcePath);
         await fs.writeFile(nestedSourcePath, "moved directory child");
 
@@ -261,17 +269,16 @@ test.describe.serial("Move Operations", () => {
         await page.getByRole("button", { name: "Clear selection" }).click();
     });
 
-    test("should keep an existing file when resolving a move conflict", async ({
+    test("should move under a new name when resolving a move conflict", async ({
         page,
     }) => {
         test.setTimeout(60_000);
-        const sourceName = `keep-existing-move-${Date.now()}.txt`;
+        const stem = `rename-move-${Date.now()}`;
+        const sourceName = `${stem}.txt`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
-        const destinationPath = path.join(
-            ctx.testDirPath,
-            "subdir1",
-            sourceName,
-        );
+        const destinationDirPath = path.join(ctx.testDirPath, "subdir1");
+        const destinationPath = path.join(destinationDirPath, sourceName);
+
         await fs.writeFile(sourcePath, "source content");
         await fs.writeFile(destinationPath, "destination content");
 
@@ -282,15 +289,26 @@ test.describe.serial("Move Operations", () => {
             sourceType: "file",
             destinationDirectoryName: "subdir1",
         });
+
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // A same-named destination must interrupt the move before any request starts.
         await expect(dialog).toBeVisible();
-        // Keeping the destination is the safe default conflict policy.
+        // Renaming keeps the destination intact, so it is the safe default policy.
         await expect(
-            dialog.getByRole("radio", { name: "Keep existing" }),
+            dialog.getByRole("radio", { name: "Rename" }),
         ).toBeChecked();
+
+        const renamedName = `${stem}_2.txt`;
+
+        // The suggested name keeps the extension so the moved file opens the same way.
+        await expect(
+            dialog.getByRole("textbox", {
+                name: `New name for ${sourceName}`,
+            }),
+        ).toHaveValue(renamedName);
         // The shared dialog must use Move-specific confirm text.
         await expect(
             dialog.getByRole("button", { name: "Continue moving" }),
@@ -301,24 +319,31 @@ test.describe.serial("Move Operations", () => {
                 request.url() === `${WEB_BASE_URL}/api/v1/move` &&
                 request.method() === "POST",
         );
+
         await dialog.getByRole("button", { name: "Continue moving" }).click();
-        // The selected dialog action must be forwarded to the move API.
-        expect((await moveRequest).postDataJSON().on_existing).toBe("error");
-        // The terminal transfer error must be reported after choosing the safe policy.
-        await expect(page.getByRole("alert")).toContainText("Move failed", {
-            timeout: 30_000,
-        });
-        // Error policy must preserve the destination bytes.
+
+        const requestBody = (await moveRequest).postDataJSON();
+
+        // The prefilled name must be what the move API receives.
+        expect(requestBody.dest.path).toBe(
+            path.join(destinationDirPath, renamedName),
+        );
+        // A rename must never overwrite, even if the new name got taken meanwhile.
+        expect(requestBody.on_existing).toBe("error");
+        // A finished move removes the source and leaves the existing file untouched.
+        await expect
+            .poll(() =>
+                fs.stat(sourcePath).then(
+                    () => true,
+                    () => false,
+                ),
+            )
+            .toBe(false);
+        await expect(
+            fs.readFile(path.join(destinationDirPath, renamedName), "utf8"),
+        ).resolves.toBe("source content");
         await expect(fs.readFile(destinationPath, "utf8")).resolves.toBe(
             "destination content",
         );
-        // A failed move must also preserve the source and its selection.
-        await expect(fs.readFile(sourcePath, "utf8")).resolves.toBe(
-            "source content",
-        );
-        await expect(
-            page.getByRole("button", { name: "Clear selection" }),
-        ).toBeVisible();
-        await page.getByRole("button", { name: "Clear selection" }).click();
     });
 });

@@ -1,15 +1,14 @@
 import type { LsEntry } from "#bindings/LsEntry";
-import { ApiError, type Agent } from "#ui/api-client";
+import { ApiError } from "#ui/api-transport";
+import type { FileSortColumn, FileSortDirection } from "#ui/browser-search";
 
 export function getImmediateParentPath(path: string): string | null {
     const normalizedPath = path.replace(/\/+$/, "");
+
     if (!normalizedPath.startsWith("/") || normalizedPath === "") return null;
     const lastSlashIndex = normalizedPath.lastIndexOf("/");
-    return lastSlashIndex === 0 ? "/" : normalizedPath.slice(0, lastSlashIndex);
-}
 
-export function getBrowserPathHref(agent: Agent, path: string) {
-    return agent.getBrowserUrl(path);
+    return lastSlashIndex === 0 ? "/" : normalizedPath.slice(0, lastSlashIndex);
 }
 
 export type PathLoadError = {
@@ -22,12 +21,15 @@ export function getPathLoadError(cause: unknown): PathLoadError | null {
     if (!(cause instanceof ApiError)) {
         return null;
     }
+
     if (cause.status === 404) {
         return { type: "missing", message: cause.message };
     }
+
     if (cause.status === 403) {
         return { type: "unreadable", message: cause.message };
     }
+
     return null;
 }
 
@@ -38,18 +40,22 @@ export function sortFileEntries<T extends { name: string }>(entries: T[]): T[] {
     return [...entries].sort((a, b) => {
         const aIsDot = a.name.startsWith(".");
         const bIsDot = b.name.startsWith(".");
+
         if (aIsDot !== bIsDot) {
             return aIsDot ? 1 : -1;
         }
+
         return a.name.localeCompare(b.name, undefined, {
             sensitivity: "base",
         });
     });
 }
 
-export type FileSortColumn =
-    "type" | "name" | "size" | "modified" | "owner" | "group";
-export type FileSortDirection = "ascending" | "descending";
+/** Pairs a listing column with its direction, which together decide the displayed order. */
+export type FileSort = {
+    column: FileSortColumn;
+    direction: FileSortDirection;
+};
 
 /** Formats the complete minute-level age used by modification-time tooltips. */
 export function formatModifiedAge(modifiedAt: number, now: number): string {
@@ -57,11 +63,13 @@ export function formatModifiedAge(modifiedAt: number, now: number): string {
         0,
         Math.floor((now - modifiedAt * 1000) / 60_000),
     );
+
     if (totalMinutes === 0) return "less than a minute ago";
 
     const days = Math.floor(totalMinutes / (24 * 60));
     const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
     const minutes = totalMinutes % 60;
+
     const parts = [
         days > 0 ? `${days} ${days === 1 ? "day" : "days"}` : null,
         hours > 0 ? `${hours} ${hours === 1 ? "hour" : "hours"}` : null,
@@ -77,9 +85,10 @@ export function formatModifiedAge(modifiedAt: number, now: number): string {
 export function compareFileEntries(
     left: LsEntry,
     right: LsEntry,
-    sort: { column: FileSortColumn; direction: FileSortDirection },
+    sort: FileSort,
 ): number {
     let comparison = 0;
+
     if (sort.column === "size") {
         comparison = left.size - right.size;
     } else if (sort.column === "modified") {
@@ -91,12 +100,14 @@ export function compareFileEntries(
             sensitivity: "base",
         });
     }
+
     if (comparison !== 0) {
         return sort.direction === "ascending" ? comparison : -comparison;
     }
 
     const leftIsHidden = left.name.startsWith(".");
     const rightIsHidden = right.name.startsWith(".");
+
     if (leftIsHidden !== rightIsHidden) {
         return leftIsHidden ? 1 : -1;
     }
@@ -104,6 +115,7 @@ export function compareFileEntries(
     const nameComparison = left.name.localeCompare(right.name, undefined, {
         sensitivity: "base",
     });
+
     return sort.direction === "ascending" ? nameComparison : -nameComparison;
 }
 
@@ -123,14 +135,8 @@ export function isBrowserPathInside(parentPath: string, candidatePath: string) {
     if (parentPath === candidatePath) {
         return true;
     }
+
     const prefix = parentPath.endsWith("/") ? parentPath : `${parentPath}/`;
+
     return candidatePath.startsWith(prefix);
-}
-
-export function getErrorMessage(cause: unknown, fallbackMessage: string) {
-    if (cause instanceof Error) {
-        return cause.message;
-    }
-
-    return fallbackMessage;
 }

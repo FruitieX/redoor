@@ -83,8 +83,12 @@ ${"```"}
             page.getByRole("button", { name: "Close markdown preview" }),
         ).toBeVisible();
         // CodeMirror remains mounted while CSS keeps it out of the visible preview.
-        await expect(page.getByLabel("File editor")).toBeAttached();
-        await expect(page.getByLabel("File editor")).not.toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeAttached();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).not.toBeVisible();
     });
 
     test("does not steal browser find while the editor is hidden", async ({
@@ -126,15 +130,17 @@ ${"```"}
         page,
     }) => {
         await page.goto(markdownUrl);
+
         const toggle = page.getByRole("button", {
             name: "Preview",
             exact: true,
         });
+
         await toggle.click();
 
         // False is explicit so reloading an intentional editor view does not reopen preview.
         await expect(page).toHaveURL(`${markdownUrl}?preview=false`);
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expect(editor).toBeVisible();
         await editor.fill(`# Draft heading
 
@@ -175,7 +181,9 @@ Draft body`);
 
         // Other editable formats retain the existing canonical URL and controls.
         await expect(page).toHaveURL(textUrl);
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         await expect(
             page.getByRole("button", { name: "Preview", exact: true }),
         ).toHaveCount(0);
@@ -200,9 +208,11 @@ completions:
         const frontmatterUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(frontmatterPath)}`;
         await page.goto(frontmatterUrl);
         const preview = page.getByRole("region", { name: "Markdown preview" });
+
         const frontmatter = preview.getByRole("region", {
             name: "YAML frontmatter",
         });
+
         const table = frontmatter.getByRole("table", {
             name: "YAML frontmatter",
         });
@@ -236,7 +246,9 @@ completions:
 
         // A line target takes precedence over the default preview so its caret jump remains useful.
         await expect(page).toHaveURL(`${markdownUrl}?line=3`);
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         await expect(page.getByLabel("Editor caret line")).toHaveText("3");
         await expect(
             page.getByRole("region", { name: "Markdown preview" }),

@@ -9,23 +9,25 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
+import { Route as AppRouteImport } from './routes/_app'
 import { Route as LoginRouteImport } from './routes/login'
-import { Route as LogsRouteImport } from './routes/logs'
-import { Route as TestRouteImport } from './routes/test'
-import { Route as AgentsIndexRouteImport } from './routes/agents.index'
-import { Route as AgentsAgentIdRouteImport } from './routes/agents.$agentId'
-import { Route as AgentsNewRouteImport } from './routes/agents.new'
-import { Route as TransfersIndexRouteImport } from './routes/transfers.index'
-import { Route as AgentsAgentIdIndexRouteImport } from './routes/agents.$agentId.index'
-import { Route as AgentsAgentIdEditRouteImport } from './routes/agents.$agentId.edit'
-import { Route as AgentsAgentIdLogsRouteImport } from './routes/agents.$agentId.logs'
-import { Route as AgentsAgentIdTrashRouteImport } from './routes/agents.$agentId.trash'
-import { Route as AgentsAgentIdBrowserSplatRouteImport } from './routes/agents.$agentId.browser.$'
+import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppSplatRouteImport } from './routes/_app/$'
+import { Route as AppLogsRouteImport } from './routes/_app/logs'
+import { Route as AppAgentsIndexRouteImport } from './routes/_app/agents.index'
+import { Route as AppAgentsAgentIdRouteImport } from './routes/_app/agents.$agentId'
+import { Route as AppAgentsNewRouteImport } from './routes/_app/agents.new'
+import { Route as AppTransfersIndexRouteImport } from './routes/_app/transfers.index'
+import { Route as AppAgentsAgentIdIndexRouteImport } from './routes/_app/agents.$agentId.index'
+import { Route as AppAgentsAgentIdEditRouteImport } from './routes/_app/agents.$agentId.edit'
+import { Route as AppAgentsAgentIdLogsRouteImport } from './routes/_app/agents.$agentId.logs'
+import { Route as AppAgentsAgentIdTrashRouteImport } from './routes/_app/agents.$agentId.trash'
+import { Route as AppSettingsTokensIndexRouteImport } from './routes/_app/settings.tokens.index'
+import { Route as AppAgentsAgentIdBrowserSplatRouteImport } from './routes/_app/agents.$agentId.browser.$'
+import { Route as AppSettingsTokensTokenIdEditRouteImport } from './routes/_app/settings.tokens.$tokenId.edit'
 
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const AppRoute = AppRouteImport.update({
+  id: '/_app',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -33,115 +35,138 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
-const LogsRoute = LogsRouteImport.update({
-  id: '/logs',
-  path: '/logs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const TestRoute = TestRouteImport.update({
-  id: '/test',
-  path: '/test',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsIndexRoute = AgentsIndexRouteImport.update({
-  id: '/agents/',
-  path: '/agents/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsAgentIdRoute = AgentsAgentIdRouteImport.update({
-  id: '/agents/$agentId',
-  path: '/agents/$agentId',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsNewRoute = AgentsNewRouteImport.update({
-  id: '/agents/new',
-  path: '/agents/new',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const TransfersIndexRoute = TransfersIndexRouteImport.update({
-  id: '/transfers/',
-  path: '/transfers/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AgentsAgentIdIndexRoute = AgentsAgentIdIndexRouteImport.update({
+const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => AgentsAgentIdRoute,
+  getParentRoute: () => AppRoute,
 } as any)
-const AgentsAgentIdEditRoute = AgentsAgentIdEditRouteImport.update({
-  id: '/edit',
-  path: '/edit',
-  getParentRoute: () => AgentsAgentIdRoute,
+const AppSplatRoute = AppSplatRouteImport.update({
+  id: '/$',
+  path: '/$',
+  getParentRoute: () => AppRoute,
 } as any)
-const AgentsAgentIdLogsRoute = AgentsAgentIdLogsRouteImport.update({
+const AppLogsRoute = AppLogsRouteImport.update({
   id: '/logs',
   path: '/logs',
-  getParentRoute: () => AgentsAgentIdRoute,
+  getParentRoute: () => AppRoute,
 } as any)
-const AgentsAgentIdTrashRoute = AgentsAgentIdTrashRouteImport.update({
+const AppAgentsIndexRoute = AppAgentsIndexRouteImport.update({
+  id: '/agents/',
+  path: '/agents/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAgentsAgentIdRoute = AppAgentsAgentIdRouteImport.update({
+  id: '/agents/$agentId',
+  path: '/agents/$agentId',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAgentsNewRoute = AppAgentsNewRouteImport.update({
+  id: '/agents/new',
+  path: '/agents/new',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppTransfersIndexRoute = AppTransfersIndexRouteImport.update({
+  id: '/transfers/',
+  path: '/transfers/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAgentsAgentIdIndexRoute = AppAgentsAgentIdIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppAgentsAgentIdRoute,
+} as any)
+const AppAgentsAgentIdEditRoute = AppAgentsAgentIdEditRouteImport.update({
+  id: '/edit',
+  path: '/edit',
+  getParentRoute: () => AppAgentsAgentIdRoute,
+} as any)
+const AppAgentsAgentIdLogsRoute = AppAgentsAgentIdLogsRouteImport.update({
+  id: '/logs',
+  path: '/logs',
+  getParentRoute: () => AppAgentsAgentIdRoute,
+} as any)
+const AppAgentsAgentIdTrashRoute = AppAgentsAgentIdTrashRouteImport.update({
   id: '/trash',
   path: '/trash',
-  getParentRoute: () => AgentsAgentIdRoute,
+  getParentRoute: () => AppAgentsAgentIdRoute,
 } as any)
-const AgentsAgentIdBrowserSplatRoute =
-  AgentsAgentIdBrowserSplatRouteImport.update({
+const AppSettingsTokensIndexRoute = AppSettingsTokensIndexRouteImport.update({
+  id: '/settings/tokens/',
+  path: '/settings/tokens/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAgentsAgentIdBrowserSplatRoute =
+  AppAgentsAgentIdBrowserSplatRouteImport.update({
     id: '/browser/$',
     path: '/browser/$',
-    getParentRoute: () => AgentsAgentIdRoute,
+    getParentRoute: () => AppAgentsAgentIdRoute,
+  } as any)
+const AppSettingsTokensTokenIdEditRoute =
+  AppSettingsTokensTokenIdEditRouteImport.update({
+    id: '/settings/tokens/$tokenId/edit',
+    path: '/settings/tokens/$tokenId/edit',
+    getParentRoute: () => AppRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
+  '/': typeof AppIndexRoute
   '/login': typeof LoginRoute
-  '/logs': typeof LogsRoute
-  '/test': typeof TestRoute
-  '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
-  '/agents/new': typeof AgentsNewRoute
-  '/agents/': typeof AgentsIndexRoute
-  '/transfers/': typeof TransfersIndexRoute
-  '/agents/$agentId/edit': typeof AgentsAgentIdEditRoute
-  '/agents/$agentId/logs': typeof AgentsAgentIdLogsRoute
-  '/agents/$agentId/trash': typeof AgentsAgentIdTrashRoute
-  '/agents/$agentId/': typeof AgentsAgentIdIndexRoute
-  '/agents/$agentId/browser/$': typeof AgentsAgentIdBrowserSplatRoute
+  '/$': typeof AppSplatRoute
+  '/logs': typeof AppLogsRoute
+  '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/agents/new': typeof AppAgentsNewRoute
+  '/agents/': typeof AppAgentsIndexRoute
+  '/transfers/': typeof AppTransfersIndexRoute
+  '/agents/$agentId/edit': typeof AppAgentsAgentIdEditRoute
+  '/agents/$agentId/logs': typeof AppAgentsAgentIdLogsRoute
+  '/agents/$agentId/trash': typeof AppAgentsAgentIdTrashRoute
+  '/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
+  '/settings/tokens/': typeof AppSettingsTokensIndexRoute
+  '/agents/$agentId/browser/$': typeof AppAgentsAgentIdBrowserSplatRoute
+  '/settings/tokens/$tokenId/edit': typeof AppSettingsTokensTokenIdEditRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
   '/login': typeof LoginRoute
-  '/logs': typeof LogsRoute
-  '/test': typeof TestRoute
-  '/agents/new': typeof AgentsNewRoute
-  '/agents': typeof AgentsIndexRoute
-  '/transfers': typeof TransfersIndexRoute
-  '/agents/$agentId/edit': typeof AgentsAgentIdEditRoute
-  '/agents/$agentId/logs': typeof AgentsAgentIdLogsRoute
-  '/agents/$agentId/trash': typeof AgentsAgentIdTrashRoute
-  '/agents/$agentId': typeof AgentsAgentIdIndexRoute
-  '/agents/$agentId/browser/$': typeof AgentsAgentIdBrowserSplatRoute
+  '/$': typeof AppSplatRoute
+  '/logs': typeof AppLogsRoute
+  '/': typeof AppIndexRoute
+  '/agents/new': typeof AppAgentsNewRoute
+  '/agents': typeof AppAgentsIndexRoute
+  '/transfers': typeof AppTransfersIndexRoute
+  '/agents/$agentId/edit': typeof AppAgentsAgentIdEditRoute
+  '/agents/$agentId/logs': typeof AppAgentsAgentIdLogsRoute
+  '/agents/$agentId/trash': typeof AppAgentsAgentIdTrashRoute
+  '/agents/$agentId': typeof AppAgentsAgentIdIndexRoute
+  '/settings/tokens': typeof AppSettingsTokensIndexRoute
+  '/agents/$agentId/browser/$': typeof AppAgentsAgentIdBrowserSplatRoute
+  '/settings/tokens/$tokenId/edit': typeof AppSettingsTokensTokenIdEditRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
+  '/_app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
-  '/logs': typeof LogsRoute
-  '/test': typeof TestRoute
-  '/agents/$agentId': typeof AgentsAgentIdRouteWithChildren
-  '/agents/new': typeof AgentsNewRoute
-  '/agents/': typeof AgentsIndexRoute
-  '/transfers/': typeof TransfersIndexRoute
-  '/agents/$agentId/edit': typeof AgentsAgentIdEditRoute
-  '/agents/$agentId/logs': typeof AgentsAgentIdLogsRoute
-  '/agents/$agentId/trash': typeof AgentsAgentIdTrashRoute
-  '/agents/$agentId/': typeof AgentsAgentIdIndexRoute
-  '/agents/$agentId/browser/$': typeof AgentsAgentIdBrowserSplatRoute
+  '/_app/$': typeof AppSplatRoute
+  '/_app/logs': typeof AppLogsRoute
+  '/_app/': typeof AppIndexRoute
+  '/_app/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/_app/agents/new': typeof AppAgentsNewRoute
+  '/_app/agents/': typeof AppAgentsIndexRoute
+  '/_app/transfers/': typeof AppTransfersIndexRoute
+  '/_app/agents/$agentId/edit': typeof AppAgentsAgentIdEditRoute
+  '/_app/agents/$agentId/logs': typeof AppAgentsAgentIdLogsRoute
+  '/_app/agents/$agentId/trash': typeof AppAgentsAgentIdTrashRoute
+  '/_app/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
+  '/_app/settings/tokens/': typeof AppSettingsTokensIndexRoute
+  '/_app/agents/$agentId/browser/$': typeof AppAgentsAgentIdBrowserSplatRoute
+  '/_app/settings/tokens/$tokenId/edit': typeof AppSettingsTokensTokenIdEditRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/login'
+    | '/$'
     | '/logs'
-    | '/test'
     | '/agents/$agentId'
     | '/agents/new'
     | '/agents/'
@@ -150,13 +175,15 @@ export interface FileRouteTypes {
     | '/agents/$agentId/logs'
     | '/agents/$agentId/trash'
     | '/agents/$agentId/'
+    | '/settings/tokens/'
     | '/agents/$agentId/browser/$'
+    | '/settings/tokens/$tokenId/edit'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
     | '/login'
+    | '/$'
     | '/logs'
-    | '/test'
+    | '/'
     | '/agents/new'
     | '/agents'
     | '/transfers'
@@ -164,42 +191,41 @@ export interface FileRouteTypes {
     | '/agents/$agentId/logs'
     | '/agents/$agentId/trash'
     | '/agents/$agentId'
+    | '/settings/tokens'
     | '/agents/$agentId/browser/$'
+    | '/settings/tokens/$tokenId/edit'
   id:
     | '__root__'
-    | '/'
+    | '/_app'
     | '/login'
-    | '/logs'
-    | '/test'
-    | '/agents/$agentId'
-    | '/agents/new'
-    | '/agents/'
-    | '/transfers/'
-    | '/agents/$agentId/edit'
-    | '/agents/$agentId/logs'
-    | '/agents/$agentId/trash'
-    | '/agents/$agentId/'
-    | '/agents/$agentId/browser/$'
+    | '/_app/$'
+    | '/_app/logs'
+    | '/_app/'
+    | '/_app/agents/$agentId'
+    | '/_app/agents/new'
+    | '/_app/agents/'
+    | '/_app/transfers/'
+    | '/_app/agents/$agentId/edit'
+    | '/_app/agents/$agentId/logs'
+    | '/_app/agents/$agentId/trash'
+    | '/_app/agents/$agentId/'
+    | '/_app/settings/tokens/'
+    | '/_app/agents/$agentId/browser/$'
+    | '/_app/settings/tokens/$tokenId/edit'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
+  AppRoute: typeof AppRouteWithChildren
   LoginRoute: typeof LoginRoute
-  LogsRoute: typeof LogsRoute
-  TestRoute: typeof TestRoute
-  AgentsAgentIdRoute: typeof AgentsAgentIdRouteWithChildren
-  AgentsNewRoute: typeof AgentsNewRoute
-  AgentsIndexRoute: typeof AgentsIndexRoute
-  TransfersIndexRoute: typeof TransfersIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
+    '/_app': {
+      id: '/_app'
+      path: ''
       fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+      preLoaderRoute: typeof AppRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -209,115 +235,155 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/logs': {
-      id: '/logs'
+    '/_app/': {
+      id: '/_app/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/$': {
+      id: '/_app/$'
+      path: '/$'
+      fullPath: '/$'
+      preLoaderRoute: typeof AppSplatRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/logs': {
+      id: '/_app/logs'
       path: '/logs'
       fullPath: '/logs'
-      preLoaderRoute: typeof LogsRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof AppLogsRouteImport
+      parentRoute: typeof AppRoute
     }
-    '/test': {
-      id: '/test'
-      path: '/test'
-      fullPath: '/test'
-      preLoaderRoute: typeof TestRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/agents/': {
-      id: '/agents/'
+    '/_app/agents/': {
+      id: '/_app/agents/'
       path: '/agents'
       fullPath: '/agents/'
-      preLoaderRoute: typeof AgentsIndexRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof AppAgentsIndexRouteImport
+      parentRoute: typeof AppRoute
     }
-    '/agents/$agentId': {
-      id: '/agents/$agentId'
+    '/_app/agents/$agentId': {
+      id: '/_app/agents/$agentId'
       path: '/agents/$agentId'
       fullPath: '/agents/$agentId'
-      preLoaderRoute: typeof AgentsAgentIdRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof AppAgentsAgentIdRouteImport
+      parentRoute: typeof AppRoute
     }
-    '/agents/new': {
-      id: '/agents/new'
+    '/_app/agents/new': {
+      id: '/_app/agents/new'
       path: '/agents/new'
       fullPath: '/agents/new'
-      preLoaderRoute: typeof AgentsNewRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof AppAgentsNewRouteImport
+      parentRoute: typeof AppRoute
     }
-    '/transfers/': {
-      id: '/transfers/'
+    '/_app/transfers/': {
+      id: '/_app/transfers/'
       path: '/transfers'
       fullPath: '/transfers/'
-      preLoaderRoute: typeof TransfersIndexRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof AppTransfersIndexRouteImport
+      parentRoute: typeof AppRoute
     }
-    '/agents/$agentId/': {
-      id: '/agents/$agentId/'
+    '/_app/agents/$agentId/': {
+      id: '/_app/agents/$agentId/'
       path: '/'
       fullPath: '/agents/$agentId/'
-      preLoaderRoute: typeof AgentsAgentIdIndexRouteImport
-      parentRoute: typeof AgentsAgentIdRoute
+      preLoaderRoute: typeof AppAgentsAgentIdIndexRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
     }
-    '/agents/$agentId/edit': {
-      id: '/agents/$agentId/edit'
+    '/_app/agents/$agentId/edit': {
+      id: '/_app/agents/$agentId/edit'
       path: '/edit'
       fullPath: '/agents/$agentId/edit'
-      preLoaderRoute: typeof AgentsAgentIdEditRouteImport
-      parentRoute: typeof AgentsAgentIdRoute
+      preLoaderRoute: typeof AppAgentsAgentIdEditRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
     }
-    '/agents/$agentId/logs': {
-      id: '/agents/$agentId/logs'
+    '/_app/agents/$agentId/logs': {
+      id: '/_app/agents/$agentId/logs'
       path: '/logs'
       fullPath: '/agents/$agentId/logs'
-      preLoaderRoute: typeof AgentsAgentIdLogsRouteImport
-      parentRoute: typeof AgentsAgentIdRoute
+      preLoaderRoute: typeof AppAgentsAgentIdLogsRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
     }
-    '/agents/$agentId/trash': {
-      id: '/agents/$agentId/trash'
+    '/_app/agents/$agentId/trash': {
+      id: '/_app/agents/$agentId/trash'
       path: '/trash'
       fullPath: '/agents/$agentId/trash'
-      preLoaderRoute: typeof AgentsAgentIdTrashRouteImport
-      parentRoute: typeof AgentsAgentIdRoute
+      preLoaderRoute: typeof AppAgentsAgentIdTrashRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
     }
-    '/agents/$agentId/browser/$': {
-      id: '/agents/$agentId/browser/$'
+    '/_app/settings/tokens/': {
+      id: '/_app/settings/tokens/'
+      path: '/settings/tokens'
+      fullPath: '/settings/tokens/'
+      preLoaderRoute: typeof AppSettingsTokensIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/agents/$agentId/browser/$': {
+      id: '/_app/agents/$agentId/browser/$'
       path: '/browser/$'
       fullPath: '/agents/$agentId/browser/$'
-      preLoaderRoute: typeof AgentsAgentIdBrowserSplatRouteImport
-      parentRoute: typeof AgentsAgentIdRoute
+      preLoaderRoute: typeof AppAgentsAgentIdBrowserSplatRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
+    '/_app/settings/tokens/$tokenId/edit': {
+      id: '/_app/settings/tokens/$tokenId/edit'
+      path: '/settings/tokens/$tokenId/edit'
+      fullPath: '/settings/tokens/$tokenId/edit'
+      preLoaderRoute: typeof AppSettingsTokensTokenIdEditRouteImport
+      parentRoute: typeof AppRoute
     }
   }
 }
 
-interface AgentsAgentIdRouteChildren {
-  AgentsAgentIdEditRoute: typeof AgentsAgentIdEditRoute
-  AgentsAgentIdLogsRoute: typeof AgentsAgentIdLogsRoute
-  AgentsAgentIdTrashRoute: typeof AgentsAgentIdTrashRoute
-  AgentsAgentIdIndexRoute: typeof AgentsAgentIdIndexRoute
-  AgentsAgentIdBrowserSplatRoute: typeof AgentsAgentIdBrowserSplatRoute
+interface AppAgentsAgentIdRouteChildren {
+  AppAgentsAgentIdEditRoute: typeof AppAgentsAgentIdEditRoute
+  AppAgentsAgentIdLogsRoute: typeof AppAgentsAgentIdLogsRoute
+  AppAgentsAgentIdTrashRoute: typeof AppAgentsAgentIdTrashRoute
+  AppAgentsAgentIdIndexRoute: typeof AppAgentsAgentIdIndexRoute
+  AppAgentsAgentIdBrowserSplatRoute: typeof AppAgentsAgentIdBrowserSplatRoute
 }
 
-const AgentsAgentIdRouteChildren: AgentsAgentIdRouteChildren = {
-  AgentsAgentIdEditRoute: AgentsAgentIdEditRoute,
-  AgentsAgentIdLogsRoute: AgentsAgentIdLogsRoute,
-  AgentsAgentIdTrashRoute: AgentsAgentIdTrashRoute,
-  AgentsAgentIdIndexRoute: AgentsAgentIdIndexRoute,
-  AgentsAgentIdBrowserSplatRoute: AgentsAgentIdBrowserSplatRoute,
+const AppAgentsAgentIdRouteChildren: AppAgentsAgentIdRouteChildren = {
+  AppAgentsAgentIdEditRoute: AppAgentsAgentIdEditRoute,
+  AppAgentsAgentIdLogsRoute: AppAgentsAgentIdLogsRoute,
+  AppAgentsAgentIdTrashRoute: AppAgentsAgentIdTrashRoute,
+  AppAgentsAgentIdIndexRoute: AppAgentsAgentIdIndexRoute,
+  AppAgentsAgentIdBrowserSplatRoute: AppAgentsAgentIdBrowserSplatRoute,
 }
 
-const AgentsAgentIdRouteWithChildren = AgentsAgentIdRoute._addFileChildren(
-  AgentsAgentIdRouteChildren,
-)
+const AppAgentsAgentIdRouteWithChildren =
+  AppAgentsAgentIdRoute._addFileChildren(AppAgentsAgentIdRouteChildren)
+
+interface AppRouteChildren {
+  AppSplatRoute: typeof AppSplatRoute
+  AppLogsRoute: typeof AppLogsRoute
+  AppIndexRoute: typeof AppIndexRoute
+  AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRouteWithChildren
+  AppAgentsNewRoute: typeof AppAgentsNewRoute
+  AppAgentsIndexRoute: typeof AppAgentsIndexRoute
+  AppTransfersIndexRoute: typeof AppTransfersIndexRoute
+  AppSettingsTokensIndexRoute: typeof AppSettingsTokensIndexRoute
+  AppSettingsTokensTokenIdEditRoute: typeof AppSettingsTokensTokenIdEditRoute
+}
+
+const AppRouteChildren: AppRouteChildren = {
+  AppSplatRoute: AppSplatRoute,
+  AppLogsRoute: AppLogsRoute,
+  AppIndexRoute: AppIndexRoute,
+  AppAgentsAgentIdRoute: AppAgentsAgentIdRouteWithChildren,
+  AppAgentsNewRoute: AppAgentsNewRoute,
+  AppAgentsIndexRoute: AppAgentsIndexRoute,
+  AppTransfersIndexRoute: AppTransfersIndexRoute,
+  AppSettingsTokensIndexRoute: AppSettingsTokensIndexRoute,
+  AppSettingsTokensTokenIdEditRoute: AppSettingsTokensTokenIdEditRoute,
+}
+
+const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
+  AppRoute: AppRouteWithChildren,
   LoginRoute: LoginRoute,
-  LogsRoute: LogsRoute,
-  TestRoute: TestRoute,
-  AgentsAgentIdRoute: AgentsAgentIdRouteWithChildren,
-  AgentsNewRoute: AgentsNewRoute,
-  AgentsIndexRoute: AgentsIndexRoute,
-  TransfersIndexRoute: TransfersIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

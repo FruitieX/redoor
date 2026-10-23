@@ -43,10 +43,12 @@ test.describe.serial("Agent search", () => {
 unique-search-value
 last line`,
         );
+
         const nestedPathSearchDirectory = path.join(
             ctx.testDirPath,
             "nested-path-search",
         );
+
         await fs.mkdir(nestedPathSearchDirectory);
         await fs.writeFile(
             path.join(nestedPathSearchDirectory, "nested-path-target.txt"),
@@ -81,6 +83,7 @@ last line`,
         const requestBodies = new Map<URL, string | null>();
         page.on("request", (request) => {
             const url = new URL(request.url());
+
             if (
                 url.pathname.includes("/find/") ||
                 url.pathname.includes("/grep/")
@@ -90,12 +93,14 @@ last line`,
             }
         });
         await page.goto(directoryUrl);
-        await page.getByRole("button", { name: "Search agent" }).click();
+        await page.getByRole("button", { name: "Search device" }).click();
 
-        const dialog = page.getByRole("dialog", { name: "Search agent" });
+        const dialog = page.getByRole("dialog", { name: "Search device" });
+
         const pathInput = dialog.getByRole("searchbox", {
             name: "Search file paths",
         });
+
         await pathInput.fill("abcd");
         await pathInput.evaluate((element: HTMLInputElement) => {
             element.setSelectionRange(2, 2);
@@ -109,31 +114,38 @@ last line`,
             ),
         ).toBe(3);
         await pathInput.fill("nested-path-target");
+
         const nestedPath = path.join(
             ctx.testDirPath,
             "nested-path-search",
             "nested-path-target.txt",
         );
+
         const pathResult = dialog.getByRole("link", {
             name: `Open path ${nestedPath}`,
         });
+
         // Path mode recursively discovers files that are absent from the loaded directory listing.
         await expect(pathResult).toBeVisible();
         await expect(pathResult).toHaveAttribute(
             "href",
             `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}`,
         );
+
         const [pathResultBounds, pathTextBounds] = await Promise.all([
             pathResult.boundingBox(),
             pathResult.getByText(nestedPath, { exact: true }).boundingBox(),
         ]);
+
         // The path begins beside the leading icon instead of inheriting centered button content.
         expect(
             (pathTextBounds?.x ?? 0) - (pathResultBounds?.x ?? 0),
         ).toBeLessThan(60);
+
         const pathRequest = requests.find((request) =>
             request.pathname.includes("/find/"),
         );
+
         // Agent and path belong to the resource URL rather than the find JSON contract.
         expect(pathRequest?.pathname).toBe(
             `/api/v1/agents/${encodeURIComponent(ctx.agentId)}/find/${ctx.testDirUrlPath}`,
@@ -156,6 +168,7 @@ last line`,
         const smartCaseButton = dialog.getByRole("button", {
             name: "Case: smart",
         });
+
         // The shared default is exposed by an icon-only control with an accessible state label.
         await expect(smartCaseButton).toBeVisible();
         await smartCaseButton.hover();
@@ -166,18 +179,22 @@ last line`,
         const smartCaseIcon = await smartCaseButton.innerHTML();
         await smartCaseButton.click();
         await expect(page).toHaveURL(/[?&]case=sensitive/);
+
         const sensitiveCaseButton = dialog.getByRole("button", {
             name: "Case: sensitive",
         });
+
         await expect(sensitiveCaseButton).toBeVisible();
         const sensitiveCaseIcon = await sensitiveCaseButton.innerHTML();
         // Each mode needs its own glyph so the current case rule is visible at a glance.
         expect(sensitiveCaseIcon).not.toBe(smartCaseIcon);
         await sensitiveCaseButton.click();
         await expect(page).toHaveURL(/[?&]case=insensitive/);
+
         const insensitiveCaseButton = dialog.getByRole("button", {
             name: "Case: insensitive",
         });
+
         const insensitiveCaseIcon = await insensitiveCaseButton.innerHTML();
         expect(insensitiveCaseIcon).not.toBe(sensitiveCaseIcon);
         expect(insensitiveCaseIcon).not.toBe(smartCaseIcon);
@@ -187,18 +204,22 @@ last line`,
         await dialog
             .getByRole("button", { name: "Search file contents" })
             .click();
+
         const contentResult = dialog.getByRole("link", {
             name: `Open ${nestedPath} at line 1`,
         });
+
         await expect(contentResult).toBeVisible();
         // A real destination href preserves native middle-click and context-menu navigation.
         await expect(contentResult).toHaveAttribute(
             "href",
             `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}?line=1`,
         );
+
         const searchRequestCount = requests.filter((request) =>
             request.pathname.includes("/find/"),
         ).length;
+
         const grepRequestCount = requests.filter((request) =>
             request.pathname.includes("/grep/"),
         ).length;
@@ -214,16 +235,20 @@ last line`,
         const contextInput = dialog.getByLabel("Context lines above and below");
         // Content search requests and displays the same default context on both sides.
         await expect(contextInput).toHaveValue("2");
+
         const searchTargetResult = dialog.getByRole("link", {
             name: /Open .*search-target\.txt at line 2/,
         });
+
         await expect(searchTargetResult.getByText("first line")).toBeVisible();
         await expect(searchTargetResult.getByText("last line")).toBeVisible();
+
         const contentRequest = requests.find((request) =>
             requestBodies
                 .get(request)
                 ?.includes('"query":"unique-search-value"'),
         );
+
         // Content grep uses the same agent-and-path URL scope as filename search.
         expect(contentRequest?.pathname).toBe(
             `/api/v1/agents/${encodeURIComponent(ctx.agentId)}/grep/${ctx.testDirUrlPath}`,
@@ -253,9 +278,11 @@ last line`,
         ).toBeGreaterThan(grepRequestCount);
 
         await dialog.getByRole("button", { name: "Search file paths" }).click();
+
         const grepRequestsAfterSwitch = requests.filter((request) =>
             request.pathname.includes("/grep/"),
         ).length;
+
         await pathInput.fill("nested-path-target");
         await expect(pathResult).toBeVisible();
         // Returning to path mode does not leak another request to the inactive grep endpoint.
@@ -273,18 +300,23 @@ last line`,
         await page.goto(directoryUrl);
 
         const launcher = page.getByRole("button", {
-            name: "Search agent",
+            name: "Search device",
         });
-        const home = page.getByRole("link", { name: "Agent home" });
+
+        const home = page.getByRole("link", { name: "Device home" });
+
         const up = page.getByRole("link", {
             name: "Go to the parent directory",
         });
+
         await expect(launcher).toHaveCount(1);
+
         const [homeBounds, launcherBounds, upBounds] = await Promise.all([
             home.boundingBox(),
             launcher.boundingBox(),
             up.boundingBox(),
         ]);
+
         // Browser chrome owns exactly one launcher and places it between Home and Up.
         expect(homeBounds?.x ?? 0).toBeLessThan(launcherBounds?.x ?? 0);
         expect(launcherBounds?.x ?? 0).toBeLessThan(upBounds?.x ?? 0);
@@ -292,14 +324,15 @@ last line`,
         // The launcher advertises the cross-platform chord rather than hiding the workflow.
         await expect(
             page.getByRole("tooltip", {
-                name: "Search agent (s, Cmd/Ctrl+K)",
+                name: "Search device (s, Cmd/Ctrl+K)",
             }),
         ).toBeVisible();
         await launcher.click();
 
         const dialog = page.getByRole("dialog", {
-            name: "Search agent",
+            name: "Search device",
         });
+
         // Directory metadata must scope grep to the directory currently being browsed.
         await expect(dialog).toContainText(
             `Current folder: ${ctx.testDirPath}`,
@@ -313,17 +346,21 @@ last line`,
         expect(desktopBounds?.height ?? 0).toBeGreaterThan(
             desktopViewport ? desktopViewport.height * 0.7 : 0,
         );
+
         const pathInput = dialog.getByRole("searchbox", {
             name: "Search file paths",
         });
+
         // Agent search starts in path mode rather than unexpectedly grepping file contents.
         await expect(pathInput).toBeFocused();
         await dialog
             .getByRole("button", { name: "Search file contents" })
             .click();
+
         const searchInput = dialog.getByRole("searchbox", {
             name: "Search file contents",
         });
+
         await expect(searchInput).toBeFocused();
         await expect(page).toHaveURL(/[?&]mode=content/);
         await page.goBack();
@@ -331,33 +368,44 @@ last line`,
         await expect(pathInput).toBeVisible();
         await page.goForward();
         await expect(searchInput).toBeVisible();
+
         const regexToggle = dialog.getByRole("button", {
             name: "Use regular expressions",
         });
-        await regexToggle.focus();
+
+        await regexToggle.hover();
+
         const dialogTooltip = page.getByRole("tooltip", {
             name: "Use regular expressions",
         });
+
         await expect(dialogTooltip).toBeVisible();
+
         const tooltipLayer = await dialogTooltip.evaluate((tooltip) => ({
             parentRole: tooltip.parentElement?.getAttribute("role"),
             zIndex: getComputedStyle(tooltip).zIndex,
         }));
+
         // Portaling into the modal top layer with a raised z-index keeps the tooltip above it.
         expect(tooltipLayer).toEqual({ parentRole: "dialog", zIndex: "80" });
         await searchInput.focus();
         const historyLength = await page.evaluate(() => history.length);
         let startFirstRequest: (() => void) | undefined;
+
         const firstRequestStarted = new Promise<void>((resolve) => {
             startFirstRequest = resolve;
         });
+
         let releaseFirstRequest: (() => void) | undefined;
+
         const firstRequestReleased = new Promise<void>((resolve) => {
             releaseFirstRequest = resolve;
         });
+
         let firstRequestFailed = false;
         page.on("requestfailed", (request) => {
             if (!request.url().includes("/grep/")) return;
+
             if (request.postData()?.includes('"query":"content1"') === true) {
                 firstRequestFailed = true;
             }
@@ -368,8 +416,10 @@ last line`,
                 true
             ) {
                 await route.continue();
+
                 return;
             }
+
             startFirstRequest?.();
             await firstRequestReleased;
             await route.continue().catch(() => undefined);
@@ -386,6 +436,7 @@ last line`,
         const result = dialog.getByRole("link", {
             name: /Open .*search-target\.txt at line 2/,
         });
+
         // Grep results expose their one-based line destination.
         await expect(result).toBeVisible();
         // Superseding an in-flight query must not leave stale matches in the result set.
@@ -408,7 +459,7 @@ last line`,
         await expect(dialog).toBeHidden();
         await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentId}/logs`);
         await expect(
-            page.getByRole("button", { name: "Search agent" }),
+            page.getByRole("button", { name: "Search device" }),
         ).toBeVisible();
         await page.keyboard.press("ControlOrMeta+k");
         // The route-level shortcut also works outside the browser and falls back to agent home.
@@ -425,8 +476,10 @@ last line`,
         await page.route("**/api/v1/user/state", async (route) => {
             if (route.request().method() !== "GET") {
                 await route.continue();
+
                 return;
             }
+
             await route.fulfill({
                 contentType: "application/json",
                 body: JSON.stringify({
@@ -448,24 +501,29 @@ last line`,
         );
 
         const dialog = page.getByRole("dialog", {
-            name: "Search agent",
+            name: "Search device",
         });
+
         // Content search follows the same remembered defaults as recursive filename search.
         await expect(
             dialog.getByLabel("Search timeout in seconds"),
         ).toHaveValue("17");
+
         const hiddenToggle = dialog.getByRole("button", {
             name: "Include hidden files and directories",
         });
+
         await expect(hiddenToggle).toHaveAttribute("aria-pressed", "true");
         await hiddenToggle.hover();
         // A pressed option must advertise turning it off, not restating the current filter.
         await expect(page.getByRole("tooltip")).toHaveText(
             "Exclude hidden files and directories",
         );
+
         const gitignoreToggle = dialog.getByRole("button", {
             name: "Respect .gitignore files",
         });
+
         await expect(gitignoreToggle).toHaveAttribute("aria-pressed", "false");
         await gitignoreToggle.hover();
         // An unpressed option must advertise the filter the next click enables.
@@ -499,8 +557,9 @@ last line`,
         );
 
         const dialog = page.getByRole("dialog", {
-            name: "Search agent",
+            name: "Search device",
         });
+
         // A directly loaded q opens search and a file route searches its parent.
         await expect(dialog).toBeVisible();
         await expect(dialog).toContainText(
@@ -563,12 +622,15 @@ last line`,
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(gitRootNestedPath)}?q=git-root-unique-value&mode=content`,
         );
+
         const dialog = page.getByRole("dialog", {
-            name: "Search agent",
+            name: "Search device",
         });
+
         const gitRootButton = dialog.getByRole("button", {
             name: "Search from git root",
         });
+
         // Nested worktree views expose the git-root control from loader git context.
         await expect(gitRootButton).toBeVisible();
         await expect(gitRootButton).toHaveAttribute("aria-pressed", "false");
@@ -619,8 +681,9 @@ test.describe("Mobile agent search", () => {
         await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentId}?q=`);
 
         const dialog = page.getByRole("dialog", {
-            name: "Search agent",
+            name: "Search device",
         });
+
         const bounds = await dialog.boundingBox();
         // Mobile search consumes the complete viewport so controls and results have maximum room.
         expect(bounds?.width).toBe(390);
@@ -629,12 +692,15 @@ test.describe("Mobile agent search", () => {
         await dialog
             .getByRole("button", { name: "Search file contents" })
             .click();
+
         const timeoutBox = await dialog
             .getByLabel("Search timeout in seconds")
             .boundingBox();
+
         const contextBox = await dialog
             .getByLabel("Context lines above and below")
             .boundingBox();
+
         // A two-column grid stretched these compact inputs across the full phone width.
         expect(
             (contextBox?.x ?? 0) -

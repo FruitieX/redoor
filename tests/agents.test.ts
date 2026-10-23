@@ -9,7 +9,8 @@ import {
     onTestFinished,
 } from "vitest";
 import { z } from "zod";
-import { ApiClient, Agent, encodeFilesystemPath } from "#ui/api-client";
+import { ApiClient, Agent } from "#ui/api-client";
+import { encodeFilesystemPath } from "#ui/api-paths";
 import { isLsDirectoryResponse, isLsFileResponse } from "#ui/ls-response";
 import type { FileSearchResponse } from "#bindings/FileSearchResponse";
 import type { ContentGrepResponse } from "#bindings/ContentGrepResponse";
@@ -17,15 +18,15 @@ import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import fs from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
-import WebSocket from "ws";
+import { FakeAgent } from "./fake-agent";
 import {
     ProcessManager,
-    TEST_AGENT_TOKEN,
     TempFileManager,
     startServerAndAgent,
     waitForLogMessage,
     waitForValue,
 } from "./test-utils";
+
 const AGENT_NAME = "test-agent";
 
 const fileSearchResponseSchema: z.ZodType<FileSearchResponse> = z.object({
@@ -63,7 +64,6 @@ const contentGrepResponseSchema: z.ZodType<ContentGrepResponse> = z.object({
             ),
         }),
     ),
-    context_supported: z.boolean(),
     timed_out: z.boolean(),
     cancelled: z.boolean(),
     truncated: z.boolean(),
@@ -72,13 +72,20 @@ const contentGrepResponseSchema: z.ZodType<ContentGrepResponse> = z.object({
 });
 
 const processManager = new ProcessManager();
+
 const tempFiles = new TempFileManager();
+
 const agentCwd = tempFiles.tempDirectory({ suffix: "-agent-cwd" });
 
 let serverPid: number;
+
 let agentPid: number;
+
 let apiClient: ApiClient;
+
 let wsUrl: string;
+
+let serverPort: number;
 
 beforeAll(async () => {
     const started = await startServerAndAgent({
@@ -91,6 +98,7 @@ beforeAll(async () => {
     agentPid = started.agentPid;
     apiClient = started.apiClient;
     wsUrl = started.wsUrl;
+    serverPort = started.serverPort;
 }, 30000);
 
 afterEach(() => {
@@ -107,9 +115,11 @@ async function getConnectedTestAgent(): Promise<Agent> {
     const agent = (await apiClient.listAgents()).find(
         (entry) => entry.name === AGENT_NAME && entry.status === "connected",
     );
+
     if (!agent) {
         throw new Error(`Connected agent ${AGENT_NAME} not found`);
     }
+
     return agent;
 }
 
@@ -126,6 +136,7 @@ async function searchAgentFiles(
     },
 ): Promise<FileSearchResponse> {
     const url = getAgentSearchUrl(agent, root);
+
     const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -140,8 +151,10 @@ async function searchAgentFiles(
             case_sensitivity: search.caseSensitivity,
         }),
     });
+
     // Successful transport proves the REST route relayed the command to the connected agent.
     expect(response.status).toBe(200);
+
     return fileSearchResponseSchema.parse(await response.json());
 }
 
@@ -149,6 +162,7 @@ async function searchAgentFiles(
 function getAgentSearchUrl(agent: Agent, root: string): URL {
     const route = `/api/v1/agents/${encodeURIComponent(agent.id)}/find`;
     const encodedRoot = encodeFilesystemPath(root);
+
     return new URL(
         encodedRoot ? `${route}/${encodedRoot}` : route,
         apiClient.baseUrl,
@@ -159,6 +173,7 @@ function getAgentSearchUrl(agent: Agent, root: string): URL {
 function getAgentGrepUrl(agent: Agent, root: string): URL {
     const route = `/api/v1/agents/${encodeURIComponent(agent.id)}/grep`;
     const encodedRoot = encodeFilesystemPath(root);
+
     return new URL(
         encodedRoot ? `${route}/${encodedRoot}` : route,
         apiClient.baseUrl,
@@ -168,10 +183,12 @@ function getAgentGrepUrl(agent: Agent, root: string): URL {
 describe("Agents API", () => {
     it("rejects startup retry for external and unknown agents", async () => {
         const external = await getConnectedTestAgent();
+
         const externalResponse = await fetch(
             `${apiClient.baseUrl}/api/v1/agents/${encodeURIComponent(external.id)}/retry-start`,
             { method: "POST", headers: external.getAuthHeaders() },
         );
+
         // Connected external processes have no supervisor-owned attempt to replace.
         expect(externalResponse.status).toBe(409);
 
@@ -179,6 +196,7 @@ describe("Agents API", () => {
             `${apiClient.baseUrl}/api/v1/agents/missing-retry-agent/retry-start`,
             { method: "POST", headers: external.getAuthHeaders() },
         );
+
         // Unknown inventory identities retain the lifecycle API's not-found distinction.
         expect(missingResponse.status).toBe(404);
     });
@@ -188,11 +206,13 @@ describe("Agents API", () => {
             wsAddress: wsUrl,
             cwd: agentCwd,
         });
+
         onTestFinished(() => processManager.kill(agentPid));
 
         const registeredAgent = await waitForValue({
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 return agents.find(
                     (agent) =>
                         agent.name === hostname() &&
@@ -210,18 +230,22 @@ describe("Agents API", () => {
         const processHome = tempFiles.tempDirectory({
             suffix: "-process-home",
         });
+
         const agentName = "process-home-agent";
+
         const agentPid = processManager.spawnAgent({
             wsAddress: wsUrl,
             name: agentName,
             cwd: agentCwd,
             env: { HOME: processHome },
         });
+
         onTestFinished(() => processManager.kill(agentPid));
 
         const registeredAgent = await waitForValue({
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 return agents.find((agent) => agent.name === agentName);
             },
             description: "process-home-defaulted agent registration",
@@ -231,36 +255,16 @@ describe("Agents API", () => {
         expect(registeredAgent?.cwd).toBe(processHome);
     });
 
-    it("accepts the hidden legacy --dir alias", async () => {
-        const agentName = "legacy-dir-agent";
-        const agentPid = processManager.spawnAgent({
-            wsAddress: wsUrl,
-            name: agentName,
-            cwd: agentCwd,
-            legacyDir: agentCwd,
-        });
-        onTestFinished(() => processManager.kill(agentPid));
-
-        const registeredAgent = await waitForValue({
-            predicate: async () => {
-                const agents = await apiClient.listAgents();
-                return agents.find((agent) => agent.name === agentName);
-            },
-            description: "legacy-dir agent registration",
-        });
-
-        // Existing invocations must retain their configured browser location during migration.
-        expect(registeredAgent?.cwd).toBe(agentCwd);
-    });
-
     it("publishes a relative --home without changing the launch cwd", async () => {
         const launchDirectory = tempFiles.tempDirectory({
             suffix: "-launch-directory",
         });
+
         const relativeDefault = "browser-default";
         const expectedDefault = path.join(launchDirectory, relativeDefault);
         await fs.mkdir(expectedDefault);
         const agentName = "relative-default-agent";
+
         const agentPid = processManager.spawnAgent({
             wsAddress: wsUrl,
             name: agentName,
@@ -268,11 +272,13 @@ describe("Agents API", () => {
             home: relativeDefault,
             log: "relative-agent.log",
         });
+
         onTestFinished(() => processManager.kill(agentPid));
 
         const registeredAgent = await waitForValue({
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 return agents.find((agent) => agent.name === agentName);
             },
             description: "relative default directory agent registration",
@@ -403,6 +409,7 @@ describe("Agents API", () => {
         const result = await testAgent.ls(agentDetails.cwd);
         // Verify result is a directory response
         expect(isLsDirectoryResponse(result)).toBe(true);
+
         // Verify result contains an array of files
         if (isLsDirectoryResponse(result)) {
             // Directory details need the resolved path to identify the object represented by the listing.
@@ -415,6 +422,7 @@ describe("Agents API", () => {
             expect(result.files).toBeInstanceOf(Array);
             // Creating a file in the isolated agent cwd ensures the listing has a deterministic entry.
             expect(result.files.length).toBeGreaterThan(0);
+
             const firstFile = result.files.find(
                 (file) => file.name === listedFileName,
             );
@@ -456,6 +464,7 @@ describe("Agents API", () => {
         const fileResult = await testAgent.ls(listedFilePath);
         // A direct file lookup must expose permission bits so clients can explain who may access it.
         expect(isLsFileResponse(fileResult)).toBe(true);
+
         if (isLsFileResponse(fileResult)) {
             // The mode must be finite so clients can derive symbolic and octal permission displays.
             expect(Number.isFinite(fileResult.permissions)).toBe(true);
@@ -482,6 +491,7 @@ describe("Agents API", () => {
         const result = await searchAgentFiles(testAgent, searchRoot, {
             query: "nestedsourcetarget",
         });
+
         // A small local tree must complete without consuming the three-second allowance.
         expect(result.timed_out).toBe(false);
         // Search timing comes from the agent that performed the filesystem traversal.
@@ -510,26 +520,33 @@ describe("Agents API", () => {
             query: "mixedcasetarget",
             caseSensitivity: "smart",
         });
+
         // A lowercase smart-case query remains forgiving for path names.
         expect(smartLowerPath.results.map((entry) => entry.path)).toEqual([
             target,
         ]);
+
         const smartUpperPath = await searchAgentFiles(testAgent, searchRoot, {
             query: "mixedCaseTarget",
             caseSensitivity: "smart",
         });
+
         // Any uppercase query letter makes smart path matching respect the whole query's case.
         expect(smartUpperPath.results).toEqual([]);
+
         const sensitivePath = await searchAgentFiles(testAgent, searchRoot, {
             query: "mixedcasetarget",
             caseSensitivity: "sensitive",
         });
+
         // Sensitive mode rejects a lowercase query for the mixed-case filename.
         expect(sensitivePath.results).toEqual([]);
+
         const insensitivePath = await searchAgentFiles(testAgent, searchRoot, {
             query: "mixedcasetarget",
             caseSensitivity: "insensitive",
         });
+
         // Insensitive mode always accepts equivalent letters regardless of case.
         expect(insensitivePath.results.map((entry) => entry.path)).toEqual([
             target,
@@ -543,6 +560,7 @@ describe("Agents API", () => {
                 fixedString: true,
                 caseSensitivity,
             });
+
         const smartLowerContent = await grep("mixedcaseneedle", "smart");
         // Content smart case has the same lowercase-insensitive default as path search.
         expect(smartLowerContent.results).toHaveLength(1);
@@ -559,15 +577,19 @@ describe("Agents API", () => {
 
     it("should exclude unquoted minus terms and search quoted minus terms", async () => {
         const testAgent = await getConnectedTestAgent();
+
         const searchRoot = tempFiles.tempDirectory({
             suffix: "-excluded-file-search",
         });
+
         const includedTarget = path.join(searchRoot, "src", "test-target.txt");
+
         const excludedTarget = path.join(
             searchRoot,
             "node_modules",
             "test-target.txt",
         );
+
         const quotedTarget = path.join(searchRoot, "contains-node_modules.txt");
         await fs.mkdir(path.dirname(includedTarget));
         await fs.mkdir(path.dirname(excludedTarget));
@@ -578,13 +600,16 @@ describe("Agents API", () => {
         const excludedResult = await searchAgentFiles(testAgent, searchRoot, {
             query: "-node_modules testtarget",
         });
+
         // The positive term still finds files outside the excluded subtree.
         expect(excludedResult.results.map((entry) => entry.path)).toEqual([
             includedTarget,
         ]);
+
         const quotedResult = await searchAgentFiles(testAgent, searchRoot, {
             query: '"-node_modules"',
         });
+
         // Double quotes make a leading minus literal rather than exclusion syntax.
         expect(quotedResult.results.map((entry) => entry.path)).toEqual([
             quotedTarget,
@@ -617,14 +642,17 @@ describe("Agents API", () => {
 
     it("should search hidden directories only when requested and always skip .git", async () => {
         const testAgent = await getConnectedTestAgent();
+
         const searchRoot = tempFiles.tempDirectory({
             suffix: "-hidden-directory-search",
         });
+
         const hiddenTarget = path.join(
             searchRoot,
             ".cache",
             "hidden-target.txt",
         );
+
         const gitTarget = path.join(searchRoot, ".git", "hidden-target.txt");
         await fs.mkdir(path.dirname(hiddenTarget));
         await fs.mkdir(path.dirname(gitTarget));
@@ -634,13 +662,16 @@ describe("Agents API", () => {
         const defaultResult = await searchAgentFiles(testAgent, searchRoot, {
             query: "hiddentarget",
         });
+
         // Omission preserves the safe default and avoids traversing hidden directories.
         expect(defaultResult.results).toEqual([]);
+
         const includedResult = await searchAgentFiles(testAgent, searchRoot, {
             query: "hiddentarget",
             includeHidden: true,
             respectGitignore: false,
         });
+
         // Hidden opt-in reaches ordinary dot-directories while `.git` remains excluded unconditionally.
         expect(includedResult.results.map((entry) => entry.path)).toEqual([
             hiddenTarget,
@@ -649,9 +680,11 @@ describe("Agents API", () => {
 
     it("should respect gitignore files at every recursion depth by default", async () => {
         const testAgent = await getConnectedTestAgent();
+
         const searchRoot = tempFiles.tempDirectory({
             suffix: "-gitignore-file-search",
         });
+
         const nestedDirectory = path.join(searchRoot, "nested");
         const ignoredTarget = path.join(nestedDirectory, "ignored-target.txt");
         await fs.mkdir(nestedDirectory);
@@ -665,12 +698,15 @@ describe("Agents API", () => {
         const defaultResult = await searchAgentFiles(testAgent, searchRoot, {
             query: "ignoredtarget",
         });
+
         // Omission must activate nested ignore rules so callers get repository-like results.
         expect(defaultResult.results).toEqual([]);
+
         const disabledResult = await searchAgentFiles(testAgent, searchRoot, {
             query: "ignoredtarget",
             respectGitignore: false,
         });
+
         // Explicitly disabling the check proves the REST option reaches agent traversal.
         expect(disabledResult.results.map((entry) => entry.path)).toEqual([
             ignoredTarget,
@@ -679,9 +715,11 @@ describe("Agents API", () => {
 
     it("should bound file search results", async () => {
         const testAgent = await getConnectedTestAgent();
+
         const searchRoot = tempFiles.tempDirectory({
             suffix: "-bounded-file-search",
         });
+
         await Promise.all(
             Array.from({ length: 125 }, (_, index) =>
                 fs.writeFile(
@@ -698,6 +736,7 @@ describe("Agents API", () => {
         const result = await searchAgentFiles(testAgent, searchRoot, {
             query: "boundedsearchresult",
         });
+
         // The fixed cap keeps one control-socket JSON response memory-safe on broad searches.
         expect(result.results).toHaveLength(100);
         // Reaching the result cap alone is not a timeout; traversal still considered every entry.
@@ -742,6 +781,7 @@ describe("Agents API", () => {
                 fixedString: false,
             }),
         );
+
         // Defaults must skip ignored, hidden-directory, and binary content while retaining visible matches.
         expect(defaultResult.results.map((entry) => entry.path)).toEqual([
             visible,
@@ -753,9 +793,11 @@ describe("Agents API", () => {
             line: "first Needle",
             line_truncated: false,
         });
+
         const truncatedLine = defaultResult.results.find(
             (entry) => entry.line_number === 2,
         );
+
         // Long response text is capped without omitting a still-bounded physical line.
         expect(truncatedLine?.line.length).toBe(500);
         expect(truncatedLine?.line_truncated).toBe(true);
@@ -776,6 +818,7 @@ describe("Agents API", () => {
                 fixedString: false,
             },
         );
+
         // Explicit options expose ordinary hidden and ignored files but `.git` and binary files remain excluded.
         expect(
             new Set(inclusiveResult.results.map((entry) => entry.path)),
@@ -797,6 +840,7 @@ describe("Agents API", () => {
             respectGitignore: true,
             fixedString: false,
         });
+
         // The hard result ceiling bounds retained and serialized match state.
         expect(result.results).toHaveLength(100);
         // A discovered 101st match tells callers the otherwise complete response was clipped.
@@ -822,10 +866,13 @@ describe("Agents API", () => {
             beforeContext: 2,
             afterContext: 20,
         });
+
         const [firstMatch, secondMatch] = result.results;
+
         if (firstMatch === undefined || secondMatch === undefined) {
             throw new Error("Expected both context grep matches");
         }
+
         // Context is attached independently to each match rather than merged into shared blocks.
         expect(firstMatch.before_context).toEqual([
             { line_number: 1, line: "zero", line_truncated: false },
@@ -854,6 +901,7 @@ describe("Agents API", () => {
     it("should validate grep timeout, context, and regular expressions", async () => {
         const testAgent = await getConnectedTestAgent();
         const timeoutUrl = getAgentGrepUrl(testAgent, agentCwd);
+
         const timeoutResponse = await fetch(timeoutUrl, {
             method: "POST",
             headers: {
@@ -865,6 +913,7 @@ describe("Agents API", () => {
                 timeout: 61,
             }),
         });
+
         // REST validation rejects deadlines outside the documented caller-selected range.
         expect(timeoutResponse.status).toBe(400);
 
@@ -882,6 +931,7 @@ describe("Agents API", () => {
                 }),
             },
         );
+
         // Context limits prevent one match from expanding into an unbounded response.
         expect(contextResponse.status).toBe(400);
 
@@ -899,6 +949,7 @@ describe("Agents API", () => {
                 }),
             },
         );
+
         // Both context directions enforce the same response-size bound.
         expect(afterContextResponse.status).toBe(400);
 
@@ -915,6 +966,7 @@ describe("Agents API", () => {
                 }),
             },
         );
+
         // Regex compilation errors are stable invalid-input responses rather than agent failures.
         expect(regexResponse.status).toBe(400);
         // The error body should identify the expression problem for API consumers.
@@ -937,6 +989,7 @@ describe("Agents API", () => {
             respectGitignore: true,
             fixedString: false,
         });
+
         // Default regex mode still treats `.` as any character.
         expect(regexResult.results.map((entry) => entry.line)).toEqual([
             "needle",
@@ -948,6 +1001,7 @@ describe("Agents API", () => {
             respectGitignore: true,
             fixedString: true,
         });
+
         // The same query must not match when the period is required in the file.
         expect(literalDot.results).toEqual([]);
 
@@ -957,6 +1011,7 @@ describe("Agents API", () => {
             respectGitignore: true,
             fixedString: true,
         });
+
         // Unbalanced parentheses are a valid needle once regex compilation is skipped.
         expect(literalParens.results.map((entry) => entry.line)).toEqual([
             "foo(bar",
@@ -967,6 +1022,7 @@ describe("Agents API", () => {
         const testAgent = await getConnectedTestAgent();
         const grepRoot = tempFiles.tempDirectory({ suffix: "-timed-grep" });
         const chunk = "x".repeat(1024 * 1024 + 1);
+
         for (let index = 0; index < 128; index += 1) {
             await fs.writeFile(
                 path.join(grepRoot, `large-${index}.txt`),
@@ -980,6 +1036,7 @@ describe("Agents API", () => {
             respectGitignore: true,
             fixedString: false,
         });
+
         // The agent deadline returns bounded state rather than turning a long scan into an HTTP error.
         expect(result).toMatchObject({
             timed_out: true,
@@ -989,7 +1046,7 @@ describe("Agents API", () => {
         expect(result.results).toEqual([]);
     });
 
-    it("should cancel an older grep while unrelated control commands remain responsive", async () => {
+    it("should keep concurrent greps independent while control commands remain responsive", async () => {
         const testAgent = await getConnectedTestAgent();
         const grepRoot = tempFiles.tempDirectory({ suffix: "-latest-grep" });
         const chunk = "x".repeat(1024 * 1024 + 1);
@@ -999,10 +1056,13 @@ describe("Agents API", () => {
             ),
         );
         const agentProcess = processManager.getProcess(agentPid);
+
         if (!agentProcess) {
             throw new Error("Agent process not found");
         }
+
         const firstUrl = getAgentGrepUrl(testAgent, grepRoot);
+
         const firstRequest = fetch(firstUrl, {
             method: "POST",
             headers: {
@@ -1013,6 +1073,7 @@ describe("Agents API", () => {
                 query: "first-query-with-no-match",
             }),
         });
+
         await waitForLogMessage(
             agentProcess,
             new RegExp(
@@ -1026,16 +1087,19 @@ describe("Agents API", () => {
                 setTimeout(() => resolve({ timedOut: true }), 3000);
             }),
         ]);
+
         // A details command completing before grep termination proves control handling is not serialized behind scanning.
         expect(detailsResult).toMatchObject({ details: { id: testAgent.id } });
 
         const filenameSearch = searchAgentFiles(testAgent, grepRoot, {
             query: "large",
         });
+
         const firstCompletion = await Promise.race([
             firstRequest.then(() => "grep" as const),
             filenameSearch.then(() => "filename-search" as const),
         ]);
+
         // Independent cancellation state lets filename search finish without superseding the active content grep.
         expect(firstCompletion).toBe("filename-search");
 
@@ -1049,15 +1113,17 @@ describe("Agents API", () => {
                 fixedString: false,
             },
         );
+
         const firstResponse = contentGrepResponseSchema.parse(
             await (await firstRequest).json(),
         );
-        // Latest-grep-wins returns a bounded terminal response to the superseded caller.
+
+        // A later grep must not supersede an unrelated caller that owns a distinct request token.
         expect(firstResponse).toMatchObject({
-            cancelled: true,
+            cancelled: false,
             timed_out: false,
         });
-        // The newest request acquires the one grep slot after its predecessor releases it.
+        // The bounded scan pool allows both callers to reach their own terminal result.
         expect(replacement.cancelled).toBe(false);
     });
 
@@ -1073,18 +1139,20 @@ describe("Agents API", () => {
             name: DUPLICATE_AGENT_NAME,
             cwd: firstAgentCwd,
         });
+
         const firstAgent = processManager.getProcess(firstAgentPid);
         // Verify first agent was spawned successfully
         expect(firstAgent).toBeDefined();
 
         const serverProcess = processManager.getProcess(serverPid);
+
         if (!serverProcess) {
             throw new Error("Server process not found");
         }
 
         await waitForLogMessage(
             serverProcess,
-            /Transfer socket registered: agent_id=duplicate-test-agent,/,
+            /Agent registered: agent_id=duplicate-test-agent,/,
         );
 
         const agentsAfterFirst = await apiClient.listAgents();
@@ -1124,10 +1192,12 @@ describe("Agents API", () => {
         const replacementAgent = await waitForValue({
             predicate: async () => {
                 const agents = await apiClient.listAgents();
+
                 return agents.find((a) => a.name === DUPLICATE_AGENT_NAME);
             },
             description: "replacement agent to be listed",
         });
+
         // Verify the replacement agent is registered with the expected name
         // The polling helper returns only after the replacement inventory entry exists.
         expect(replacementAgent.name).toBe(DUPLICATE_AGENT_NAME);
@@ -1141,36 +1211,17 @@ describe("Agents API", () => {
 
     it("disconnects a stale unmanaged agent", async () => {
         const unmanagedAgentName = "stale-unmanaged-test-agent";
-        const control = new WebSocket(wsUrl, { autoPong: false });
-        onTestFinished(() => control.close());
-        await new Promise<void>((resolve, reject) => {
-            control.once("open", resolve);
-            control.once("error", reject);
+
+        // Without automatic pongs the fixture looks like a half-open tunnel to the server.
+        const fixture = await FakeAgent.connect({
+            serverPort,
+            agentId: unmanagedAgentName,
+            hostname: "stale-host",
+            username: "stale-user",
+            autoPong: false,
         });
-        control.send(
-            JSON.stringify({
-                type: "agent_register",
-                agent_id: unmanagedAgentName,
-                agent_name: unmanagedAgentName,
-                os: "linux",
-                arch: "x86_64",
-                hostname: "stale-host",
-                username: "stale-user",
-                cwd: "/tmp",
-                token: TEST_AGENT_TOKEN,
-                binary: {
-                    version: "0.0.0",
-                    git_rev: "test",
-                    git_dirty: false,
-                    version_dirty: false,
-                    build_mode: "debug",
-                    build_date: "unknown",
-                },
-                supports_self_exec: false,
-                supports_native_open: false,
-                supports_trash: false,
-            }),
-        );
+
+        onTestFinished(() => fixture.close());
 
         const connected = await waitForValue({
             timeoutMs: 4000,
@@ -1182,7 +1233,8 @@ describe("Agents API", () => {
                         agent.connectionId !== null,
                 ),
         });
-        // A control connection id proves the fixture was accepted without requiring a transfer socket.
+
+        // A connection id proves the fixture was accepted.
         expect(connected.managed).toBe(false);
 
         const disconnected = await waitForValue({
@@ -1196,8 +1248,70 @@ describe("Agents API", () => {
                         agent.connectionId === null,
                 ),
         });
+
         // Stale teardown must clear the authoritative socket even without a watchdog.
         expect(disconnected.status).toBe("disconnected");
+    });
+
+    it("resolves a request only with the answer of the agent it was sent to", async () => {
+        const targetName = "forge-target-agent";
+
+        const target = await FakeAgent.connect({
+            serverPort,
+            agentId: targetName,
+            hostname: "forge-host",
+            username: "forge-user",
+        });
+
+        onTestFinished(() => target.close());
+
+        const attacker = await FakeAgent.connect({
+            serverPort,
+            agentId: "forge-attacker-agent",
+        });
+
+        onTestFinished(() => attacker.close());
+
+        const registered = await waitForValue({
+            description: "forge target fixture to register",
+            predicate: async () =>
+                (await apiClient.listAgents()).find(
+                    (agent) =>
+                        agent.name === targetName && agent.connectionId !== null,
+                ),
+        });
+
+        const echo = registered.echo("genuine");
+        const { id } = await target.nextCommand("Echo");
+
+        // Request ids are scoped to one connection, so the attacker's answer with the same
+        // (sequential) id names a request that does not exist on its own connection.
+        attacker.respond(id, { message: "forged" });
+
+        // The attacker's connection keeps working, so its frame really was processed first.
+        const attackerListed = await waitForValue({
+            description: "attacker fixture to register",
+            predicate: async () =>
+                (await apiClient.listAgents()).find(
+                    (agent) =>
+                        agent.name === "forge-attacker-agent" &&
+                        agent.connectionId !== null,
+                ),
+        });
+
+        attacker.onCommand((command) => {
+            if (command.command.type === "Echo") {
+                attacker.respond(command.id, { message: "attacker echo" });
+            }
+        });
+        expect((await attackerListed.echo("probe")).message).toBe(
+            "attacker echo",
+        );
+
+        target.respond(id, { message: "genuine" });
+
+        // Only the agent the request was sent to may resolve the pending REST request.
+        expect((await echo).message).toBe("genuine");
     });
 
     it("should echo message back from connected agent", async () => {
@@ -1213,6 +1327,7 @@ describe("Agents API", () => {
         const testAgent = await getConnectedTestAgent();
 
         const CONCURRENT_REQUESTS = 20;
+
         const uniqueMessages = Array.from(
             { length: CONCURRENT_REQUESTS },
             (_, i) => `concurrent-test-${i}`,
@@ -1234,6 +1349,7 @@ describe("Agents API", () => {
 
     it("should return 404 for non-existent agent details", async () => {
         const nonExistentAgentId = "non-existent-agent-id";
+
         const agent = new Agent(
             apiClient.baseUrl,
             {
@@ -1250,7 +1366,6 @@ describe("Agents API", () => {
                 connection_issue: null,
                 provisioning_status: [],
                 binary: null,
-                supports_self_exec: false,
                 supports_native_open: false,
                 supports_move_to_trash: false,
                 supports_trash: false,
@@ -1262,6 +1377,7 @@ describe("Agents API", () => {
                     apiClient.getAuthHeaders().Cookie ?? null,
             },
         );
+
         // Verify that requesting details for non-existent agent throws an error
         await expect(agent.getDetails()).rejects.toThrow("Agent not found");
     });

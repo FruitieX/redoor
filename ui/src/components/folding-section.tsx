@@ -16,13 +16,14 @@ export function FoldingSection(props: {
     contentClassName?: string;
 }) {
     const panelId = React.useId();
+
     const toggle = (
         <button
             type="button"
             aria-expanded={props.open}
             aria-controls={props.open ? panelId : undefined}
             onClick={() => props.onOpenChange(!props.open)}
-            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium text-slate-300 hover:bg-white/5 hover:text-slate-100"
+            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium text-slate-300 hover:bg-tint hover:text-slate-100"
         >
             {props.title}
             <ChevronDown
@@ -37,7 +38,7 @@ export function FoldingSection(props: {
     return (
         <section
             aria-label={props.title}
-            className={`rounded-lg border border-slate-800 bg-[#0b0d12] ${props.className ?? ""}`}
+            className={`rounded-lg border border-slate-800 bg-canvas ${props.className ?? ""}`}
         >
             {props.tooltip === undefined ? (
                 toggle

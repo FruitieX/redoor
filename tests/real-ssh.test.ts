@@ -27,8 +27,11 @@ import {
 const execFileAsync = promisify(execFile);
 
 const SSH_TEST_HOST = "redoor-ssh-test";
+
 const SSH_TEST_USER = "redoor";
+
 const SSH_PASSWORD_USER = "redoor-password";
+
 const SSH_ROOT_USER = "root";
 
 type RelayPidMetadata = {
@@ -87,11 +90,13 @@ async function sshCommandWithPassword(
     command: string,
 ): Promise<void> {
     const password = process.env.REDOOR_SSH_TEST_PASSWORD;
+
     if (password === undefined || password === "") {
         throw new Error(
             "REDOOR_SSH_TEST_PASSWORD is required for password SSH cleanup",
         );
     }
+
     const askpassDir = mkdtempSync(join(tmpdir(), "redoor-ssh-askpass-"));
     const askpassPath = join(askpassDir, "askpass");
     writeFileSync(
@@ -101,6 +106,7 @@ printf '%s\n' ${shellQuote(password)}
 `,
         { mode: 0o700 },
     );
+
     try {
         await execFileAsync(
             "ssh",
@@ -143,18 +149,23 @@ describe.skipIf(process.env.REDOOR_SSH_TEST !== "1")(
     () => {
         test("runs and controls multiple relays independently on one SSH host", async () => {
             const processManager = new ProcessManager();
+
             const home = mkdtempSync(
                 join(tmpdir(), "redoor-relay-integration-"),
             );
+
             const suffix = `${process.pid}-${Date.now()}`;
             const appName = `redoor-relay-test-${suffix}`;
             const relayIds = ["first", "second"] as const;
+
             const agentNames = relayIds.map(
                 (id) => `relay-test-${id}-${suffix}`,
             );
+
             const agentAppNames = relayIds.map(
                 (id) => `redoor-relay-agent-${id}-${suffix}`,
             );
+
             const remoteRoot = `/tmp/redoor-relay-test-${suffix}`;
             const configPath = join(home, "config.toml");
             const localLogDirectory = join(home, "logs");
@@ -206,6 +217,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                         // The test may already have stopped the selected relay.
                     }
                 }
+
                 try {
                     await cleanupSshTest({ remoteRoot, agentAppNames });
                 } finally {
@@ -218,9 +230,11 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
             await cleanupSshTest({ remoteRoot, agentAppNames });
             processManager.spawnServer({ config: configPath });
             await waitForPort(VITEST_SERVER_PORT);
+
             const apiClient = new ApiClient(
                 `http://127.0.0.1:${VITEST_SERVER_PORT}`,
             );
+
             await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
 
             const foregroundRelayCommand = [
@@ -234,6 +248,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
             ]
                 .map(shellQuote)
                 .join(" ");
+
             const foregroundRelayParent = spawn(
                 "sh",
                 ["-c", `${foregroundRelayCommand}; true`],
@@ -246,6 +261,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                     },
                 },
             );
+
             onTestFinished(() => {
                 if (foregroundRelayParent.pid !== undefined) {
                     try {
@@ -282,6 +298,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                                     "relays",
                                     `${id}.pid`,
                                 );
+
                                 return relayPidMetadataSchema.parse(
                                     JSON.parse(readFileSync(path, "utf8")),
                                 );
@@ -294,28 +311,33 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                     }),
                 ),
             );
+
             // Distinct remote namespaces prove same-host agents cannot contend for agent.pid.
             expect(metadata.map((entry) => entry.agent_app_name)).toEqual(
                 agentAppNames,
             );
             expect(new Set(metadata.map((entry) => entry.pid)).size).toBe(2);
             const firstMetadata = metadata[0];
+
             if (firstMetadata === undefined) {
                 throw new Error(
                     "Foreground relay metadata unexpectedly missing",
                 );
             }
+
             if (foregroundRelayParent.pid === undefined) {
                 throw new Error(
                     "foreground relay parent shell should have a pid",
                 );
             }
+
             // The relay must remain a child of the shell whose lifetime it watches.
             expect(firstMetadata.pid).not.toBe(foregroundRelayParent.pid);
 
             const connected = await waitForValue({
                 predicate: async () => {
                     const agents = await apiClient.listAgents();
+
                     const selected = agentNames.map((name) =>
                         agents.find(
                             (agent) =>
@@ -323,6 +345,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                                 agent.status === "connected",
                         ),
                     );
+
                     return selected.every((agent) => agent !== undefined)
                         ? selected
                         : undefined;
@@ -330,12 +353,14 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                 timeoutMs: 60_000,
                 description: "both relay agents to connect",
             });
+
             for (const [index, agent] of connected.entries()) {
                 if (agent === undefined) {
                     throw new Error(
                         "connected relay agent unexpectedly missing",
                     );
                 }
+
                 const message = `through-${relayIds[index]}`;
                 const response = await agent.echo(message);
                 // Echo proves REST control traffic traverses each independent SSH relay.
@@ -357,8 +382,10 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
             const originalConnectionIds = connected.map(
                 (agent) => agent?.connectionId,
             );
+
             for (const [index, agentAppName] of agentAppNames.entries()) {
                 await killRemoteAgent(agentAppName);
+
                 const replacement = await waitForValue({
                     predicate: async () =>
                         (await apiClient.listAgents()).find(
@@ -371,11 +398,14 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                     timeoutMs: 30_000,
                     description: `${relayIds[index]} relay watchdog to reconnect its agent`,
                 });
+
                 const response = await replacement.echo(
                     `restarted-${relayIds[index]}`,
                 );
+
                 // A fresh usable connection proves foreground and daemon relays both supervise SSH exits.
                 expect(response.message).toBe(`restarted-${relayIds[index]}`);
+
                 const currentMetadata = relayPidMetadataSchema.parse(
                     JSON.parse(
                         readFileSync(
@@ -391,12 +421,15 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                         ),
                     ),
                 );
+
                 const originalMetadata = metadata[index];
+
                 if (originalMetadata === undefined) {
                     throw new Error(
                         "Original relay metadata unexpectedly missing",
                     );
                 }
+
                 // Retry happens inside the same locked relay process rather than a replacement daemon.
                 expect(currentMetadata.pid).toBe(originalMetadata.pid);
             }
@@ -406,6 +439,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                 predicate: async () => {
                     try {
                         process.kill(firstMetadata.pid, 0);
+
                         return undefined;
                     } catch {
                         return true;
@@ -415,9 +449,11 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                 description:
                     "foreground relay to exit after its parent is killed",
             });
+
             const survivingAgent = await waitForValue({
                 predicate: async () => {
                     const agents = await apiClient.listAgents();
+
                     return agents.find(
                         (agent) =>
                             agent.name === agentNames[1] &&
@@ -427,6 +463,7 @@ log = "${join(localLogDirectory, `${relayIds[1]}.log`)}"
                 timeoutMs: 20_000,
                 description: "second relay to survive first relay shutdown",
             });
+
             const response = await survivingAgent.echo("still-connected");
             // Independent local and remote PID namespaces keep the second relay usable.
             expect(response.message).toBe("still-connected");
@@ -445,9 +482,11 @@ describe.skipIf(process.env.REDOOR_SSH_TEST !== "1")(
     () => {
         test("starts, controls, and restarts an [[agents]] entry through redoor-ssh-test", async () => {
             const processManager = new ProcessManager();
+
             const home = mkdtempSync(
                 join(tmpdir(), "redoor-managed-ssh-integration-"),
             );
+
             const suffix = `${process.pid}-${Date.now()}`;
             const appName = `redoor-managed-ssh-test-${suffix}`;
             const agentName = `managed-ssh-test-${suffix}`;
@@ -474,6 +513,7 @@ log = "${agentLogPath}"
 
             onTestFinished(async () => {
                 await processManager.killAll();
+
                 try {
                     await cleanupSshTest({
                         remoteRoot,
@@ -490,6 +530,7 @@ log = "${agentLogPath}"
                 agentAppNames: [appName],
             });
             await sshTestCommand(`mkdir -p ${shellQuote(remoteRoot)}`);
+
             const serverPid = processManager.spawn(
                 SERVER_PATH,
                 ["server", "--config", configPath],
@@ -501,10 +542,13 @@ log = "${agentLogPath}"
                     },
                 },
             );
+
             await waitForPort(VITEST_SERVER_PORT);
+
             const apiClient = new ApiClient(
                 `http://127.0.0.1:${VITEST_SERVER_PORT}`,
             );
+
             await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
 
             const configuredAgent = await waitForValue({
@@ -514,6 +558,7 @@ log = "${agentLogPath}"
                     ),
                 description: "managed SSH agent inventory registration",
             });
+
             // TOML registration must remain dormant until an explicit REST lifecycle request.
             expect(configuredAgent.managed).toBe(true);
             expect(configuredAgent.status).toBe("stopped");
@@ -521,17 +566,21 @@ log = "${agentLogPath}"
 
             await configuredAgent.start();
             const seenProvisioning = new Set<string>();
+
             const firstConnection = await waitForValue({
                 predicate: async () => {
                     const agent = (await apiClient.listAgents()).find(
                         (entry) => entry.name === agentName,
                     );
+
                     for (const step of agent?.provisioningStatus ?? []) {
                         seenProvisioning.add(step.message);
                     }
+
                     if (agent?.connectionId) {
                         return agent;
                     }
+
                     throw new Error(
                         `status=${agent?.status ?? "missing"}, issue=${agent?.connectionIssue ?? "none"}, server=${processManager.getStdout(serverPid)}`,
                     );
@@ -539,6 +588,7 @@ log = "${agentLogPath}"
                 timeoutMs: 60_000,
                 description: "managed SSH agent to connect",
             });
+
             const provisioningMessages = [...seenProvisioning];
             // Inventory must expose the SSH prepare stages that replace a generic loading state.
             expect(
@@ -561,6 +611,37 @@ log = "${agentLogPath}"
                         message.startsWith("Uploading the binary to "),
                 ),
             ).toBe(true);
+            // The test cleared this namespace's remote binaries, so the first attempt must
+            // upload. A cache hit could only come from a retry after a failed attempt (for
+            // example a post-upload version check that rejects the binary it just uploaded).
+            expect(
+                provisioningMessages.some((message) =>
+                    message.startsWith("Uploading the binary to "),
+                ),
+            ).toBe(true);
+            expect(
+                provisioningMessages.filter(
+                    (message) =>
+                        message.startsWith("Using cached binary from ") ||
+                        message.startsWith("Using existing remote binary at "),
+                ),
+            ).toEqual([]);
+
+            if (process.platform === "linux" && process.arch === "x64") {
+                // The test server is a debug build for the SSH host's platform (x86_64 Linux),
+                // so it must deploy its own workspace build instead of a GitHub release.
+                expect(
+                    provisioningMessages.some((message) =>
+                        message.startsWith("Comparing the remote debug install"),
+                    ),
+                ).toBe(true);
+                expect(
+                    provisioningMessages.some((message) =>
+                        message.startsWith("Downloading the matching binary from "),
+                    ),
+                ).toBe(false);
+            }
+
             expect(
                 provisioningMessages.some((message) =>
                     message.startsWith("Spawning the remote binary"),
@@ -570,15 +651,18 @@ log = "${agentLogPath}"
             expect(
                 firstConnection.provisioningStatus.every((step, index, steps) => {
                     const previous = steps[index - 1];
+
                     return previous === undefined || step.at >= previous.at;
                 }),
             ).toBe(true);
             const firstConnectionId = firstConnection.connectionId;
+
             if (firstConnectionId === null) {
                 throw new Error(
                     "Connected managed SSH agent has no connection ID",
                 );
             }
+
             const echo = await firstConnection.echo("managed-through-ssh");
             // A successful command proves control traffic reaches the TOML-managed remote process.
             expect(echo.message).toBe("managed-through-ssh");
@@ -591,9 +675,11 @@ log = "${agentLogPath}"
                     type: "application/octet-stream",
                 }),
             );
+
             const downloaded = Buffer.from(
                 await firstConnection.raw(remotePath),
             );
+
             // Byte equality exercises streamed upload and download over the managed SSH tunnel.
             expect(Buffer.compare(downloaded, payload)).toBe(0);
 
@@ -601,12 +687,15 @@ log = "${agentLogPath}"
             // Managed shutdown retains configured inventory while reaping the SSH child.
             expect(shutdown.agent.managed).toBe(true);
             expect(shutdown.agent.status).toBe("stopped");
+
             const stoppedAgent = (await apiClient.listAgents()).find(
                 (agent) => agent.name === agentName,
             );
+
             if (stoppedAgent === undefined) {
                 throw new Error("Stopped managed SSH agent disappeared");
             }
+
             await stoppedAgent.start();
 
             const replacement = await waitForValue({
@@ -617,11 +706,13 @@ log = "${agentLogPath}"
                             entry.status === "connected" &&
                             entry.connectionId !== firstConnectionId,
                     );
+
                     return agent;
                 },
                 timeoutMs: 60_000,
                 description: "managed SSH agent to reconnect after restart",
             });
+
             const restartedEcho = await replacement.echo("managed-restarted");
             // A new usable connection proves the watchdog can respawn the prepared SSH agent.
             expect(restartedEcho.message).toBe("managed-restarted");
@@ -635,9 +726,11 @@ describe.skipIf(
 )("TOML-managed SSH agents with password auth", () => {
     test("starts an [[agents]] entry as redoor-password", async () => {
         const processManager = new ProcessManager();
+
         const home = mkdtempSync(
             join(tmpdir(), "redoor-managed-ssh-password-"),
         );
+
         const suffix = `${process.pid}-${Date.now()}`;
         const appName = `redoor-managed-ssh-password-${suffix}`;
         const agentName = `managed-ssh-password-${suffix}`;
@@ -645,9 +738,11 @@ describe.skipIf(
         const configPath = join(home, "config.toml");
         const agentLogPath = join(home, "managed-agent.log");
         const sshPassword = process.env.REDOOR_SSH_TEST_PASSWORD;
+
         if (sshPassword === undefined) {
             throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
         }
+
         writeFileSync(
             configPath,
             `agent_token = "${TEST_AGENT_TOKEN}"
@@ -669,6 +764,7 @@ log = "${agentLogPath}"
 
         onTestFinished(async () => {
             await processManager.killAll();
+
             try {
                 await cleanupSshTest({
                     remoteRoot,
@@ -687,6 +783,7 @@ log = "${agentLogPath}"
             sshCommand: sshPasswordTestCommand,
         });
         await sshPasswordTestCommand(`mkdir -p ${shellQuote(remoteRoot)}`);
+
         const serverPid = processManager.spawn(
             SERVER_PATH,
             ["server", "--config", configPath],
@@ -698,10 +795,13 @@ log = "${agentLogPath}"
                 },
             },
         );
+
         await waitForPort(VITEST_SERVER_PORT);
+
         const apiClient = new ApiClient(
             `http://127.0.0.1:${VITEST_SERVER_PORT}`,
         );
+
         await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
 
         const configuredAgent = await waitForValue({
@@ -711,18 +811,22 @@ log = "${agentLogPath}"
                 ),
             description: "password SSH agent inventory registration",
         });
+
         expect(configuredAgent.managed).toBe(true);
         expect(configuredAgent.status).toBe("stopped");
 
         await configuredAgent.start();
+
         const connected = await waitForValue({
             predicate: async () => {
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.name === agentName,
                 );
+
                 if (agent?.connectionId) {
                     return agent;
                 }
+
                 throw new Error(
                     `status=${agent?.status ?? "missing"}, issue=${agent?.connectionIssue ?? "none"}, server=${processManager.getStdout(serverPid)}`,
                 );
@@ -730,6 +834,7 @@ log = "${agentLogPath}"
             timeoutMs: 60_000,
             description: "password SSH agent to connect",
         });
+
         const echo = await connected.echo("managed-through-password-ssh");
         // Echo proves sniff, binary upload, and the long-lived session all used askpass.
         expect(echo.message).toBe("managed-through-password-ssh");
@@ -751,9 +856,11 @@ describe.skipIf(
         const configPath = join(home, "config.toml");
         const agentLogPath = join(home, "root-agent.log");
         const sshPassword = process.env.REDOOR_SSH_TEST_PASSWORD;
+
         if (sshPassword === undefined) {
             throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
         }
+
         writeFileSync(
             configPath,
             `agent_token = "${TEST_AGENT_TOKEN}"
@@ -775,6 +882,7 @@ log = "${agentLogPath}"
 
         onTestFinished(async () => {
             await processManager.killAll();
+
             try {
                 await cleanupSshTest({
                     remoteRoot,
@@ -794,6 +902,7 @@ log = "${agentLogPath}"
         await sshRootTestCommand(
             `install -d -o ${SSH_TEST_USER} -g ${SSH_TEST_USER} ${shellQuote(parentPath)}`,
         );
+
         const serverPid = processManager.spawn(
             SERVER_PATH,
             ["server", "--config", configPath],
@@ -805,11 +914,15 @@ log = "${agentLogPath}"
                 },
             },
         );
+
         await waitForPort(VITEST_SERVER_PORT);
+
         const apiClient = new ApiClient(
             `http://127.0.0.1:${VITEST_SERVER_PORT}`,
         );
+
         await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
+
         const configuredAgent = await waitForValue({
             predicate: async () =>
                 (await apiClient.listAgents()).find(
@@ -817,15 +930,19 @@ log = "${agentLogPath}"
                 ),
             description: "root SSH agent inventory registration",
         });
+
         await configuredAgent.start();
+
         const connected = await waitForValue({
             predicate: async () => {
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.name === agentName,
                 );
+
                 if (agent?.connectionId) {
                     return agent;
                 }
+
                 throw new Error(
                     `status=${agent?.status ?? "missing"}, issue=${agent?.connectionIssue ?? "none"}, server=${processManager.getStdout(serverPid)}`,
                 );
@@ -849,18 +966,23 @@ log = "${agentLogPath}"
             new File(["replacement"], "root-file.txt"),
         );
         const listing = await connected.ls(parentPath);
+
         if (!("files" in listing)) {
             throw new Error("Root ownership fixture parent was not a directory");
         }
+
         const inheritedDirectory = listing.files.find(
             (entry) => entry.name === "inherited-directory",
         );
+
         const inheritedFile = listing.files.find(
             (entry) => entry.name === "inherited-file.txt",
         );
+
         const rootFile = listing.files.find(
             (entry) => entry.name === "root-file.txt",
         );
+
         if (
             inheritedDirectory === undefined ||
             inheritedFile === undefined ||
@@ -892,12 +1014,15 @@ log = "${agentLogPath}"
         expect(accounts.users.some((user) => user.name === SSH_TEST_USER)).toBe(
             true,
         );
+
         const targetGroup =
             accounts.groups.find((group) => group.name === SSH_TEST_USER) ??
             accounts.groups.find((group) => group.name !== "root");
+
         if (targetGroup === undefined) {
             throw new Error("Root SSH host returned no usable groups");
         }
+
         const missingOwner = `redoor-missing-${process.pid}-${Date.now()}`;
         await expect(
             connected.chown(`${parentPath}/root-file.txt`, {
@@ -906,23 +1031,28 @@ log = "${agentLogPath}"
         ).rejects.toThrow(
             `Owner '${missingOwner}' does not exist on the agent`,
         );
+
         const ownerOnly = await connected.chown(
             `${parentPath}/root-file.txt`,
             { owner: SSH_TEST_USER },
         );
+
         const groupOnly = await connected.chown(
             `${parentPath}/inherited-directory`,
             { group: targetGroup.name },
         );
+
         // Returned IDs must match disk so UID/GID confirmation fields stay truthful after a name mapping.
         expect(ownerOnly.owner).toBe(SSH_TEST_USER);
         expect(ownerOnly.uid).not.toBe(0);
         expect(groupOnly.group).toBe(targetGroup.name);
         expect(groupOnly.gid).toBe(targetGroup.gid);
         const chownListing = await connected.ls(parentPath);
+
         if (!("files" in chownListing)) {
             throw new Error("Root chown fixture parent was not a directory");
         }
+
         expect(
             chownListing.files.find((entry) => entry.name === "root-file.txt")
                 ?.uid,
@@ -979,9 +1109,11 @@ home = "${remoteRoot}"
                     },
                 },
             );
+
             await waitForPort(VITEST_SERVER_PORT);
             const apiClient = new ApiClient(`http://127.0.0.1:${VITEST_SERVER_PORT}`);
             await apiClient.login(TEST_USERNAME, TEST_PASSWORD);
+
             const configuredAgent = await waitForValue({
                 predicate: async () =>
                     (await apiClient.listAgents()).find((agent) => agent.name === agentName),
@@ -989,16 +1121,19 @@ home = "${remoteRoot}"
             });
 
             await configuredAgent.start();
+
             const failed = await waitForValue({
                 predicate: async () => {
                     const agent = (await apiClient.listAgents()).find(
                         (entry) => entry.name === agentName,
                     );
+
                     return agent?.connectionIssue ? agent : undefined;
                 },
                 timeoutMs: 15_000,
                 description: "non-interactive SSH authentication issue",
             });
+
             // The REST issue must tell operators how to configure password-only hosts.
             expect(failed.connectionIssue).toContain(
                 "Configure a password, SSH key, or ssh-agent credential",
@@ -1017,6 +1152,7 @@ home = "${remoteRoot}"
             const serverOutput = processManager.getStdout(serverPid);
             // Neither the server token nor fixture password may leak into SSH diagnostics.
             expect(serverOutput).not.toContain(TEST_AGENT_TOKEN);
+
             if (process.env.REDOOR_SSH_TEST_PASSWORD) {
                 expect(serverOutput).not.toContain(process.env.REDOOR_SSH_TEST_PASSWORD);
             }

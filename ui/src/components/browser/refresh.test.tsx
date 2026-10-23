@@ -1,71 +1,105 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { afterEach, expect, test, vi } from "vitest";
-
-const mocks = vi.hoisted(() => ({
-    invalidateQueries: vi.fn(async () => undefined),
-    invalidateRoute: vi.fn(async () => undefined),
-    refetchQueries: vi.fn(async () => undefined),
-}));
-
-vi.mock("@tanstack/react-query", () => ({
-    useQueryClient: () => ({
-        invalidateQueries: mocks.invalidateQueries,
-        refetchQueries: mocks.refetchQueries,
-    }),
-}));
-
-vi.mock("@tanstack/react-router", () => ({
-    useRouter: () => ({ invalidate: mocks.invalidateRoute }),
-}));
+import { expect, onTestFinished, test, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+    createMemoryHistory,
+    createRootRoute,
+    createRouter,
+    RouterContextProvider,
+} from "@tanstack/react-router";
+import { Button } from "#ui/components/button";
 
 import {
     useBrowserRefreshTriggers,
     useEditorRefreshRegistration,
 } from "./refresh";
 
+/** Exercises focus events through the same refresh hooks used by the browser. */
 function RefreshHarness(props: { isDirty: boolean }) {
     useEditorRefreshRegistration({
         agentId: "agent-1",
         path: "/workspace/file.txt",
         isDirty: props.isDirty,
     });
-    useBrowserRefreshTriggers();
+    useBrowserRefreshTriggers("agent-1");
 
     return (
         <>
             <div data-terminal-input>
                 <textarea aria-label="Terminal input" />
-                <button type="button">Terminal control</button>
+                <Button type="button">Terminal control</Button>
             </div>
-            <button type="button">Editor</button>
+            <Button type="button">Editor</Button>
         </>
     );
 }
 
-afterEach(() => {
-    cleanup();
-    vi.clearAllMocks();
-});
+/** Real providers keep query and router behavior in the test while spies observe refresh coordination. */
+async function renderRefreshHarness(isDirty: boolean) {
+    const queryClient = new QueryClient();
+
+    const router = createRouter({
+        routeTree: createRootRoute(),
+        history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+
+    onTestFinished(() => {
+        cleanup();
+        queryClient.clear();
+        vi.restoreAllMocks();
+    });
+    await router.load();
+
+    const mocks = {
+        invalidateQueries: vi.spyOn(queryClient, "invalidateQueries"),
+        refetchQueries: vi.spyOn(queryClient, "refetchQueries"),
+        invalidateRoute: vi.spyOn(router, "invalidate"),
+    };
+
+    const view = render(
+        <QueryClientProvider client={queryClient}>
+            <RouterContextProvider router={router}>
+                <RefreshHarness isDirty={isDirty} />
+            </RouterContextProvider>
+        </QueryClientProvider>,
+    );
+
+    return { view, mocks };
+}
 
 test("refreshes the listing and a clean editor when terminal focus leaves", async () => {
-    const view = render(<RefreshHarness isDirty={false} />);
+    const { view, mocks } = await renderRefreshHarness(false);
+
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
     });
+
     const editor = view.getByRole("button", { name: "Editor" });
 
     fireEvent.focusOut(terminalInput, { relatedTarget: editor });
 
+    // Route invalidation must follow the query refresh triggered by terminal blur.
     await waitFor(() => expect(mocks.invalidateRoute).toHaveBeenCalledOnce());
+    // Creating a file can navigate while this git refresh is already fetching.
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith(
+        {
+            queryKey: ["server-state", "agent", "agent-1", "git"],
+        },
+        {
+            cancelRefetch: false,
+        },
+    );
     // A clean editor must pull new bytes before route invalidation reloads the listing.
     expect(mocks.refetchQueries).toHaveBeenCalledWith(
         {
             queryKey: [
                 "server-state",
-                "file-content",
+                "agent",
                 "agent-1",
+                "filesystem",
+                "content",
                 "/workspace/file.txt",
             ],
             type: "all",
@@ -78,24 +112,50 @@ test("refreshes the listing and a clean editor when terminal focus leaves", asyn
 });
 
 test("keeps an unsaved editor while refreshing the listing", async () => {
-    const view = render(<RefreshHarness isDirty />);
+    const { view, mocks } = await renderRefreshHarness(true);
+
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
     });
+
     const editor = view.getByRole("button", { name: "Editor" });
 
     fireEvent.focusOut(terminalInput, { relatedTarget: editor });
 
+    // A dirty editor must still allow the directory listing to refresh.
     await waitFor(() => expect(mocks.invalidateRoute).toHaveBeenCalledOnce());
+    // Git still refreshes for a dirty editor, but must not abort an in-flight loader fetch.
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith(
+        {
+            queryKey: ["server-state", "agent", "agent-1", "git"],
+        },
+        {
+            cancelRefetch: false,
+        },
+    );
     // Unsaved text must never be replaced by the automatic terminal-blur refresh.
-    expect(mocks.refetchQueries).not.toHaveBeenCalled();
+    expect(mocks.refetchQueries).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+            queryKey: [
+                "server-state",
+                "agent",
+                "agent-1",
+                "filesystem",
+                "content",
+                "/workspace/file.txt",
+            ],
+        }),
+        expect.anything(),
+    );
 });
 
-test("ignores focus movement within the terminal", () => {
-    const view = render(<RefreshHarness isDirty={false} />);
+test("ignores focus movement within the terminal", async () => {
+    const { view, mocks } = await renderRefreshHarness(false);
+
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
     });
+
     const terminalControl = view.getByRole("button", {
         name: "Terminal control",
     });

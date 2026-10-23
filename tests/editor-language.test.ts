@@ -21,6 +21,7 @@ print('hello')`,
 
     test("does not use a hash bang to override an extension", () => {
         const fromName = languageFromFileName("script.py");
+
         const withHashBang = languageFromFileName(
             "script.py",
             "#!/usr/bin/env node",

@@ -2,10 +2,13 @@ import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { PackageOpen } from "lucide-react";
 
-import type { ServerInfoResponse } from "#ui/api-client";
+import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
+import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import { Button } from "./button";
 import { ConfirmationDialog } from "./confirmation-dialog";
+import { DetailCard } from "./detail-card";
 import { InputControl } from "./input-control";
+import { getErrorMessage } from "#ui/utils/error";
 
 type UpgradeAction = "published_release" | "running_server";
 
@@ -14,10 +17,9 @@ type UpgradeButtonProps = {
     agentOs: string;
     agentArch: string;
     agentExePath: string;
-    supportsSelfExec: boolean;
     serverInfo: ServerInfoResponse;
-    upgrade: (targetVersion: string) => Promise<unknown>;
-    forceInstallRunningBinary: () => Promise<unknown>;
+    upgrade: (targetVersion: string) => Promise<UpgradeAgentResponse>;
+    forceInstallRunningBinary: () => Promise<UpgradeAgentResponse>;
     waitUntilReady: (
         targetVersion: string,
         requireServerIdentity: boolean,
@@ -26,20 +28,15 @@ type UpgradeButtonProps = {
 
 /** Converts request and reconnection failures into dialog feedback. */
 function upgradeErrorMessage(cause: unknown): string {
-    return cause instanceof Error ? cause.message : "Upgrade failed";
+    return getErrorMessage(cause, "Upgrade failed");
 }
 
 /** Explains a client-known condition that prevents the server from starting an upgrade. */
-function upgradeUnavailableReason(props: {
-    supportsSelfExec: boolean;
-    exePath: string;
-}): string | null {
-    if (!props.supportsSelfExec) {
-        return "This agent does not support safe self-exec upgrades. Install a current Redoor agent manually, reconnect it, and try again.";
-    }
+function upgradeUnavailableReason(props: { exePath: string }): string | null {
     if (props.exePath === "unknown" || !props.exePath.startsWith("/")) {
         return `The agent reported an unusable executable path (${props.exePath}), so Redoor cannot safely replace its binary.`;
     }
+
     return null;
 }
 
@@ -59,30 +56,37 @@ function UpgradeConfirmationDescription(props: { targetDescription: string }) {
 /** Presents upgrade identity and availability before confirming the disruptive action. */
 export function UpgradeButton(props: UpgradeButtonProps) {
     const [action, setAction] = React.useState<UpgradeAction | null>(null);
+
     const [targetVersion, setTargetVersion] = React.useState(
         props.serverInfo.version,
     );
+
     const normalizedTargetVersion = targetVersion.trim();
     const disabledDescriptionId = `upgrade-disabled-${props.target.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
+
     const unavailableReason = upgradeUnavailableReason({
-        supportsSelfExec: props.supportsSelfExec,
         exePath: props.agentExePath,
     });
+
     const runningBinaryUnavailableReason =
         props.agentArch === props.serverInfo.arch
             ? unavailableReason
             : `The running server binary is ${props.serverInfo.arch}, but this agent is ${props.agentArch}.`;
+
     const targetDescription =
         action === "running_server"
             ? `Force install the exact Redoor ${props.serverInfo.version} executable currently running this server.`
             : `Download and install Redoor ${normalizedTargetVersion} for ${props.agentOs}/${props.agentArch}.`;
+
     const upgradeMutation = useMutation({
         mutationFn: async (selectedAction: UpgradeAction) => {
             if (selectedAction === "running_server") {
                 await props.forceInstallRunningBinary();
                 await props.waitUntilReady(props.serverInfo.version, true);
+
                 return;
             }
+
             await props.upgrade(normalizedTargetVersion);
             await props.waitUntilReady(normalizedTargetVersion, false);
         },
@@ -101,26 +105,17 @@ export function UpgradeButton(props: UpgradeButtonProps) {
     };
 
     return (
-        <section
-            aria-labelledby="agent-upgrade-title"
-            className="rounded-lg border border-slate-800 bg-[#11141b] p-4"
-        >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2
-                    id="agent-upgrade-title"
-                    className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-300"
-                >
-                    <PackageOpen
-                        className="h-5 w-5 text-slate-400"
-                        aria-hidden="true"
-                    />
-                    Upgrade
-                </h2>
-                <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                    Published release
-                </span>
-            </div>
-            <div className="mt-4 flex flex-col gap-4 border-t border-slate-800 pt-4 lg:flex-row lg:items-center">
+        <>
+            <DetailCard
+                title="Upgrade"
+                icon={<PackageOpen className="h-5 w-5" aria-hidden="true" />}
+                actions={
+                    <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                        Published release
+                    </span>
+                }
+                bodyClassName="flex flex-col gap-4 border-t border-slate-800 pt-4 lg:flex-row lg:items-center"
+            >
                 <div className="shrink-0 lg:w-40">
                     <label
                         htmlFor="agent-upgrade-target-version"
@@ -221,7 +216,7 @@ export function UpgradeButton(props: UpgradeButtonProps) {
                         </p>
                     ) : null}
                 </div>
-            </div>
+            </DetailCard>
             <ConfirmationDialog
                 isOpen={action !== null}
                 title={
@@ -247,6 +242,6 @@ export function UpgradeButton(props: UpgradeButtonProps) {
                 onClose={close}
                 onConfirm={upgrade}
             />
-        </section>
+        </>
     );
 }

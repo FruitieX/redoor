@@ -2,11 +2,16 @@ import { File, Folder, X } from "lucide-react";
 import type { SelectedPath } from "#ui/selected-files";
 import { IconButton } from "#ui/components/icon-button";
 
-/** Makes the exact selected paths visible before a bulk filesystem operation. */
+/**
+ * Makes the exact selected paths visible before a bulk filesystem operation. Deselecting is
+ * optional because some batches, such as uploads, are not backed by the selection.
+ */
 export function AffectedPathsList(props: {
     paths: SelectedPath[];
-    onDeselect: (path: SelectedPath) => void;
+    onDeselect?: (path: SelectedPath) => void;
 }) {
+    const onDeselect = props.onDeselect;
+
     return (
         <div className="mt-4">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -35,14 +40,18 @@ export function AffectedPathsList(props: {
                                 {path.agentName}
                             </span>
                         </span>
-                        <IconButton
-                            type="button"
-                            label={`Deselect ${path.fileName}`}
-                            onClick={() => props.onDeselect(path)}
-                            className="h-7 w-7 shrink-0 rounded text-slate-500 hover:bg-white/5 hover:text-slate-200"
-                        >
-                            <X className="h-4 w-4" aria-hidden="true" />
-                        </IconButton>
+                        {onDeselect ? (
+                            <IconButton
+                                type="button"
+                                label={`Deselect ${path.fileName}`}
+                                onClick={() => onDeselect(path)}
+                                variant="quiet"
+                                size="lg"
+                                className="h-7 w-7 shrink-0"
+                            >
+                                <X className="h-4 w-4" aria-hidden="true" />
+                            </IconButton>
+                        ) : null}
                     </li>
                 ))}
             </ul>

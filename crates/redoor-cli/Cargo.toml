@@ -1,0 +1,30 @@
+[package]
+name = "redoor-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+redoor-protocol.workspace = true
+redoor-core.workspace = true
+anyhow.workspace = true
+async-compression.workspace = true
+async-stream.workspace = true
+bytes.workspace = true
+clap.workspace = true
+dialoguer.workspace = true
+futures-util.workspace = true
+jiff.workspace = true
+libc.workspace = true
+nix.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+redoor-core = { workspace = true, features = ["test-support"] }
+axum.workspace = true

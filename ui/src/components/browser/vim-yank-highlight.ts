@@ -70,6 +70,7 @@ function createYankDecorations(
     const lastOffset = end > start ? end - 1 : end;
     const lastLine = document.lineAt(lastOffset);
     const decorations = [];
+
     for (
         let lineNumber = firstLine.number;
         lineNumber <= lastLine.number;
@@ -79,6 +80,7 @@ function createYankDecorations(
             lineYankDecoration.range(document.line(lineNumber).from),
         );
     }
+
     return Decoration.set(decorations);
 }
 
@@ -90,10 +92,12 @@ const yankHighlightField = StateField.define<DecorationSet>({
     /** Maps an active flash through edits and replaces it only for explicit yank effects. */
     update(value, transaction) {
         let nextValue = value.map(transaction.changes);
+
         for (const effect of transaction.effects) {
             if (!effect.is(setYankHighlight)) {
                 continue;
             }
+
             nextValue =
                 effect.value === null
                     ? Decoration.none
@@ -102,6 +106,7 @@ const yankHighlightField = StateField.define<DecorationSet>({
                           effect.value,
                       );
         }
+
         return nextValue;
     },
     provide: (field) => EditorView.decorations.from(field),
@@ -113,7 +118,9 @@ function vimPositionToOffset(view: EditorView, position: VimPosition): number {
         1,
         Math.min(position.line + 1, view.state.doc.lines),
     );
+
     const line = view.state.doc.line(lineNumber);
+
     return Math.max(line.from, Math.min(line.from + position.ch, line.to));
 }
 
@@ -150,6 +157,7 @@ const yankHighlightPlugin = ViewPlugin.fromClass(
             if (this.clearTimer !== undefined) {
                 clearTimeout(this.clearTimer);
             }
+
             this.view.dispatch({
                 effects: setYankHighlight.of({
                     from: vimPositionToOffset(this.view, event.from),
@@ -166,6 +174,7 @@ const yankHighlightPlugin = ViewPlugin.fromClass(
         /** Removes the Vim listener and pending timer before the editor is destroyed. */
         destroy() {
             this.cm?.off("vim-yank", this.handleYank);
+
             if (this.clearTimer !== undefined) {
                 clearTimeout(this.clearTimer);
             }

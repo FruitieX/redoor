@@ -38,9 +38,11 @@ test.describe.serial("File Browser Navigation", () => {
         const now = Date.now();
         const hidden = ".hidden.txt";
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+
         const modifiedAt = Math.floor(
             (now - ((3 * 24 + 2) * 60 + 3) * 60_000) / 1000,
         );
+
         await page.route(
             `**/api/v1/agents/${encodeURIComponent(ctx.agentId)}/ls/**`,
             async (route) => {
@@ -118,12 +120,14 @@ test.describe.serial("File Browser Navigation", () => {
         );
 
         const rows = page.locator("main tbody tr");
+
         const expectOrder = async (names: string[]) => {
             const expectedLabels = names.map((name) =>
                 name === "z-directory"
                     ? `Directory entry ${name}`
                     : `File entry ${name}`,
             );
+
             // Waiting on the first row ensures React has committed the requested order.
             await expect(rows.first()).toHaveAttribute(
                 "aria-label",
@@ -217,17 +221,21 @@ test.describe.serial("File Browser Navigation", () => {
             .getByRole("dialog", { name: "Actions for directory subdir1" })
             .getByRole("button", { name: "Download", exact: true })
             .click();
+
         const downloadDialog = page.getByRole("dialog", {
             name: "Download directory",
         });
+
         // Directory downloads explain their streaming archive format before starting.
         await expect(downloadDialog).toContainText(
             "streamed as a .tar.gz archive",
         );
+
         const downloadDirectory = downloadDialog.getByRole("link", {
             name: "Download .tar.gz",
             exact: true,
         });
+
         await expect(downloadDirectory).toBeVisible();
         await expect(downloadDirectory).toHaveAttribute(
             "href",
@@ -301,6 +309,7 @@ test.describe.serial("File Browser Navigation", () => {
         const filterInput = page.getByRole("searchbox", {
             name: "Filter files",
         });
+
         await filterInput.fill("DIR2");
 
         // Matching is case-insensitive and leaves only names containing the entered text.
@@ -329,9 +338,11 @@ test.describe.serial("File Browser Navigation", () => {
         await expect(
             page.getByRole("link", { name: "deep", exact: true }),
         ).toBeVisible();
+
         const destinationFilterInput = page.getByRole("searchbox", {
             name: "Filter files",
         });
+
         // Filter-driven navigation restores keyboard focus in the destination listing.
         await expect(destinationFilterInput).toBeFocused();
 
@@ -351,6 +362,7 @@ test.describe.serial("File Browser Navigation", () => {
         const filterInput = page.getByRole("searchbox", {
             name: "Filter files",
         });
+
         // The visible hint advertises the only shortcut owned by local filtering.
         await expect(filterInput).toHaveAttribute(
             "placeholder",
@@ -373,10 +385,12 @@ test.describe.serial("File Browser Navigation", () => {
             name: "subdir1",
             exact: true,
         });
+
         const secondFileEntry = page.getByRole("link", {
             name: "subdir2",
             exact: true,
         });
+
         await page.keyboard.press("j");
         // The first movement starts at the first visible file-name link.
         await expect(firstFileEntry).toBeFocused();
@@ -391,6 +405,7 @@ test.describe.serial("File Browser Navigation", () => {
             name: "Go to the parent directory",
             exact: true,
         });
+
         await upLink.hover();
         // Parent navigation advertises the equivalent keyboard shortcut.
         await expect(page.getByRole("tooltip")).toHaveText(
@@ -416,13 +431,16 @@ test.describe.serial("File Browser Navigation", () => {
     }) => {
         const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
+
         const filterInput = page.getByRole("searchbox", {
             name: "Filter files",
         });
+
         const firstResult = page.getByRole("link", {
             name: "subdir1",
             exact: true,
         });
+
         const secondResult = page.getByRole("link", {
             name: "subdir2",
             exact: true,
@@ -459,6 +477,7 @@ test.describe.serial("File Browser Navigation", () => {
                 await fs.rm(hiddenPath, { force: true });
                 hiddenPath = "";
             }
+
             const api = new ApiClient(API_BASE_URL);
             await api.login("test-user", "test-password");
             // Later listings look up `.test-*` paths from the agent home.
@@ -483,25 +502,30 @@ test.describe.serial("File Browser Navigation", () => {
             await fs.writeFile(hiddenPath, "secret");
             const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
             await page.goto(directoryUrl);
+
             const hidePersisted = page.waitForResponse(
                 (response) =>
                     response.request().method() === "PUT" &&
                     response.url().includes("/api/v1/user/state"),
             );
+
             await page
                 .getByRole("button", { name: "Hide hidden files" })
                 .click();
             await hidePersisted;
+
             const hiddenFile = page.getByRole("link", {
                 name: hiddenFileName,
                 exact: true,
             });
+
             // The persisted hide preference still conceals dotfiles until the query asks for them.
             await expect(hiddenFile).toHaveCount(0);
 
             const filterInput = page.getByRole("searchbox", {
                 name: "Filter files",
             });
+
             await filterInput.fill("env.local");
             // A query without a leading dot must not reveal hidden names.
             await expect(hiddenFile).toHaveCount(0);
@@ -523,9 +547,11 @@ test.describe.serial("File Browser Navigation", () => {
         page,
     }) => {
         await page.goto(ctx.agentBrowserUrl);
+
         const homeLink = page
             .getByRole("navigation", { name: "Application" })
             .getByRole("link", { name: "Server home" });
+
         // Visible application navigation proves the authenticated desktop shell is mounted.
         await expect(homeLink).toBeVisible();
         await page.evaluate(() => {
@@ -560,7 +586,7 @@ test.describe.serial("File Browser Navigation", () => {
         ).toHaveCount(0);
         await page.getByRole("button", { name: "More", exact: true }).click();
         const moreMenu = page.getByRole("dialog", { name: "More" });
-        // The removed queue route is no longer exposed through the secondary action menu either.
+        // The secondary action menu must not offer an unavailable queue destination.
         await expect(
             moreMenu.getByRole("link", { name: "Upload queue", exact: true }),
         ).toHaveCount(0);
@@ -569,11 +595,13 @@ test.describe.serial("File Browser Navigation", () => {
 
         // The query parameter makes the alternate view directly addressable and reload-safe.
         await expect(page).toHaveURL(`${directoryUrl}?view=details`);
+
         // The directory heading confirms details describe the current directory rather than a child.
         const directoryHeading = page.getByRole("heading", {
             name: "Directory name",
             exact: true,
         });
+
         await expect(directoryHeading).toBeVisible();
         // The visible heading value identifies the directory represented by the metadata.
         await expect(directoryHeading).toHaveText(ctx.testDirName);
@@ -585,10 +613,12 @@ test.describe.serial("File Browser Navigation", () => {
         await expect(
             page.getByRole("heading", { name: "Permissions", exact: true }),
         ).toBeVisible();
+
         const calculateSize = page.getByRole("button", {
             name: "Calculate size",
             exact: true,
         });
+
         // Recursive traversal remains opt-in so opening details is fast for large trees.
         await expect(calculateSize).toBeVisible();
         await calculateSize.click();
@@ -727,9 +757,11 @@ test.describe.serial("File Browser Navigation", () => {
         // Directory Sync must not expose on-page conflict radios before Copy is chosen.
         await expect(page.getByRole("radio", { name: "Merge" })).toHaveCount(0);
         await page.getByRole("button", { name: "Copy", exact: true }).click();
+
         const confirmation = page.getByRole("dialog", {
             name: "Copy directory?",
         });
+
         // Directory copy must be confirmed before the existing-path policy is requested.
         await expect(confirmation).toBeVisible();
         await confirmation
@@ -739,6 +771,7 @@ test.describe.serial("File Browser Navigation", () => {
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // An existing directory must open the shared Keep / Replace / Merge prompt.
         await expect(dialog).toBeVisible();
         await dialog
@@ -776,10 +809,12 @@ test.describe.serial("File Browser Navigation", () => {
             ctx.testDirPath,
             `reverse-directory-current-${Date.now()}`,
         );
+
         const selectedPath = path.join(
             ctx.testDirPath,
             `reverse-directory-selected-${Date.now()}`,
         );
+
         await fs.mkdir(currentPath);
         await fs.mkdir(selectedPath);
         await fs.writeFile(path.join(currentPath, "old.txt"), "old");
@@ -810,6 +845,7 @@ test.describe.serial("File Browser Navigation", () => {
         const dialog = page.getByRole("dialog", {
             name: "Destination items already exist",
         });
+
         // The current directory already exists, so reverse mode must request a destination policy.
         await expect(dialog).toBeVisible();
         await dialog.getByRole("radio", { name: "Replace existing" }).check();
@@ -862,6 +898,7 @@ test.describe.serial("File Browser Navigation", () => {
         const breadcrumbs = page.getByRole("navigation", {
             name: "Breadcrumbs",
         });
+
         // Breadcrumbs describe the filesystem path without repeating the agent tab label.
         await expect(breadcrumbs).not.toContainText(ctx.agentName);
         await expect(breadcrumbs).toContainText(ctx.testDirName);
@@ -883,9 +920,11 @@ test.describe.serial("File Browser Navigation", () => {
         ).toBeVisible();
 
         await page.getByRole("link", { name: "subdir1", exact: true }).click();
+
         const subdir1Breadcrumbs = page.getByRole("navigation", {
             name: "Breadcrumbs",
         });
+
         await expect(subdir1Breadcrumbs).toContainText("subdir1");
         await expect(
             page.getByRole("link", { name: "nested1.txt", exact: true }),
@@ -960,6 +999,40 @@ test.describe.serial("File Browser Navigation", () => {
         ).toBeVisible();
     });
 
+    test("should expand the agent home in an edited breadcrumb path", async ({
+        page,
+    }) => {
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        await page.goto(directoryUrl);
+
+        await page.getByRole("button", { name: "Edit file path" }).click();
+        await page.getByRole("textbox", { name: "File path" }).fill("~");
+        await page.getByRole("textbox", { name: "File path" }).press("Enter");
+        // Bare ~ opens the connected agent's home rather than a literal /~ directory.
+        await expect(page).toHaveURL(ctx.agentBrowserUrl);
+        // The breadcrumb editor remounts when the new path renders, so editing before the home
+        // listing appears would lose the second edit.
+        await expect(
+            page.getByRole("link", { name: ctx.testDirName, exact: true }),
+        ).toBeVisible();
+
+        await page.getByRole("button", { name: "Edit file path" }).click();
+        await page
+            .getByRole("textbox", { name: "File path" })
+            .fill("~/breadcrumb-missing-file.txt");
+        await page.getByRole("button", { name: "Navigate to path" }).click();
+        // A pasted home-relative file path resolves against the agent's home.
+        await expect(page).toHaveURL(
+            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.agentHome, "breadcrumb-missing-file.txt"))}`,
+        );
+        // The missing-file creation form confirms the route looked up the expanded path.
+        await expect(
+            page.getByRole("heading", {
+                name: "File or directory does not exist",
+            }),
+        ).toBeVisible();
+    });
+
     test("should navigate using the parent directory button", async ({
         page,
     }) => {
@@ -1006,6 +1079,7 @@ test.describe.serial("File Browser Navigation", () => {
             name: "Go to the parent directory",
             exact: true,
         });
+
         await upButton.click();
 
         // The second Up click should return from subdir2 to the test directory root.

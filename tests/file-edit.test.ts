@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { ApiClient, Agent, encodeFilesystemPath } from "#ui/api-client";
-import type { TransferProgressEntry } from "#ui/api-client";
+import { ApiClient, Agent } from "#ui/api-client";
+import { encodeFilesystemPath } from "#ui/api-paths";
+import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import {
     ProcessManager,
     TempFileManager,
@@ -24,6 +25,7 @@ describe("File Edit API", () => {
             agentName: AGENT_NAME,
             agentCwd: tempFiles.tempDirectory({ suffix: "-agent-cwd" }),
         });
+
         apiClient = setup.apiClient;
         testAgent = setup.testAgent;
     }, 30000);
@@ -46,12 +48,14 @@ describe("File Edit API", () => {
     function startHeldEdit(filePath: string, first: Buffer, second: Buffer) {
         let streamController:
             ReadableStreamDefaultController<Uint8Array> | undefined;
+
         const body = new ReadableStream<Uint8Array>({
             start(controller) {
                 streamController = controller;
                 controller.enqueue(first);
             },
         });
+
         const requestOptions = {
             method: "PUT",
             headers: {
@@ -62,7 +66,9 @@ describe("File Edit API", () => {
             body,
             duplex: "half",
         };
+
         const response = fetch(editUrl(filePath), requestOptions);
+
         return {
             response,
             finish() {
@@ -71,6 +77,7 @@ describe("File Edit API", () => {
                         "Edit stream controller was not initialized",
                     );
                 }
+
                 streamController.enqueue(second);
                 streamController.close();
             },
@@ -83,15 +90,18 @@ describe("File Edit API", () => {
     it("preserves inode, ownership, ordinary mode, and exact bytes", async () => {
         const filePath = tempFiles.create("old content", { suffix: ".txt" });
         fs.chmodSync(filePath, 0o751);
+
         if (process.getuid?.() === 0) {
             fs.chownSync(filePath, 12345, 12346);
         }
+
         const before = fs.statSync(filePath, { bigint: true });
 
         const result = await testAgent.editFile(
             filePath,
             new File(["replacement content is longer"], "edited.txt"),
         );
+
         const after = fs.statSync(filePath, { bigint: true });
 
         // The response must identify the selected absolute path and exact body length.
@@ -185,11 +195,13 @@ describe("File Edit API", () => {
             headers: testAgent.getAuthHeaders(),
             body: "new",
         });
+
         const loopResponse = await fetch(editUrl(first), {
             method: "PUT",
             headers: testAgent.getAuthHeaders(),
             body: "new",
         });
+
         const directoryResponse = await fetch(editUrl(directory), {
             method: "PUT",
             headers: testAgent.getAuthHeaders(),
@@ -219,6 +231,7 @@ describe("File Edit API", () => {
             description: "active edit progress row",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.agent_id === testAgent.id &&
@@ -229,6 +242,7 @@ describe("File Edit API", () => {
                 );
             },
         });
+
         const detailsResult = await Promise.race([
             testAgent.getDetails().then((details) => ({ details })),
             new Promise<{ timedOut: true }>((resolve) => {
@@ -247,10 +261,12 @@ describe("File Edit API", () => {
         const response = await held.response;
         // A complete staged body must commit successfully.
         expect(response.status).toBe(200);
+
         const completed = await waitForValue({
             description: "completed edit progress row",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -258,6 +274,7 @@ describe("File Edit API", () => {
                 );
             },
         });
+
         // Completion must publish the non-cancelable terminal state.
         expect(completed.cancelable).toBe(false);
         // The final bytes must concatenate both streamed request chunks exactly.
@@ -271,6 +288,7 @@ describe("File Edit API", () => {
         fs.chmodSync(filePath, 0o640);
         const before = fs.statSync(filePath, { bigint: true });
         const first = Buffer.alloc(64 * 1024, "a");
+
         const held = startHeldEdit(
             filePath,
             first,
@@ -281,6 +299,7 @@ describe("File Edit API", () => {
             description: "active edit before abort",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.path === filePath &&
@@ -290,6 +309,7 @@ describe("File Edit API", () => {
                 );
             },
         });
+
         held.abort(new Error("client aborted edit"));
 
         // A broken producer must reject instead of returning a false success response.
@@ -298,6 +318,7 @@ describe("File Edit API", () => {
             description: "errored edit after abort",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.find(
                     (transfer: TransferProgressEntry) =>
                         transfer.request_id === activeTransfer.request_id &&
@@ -325,6 +346,7 @@ describe("File Edit API", () => {
         fs.writeFileSync(firstTarget, "first old");
         fs.writeFileSync(secondTarget, "second old");
         fs.symlinkSync("first.txt", selected);
+
         const held = startHeldEdit(
             selected,
             Buffer.from("replacement "),
@@ -335,6 +357,7 @@ describe("File Edit API", () => {
             description: "edit pinned before symlink swap",
             predicate: async () => {
                 const progress = await apiClient.getTransferProgress();
+
                 return progress.transfers.some(
                     (transfer: TransferProgressEntry) =>
                         transfer.path === selected &&

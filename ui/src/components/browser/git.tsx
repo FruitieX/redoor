@@ -12,9 +12,12 @@ import { ActionMenu } from "#ui/components/action-menu";
 import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
+import { ViewCardHeader } from "#ui/components/view-card-header";
+import { browserRoute } from "#ui/browser-route";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
 import { gitDiffQueryOptions, gitStatusQueryOptions } from "#ui/queries";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
+import { getBaseName } from "#ui/utils/path";
 import type { GitChangeState } from "#bindings/GitChangeState";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
@@ -27,41 +30,67 @@ type GitStatusItem = {
 };
 
 /** Derives status sections and one de-duplicated diff order from the rendered rows. */
-export function groupGitStatusEntries(entries: GitStatusEntry[]) {
+function groupGitStatusEntries(entries: GitStatusEntry[]) {
     const ordinaryEntries = entries.filter(
         (entry) => entry.conflict_state === null,
     );
-    const conflicts: GitStatusItem[] = entries
-        .filter((entry) => entry.conflict_state !== null)
-        .map((entry) => ({ entry, state: "conflicted" }));
-    const untracked: GitStatusItem[] = ordinaryEntries
-        .filter(
-            (entry) =>
-                entry.index_state === "unmodified" &&
-                entry.worktree_state === "added",
-        )
-        .map((entry) => ({ entry, state: "untracked" }));
-    const staged: GitStatusItem[] = ordinaryEntries
-        .filter((entry) => entry.index_state !== "unmodified")
-        .map((entry) => ({ entry, state: entry.index_state }));
-    const unstaged: GitStatusItem[] = ordinaryEntries
-        .filter(
-            (entry) =>
-                entry.worktree_state !== "unmodified" &&
-                !untracked.some((item) => item.entry.path === entry.path),
-        )
-        .map((entry) => ({ entry, state: entry.worktree_state }));
+
+    const conflicts = entries.flatMap<GitStatusItem>((entry) =>
+        entry.conflict_state !== null ? [{ entry, state: "conflicted" }] : [],
+    );
+
+    const untracked = ordinaryEntries.flatMap<GitStatusItem>((entry) =>
+        entry.index_state === "unmodified" && entry.worktree_state === "added"
+            ? [{ entry, state: "untracked" }]
+            : [],
+    );
+
+    const staged = ordinaryEntries.flatMap<GitStatusItem>((entry) =>
+        entry.index_state !== "unmodified"
+            ? [{ entry, state: entry.index_state }]
+            : [],
+    );
+
+    const unstaged = ordinaryEntries.flatMap<GitStatusItem>((entry) =>
+        entry.worktree_state !== "unmodified" &&
+        !untracked.some((item) => item.entry.path === entry.path)
+            ? [{ entry, state: entry.worktree_state }]
+            : [],
+    );
+
     const seenPaths = new Set<string>();
-    const diffEntries = [...conflicts, ...staged, ...unstaged, ...untracked]
-        .map((item) => item.entry)
-        .filter((entry) => {
-            if (seenPaths.has(entry.path)) {
-                return false;
-            }
-            seenPaths.add(entry.path);
-            return true;
-        });
+
+    const diffEntries = [
+        ...conflicts,
+        ...staged,
+        ...unstaged,
+        ...untracked,
+    ].flatMap((item) => {
+        const entry = item.entry;
+
+        if (seenPaths.has(entry.path)) {
+            return [];
+        }
+
+        seenPaths.add(entry.path);
+
+        return [entry];
+    });
+
     return { conflicts, staged, unstaged, untracked, diffEntries };
+}
+
+/** Links back to the repository's own Git view, which both Git headers offer. */
+function RepositoryLink(props: { agent: Agent; repositoryRoot: string }) {
+    return (
+        <Link
+            {...browserRoute(props.agent.id, props.repositoryRoot)}
+            search={{ view: "git" }}
+            className="mt-3 block break-all font-mono text-sm text-blue-300 hover:underline"
+        >
+            Repository: {props.repositoryRoot}
+        </Link>
+    );
 }
 
 /** Presents repository identity consistently above status and file comparisons. */
@@ -73,25 +102,19 @@ function GitHeader(props: {
     description: string;
 }) {
     return (
-        <header className="border-b border-slate-800 bg-linear-to-br from-emerald-500/10 via-transparent to-transparent p-4 sm:p-5">
-            <p className="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-400">
-                <GitBranch className="h-4 w-4" aria-hidden="true" />
-                {props.reference}
-            </p>
-            <h1 className="break-all text-xl font-bold tracking-tight text-slate-50 sm:text-2xl">
-                {props.title}
-            </h1>
-            <p className="mt-1.5 max-w-3xl text-sm text-slate-400">
+        <ViewCardHeader
+            icon={<GitBranch className="h-5 w-5" aria-hidden="true" />}
+            eyebrow={props.reference}
+            title={props.title}
+        >
+            <p className="mt-3 max-w-3xl text-sm text-slate-400">
                 {props.description}
             </p>
-            <Link
-                to={props.agent.getBrowserUrl(props.repositoryRoot)}
-                search={{ view: "git" }}
-                className="mt-1.5 block break-all font-mono text-xs text-blue-300 hover:underline"
-            >
-                Repository: {props.repositoryRoot}
-            </Link>
-        </header>
+            <RepositoryLink
+                agent={props.agent}
+                repositoryRoot={props.repositoryRoot}
+            />
+        </ViewCardHeader>
     );
 }
 
@@ -112,6 +135,7 @@ function GitStatusSection(props: {
     if (props.entries.length === 0) {
         return null;
     }
+
     return (
         <section
             aria-labelledby={`git-${props.title.toLowerCase().replace(" ", "-")}`}
@@ -131,7 +155,10 @@ function GitStatusSection(props: {
                     >
                         <span className="min-w-0">
                             <Link
-                                to={props.agent.getBrowserUrl(item.entry.path)}
+                                {...browserRoute(
+                                    props.agent.id,
+                                    item.entry.path,
+                                )}
                                 search={{ view: "git" }}
                                 className="block break-all font-mono text-xs text-blue-300 hover:underline sm:text-sm"
                             >
@@ -171,13 +198,16 @@ function useGitDiffActivation(props: {
     const [activatedDirectory, setActivatedDirectory] = React.useState<
         string | null
     >(null);
+
     const loadButtonRef = React.useRef<HTMLDivElement>(null);
     const active = activatedDirectory === props.directoryKey;
+
     const shouldAutoLoad =
         props.changedFileCount > 0 && props.changedFileCount < 50;
 
     React.useEffect(() => {
         const loadButton = loadButtonRef.current;
+
         if (
             active ||
             !shouldAutoLoad ||
@@ -192,12 +222,15 @@ function useGitDiffActivation(props: {
                 if (!entries.some((entry) => entry.isIntersecting)) {
                     return;
                 }
+
                 setActivatedDirectory(props.directoryKey);
                 observer.disconnect();
             },
             { root: null, rootMargin: "0px", threshold: 0 },
         );
+
         observer.observe(loadButton);
+
         return () => observer.disconnect();
     }, [active, props.directoryKey, shouldAutoLoad]);
 
@@ -211,14 +244,18 @@ function useGitDiffActivation(props: {
 /** Groups directory status into the same concepts users see in a normal Git workflow. */
 export function GitDirectoryView(props: { agent: Agent; path: string }) {
     const directoryKey = `${props.agent.id}:${props.path}`;
+
     const statusQuery = useQuery(
         gitStatusQueryOptions(props.agent, props.path),
     );
+
     const groups = groupGitStatusEntries(statusQuery.data?.entries ?? []);
+
     const diffActivation = useGitDiffActivation({
         directoryKey,
         changedFileCount: groups.diffEntries.length,
     });
+
     const diffQuery = useQuery({
         ...gitDiffQueryOptions(
             props.agent,
@@ -227,6 +264,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
         ),
         enabled: diffActivation.active && groups.diffEntries.length > 0,
     });
+
     if (statusQuery.isPending) {
         return (
             <p role="status" className="text-sm text-slate-400">
@@ -234,6 +272,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
             </p>
         );
     }
+
     if (statusQuery.isError) {
         return (
             <p role="alert" className="text-sm text-red-300">
@@ -247,6 +286,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 
     const status = statusQuery.data;
     const { conflicts, staged, unstaged, untracked, diffEntries } = groups;
+
     const diffAnchorByPath = diffActivation.active
         ? new Map(
               diffEntries.map((entry, index) => [
@@ -255,11 +295,13 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
               ]),
           )
         : null;
+
     const reference = status.branch_name
         ? `Branch ${status.branch_name}`
         : status.detached_head_id
           ? `Detached at ${status.detached_head_id.slice(0, 12)}`
           : "Unborn HEAD";
+
     const tracking = [
         status.upstream ? `Tracking ${status.upstream}` : null,
         status.ahead === null ? null : `${status.ahead} ahead`,
@@ -270,7 +312,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
         <BrowserViewCard>
             <GitHeader
                 agent={props.agent}
-                title={status.path.split("/").filter(Boolean).pop() ?? "/"}
+                title={getBaseName(status.path)}
                 repositoryRoot={status.repository_root}
                 reference={reference}
                 description={
@@ -279,7 +321,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                         : "Changes below this directory, compared with HEAD and the index."
                 }
             />
-            <div className="grid gap-4 p-3 sm:p-5">
+            <div className="grid gap-4 p-4 sm:p-5">
                 {status.entries.length === 0 ? (
                     <div
                         role="status"
@@ -358,7 +400,9 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                                 const pathLabel =
                                     diffEntries[index]
                                         ?.repository_relative_path ?? diff.path;
+
                                 const isTextDiff = diff.result.type === "text";
+
                                 return (
                                     <section
                                         key={`${diff.path}:${index}`}
@@ -369,7 +413,8 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                                         {isTextDiff ? null : (
                                             <h2 className="break-all border-b border-slate-800 px-3 py-2 font-mono text-sm font-semibold">
                                                 <Link
-                                                    to={props.agent.getBrowserUrl(
+                                                    {...browserRoute(
+                                                        props.agent.id,
                                                         diff.path,
                                                     )}
                                                     className="text-blue-300 hover:underline"
@@ -381,9 +426,10 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                                         <div className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden">
                                             <GitDiffResultView
                                                 result={diff.result}
-                                                editorHref={props.agent.getBrowserUrl(
-                                                    diff.path,
-                                                )}
+                                                editorFile={{
+                                                    agentId: props.agent.id,
+                                                    path: diff.path,
+                                                }}
                                             />
                                         </div>
                                     </section>
@@ -400,17 +446,18 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 /** Explains all non-text outcomes rather than presenting them as empty patches. */
 function GitDiffResultView(props: {
     result: GitDiffResult;
-    editorHref: string;
+    editorFile: { agentId: string; path: string };
 }) {
     if (props.result.type === "text") {
         return (
             <UnifiedDiff
                 unifiedDiff={props.result.unified_diff}
                 emptyMessage="No changes in this comparison."
-                editorHref={props.editorHref}
+                editorFile={props.editorFile}
             />
         );
     }
+
     const messages = {
         no_changes: "No changes in this comparison.",
         untracked:
@@ -421,6 +468,7 @@ function GitDiffResultView(props: {
             "This file or its generated patch is too large to display safely.",
         unsupported_entry: "This Git entry cannot be displayed as a text diff.",
     } satisfies Record<Exclude<GitDiffResult["type"], "text">, string>;
+
     return (
         <p role="status" className="text-sm text-slate-300">
             {messages[props.result.type]}
@@ -433,70 +481,68 @@ export function GitFileView(props: {
     agent: Agent;
     path: string;
     context: GitContextResponse;
+    /** Comes from the URL so the comparison survives a reload and can be shared. */
+    mode: GitDiffMode;
+    onModeChange: (mode: GitDiffMode) => void;
 }) {
-    const [mode, setMode] = React.useState<GitDiffMode>("full");
     const diffQuery = useQuery(
-        gitDiffQueryOptions(props.agent, [props.path], mode),
+        gitDiffQueryOptions(props.agent, [props.path], props.mode),
     );
+
     const repositoryRoot =
         props.context.status === "inside_worktree"
             ? props.context.repository_root
             : null;
+
     return (
         <BrowserViewCard>
-            <header className="flex min-h-11 items-center justify-between gap-3 border-b border-slate-800 px-3 py-1.5 sm:px-4">
-                <div className="flex min-w-0 items-center gap-2 text-sm text-slate-300">
-                    <GitBranch
-                        className="h-4 w-4 shrink-0 text-emerald-400"
-                        aria-hidden="true"
-                    />
-                    <span className="min-w-0">
-                        <span className="block truncate font-medium">
-                            {mode === "staged"
-                                ? "Staged changes"
-                                : "All changes"}
-                        </span>
-                        {repositoryRoot === null ? null : (
-                            <Link
-                                to={props.agent.getBrowserUrl(repositoryRoot)}
-                                search={{ view: "git" }}
-                                className="block truncate font-mono text-[11px] leading-3.5 text-blue-300 hover:underline"
+            <ViewCardHeader
+                icon={<GitBranch className="h-5 w-5" aria-hidden="true" />}
+                eyebrow={
+                    props.mode === "staged" ? "Staged changes" : "All changes"
+                }
+                title={getBaseName(props.path)}
+                actions={
+                    <ActionMenu
+                        label="Git diff options"
+                        title="Git diff options"
+                        closeAriaLabel="Close Git diff options"
+                        hideTitle={false}
+                        icon={<MoreHorizontal className="h-4 w-4" />}
+                        variant="icon"
+                    >
+                        {() => (
+                            <Checkbox
+                                checked={props.mode === "staged"}
+                                label="Staged changes only"
+                                title={false}
+                                className="w-full px-3 py-2"
+                                onCheckedChange={(stagedOnly) =>
+                                    props.onModeChange(
+                                        stagedOnly ? "staged" : "full",
+                                    )
+                                }
                             >
-                                Repository: {repositoryRoot}
-                            </Link>
+                                Staged changes only
+                            </Checkbox>
                         )}
-                    </span>
-                </div>
-                <ActionMenu
-                    label="Git diff options"
-                    title="Git diff options"
-                    closeAriaLabel="Close Git diff options"
-                    hideTitle={false}
-                    icon={<MoreHorizontal className="h-4 w-4" />}
-                    variant="icon"
-                >
-                    {() => (
-                        <Checkbox
-                            checked={mode === "staged"}
-                            label="Staged changes only"
-                            title={false}
-                            className="w-full px-3 py-2"
-                            onCheckedChange={(stagedOnly) =>
-                                setMode(stagedOnly ? "staged" : "full")
-                            }
-                        >
-                            Staged changes only
-                        </Checkbox>
-                    )}
-                </ActionMenu>
-            </header>
+                    </ActionMenu>
+                }
+            >
+                {repositoryRoot === null ? null : (
+                    <RepositoryLink
+                        agent={props.agent}
+                        repositoryRoot={repositoryRoot}
+                    />
+                )}
+            </ViewCardHeader>
             <section
-                aria-label={`${mode === "full" ? "Full" : "Staged"} Git diff`}
-                className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden bg-slate-950/30"
+                aria-label={`${props.mode === "full" ? "Full" : "Staged"} Git diff`}
+                className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden bg-slate-950/30 [&>p]:p-4 sm:[&>p]:p-5"
             >
                 {diffQuery.isPending ? (
                     <p role="status" className="p-4 text-sm text-slate-400">
-                        Loading {mode} Git diff...
+                        Loading {props.mode} Git diff...
                     </p>
                 ) : diffQuery.isError ? (
                     <p role="alert" className="p-4 text-sm text-red-300">
@@ -512,7 +558,10 @@ export function GitFileView(props: {
                                 type: "no_changes",
                             }
                         }
-                        editorHref={props.agent.getBrowserUrl(props.path)}
+                        editorFile={{
+                            agentId: props.agent.id,
+                            path: props.path,
+                        }}
                     />
                 )}
             </section>

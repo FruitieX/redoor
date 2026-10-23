@@ -28,6 +28,7 @@ test.describe("Server home", () => {
                     offset: 43,
                 }),
             ];
+
             await route.fulfill({ json: { transfers } });
         });
 
@@ -36,6 +37,7 @@ test.describe("Server home", () => {
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         const transfersTab = panel.getByRole("tab", { name: /Transfers/ });
         // Active work prioritizes its completion percentage in the compact tab badge.
         await expect(transfersTab).toContainText("50%");
@@ -68,9 +70,11 @@ test.describe("Server home", () => {
         });
 
         await page.goto(`${WEB_BASE_URL}/`);
+
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         await panel.getByRole("tab", { name: /Transfers/ }).press("Enter");
 
         // Completed history stays off the drawer; the empty copy points to the full list.
@@ -107,9 +111,11 @@ test.describe("Server home", () => {
         });
 
         await page.goto(`${WEB_BASE_URL}/`);
+
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         const transfersTab = panel.getByRole("tab", { name: /Transfers/ });
         // The only active transfer is also the one expected to finish last.
         await expect(transfersTab).toContainText(/\d+%/);
@@ -118,14 +124,17 @@ test.describe("Server home", () => {
         const progress = panel.getByRole("img", {
             name: /Transfer progress \d+% .+\/s/,
         });
+
         // Percent comes first so the row reads as completion, then rate, then ETA.
         await expect(progress).toHaveAttribute(
             "aria-label",
             /Transfer progress \d+% .+\/s .+ remaining$/,
         );
+
         const activeTransfer = panel
             .getByRole("row")
             .filter({ hasText: "active.bin" });
+
         // The visible row summary presents the same progress details as the accessible label.
         await expect(
             activeTransfer.getByText(/\d+% .+\/s .+ remaining$/),
@@ -142,6 +151,7 @@ test.describe("Server home", () => {
         const startedAt = Math.floor(Date.now() / 1000) - 10;
         let totalBytes = 0;
         let sendTransfersChanged = () => {};
+
         await page.routeWebSocket("**/api/v1/ui/ws", (ws) => {
             const server = ws.connectToServer();
             ws.onMessage((message) => {
@@ -178,17 +188,21 @@ test.describe("Server home", () => {
         });
 
         await page.goto(`${WEB_BASE_URL}/`);
+
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         await panel.getByRole("tab", { name: /Transfers/ }).press("Enter");
 
         const archiveRow = panel
             .getByRole("row")
             .filter({ hasText: "archive-dir" });
+
         const measuringBadge = archiveRow.getByRole("img", {
             name: "Archive size is still being calculated",
         });
+
         // Unknown totals must keep transferred bytes visible without inventing a percent.
         await expect(measuringBadge).toBeVisible();
         await expect(archiveRow.getByText("47.7 MB")).toBeVisible();
@@ -197,7 +211,10 @@ test.describe("Server home", () => {
         ).toBeVisible();
         await expect(archiveRow.getByText(/%/)).toHaveCount(0);
 
-        await measuringBadge.hover();
+        // Keyboard focus opens the tooltip immediately. Hover depends on the cursor staying over
+        // the badge through the 500ms delay, which intermittently failed under full-suite load.
+        await measuringBadge.focus();
+        // The badge explains why no percentage is shown yet.
         await expect(
             page.getByRole("tooltip", {
                 name: "The archive size is being measured while the download already runs.",
@@ -224,6 +241,7 @@ test.describe("Server home", () => {
         const panel = page.getByRole("region", {
             name: "Application tools",
         });
+
         const scrollArea = page.getByRole("main");
 
         await expect(
@@ -235,6 +253,7 @@ test.describe("Server home", () => {
             .poll(async () => {
                 const inset = await readBottomChromeHeight(scrollArea);
                 const panelHeight = (await panel.boundingBox())?.height ?? 0;
+
                 return Math.abs(inset - panelHeight);
             })
             .toBeLessThan(1);
@@ -250,6 +269,7 @@ test.describe("Server home", () => {
                 const inset = await readBottomChromeHeight(scrollArea);
                 const scrollPadding = await readBottomScrollPadding(scrollArea);
                 const panelHeight = (await panel.boundingBox())?.height ?? 0;
+
                 return {
                     matchesPanel: Math.abs(inset - panelHeight) < 1,
                     matchesScrollPadding: Math.abs(scrollPadding - inset) < 1,
@@ -277,13 +297,16 @@ test.describe("Server home", () => {
         ).toBeVisible();
 
         const browserUrl = new URL(page.url());
+
         const serverProtocol =
             browserUrl.protocol === "https:" ? "https:" : "http:";
+
         const expectedConfig = `agent_token = "test-agent-token"
 
 [agent]
 server = "${serverProtocol}//${browserUrl.host}"
 `;
+
         // Exact text proves the browser generated a complete config from the real token and its own origin.
         await expect(config).toHaveText(expectedConfig);
         // Omitting both options preserves hostname naming and conventional file logging defaults.
@@ -295,16 +318,20 @@ server = "${serverProtocol}//${browserUrl.host}"
     }) => {
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const agentNames = page.getByRole("region", { name: "Agent names" });
+        const agentNames = page.getByRole("region", { name: "Device names" });
+
         const serverHeading = page.getByRole("heading", {
             name: "Server",
             exact: true,
         });
+
         const appName = page.getByRole("heading", { name: "App name" });
+
         const firstAgent = agentNames.getByRole("link", {
             name: "agent1_src",
             exact: true,
         });
+
         const secondAgent = agentNames.getByRole("link", {
             name: "agent2_custom",
             exact: true,
@@ -320,7 +347,7 @@ server = "${serverProtocol}//${browserUrl.host}"
 
         // The persistent desktop sidebar already shows agents, so no extra drawer control.
         await expect(
-            page.getByRole("button", { name: "Open agent sidebar" }),
+            page.getByRole("button", { name: "Open device sidebar" }),
         ).toHaveCount(0);
 
         // Several names share a row instead of stacking as a single-column list.
@@ -334,7 +361,7 @@ server = "${serverProtocol}//${browserUrl.host}"
         // A name is a shortcut to that agent's own home.
         await expect(page).toHaveURL(/\/agents\/[^/]+$/);
         await expect(
-            page.getByRole("heading", { name: "Agent name" }),
+            page.getByRole("heading", { name: "Device name" }),
         ).toContainText("agent1_src");
     });
 
@@ -344,19 +371,21 @@ server = "${serverProtocol}//${browserUrl.host}"
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const agentNames = page.getByRole("region", { name: "Agent names" });
+        const agentNames = page.getByRole("region", { name: "Device names" });
+
         const openSidebar = agentNames.getByRole("button", {
-            name: "Open agent sidebar",
+            name: "Open device sidebar",
         });
-        // The persistent right sidebar is gone, so the list must expose a drawer control.
+
+        // The device list must expose a control for opening the navigation drawer.
         await expect(openSidebar).toBeVisible();
         await openSidebar.click();
 
-        const agentMenu = page.getByRole("dialog", { name: "Agent menu" });
+        const agentMenu = page.getByRole("dialog", { name: "Device menu" });
         // The home control must open the same drawer as the top-bar trigger.
         await expect(agentMenu).toBeVisible();
         await expect(
-            agentMenu.getByRole("navigation", { name: "Agents" }),
+            agentMenu.getByRole("navigation", { name: "Devices" }),
         ).toBeVisible();
     });
 });
@@ -389,6 +418,7 @@ function createTransfers(
     },
 ) {
     const offset = options?.offset ?? 0;
+
     return Array.from({ length: count }, (_value, index) => ({
         request_id: offset + index + 1,
         agent_id: "agent-1",

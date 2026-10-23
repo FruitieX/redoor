@@ -1,5 +1,12 @@
-import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
-import type { LsFileResponse } from "#bindings/LsFileResponse";
+import type { ResumeMode } from "#bindings/ResumeMode";
+import type { CopyPreflightRequest } from "#bindings/CopyPreflightRequest";
+import type { CopyPreflightResponse } from "#bindings/CopyPreflightResponse";
+import type { PartialsResponse } from "#bindings/PartialsResponse";
+import type { PartialActionRequest } from "#bindings/PartialActionRequest";
+import type { ResumePartialResponse } from "#bindings/ResumePartialResponse";
+import type { DiscardPartialResponse } from "#bindings/DiscardPartialResponse";
+import type { PauseTransferResponse } from "#bindings/PauseTransferResponse";
+import type { ProtocolMismatchListResponse } from "#bindings/ProtocolMismatchListResponse";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import type { EchoRequest } from "#bindings/EchoRequest";
@@ -9,12 +16,8 @@ import type { AgentConnectionStatus } from "#bindings/AgentConnectionStatus";
 import type { StartAgentResponse } from "#bindings/StartAgentResponse";
 import type { RetryAgentStartResponse } from "#bindings/RetryAgentStartResponse";
 import type { ShutdownAgentResponse } from "#bindings/ShutdownAgentResponse";
-import type { TransferDirection } from "#bindings/TransferDirection";
-import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import type { TransferProgressListResponse } from "#bindings/TransferProgressListResponse";
-import type { TransferProgressState } from "#bindings/TransferProgressState";
 import type { CancelTransferResponse } from "#bindings/CancelTransferResponse";
-import type { UiEvent } from "#bindings/UiEvent";
 import type { RawDeleteResponse } from "#bindings/RawDeleteResponse";
 import type { RawUploadResponse } from "#bindings/RawUploadResponse";
 import type { FileEditResponse } from "#bindings/FileEditResponse";
@@ -31,8 +34,6 @@ import type { CopyExistingMode } from "#bindings/CopyExistingMode";
 import type { MoveFileRequest } from "#bindings/MoveFileRequest";
 import type { MoveFileResponse } from "#bindings/MoveFileResponse";
 import type { TerminalSize } from "#bindings/TerminalSize";
-import type { TerminalClientMessage } from "#bindings/TerminalClientMessage";
-import type { TerminalServerMessage } from "#bindings/TerminalServerMessage";
 import type { LoginRequest } from "#bindings/LoginRequest";
 import type { LoginResponse } from "#bindings/LoginResponse";
 import type { LogoutResponse } from "#bindings/LogoutResponse";
@@ -40,22 +41,15 @@ import type { MetadataResponse } from "#bindings/MetadataResponse";
 import type { CreateOneTimeTokenResponse } from "#bindings/CreateOneTimeTokenResponse";
 import type { OpenPathResponse } from "#bindings/OpenPathResponse";
 import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
-import type { ServerAuthMode } from "#bindings/ServerAuthMode";
-import type { ServerBuildMode } from "#bindings/ServerBuildMode";
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { RestartResponse } from "#bindings/RestartResponse";
 import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import type { UpgradeAgentRequest } from "#bindings/UpgradeAgentRequest";
-import type { LogEvent } from "#bindings/LogEvent";
-import type { LogEntry } from "#bindings/LogEntry";
-import type { LogErrorDetails } from "#bindings/LogErrorDetails";
 import type { RenamePathRequest } from "#bindings/RenamePathRequest";
 import type { RenamePathResponse } from "#bindings/RenamePathResponse";
 import type { FileSearchResponse } from "#bindings/FileSearchResponse";
-import type { FileSearchEntry } from "#bindings/FileSearchEntry";
 import type { FindRequest } from "#bindings/FindRequest";
 import type { GrepRequest } from "#bindings/GrepRequest";
-import type { ContentGrepMatch } from "#bindings/ContentGrepMatch";
 import type { ContentGrepResponse } from "#bindings/ContentGrepResponse";
 import type { DiffEndpoint } from "#bindings/DiffEndpoint";
 import type { DiffFilesRequest } from "#bindings/DiffFilesRequest";
@@ -87,8 +81,15 @@ import type { ChmodPathResponse } from "#bindings/ChmodPathResponse";
 import type { Level } from "#bindings/Level";
 import type { LoggingLevelRequest } from "#bindings/LoggingLevelRequest";
 import type { LoggingLevelResponse } from "#bindings/LoggingLevelResponse";
+import type { AccessTokenListResponse } from "#bindings/AccessTokenListResponse";
+import type { AccessTokenResponse } from "#bindings/AccessTokenResponse";
+import type { AccessTokenSecretResponse } from "#bindings/AccessTokenSecretResponse";
+import type { CreateAccessTokenRequest } from "#bindings/CreateAccessTokenRequest";
+import type { DeleteAccessTokenResponse } from "#bindings/DeleteAccessTokenResponse";
+import type { UpdateAccessTokenRequest } from "#bindings/UpdateAccessTokenRequest";
 import {
     apiRequest,
+    authenticationHeaders,
     requireSuccessfulResponse,
     withAuthentication,
     type RequestContext,
@@ -97,83 +98,6 @@ import * as apiPaths from "#ui/api-paths";
 import type { LsResponse } from "#ui/ls-response";
 
 const { appendFilesystemPath, encodeFilesystemPath, getBrowserUrl } = apiPaths;
-
-export { ApiError } from "#ui/api-transport";
-export { encodeFilesystemPath, getBrowserUrl };
-
-export type {
-    LsDirectoryResponse,
-    LsFileResponse,
-    MetadataResponse,
-    CreateOneTimeTokenResponse,
-    DirectorySizeResponse,
-    RawDeleteResponse,
-    RawUploadResponse,
-    TrashListResponse,
-    EmptyTrashResponse,
-    RestoreTrashItemRequest,
-    RestoreTrashItemResponse,
-    CreateDirectoryResponse,
-    CreationOwnershipOptions,
-    TransferDirection,
-    TransferProgressEntry,
-    TransferProgressListResponse,
-    TransferProgressState,
-    CancelTransferResponse,
-    UiEvent,
-    CopyFileRequest,
-    CopyFileResponse,
-    CopyEndpoint,
-    CopyExistingMode,
-    MoveFileRequest,
-    MoveFileResponse,
-    TerminalSize,
-    TerminalClientMessage,
-    TerminalServerMessage,
-    ServerInfoResponse,
-    ServerAuthMode,
-    ServerBuildMode,
-    BinaryIdentity,
-    RestartResponse,
-    UpgradeAgentResponse,
-    UpgradeAgentRequest,
-    LogEvent,
-    LogEntry,
-    LogErrorDetails,
-    AgentConnectionStatus,
-    StartAgentResponse,
-    RetryAgentStartResponse,
-    ShutdownAgentResponse,
-    RenamePathRequest,
-    RenamePathResponse,
-    FileSearchResponse,
-    FileSearchEntry,
-    ContentGrepMatch,
-    ContentGrepResponse,
-    DiffEndpoint,
-    DiffFilesRequest,
-    DiffFilesResponse,
-    CreateSshAgentRequest,
-    CreateSshAgentResponse,
-    ManagedSshAgentConfigurationResponse,
-    UpdateSshAgentResponse,
-    UpdateSshAgentRequest,
-    CreateLocalAgentRequest,
-    CreateLocalAgentResponse,
-    ManagedLocalAgentConfigurationResponse,
-    UpdateLocalAgentResponse,
-    UpdateLocalAgentRequest,
-    DeleteManagedAgentResponse,
-    UpdateUserStateRequest,
-    UserStateResponse,
-    GitContextResponse,
-    GitStatusResponse,
-    GitDiffResponse,
-    GitDiffMode,
-    Level,
-    LoggingLevelRequest,
-    LoggingLevelResponse,
-};
 
 export class Agent {
     private baseUrl: string;
@@ -213,11 +137,10 @@ export class Agent {
 
     /** Returns authentication headers for lower-level streaming tests and integrations. */
     getAuthHeaders(): Record<string, string> {
-        const sessionCookie = this.requestContext.getSessionCookie?.();
-        return sessionCookie ? { Cookie: sessionCookie } : {};
+        return authenticationHeaders(this.requestContext);
     }
 
-    /** Reads the threshold from the connected agent over its authoritative control socket. */
+    /** Reads the threshold from the connected agent over its connection. */
     async getLoggingLevel(): Promise<LoggingLevelResponse> {
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.id)}/logging-level`,
@@ -229,6 +152,7 @@ export class Agent {
     /** Changes logging admission without reconnecting this agent or its live viewer. */
     async updateLoggingLevel(level: Level): Promise<LoggingLevelResponse> {
         const request: LoggingLevelRequest = { level };
+
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.id)}/logging-level`,
             {
@@ -272,7 +196,7 @@ export class Agent {
         return this.info.supports_move_to_trash || this.info.supports_trash;
     }
 
-    /** Effective UID from registration; null until first connect or for older agents. */
+    /** Effective UID from registration; null until first connect. */
     get uid(): number | null {
         return this.info.uid;
     }
@@ -297,7 +221,7 @@ export class Agent {
         return this.info.connected_at;
     }
 
-    /** Identifies the current control socket so process restarts can await a replacement. */
+    /** Identifies the current agent connection so process restarts can await a replacement. */
     get connectionId(): string | null {
         return this.info.connection_id;
     }
@@ -320,11 +244,6 @@ export class Agent {
     /** Returns binary identity from the latest registration, if any. */
     get binary(): BinaryIdentity | null {
         return this.info.binary;
-    }
-
-    /** Reports whether this session can complete the safe in-place upgrade protocol. */
-    get supportsSelfExec(): boolean {
-        return this.info.supports_self_exec;
     }
 
     /** Reports whether this session can launch paths in its graphical desktop. */
@@ -374,6 +293,7 @@ export class Agent {
             source: "published_release",
             target_version: targetVersion,
         };
+
         return apiRequest(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/upgrade`,
             {
@@ -390,6 +310,7 @@ export class Agent {
     /** Force-installs the exact running server executable on a matching architecture. */
     async forceInstallRunningBinary(): Promise<UpgradeAgentResponse> {
         const request: UpgradeAgentRequest = { source: "running_server" };
+
         return apiRequest(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/upgrade`,
             {
@@ -452,6 +373,7 @@ export class Agent {
         mode: GitDiffMode,
     ): Promise<GitDiffResponse> {
         const request: GitDiffRequest = { files, mode };
+
         return apiRequest<GitDiffResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/git/diff`,
             {
@@ -482,6 +404,7 @@ export class Agent {
             respect_gitignore: options.respectGitignore,
             case_sensitivity: options.caseSensitivity ?? "smart",
         };
+
         return apiRequest<FileSearchResponse>(
             this.filesystemUrl("find", path),
             {
@@ -519,6 +442,7 @@ export class Agent {
             before_context: options.beforeContext ?? 0,
             after_context: options.afterContext ?? 0,
         };
+
         return apiRequest<ContentGrepResponse>(
             this.filesystemUrl("grep", path),
             {
@@ -536,6 +460,7 @@ export class Agent {
         random_sleep: boolean = false,
     ): Promise<EchoResponse> {
         const request: EchoRequest = { message, random_sleep };
+
         return apiRequest(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/echo`,
             {
@@ -551,6 +476,7 @@ export class Agent {
 
     async raw(path: string): Promise<ArrayBuffer> {
         const response = await this.download(path);
+
         return response.arrayBuffer();
     }
 
@@ -581,6 +507,7 @@ export class Agent {
             new URL(this.filesystemUrl("chown", path)),
             request,
         );
+
         return apiRequest<ChownPathResponse>(
             url.toString(),
             { method: "POST" },
@@ -617,9 +544,11 @@ export class Agent {
 
     getRawUrl(path: string, options?: { download?: boolean }): string {
         let url = this.filesystemUrl("raw", path);
+
         if (options?.download) {
             url += "?download=1";
         }
+
         return url;
     }
 
@@ -634,7 +563,9 @@ export class Agent {
             `/api/v1/agents/${encodeURIComponent(this.info.id)}/logs/ws`,
             this.baseUrl,
         );
+
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+
         return url.toString();
     }
 
@@ -643,26 +574,36 @@ export class Agent {
         if (!cwd.startsWith("/")) {
             throw new Error("Filesystem path must be absolute");
         }
+
         const url = new URL(
             `/api/v1/agents/${encodeURIComponent(this.info.id)}/terminal/ws`,
             this.baseUrl,
         );
+
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
         url.searchParams.set("rows", String(size.rows));
         url.searchParams.set("cols", String(size.cols));
         url.searchParams.set("cwd", cwd);
+
         return url.toString();
     }
 
     async upload(
         path: string,
         file: File,
-        ownership?: Partial<CreationOwnershipOptions>,
+        options?: Partial<CreationOwnershipOptions> & {
+            on_existing?: CopyExistingMode;
+        },
     ): Promise<RawUploadResponse> {
         const url = apiPaths.appendOwnershipOptions(
             new URL(this.getRawUrl(path), this.baseUrl),
-            ownership,
+            options,
         );
+
+        if (options?.on_existing != null) {
+            url.searchParams.set("on_existing", options.on_existing);
+        }
+
         return apiRequest<RawUploadResponse>(
             url.toString(),
             {
@@ -690,14 +631,18 @@ export class Agent {
         options?: { trash?: boolean },
     ): Promise<RawDeleteResponse> {
         const url = new URL(this.getRawUrl(path), this.baseUrl);
+
         if (options?.trash !== undefined) {
             url.searchParams.set("trash", String(options.trash));
         }
+
         const response = await fetch(
             url,
             withAuthentication({ method: "DELETE" }, this.requestContext),
         );
+
         await requireSuccessfulResponse(response, this.requestContext);
+
         return response.json();
     }
 
@@ -737,6 +682,7 @@ export class Agent {
             new URL(this.filesystemUrl("mkdir", path)),
             ownership,
         );
+
         const response = await fetch(
             url,
             withAuthentication(
@@ -746,7 +692,9 @@ export class Agent {
                 this.requestContext,
             ),
         );
+
         await requireSuccessfulResponse(response, this.requestContext);
+
         return response.json();
     }
 
@@ -757,6 +705,7 @@ export class Agent {
         newName: string,
     ): Promise<RenamePathResponse> {
         encodeFilesystemPath(dir);
+
         return this.postJson(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(this.info.id)}/rename`,
             { dir, old: oldName, new: newName } satisfies RenamePathRequest,
@@ -768,10 +717,12 @@ export class Agent {
         sourcePath: string,
         options?: {
             on_existing?: CopyExistingMode;
+            resume?: ResumeMode;
         },
     ): Promise<CopyFileResponse> {
         encodeFilesystemPath(sourcePath);
         encodeFilesystemPath(destination.path);
+
         const request: CopyFileRequest = {
             source: {
                 agent: this.info.id,
@@ -779,6 +730,7 @@ export class Agent {
             },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
+            resume: options?.resume ?? "auto",
         };
 
         return apiRequest<CopyFileResponse>(
@@ -798,15 +750,18 @@ export class Agent {
     async moveTo(
         destination: CopyEndpoint,
         sourcePath: string,
-        options?: { on_existing?: CopyExistingMode },
+        options?: { on_existing?: CopyExistingMode; resume?: ResumeMode },
     ): Promise<MoveFileResponse> {
         encodeFilesystemPath(sourcePath);
         encodeFilesystemPath(destination.path);
+
         const request: MoveFileRequest = {
             source: { agent: this.info.id, path: sourcePath },
             dest: destination,
             on_existing: options?.on_existing ?? "error",
+            resume: options?.resume ?? "auto",
         };
+
         return apiRequest<MoveFileResponse>(
             `${this.baseUrl}/api/v1/move`,
             {
@@ -830,8 +785,10 @@ export class Agent {
         });
 
         const fetchOptions: RequestInit = {};
+
         if (options?.range) {
             const [start, end] = options.range;
+
             if (start === null && end !== null) {
                 // Suffix range: bytes=-N
                 fetchOptions.headers = { Range: `bytes=-${end}` };
@@ -861,7 +818,9 @@ export class Agent {
 export class ApiClient {
     baseUrl: string;
     private sessionCookie: string | null = null;
+    private accessToken: string | null = null;
     private unauthorizedHandler: (() => void) | undefined;
+    private agentClients = new WeakMap<AgentInfoResponse, Agent>();
 
     constructor(baseUrl: string) {
         this.baseUrl = baseUrl;
@@ -874,13 +833,22 @@ export class ApiClient {
 
     /** Returns authentication headers for direct streaming requests outside this wrapper. */
     getAuthHeaders(): Record<string, string> {
-        return this.sessionCookie ? { Cookie: this.sessionCookie } : {};
+        return authenticationHeaders(this.requestContext());
     }
 
-    /** Shares current cookie and expiry handling with agents created by this client. */
+    /**
+     * Authenticates later requests with an access token instead of a session, which is how
+     * Node-based scripts and the integration tests act as the remote CLI or an MCP client.
+     */
+    setAccessToken(token: string | null): void {
+        this.accessToken = token;
+    }
+
+    /** Shares current credentials and expiry handling with agents created by this client. */
     private requestContext(): RequestContext {
         return {
             getSessionCookie: () => this.sessionCookie,
+            getAccessToken: () => this.accessToken,
             onUnauthorized: () => this.unauthorizedHandler?.(),
         };
     }
@@ -888,6 +856,7 @@ export class ApiClient {
     /** Establishes a browser cookie and captures it explicitly when running under Node fetch. */
     async login(username: string, password: string): Promise<LoginResponse> {
         const request: LoginRequest = { username, password };
+
         const response = await fetch(
             `${this.baseUrl}/api/v1/login`,
             withAuthentication(
@@ -899,11 +868,14 @@ export class ApiClient {
                 { getSessionCookie: () => this.sessionCookie },
             ),
         );
+
         await requireSuccessfulResponse(response, {});
         const setCookie = response.headers.get("set-cookie");
+
         if (setCookie) {
             this.sessionCookie = setCookie.split(";", 1)[0] ?? null;
         }
+
         return response.json();
     }
 
@@ -914,7 +886,9 @@ export class ApiClient {
             { method: "POST" },
             this.requestContext(),
         );
+
         this.sessionCookie = null;
+
         return response;
     }
 
@@ -930,6 +904,7 @@ export class ApiClient {
     getUiWebSocketUrl(): string {
         const url = new URL("/api/v1/ui/ws", this.baseUrl);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+
         return url.toString();
     }
 
@@ -937,6 +912,7 @@ export class ApiClient {
     getServerLogsWebSocketUrl(): string {
         const url = new URL("/api/v1/server/logs/ws", this.baseUrl);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+
         return url.toString();
     }
 
@@ -954,6 +930,7 @@ export class ApiClient {
         level: Level,
     ): Promise<LoggingLevelResponse> {
         const request: LoggingLevelRequest = { level };
+
         return apiRequest<LoggingLevelResponse>(
             `${this.baseUrl}/api/v1/server/logging-level`,
             {
@@ -965,15 +942,44 @@ export class ApiClient {
         );
     }
 
-    async listAgents(): Promise<Agent[]> {
+    /**
+     * Fetches the plain inventory snapshot that the UI keeps in its query cache. Plain JSON
+     * lets TanStack Query structurally share unchanged agents across refetches, which class
+     * instances would defeat.
+     */
+    async listAgentInfos(): Promise<AgentInfoResponse[]> {
         const response = await apiRequest<AgentListResponse>(
             `${this.baseUrl}/api/v1/agents`,
             undefined,
             this.requestContext(),
         );
-        return response.agents.map(
-            (info) => new Agent(this.baseUrl, info, this.requestContext()),
-        );
+
+        return response.agents;
+    }
+
+    /**
+     * Returns the request client for one inventory snapshot. Memoizing on the snapshot object
+     * keeps the client's identity stable for as long as the cache keeps that object, so memos
+     * and effects that depend on an agent only rerun when its data really changed.
+     */
+    agentFor(info: AgentInfoResponse): Agent {
+        const existing = this.agentClients.get(info);
+
+        if (existing) {
+            return existing;
+        }
+
+        const agent = new Agent(this.baseUrl, info, this.requestContext());
+        this.agentClients.set(info, agent);
+
+        return agent;
+    }
+
+    /** Lists agent request clients for scripts and tests that do not use the query cache. */
+    async listAgents(): Promise<Agent[]> {
+        const infos = await this.listAgentInfos();
+
+        return infos.map((info) => this.agentFor(info));
     }
 
     /** Persists and dynamically registers one dormant SSH-backed managed agent. */
@@ -1066,6 +1072,7 @@ export class ApiClient {
         kind: "ssh" | "local",
     ): Promise<DeleteManagedAgentResponse> {
         const collection = kind === "local" ? "local-agents" : "agents";
+
         return apiRequest<DeleteManagedAgentResponse>(
             `${this.baseUrl}/api/v1/${collection}/${encodeURIComponent(agentId)}`,
             { method: "DELETE" },
@@ -1077,6 +1084,69 @@ export class ApiClient {
         return apiRequest<TransferProgressListResponse>(
             `${this.baseUrl}/api/v1/transfers/progress`,
             undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Discovers durable partials from the currently connected destination agents. */
+    async listPartials(): Promise<PartialsResponse> {
+        return apiRequest<PartialsResponse>(
+            `${this.baseUrl}/api/v1/partials`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Checks metadata without making the dialog wait for prefix hashing. */
+    async copyPreflight(
+        request: CopyPreflightRequest,
+    ): Promise<CopyPreflightResponse> {
+        return apiRequest<CopyPreflightResponse>(
+            `${this.baseUrl}/api/v1/copy/preflight`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Waits until the destination confirms the partial is durable. */
+    async pauseTransfer(transferId: number): Promise<PauseTransferResponse> {
+        return apiRequest<PauseTransferResponse>(
+            `${this.baseUrl}/api/v1/transfers/${transferId}/pause`,
+            { method: "POST" },
+            this.requestContext(),
+        );
+    }
+
+    /** An opaque manifest key creates a fresh transfer using signed endpoints. */
+    async resumePartial(
+        request: PartialActionRequest,
+    ): Promise<ResumePartialResponse> {
+        return apiRequest<ResumePartialResponse>(
+            `${this.baseUrl}/api/v1/partials/resume`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Deletes agent-owned output after the user chooses to abandon it. */
+    async discardPartial(
+        request: PartialActionRequest,
+    ): Promise<DiscardPartialResponse> {
+        return apiRequest<DiscardPartialResponse>(
+            `${this.baseUrl}/api/v1/partials/discard`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
             this.requestContext(),
         );
     }
@@ -1097,6 +1167,7 @@ export class ApiClient {
         encodeFilesystemPath(left.path);
         encodeFilesystemPath(right.path);
         const request: DiffFilesRequest = { left, right };
+
         return apiRequest<DiffFilesResponse>(
             `${this.baseUrl}/api/v1/diff`,
             {
@@ -1112,6 +1183,86 @@ export class ApiClient {
     async getServerInfo(): Promise<ServerInfoResponse> {
         return apiRequest<ServerInfoResponse>(
             `${this.baseUrl}/api/v1/server`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Lists recent agent connections refused because they speak another protocol version. */
+    async listProtocolMismatches(): Promise<ProtocolMismatchListResponse> {
+        return apiRequest<ProtocolMismatchListResponse>(
+            `${this.baseUrl}/api/v1/protocol-mismatches`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Lists secret-free metadata of every access token. */
+    async listAccessTokens(): Promise<AccessTokenListResponse> {
+        return apiRequest<AccessTokenListResponse>(
+            `${this.baseUrl}/api/v1/tokens`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Mints an access token; the returned secret is never retained by this client. */
+    async createAccessToken(
+        request: CreateAccessTokenRequest,
+    ): Promise<AccessTokenSecretResponse> {
+        return apiRequest<AccessTokenSecretResponse>(
+            `${this.baseUrl}/api/v1/tokens`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Replaces a token's policy while its clients keep using the same secret. */
+    async updateAccessToken(
+        tokenId: string,
+        request: UpdateAccessTokenRequest,
+    ): Promise<AccessTokenResponse> {
+        return apiRequest<AccessTokenResponse>(
+            `${this.baseUrl}/api/v1/tokens/${encodeURIComponent(tokenId)}`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Issues a new secret for the same token, invalidating the old one at once. */
+    async rotateAccessToken(
+        tokenId: string,
+    ): Promise<AccessTokenSecretResponse> {
+        return apiRequest<AccessTokenSecretResponse>(
+            `${this.baseUrl}/api/v1/tokens/${encodeURIComponent(tokenId)}/rotate`,
+            { method: "POST" },
+            this.requestContext(),
+        );
+    }
+
+    /** Revokes a token so every later request using it is rejected. */
+    async deleteAccessToken(
+        tokenId: string,
+    ): Promise<DeleteAccessTokenResponse> {
+        return apiRequest<DeleteAccessTokenResponse>(
+            `${this.baseUrl}/api/v1/tokens/${encodeURIComponent(tokenId)}`,
+            { method: "DELETE" },
+            this.requestContext(),
+        );
+    }
+
+    /** Reads the metadata of the access token this client authenticates with. */
+    async getCurrentAccessToken(): Promise<AccessTokenResponse> {
+        return apiRequest<AccessTokenResponse>(
+            `${this.baseUrl}/api/v1/tokens/current`,
             undefined,
             this.requestContext(),
         );
@@ -1143,14 +1294,18 @@ export class ApiClient {
 
     async waitForAgentNames(names: string[], timeoutMs = 5000): Promise<void> {
         const startTime = Date.now();
+
         while (Date.now() - startTime < timeoutMs) {
             const agents = await this.listAgents();
             const currentNames = agents.map((agent) => agent.name);
+
             if (names.every((name) => currentNames.includes(name))) {
                 return;
             }
+
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
+
         throw new Error(`Timed out waiting for agents: ${names.join(", ")}`);
     }
 
@@ -1160,15 +1315,19 @@ export class ApiClient {
         timeoutMs: number = 5000,
     ): Promise<void> {
         const startTime = Date.now();
+
         while (Date.now() - startTime < timeoutMs) {
             const connectedNames = (await this.listAgents())
                 .filter((agent) => agent.status === "connected")
                 .map((agent) => agent.name);
+
             if (names.every((name) => connectedNames.includes(name))) {
                 return;
             }
+
             await new Promise((resolve) => setTimeout(resolve, 50));
         }
+
         throw new Error(
             `Timed out waiting for connected agents: ${names.join(", ")}`,
         );

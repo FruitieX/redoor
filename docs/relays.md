@@ -23,7 +23,7 @@ server = "https://staging-redoor.example.com"
 ssh_port = 2222
 ```
 
-An ID may contain ASCII letters, numbers, `.`, `_`, and `-`. It identifies local lifecycle state and remains independent from `name`, which identifies the remote agent on the server. Relay IDs must be unique.
+An ID may contain ASCII letters, numbers, `.`, `_`, and `-`. It identifies local lifecycle state and remains independent from `name`, which names the remote device in the UI and remote CLI. Relay IDs must be unique.
 
 `agent_app_name` isolates the remote agent's PID and data files. When omitted, it defaults to `<local-app-name>-relay-<relay-id>`, allowing multiple relays to run concurrently on the same SSH host. Explicit values use the same validation as `--app-name`.
 
@@ -83,8 +83,6 @@ Default relay logs are isolated by ID:
 
 Root uses `/var/log/redoor/relays/production.log` by default.
 
-## Compatibility
+## Startup options
 
-Ad hoc relay startup flags and a positional SSH target are no longer accepted. Move these settings into `[[relays]]`: `--server`, `--token`, `--name`, `-l`, `-p`, `--remote-bin`, `--binary-source`, `--home`, `--log`, `--insecure`, and the positional target.
-
-`--daemon` remains a `start` option. `REDOOR_AGENT_TOKEN` may override the top-level token at startup; relay-specific settings do not have environment overrides.
+Every relay setting lives in its `[[relays]]` entry. `--daemon` is a `start` option. `REDOOR_AGENT_TOKEN` may override the top-level token at startup; relay-specific settings do not have environment overrides.

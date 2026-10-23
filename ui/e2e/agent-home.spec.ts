@@ -32,6 +32,7 @@ test.describe.serial("Agent home", () => {
         await expect(
             mounts.getByRole("columnheader", { name: "Type" }),
         ).toBeVisible();
+
         // Defensive rendering must hide pseudo-filesystems even if an older agent reports them.
         for (const hiddenType of [
             "devpts",
@@ -58,6 +59,7 @@ test.describe.serial("Agent home", () => {
             name: "Browse mount point /",
             exact: true,
         });
+
         // Linux agents must expose the root mount as a browser destination.
         await expect(rootMount).toBeVisible();
         await rootMount.click();

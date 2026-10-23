@@ -5,7 +5,7 @@ import type { TrashListResponse } from "#bindings/TrashListResponse";
 import type { Agent } from "#ui/api-client";
 import { Checkbox } from "#ui/components/checkbox";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
-import { getErrorMessage } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import { TextField } from "#ui/components/text-field";
 import { queryKeys } from "#ui/queries";
 
@@ -20,20 +20,26 @@ function isTrashPayloadPath(
     queryClient: ReturnType<typeof useQueryClient>,
 ): boolean {
     if (!target.agent) return false;
+
     const trash = queryClient.getQueryData<TrashListResponse>(
         queryKeys.trash(target.agent.id),
     );
+
     return (
         trash?.locations.some((location) => {
             const root = `${location.path.replace(/\/+$/, "")}/files`;
+
             return target.path === root || target.path.startsWith(`${root}/`);
         }) ?? false
     );
 }
 
-/** Centralizes trash and permanent-delete behavior for every filesystem delete surface. */
+/**
+ * Centralizes trash and permanent-delete behavior for every filesystem delete surface.
+ * Callers mount it only while the confirmation is open, so every opening starts from a
+ * fresh choice, confirmation text and error instead of resetting them in an effect.
+ */
 export function DeletePathsDialog(props: {
-    isOpen: boolean;
     title: string;
     description: React.ReactNode;
     targets: DeletePathTarget[];
@@ -45,30 +51,38 @@ export function DeletePathsDialog(props: {
     onDeleted: (targets: DeletePathTarget[]) => void | Promise<void>;
 }) {
     const queryClient = useQueryClient();
+
     const canTrash = props.targets.every(
         (target) =>
             target.agent?.supportsMoveToTrash === true &&
             !isTrashPayloadPath(target, queryClient),
     );
-    const [deletePermanently, setDeletePermanently] = React.useState(!canTrash);
+
+    // Only a user-chosen permanent delete is state; targets that cannot be trashed always are.
+    const [chosePermanent, setChosePermanent] = React.useState(false);
+    const deletePermanently = !canTrash || chosePermanent;
     const [confirmationText, setConfirmationText] = React.useState("");
+
     const mutation = useMutation({
         mutationFn: async (targets: DeletePathTarget[]) => {
             const results = await Promise.allSettled(
                 targets.map((target) => {
                     if (!target.agent) {
                         return Promise.reject(
-                            new Error("Agent unavailable for selected item"),
+                            new Error("Device unavailable for selected item"),
                         );
                     }
+
                     return target.agent.deleteFile(target.path, {
                         trash: !deletePermanently,
                     });
                 }),
             );
+
             const successfulTargets = targets.filter(
                 (_target, index) => results[index]?.status === "fulfilled",
             );
+
             const failures = results.filter(
                 (result): result is PromiseRejectedResult =>
                     result.status === "rejected",
@@ -77,11 +91,14 @@ export function DeletePathsDialog(props: {
             if (successfulTargets.length > 0) {
                 await props.onDeleted(successfulTargets);
             }
+
             if (failures.length > 0) {
                 const operation = deletePermanently ? "Deleted" : "Trashed";
+
                 const fallback = deletePermanently
                     ? "Delete failed"
                     : "Move to trash failed";
+
                 const message = getErrorMessage(failures[0]?.reason, fallback);
                 throw new Error(
                     successfulTargets.length > 0
@@ -93,22 +110,16 @@ export function DeletePathsDialog(props: {
         onSuccess: props.onClose,
     });
 
-    React.useEffect(() => {
-        if (!props.isOpen) return;
-        setDeletePermanently(!canTrash);
-        setConfirmationText("");
-        mutation.reset();
-    }, [props.isOpen, canTrash]);
-
     /** Keeps an in-flight filesystem operation attached to its visible status. */
     const close = () => {
         if (!mutation.isPending) props.onClose();
     };
 
     const operationLabel = deletePermanently ? "Deleting" : "Moving to trash";
+
     return (
         <ConfirmationDialog
-            isOpen={props.isOpen}
+            isOpen={true}
             title={props.title}
             description={
                 canTrash
@@ -161,7 +172,7 @@ export function DeletePathsDialog(props: {
                     disabled={mutation.isPending}
                     className="mt-4"
                     onCheckedChange={(checked) => {
-                        setDeletePermanently(checked);
+                        setChosePermanent(checked);
                         mutation.reset();
                     }}
                 >

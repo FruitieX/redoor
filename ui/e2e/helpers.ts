@@ -1,27 +1,33 @@
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { ApiClient, encodeFilesystemPath } from "#ui/api-client";
+import { ApiClient } from "#ui/api-client";
+import { encodeFilesystemPath } from "#ui/api-paths";
 import { testPorts } from "#test-ports";
 
 export { encodeFilesystemPath };
 
 const __filename = fileURLToPath(import.meta.url);
+
 const __dirname = path.dirname(__filename);
+
 const BASE_TEST_DIR = path.join(__dirname, "..", "..", ".test");
 
 // The UI is served from the same redoor server as the API, so both
 // the browser and the API client target the same origin.
 export const WEB_BASE_URL = `http://localhost:${testPorts.playwright}`;
+
 export const API_BASE_URL = WEB_BASE_URL;
 
 /** Asserts keyboard ownership through wterm's hidden textarea inside the accessible host. */
 export async function expectTerminalFocused(terminal: Locator): Promise<void> {
-    // Focus must remain inside the labeled textbox even though its input node is aria-hidden.
+    // WTerm also labels its textarea; filter to the host whose descendants own shell focus.
+    const host = terminal.filter({ has: terminal.page().locator("textarea") });
     await expect
         .poll(() =>
-            terminal.evaluate((host) =>
+            host.evaluate((host) =>
                 host.contains(host.ownerDocument.activeElement),
             ),
         )
@@ -30,10 +36,11 @@ export async function expectTerminalFocused(terminal: Locator): Promise<void> {
 
 /** Asserts that neither the terminal host nor its internal input owns keyboard focus. */
 export async function expectTerminalBlurred(terminal: Locator): Promise<void> {
+    const host = terminal.filter({ has: terminal.page().locator("textarea") });
     // Leaving the shell must move focus completely outside its accessible host.
     await expect
         .poll(() =>
-            terminal.evaluate(
+            host.evaluate(
                 (host) => !host.contains(host.ownerDocument.activeElement),
             ),
         )
@@ -86,11 +93,13 @@ export async function setupTestDir(suffix: string): Promise<TestContext> {
     );
     const agents = await apiClient.listAgents();
     const agent = agents.find((entry) => entry.name === "agent1_src");
+
     if (!agent || agent.status !== "connected" || agent.cwd === null) {
         throw new Error("Connected agent agent1_src not available for testing");
     }
 
     const agent2 = agents.find((entry) => entry.name === "agent2_custom");
+
     if (!agent2 || agent2.status !== "connected" || agent2.cwd === null) {
         throw new Error(
             "Connected agent agent2_custom not available for testing",
@@ -120,12 +129,15 @@ export async function minimizeBottomDrawer(page: Page): Promise<void> {
     const minimize = page.getByRole("button", {
         name: "Minimize bottom drawer",
     });
+
     const expand = page.getByRole("button", { name: "Expand bottom drawer" });
     await expect(minimize.or(expand)).toBeVisible();
+
     if (await minimize.isVisible()) {
         // Enter avoids a hover tooltip that would later collide with other tooltip assertions.
         await minimize.press("Enter");
     }
+
     await expect(expand).toBeVisible();
     const panel = page.getByRole("region", { name: "Application tools" });
     // The close slide still covers the listing until height returns to the compact bar.
@@ -143,6 +155,7 @@ export async function confirmSelectedTransfer(
     const dialog = page.getByRole("dialog", {
         name: new RegExp(`^${operation} selected items?\\?$`),
     });
+
     await expect(dialog).toBeVisible();
     await dialog
         .getByRole("button", {
@@ -163,5 +176,41 @@ export async function simulateTabRefocus(page: Page): Promise<void> {
     await page.evaluate(() => {
         window.dispatchEvent(new Event("visibilitychange"));
         window.dispatchEvent(new Event("focus"));
+    });
+}
+
+/** Agent token the Playwright server is configured with. */
+const AGENT_TOKEN = "test-agent-token";
+
+/**
+ * Attempts an agent websocket upgrade that offers an unknown protocol, the way an agent of a
+ * different release would, and resolves with the HTTP status the server answered.
+ */
+export function upgradeWithProtocol(protocol: string, version: string) {
+    const url = new URL("/api/v1/agent/ws", WEB_BASE_URL);
+
+    return new Promise<number>((resolve, reject) => {
+        const request = http.request(url, {
+            headers: {
+                Connection: "Upgrade",
+                Upgrade: "websocket",
+                "Sec-WebSocket-Version": "13",
+                "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                "Sec-WebSocket-Protocol": protocol,
+                "X-Redoor-Agent-Version": version,
+                Authorization: `Bearer ${AGENT_TOKEN}`,
+            },
+        });
+
+        request.on("response", (response) => {
+            response.resume();
+            resolve(response.statusCode ?? 0);
+        });
+        request.on("upgrade", (_response, socket) => {
+            socket.destroy();
+            reject(new Error("the server accepted an unknown protocol"));
+        });
+        request.on("error", reject);
+        request.end();
     });
 }

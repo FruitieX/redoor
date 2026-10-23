@@ -1,0 +1,181 @@
+//! Strongly typed identifiers and timestamps shared by the wire protocol and REST API.
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use ts_rs::TS;
+use uuid::Uuid;
+
+/// Identifies one agent across the router, websocket protocol, and REST API.
+///
+/// This is the stable key used to address a connected agent and to associate
+/// agent-originated messages with that agent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[ts(type = "string")]
+pub struct AgentId(pub String);
+
+impl AgentId {
+    /// Accepts both borrowed and owned strings so call sites need no explicit conversion.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<String> for AgentId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for AgentId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Identifies one websocket session connected to the router.
+///
+/// This is used for logging and for distinguishing concurrent connections even
+/// when they belong to the same logical agent over time.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[ts(type = "string")]
+pub struct SocketId(pub Uuid);
+
+impl SocketId {
+    /// Uses a random v4 UUID so concurrent sessions never collide without coordination.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for SocketId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<Uuid> for SocketId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for SocketId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Correlates one router command request with its eventual response.
+///
+/// This is used for internal command routing between the server router,
+/// websocket protocol messages, stream uploads/downloads, and agent-side
+/// upload session tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[ts(type = "number")]
+pub struct RequestId(pub u64);
+
+impl RequestId {
+    /// Wraps a raw counter value so request ids cannot be mixed up with other integers.
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Advances the router's request counter to the next unused correlation id.
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    /// Reuses the request id as the public transfer id for flows whose progress entry is
+    /// keyed by the request that started them, avoiding a second id allocation.
+    pub fn as_transfer_id(self) -> TransferId {
+        TransferId(self.0)
+    }
+
+    /// Encodes the id for the binary stream frame header, which is little-endian.
+    pub fn to_le_bytes(self) -> [u8; 8] {
+        self.0.to_le_bytes()
+    }
+
+    /// Decodes the id from a binary stream frame header.
+    pub fn from_le_bytes(bytes: [u8; 8]) -> Self {
+        Self(u64::from_le_bytes(bytes))
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Identifies a public transfer or copy operation exposed to REST and UI
+/// consumers.
+///
+/// Unlike `RequestId`, this represents the externally visible transfer job,
+/// not the internal per-agent request IDs that may be used to implement it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[ts(type = "number")]
+pub struct TransferId(pub u64);
+
+impl TransferId {
+    /// Wraps a raw counter value so transfer ids cannot be mixed up with request ids.
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Advances the public transfer counter to the next unused id.
+    pub fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+impl fmt::Display for TransferId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl UnixTimestampSeconds {
+    /// Wraps raw epoch seconds so they cannot be confused with millisecond timestamps.
+    pub fn new(value: i64) -> Self {
+        Self(value)
+    }
+}
+
+/// Unix timestamp in whole seconds since the epoch.
+///
+/// This is used for registration-time metadata such as when an agent
+/// connected to the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[ts(type = "number")]
+pub struct UnixTimestampSeconds(pub i64);
+
+impl fmt::Display for UnixTimestampSeconds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Unix timestamp in milliseconds so provisioning rows can show secs + ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[ts(type = "number")]
+pub struct UnixTimestampMillis(pub i64);
+
+impl UnixTimestampMillis {
+    /// Captures the current instant so step deltas can include milliseconds.
+    pub fn now() -> Self {
+        Self(jiff::Timestamp::now().as_millisecond())
+    }
+}

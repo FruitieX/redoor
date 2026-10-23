@@ -1,55 +1,23 @@
 import { atom } from "jotai";
-import type { Agent } from "#ui/api-client";
 
 /** Identifies one primary pane in the shared application drawer. */
 export type BottomDrawerTabId = "selected" | "transfers" | "terminal";
 
-/** Carries ordered activation requests so only explicit feature actions steal focus. */
-export const bottomDrawerActivationAtom = atom<{
-    tab: BottomDrawerTabId;
-    sequence: number;
-}>({ tab: "terminal", sequence: 0 });
+/** Shares drawer visibility so feature buttons can fold an already visible pane. */
+export const bottomDrawerCollapsedAtom = atom(true);
 
-/** Requests that the shared drawer reveal a feature after a direct user action. */
+/** Identifies which drawer pane a feature toggle would hide. */
+export const bottomDrawerActiveTabAtom = atom<BottomDrawerTabId>("terminal");
+
+/**
+ * Reveals a pane after a direct user action by changing the tab and expanding the drawer in
+ * one write. The drawer reads the same two atoms, so there is no request to queue and no
+ * effect to drain it: the action is the state change.
+ */
 export const activateBottomDrawerTabAtom = atom(
     null,
-    (get, set, tab: BottomDrawerTabId) => {
-        const current = get(bottomDrawerActivationAtom);
-        set(bottomDrawerActivationAtom, {
-            tab,
-            sequence: current.sequence + 1,
-        });
+    (_get, set, tab: BottomDrawerTabId) => {
+        set(bottomDrawerActiveTabAtom, tab);
+        set(bottomDrawerCollapsedAtom, false);
     },
 );
-
-/** Carries one ordered request for a fresh terminal with optional one-shot input. */
-export type TerminalCreationRequest = {
-    readonly agent: Agent;
-    readonly cwd: string;
-    readonly startupCommand: string;
-    readonly refreshTarget: BrowserListingRefreshTarget;
-};
-
-/** Identifies the exact canonical listing that should reflect command-created entries. */
-export type BrowserListingRefreshTarget = {
-    readonly agentId: string;
-    readonly path: string;
-};
-
-/** Queues every creation request until the global terminal owner atomically consumes them. */
-export const terminalCreationRequestsAtom = atom<TerminalCreationRequest[]>([]);
-
-/** Appends terminal requests so rapid actions cannot replace an earlier request. */
-export const requestTerminalCreationAtom = atom(
-    null,
-    (_get, set, request: TerminalCreationRequest) => {
-        set(terminalCreationRequestsAtom, (current) => [...current, request]);
-    },
-);
-
-/** Removes and returns queued requests before creating tabs, preventing remount replays. */
-export const consumeTerminalCreationRequestsAtom = atom(null, (get, set) => {
-    const requests = get(terminalCreationRequestsAtom);
-    set(terminalCreationRequestsAtom, []);
-    return requests;
-});

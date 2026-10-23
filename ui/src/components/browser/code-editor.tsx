@@ -3,8 +3,8 @@ import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { bbedit } from "@uiw/codemirror-theme-bbedit";
 import { tokyoNight } from "@uiw/codemirror-theme-tokyo-night";
 import { search } from "@codemirror/search";
-import { Prec, type EditorState } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { Facet, type EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { vim, Vim } from "@replit/codemirror-vim";
 import {
     EditorSearch,
@@ -12,7 +12,10 @@ import {
 } from "#ui/components/browser/editor-search";
 import { vimYankHighlightExtension } from "./vim-yank-highlight";
 import { languageFromFileName } from "#ui/utils/editor-language";
+import { shortcutPriority, useShortcut } from "#ui/shortcuts";
+import { useTerminals } from "#ui/use-terminals";
 import { isTerminalInputTarget, isUnmodifiedAltKey } from "#ui/utils/keyboard";
+import { getBaseName } from "#ui/utils/path";
 import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
 
 /** Carries only the editor selection details needed by actions outside CodeMirror. */
@@ -21,59 +24,87 @@ export type EditorSelection = {
     startLine: number;
 };
 
-/** Lets :w call the current save handler without re-registering the global ex command. */
-const vimWriteRef = { current: () => {} };
-
-Vim.defineEx("write", "w", () => {
-    vimWriteRef.current();
+/**
+ * Carries each editor's save handler in its own CodeMirror state. Vim's `:w` is registered
+ * once for the whole page, so it finds the handler of the editor that ran it through that
+ * editor's state, rather than through a shared variable that assumes only one editor exists.
+ */
+const vimWriteHandler = Facet.define<() => void, (() => void) | null>({
+    combine: (handlers) => handlers[0] ?? null,
 });
 
-/** Reclaims editor focus from an active shell when the global Alt-e shortcut is used. */
+Vim.defineEx("write", "w", (cm) => {
+    cm.cm6.state.facet(vimWriteHandler)?.();
+});
+
+/**
+ * Reclaims editor focus from an active shell with Alt-e, and drops a pending delayed
+ * correction when a newer terminal activation arrives, which must win.
+ */
 function useFocusEditorShortcut(view: EditorView | null) {
+    const terminals = useTerminals();
+    const focusCorrectionTimer = React.useRef<number | undefined>(undefined);
+
     React.useEffect(() => {
-        if (view === null) {
-            return;
-        }
-        let focusCorrectionTimer: number | undefined;
+        return () => window.clearTimeout(focusCorrectionTimer.current);
+    }, []);
 
-        /** Returns from a focused shell without typing e into the session. */
-        const handleFocusEditorShortcut = (event: KeyboardEvent) => {
-            if (
-                !isUnmodifiedAltKey(event, "e") ||
-                !isTerminalInputTarget(event.target)
-            ) {
-                return;
-            }
-            event.preventDefault();
-            view.focus();
-            window.clearTimeout(focusCorrectionTimer);
-            focusCorrectionTimer = window.setTimeout(() => {
-                // The terminal may settle focus asynchronously, so reclaim it only if that won.
-                if (isTerminalInputTarget(document.activeElement)) {
-                    view.focus();
+    // A watcher in the observer tier, so it still sees `t` after the terminal shortcut claims it.
+    useShortcut(
+        {
+            name: "editor-cancel-focus-correction",
+            phase: "capture",
+            priority: shortcutPriority.observer,
+            match: (event) =>
+                isUnmodifiedAltKey(event, "t") || event.key === "t",
+            run: () => {
+                window.clearTimeout(focusCorrectionTimer.current);
+
+                return false;
+            },
+        },
+        view !== null,
+    );
+
+    useShortcut(
+        {
+            name: "editor-reclaim-focus",
+            phase: "capture",
+            priority: shortcutPriority.editor,
+            match: (event) => isUnmodifiedAltKey(event, "e"),
+            run: (event) => {
+                // Whatever the key's target, the user went back to the editor, so a terminal
+                // that finishes connecting later must not take focus again.
+                terminals.cancelPendingFocus();
+
+                if (view === null || !isTerminalInputTarget(event.target)) {
+                    return false;
                 }
-            }, 0);
-        };
 
-        window.addEventListener("keydown", handleFocusEditorShortcut, true);
-        return () => {
-            window.clearTimeout(focusCorrectionTimer);
-            window.removeEventListener(
-                "keydown",
-                handleFocusEditorShortcut,
-                true,
-            );
-        };
-    }, [view]);
+                view.focus();
+                window.clearTimeout(focusCorrectionTimer.current);
+
+                focusCorrectionTimer.current = window.setTimeout(() => {
+                    // The terminal may settle focus asynchronously, so reclaim it only if that won.
+                    if (isTerminalInputTarget(document.activeElement)) {
+                        view.focus();
+                    }
+                }, 0);
+            },
+        },
+        view !== null,
+    );
 }
 
 /** Selects the inbound ?line= target and centers it so the opened location is obvious in a tall buffer. */
 function moveCaretToLine(view: EditorView, line: number) {
     const lineCount = view.state.doc.lines;
+
     // Empty documents have no real line to reveal; clamping would still dispatch a no-op caret.
     if (view.state.doc.length === 0 || lineCount < 1) {
         return;
     }
+
     const clamped = Math.min(Math.max(line, 1), lineCount);
     const docLine = view.state.doc.line(clamped);
     view.dispatch({
@@ -85,60 +116,15 @@ function moveCaretToLine(view: EditorView, line: number) {
 /** Reads the current range so chrome and tests can follow the editor selection. */
 function editorSelectionFromState(state: EditorState): EditorSelection | null {
     const selection = state.selection.main;
+
     if (selection.empty) {
         return null;
     }
+
     return {
         text: state.sliceDoc(selection.from, selection.to),
         startLine: state.doc.lineAt(selection.from).number,
     };
-}
-
-/**
- * Keeps find bindings from swallowing native page search when the editor is hidden.
- */
-function editorSearchKeyBindings(
-    searchHandleRef: React.RefObject<EditorSearchHandle | null>,
-    captureFindKeysRef: React.RefObject<boolean>,
-) {
-    const runFind = (command: () => boolean | undefined) => {
-        if (!captureFindKeysRef.current) {
-            return false;
-        }
-        return command() ?? false;
-    };
-    return [
-        {
-            key: "Mod-f",
-            run: () => {
-                if (!captureFindKeysRef.current) {
-                    return false;
-                }
-                searchHandleRef.current?.open();
-                return true;
-            },
-        },
-        {
-            key: "Mod-g",
-            run: () => runFind(() => searchHandleRef.current?.findNext()),
-        },
-        {
-            key: "Shift-Mod-g",
-            run: () => runFind(() => searchHandleRef.current?.findPrevious()),
-        },
-        {
-            key: "F3",
-            run: () => runFind(() => searchHandleRef.current?.findNext()),
-        },
-        {
-            key: "Shift-F3",
-            run: () => runFind(() => searchHandleRef.current?.findPrevious()),
-        },
-        {
-            key: "Escape",
-            run: () => searchHandleRef.current?.close() ?? false,
-        },
-    ];
 }
 
 /** Applies inbound ?line= once the view exists so typing and saves do not re-scroll. */
@@ -150,6 +136,7 @@ function useInboundScrollToLine(
         if (view === null || scrollToLine === undefined) {
             return;
         }
+
         moveCaretToLine(view, scrollToLine);
     }, [view, scrollToLine]);
 }
@@ -171,21 +158,22 @@ export function CodeEditor(props: {
     onSave: () => void;
     onSelectionChange: (selection: EditorSelection | null) => void;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
+    isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
+    /** Leaves find keys to the browser while the editor is hidden behind a preview. */
     captureFindKeys: boolean;
 }) {
     const resolvedTheme = useResolvedTheme();
     const onSaveRef = React.useRef(props.onSave);
     onSaveRef.current = props.onSave;
-    /** Saves without leaving CodeMirror so Mod-s and :w cannot dump the user into chrome. */
-    const saveFromEditor = () => {
+    const editorRef = React.useRef<ReactCodeMirrorRef>(null);
+
+    /** Saves without leaving CodeMirror so :w cannot dump the user into chrome. */
+    const saveFromEditor = React.useCallback(() => {
         onSaveRef.current();
         editorRef.current?.view?.focus();
-    };
-    vimWriteRef.current = saveFromEditor;
-    const editorRef = React.useRef<ReactCodeMirrorRef>(null);
-    const captureFindKeysRef = React.useRef(props.captureFindKeys);
-    captureFindKeysRef.current = props.captureFindKeys;
+    }, []);
+
     const onFocusRef = React.useRef(props.onFocus);
     onFocusRef.current = props.onFocus;
     const hasReceivedFocusRef = React.useRef(false);
@@ -194,11 +182,14 @@ export function CodeEditor(props: {
     const [caretLine, setCaretLine] = React.useState<number | null>(null);
     const [selectedText, setSelectedText] = React.useState<string | null>(null);
     const firstLineEnd = props.value.indexOf("\n");
+
     const firstLine = props.value.slice(
         0,
         firstLineEnd === -1 ? props.value.length : firstLineEnd,
     );
-    const baseName = props.fileName.split("/").pop() ?? props.fileName;
+
+    const baseName = getBaseName(props.fileName);
+
     const languageContent =
         baseName.lastIndexOf(".") <= 0 && firstLine.startsWith("#!")
             ? firstLine
@@ -206,10 +197,15 @@ export function CodeEditor(props: {
 
     const extensions = React.useMemo(() => {
         const language = languageFromFileName(props.fileName, languageContent);
+
         return [
             // Vim must precede both its observer and other keymaps so its adapter exists and normal-mode keys win.
             ...(props.vimMode
-                ? [vim({ status: true }), vimYankHighlightExtension]
+                ? [
+                      vim({ status: true }),
+                      vimYankHighlightExtension,
+                      vimWriteHandler.of(saveFromEditor),
+                  ]
                 : []),
             ...(props.wrapLines ? [EditorView.lineWrapping] : []),
             search(),
@@ -239,31 +235,21 @@ export function CodeEditor(props: {
                 ".cm-scroller": {
                     overflow: "auto",
                 },
+                ".cm-content": {
+                    padding: "0",
+                },
+                ".cm-line": {
+                    padding: "0",
+                },
             }),
-            Prec.highest(
-                keymap.of([
-                    {
-                        key: "Mod-s",
-                        run: () => {
-                            onSaveRef.current();
-                            editorRef.current?.view?.focus();
-                            return true;
-                        },
-                    },
-                    ...editorSearchKeyBindings(
-                        props.searchHandleRef,
-                        captureFindKeysRef,
-                    ),
-                ]),
-            ),
             ...(language === undefined ? [] : [language]),
         ];
     }, [
         languageContent,
         props.fileName,
-        props.searchHandleRef,
         props.vimMode,
         props.wrapLines,
+        saveFromEditor,
     ]);
 
     useFocusEditorShortcut(view);
@@ -276,6 +262,7 @@ export function CodeEditor(props: {
                 editable={props.editable}
                 documentRevision={documentRevision}
                 handleRef={props.searchHandleRef}
+                open={props.isSearchOpen}
                 onOpenChange={props.onSearchOpenChange}
                 captureFindKeys={props.captureFindKeys}
             />
@@ -285,7 +272,7 @@ export function CodeEditor(props: {
                 data-wrap-lines={props.wrapLines ? "true" : "false"}
                 role="region"
                 aria-label="Editor viewport"
-                className="min-h-0 flex-1 overflow-hidden rounded-md border border-transparent p-1.5 focus-within:border-blue-500"
+                className="relative min-h-0 flex-1 overflow-hidden after:pointer-events-none after:absolute after:inset-0 after:z-20 after:border after:border-transparent focus-within:after:border-blue-500"
             >
                 {caretLine === null ? null : (
                     <span className="sr-only" aria-label="Editor caret line">
@@ -323,9 +310,11 @@ export function CodeEditor(props: {
                                     update.state.selection.main.head,
                                 ).number,
                             );
+
                             const nextSelection = editorSelectionFromState(
                                 update.state,
                             );
+
                             setSelectedText(nextSelection?.text ?? null);
                             props.onSelectionChange(nextSelection);
                         }

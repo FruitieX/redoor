@@ -24,6 +24,7 @@ const execFileAsync = promisify(execFile);
 function isolatedProcess(role: "agent" | "server") {
     const home = mkdtempSync(join(tmpdir(), `redoor-${role}-lifecycle-`));
     const appName = `redoor-${role}-${process.pid}-${Date.now()}`;
+
     const env: NodeJS.ProcessEnv & {
         HOME: string;
         REDOOR_APP_NAME: string;
@@ -34,6 +35,7 @@ function isolatedProcess(role: "agent" | "server") {
         REDOOR_APP_NAME: appName,
         REDOOR_AGENT_NOTIFICATION: "off",
     };
+
     delete env.REDOOR_PORT;
     const pidFile = join(home, ".local", "share", appName, `${role}.pid`);
     const stopArgs = [role, "stop"];
@@ -44,6 +46,7 @@ function isolatedProcess(role: "agent" | "server") {
         } catch {
             // The tested stop command may already have removed the process.
         }
+
         rmSync(home, { recursive: true, force: true });
     });
 
@@ -57,11 +60,13 @@ async function waitForPid(pidFile: string, stalePid?: number): Promise<number> {
         pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
         // A numeric PID proves the daemon completed the process-lock startup phase.
         expect(pid).toBeGreaterThan(0);
+
         if (stalePid !== undefined) {
             // A changed PID proves startup replaced the unlocked stale record.
             expect(pid).not.toBe(stalePid);
         }
     });
+
     return pid;
 }
 
@@ -70,6 +75,7 @@ function spawnWithKillableParent(args: string[], env: NodeJS.ProcessEnv) {
     const command = [SERVER_PATH, ...args]
         .map((value) => `'${value.replaceAll("'", `'\\''`)}'`)
         .join(" ");
+
     return spawn("sh", ["-c", `${command}; true`], { env });
 }
 
@@ -88,11 +94,13 @@ describe("process lifecycle commands", () => {
     test("server daemon writes a PID, rejects duplicates, and stops", async () => {
         const isolated = isolatedProcess("server");
         const port = await getAvailablePort();
+
         const configDirectory = join(
             isolated.env.HOME,
             ".config",
             isolated.env.REDOOR_APP_NAME,
         );
+
         const configPath = join(configDirectory, "config.toml");
         mkdirSync(configDirectory, { recursive: true });
         writeFileSync(
@@ -122,6 +130,7 @@ port = ${port}
         const status = await execFileAsync(SERVER_PATH, ["server", "status"], {
             env: isolated.env,
         });
+
         // Status must report the lock owner rather than only checking file presence.
         expect(status.stdout).toContain(`server is running with PID ${pid}`);
 
@@ -138,6 +147,7 @@ port = ${port}
         const stopped = await execFileAsync(SERVER_PATH, ["server", "stop"], {
             env: isolated.env,
         });
+
         // Reporting the daemon PID confirms the stop command targeted the PID-file owner.
         expect(stopped.stdout).toContain(`Stopped server process ${pid}`);
         await vi.waitFor(() => {
@@ -158,9 +168,10 @@ port = ${port}
     test("agent daemon writes a PID, rejects duplicates, and stops", async () => {
         const isolated = isolatedProcess("agent");
         const port = await getAvailablePort();
+
         const agentArgs = [
             "agent",
-            `ws://127.0.0.1:${port}/ws`,
+            `ws://127.0.0.1:${port}`,
             "--token",
             "lifecycle-token",
             "--name",
@@ -175,6 +186,7 @@ port = ${port}
         const status = await execFileAsync(SERVER_PATH, ["agent", "status"], {
             env: isolated.env,
         });
+
         // Status shares the same lock truth as stop/duplicate-start rejection.
         expect(status.stdout).toContain(`agent is running with PID ${pid}`);
 
@@ -189,6 +201,7 @@ port = ${port}
         const stopped = await execFileAsync(SERVER_PATH, ["agent", "stop"], {
             env: isolated.env,
         });
+
         // Reporting the daemon PID confirms agent stop used the isolated application namespace.
         expect(stopped.stdout).toContain(`Stopped agent process ${pid}`);
         await vi.waitFor(() => {
@@ -255,6 +268,7 @@ server = "https://redoor.example.com"
             ["agent", "relay", "ls", "--config", configPath],
             { env: isolated.env },
         );
+
         // Stable line-oriented output lets operators and scripts select any configured relay.
         expect(listed.stdout).toBe("production\nstaging\n");
     });
@@ -264,11 +278,13 @@ server = "https://redoor.example.com"
         async () => {
             const isolated = isolatedProcess("server");
             const port = await getAvailablePort();
+
             const configDirectory = join(
                 isolated.env.HOME,
                 ".config",
                 isolated.env.REDOOR_APP_NAME,
             );
+
             const configPath = join(configDirectory, "config.toml");
             mkdirSync(configDirectory, { recursive: true });
             writeFileSync(
@@ -292,6 +308,7 @@ port = ${port}
             if (parent.pid === undefined) {
                 throw new Error("parent shell should have a pid");
             }
+
             killOnTestFinished(parent.pid);
             killOnTestFinished(serverPid);
             // bash execs a lone `sh -c` command; `; true` keeps a real parent to SIGKILL.
@@ -309,10 +326,11 @@ port = ${port}
         async () => {
             const isolated = isolatedProcess("agent");
             const port = await getAvailablePort();
+
             const parent = spawnWithKillableParent(
                 [
                     "agent",
-                    `ws://127.0.0.1:${port}/ws`,
+                    `ws://127.0.0.1:${port}`,
                     "--token",
                     "lifecycle-token",
                     "--name",
@@ -320,11 +338,13 @@ port = ${port}
                 ],
                 isolated.env,
             );
+
             const agentPid = await waitForPid(isolated.pidFile);
 
             if (parent.pid === undefined) {
                 throw new Error("parent shell should have a pid");
             }
+
             killOnTestFinished(parent.pid);
             killOnTestFinished(agentPid);
             // The agent command must remain below the shell whose death it watches.
@@ -342,11 +362,13 @@ port = ${port}
         async () => {
             const isolated = isolatedProcess("server");
             const port = await getAvailablePort();
+
             const configDirectory = join(
                 isolated.env.HOME,
                 ".config",
                 isolated.env.REDOOR_APP_NAME,
             );
+
             const configPath = join(configDirectory, "config.toml");
             const agentHome = join(isolated.env.HOME, "managed-agent-home");
             mkdirSync(configDirectory, { recursive: true });
@@ -377,6 +399,7 @@ home = "${agentHome}"
             await waitForPort(port);
             const apiClient = new ApiClient(`http://127.0.0.1:${port}`);
             await apiClient.login("lifecycle-user", "lifecycle-password");
+
             const configuredAgent = await waitForValue({
                 predicate: async () =>
                     (await apiClient.listAgents()).find(
@@ -384,7 +407,9 @@ home = "${agentHome}"
                     ),
                 description: "managed lifecycle agent registration",
             });
+
             await configuredAgent.start();
+
             const connectedAgent = await waitForValue({
                 predicate: async () =>
                     (await apiClient.listAgents()).find(
@@ -395,6 +420,7 @@ home = "${agentHome}"
                 timeoutMs: 15_000,
                 description: "managed lifecycle agent connection",
             });
+
             const agentPid = (await connectedAgent.getDetails()).pid;
             killOnTestFinished(agentPid);
 

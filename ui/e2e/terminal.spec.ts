@@ -5,6 +5,7 @@ import {
 } from "@playwright/test";
 import { z } from "zod";
 import { ApiClient } from "#ui/api-client";
+import { dragReorderRow } from "./reorder";
 import {
     API_BASE_URL,
     expectTerminalFocused,
@@ -54,12 +55,100 @@ test.describe.serial("Terminal panel lifecycle", () => {
         });
     });
 
+    test("opens the editor terminal from its toolbar and matching shortcuts", async ({
+        page,
+    }) => {
+        const terminalSockets: PlaywrightWebSocket[] = [];
+        page.on("websocket", (socket) => {
+            if (socket.url().includes("/terminal/ws")) {
+                terminalSockets.push(socket);
+            }
+        });
+        await page.goto(ctx.agentBrowserUrl);
+        await page
+            .getByRole("link", { name: ctx.testDirName, exact: true })
+            .click();
+        await page
+            .getByRole("link", { name: "file1.txt", exact: true })
+            .click();
+        const editor = page.getByLabel("File editor");
+
+        const openTerminal = page.getByRole("button", {
+            name: "Open terminal",
+            exact: true,
+        });
+
+        const expandEditor = page.getByRole("button", {
+            name: "Expand editor to full window",
+        });
+
+        await openTerminal.hover();
+        // The toolbar must advertise both existing ways to reach the shell.
+        await expect(page.getByRole("tooltip")).toContainText(
+            "t, Alt+t / Option+T",
+        );
+        const terminalBox = await openTerminal.boundingBox();
+        const expandBox = await expandEditor.boundingBox();
+
+        if (terminalBox === null || expandBox === null) {
+            throw new Error("expected editor secondary action measurements");
+        }
+
+        // The terminal belongs immediately before full-window in the right-hand actions.
+        expect(terminalBox.x + terminalBox.width).toBeLessThanOrEqual(
+            expandBox.x,
+        );
+        await openTerminal.click();
+        // The button creates a ready shell and focuses it for immediate typing.
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+        await expectTerminalFocused(
+            page.getByLabel(`agent1_src 1 for ${ctx.agentName}`),
+        );
+        // A file editor opens its terminal in the parent directory.
+        expect(
+            new URL(terminalSockets[0]?.url() ?? "").searchParams.get("cwd"),
+        ).toBe(ctx.testDirPath);
+        await openTerminal.click();
+        // A second toolbar click folds the drawer without killing the live shell.
+        await expect(
+            page.getByRole("button", { name: "Expand bottom drawer" }),
+        ).toBeVisible();
+        await openTerminal.click();
+        // Reopening the drawer must reuse the same shell and restore keyboard focus.
+        await expectTerminalFocused(
+            page.getByLabel(`agent1_src 1 for ${ctx.agentName}`),
+        );
+        expect(terminalSockets).toHaveLength(1);
+        await page.keyboard.press("Alt+e");
+        const originalText = await editor.innerText();
+        await editor.press("t");
+        // Plain t remains editor input and cannot create another shell.
+        await expect(editor).not.toHaveText(originalText);
+        expect(terminalSockets).toHaveLength(1);
+        await editor.press("Alt+t");
+        // Option/Alt+t returns to the same terminal rather than creating a duplicate.
+        await expectTerminalFocused(
+            page.getByLabel(`agent1_src 1 for ${ctx.agentName}`),
+        );
+        await page.keyboard.press("Alt+e");
+        await openTerminal.focus();
+        await page.keyboard.press("t");
+        // Outside text entry, the single-key shortcut invokes the same reuse action.
+        await expectTerminalFocused(
+            page.getByLabel(`agent1_src 1 for ${ctx.agentName}`),
+        );
+        expect(terminalSockets).toHaveLength(1);
+    });
+
     test("initializes a shell and executes a command", async ({ page }) => {
         let terminalOutput = "";
         page.on("websocket", (socket) => {
             if (!socket.url().includes("/terminal/ws")) {
                 return;
             }
+
             socket.on("framereceived", (event) => {
                 terminalOutput += terminalFrameSchema.parse(event.payload);
             });
@@ -77,6 +166,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalInput = page
             .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
             .locator("textarea");
+
         await terminalInput.focus();
         // Octal escapes print "terminal-ok" without putting that marker in the echoed command.
         await terminalInput.pressSequentially(
@@ -86,6 +176,142 @@ test.describe.serial("Terminal panel lifecycle", () => {
 
         // Only an executed printf produces the decoded marker in PTY output.
         await expect.poll(() => terminalOutput).toContain("terminal-ok");
+    });
+
+    test("types Finnish macOS Option characters without terminal escape prefixes", async ({
+        page,
+    }) => {
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "platform", {
+                get: () => "MacIntel",
+            });
+        });
+        const inputFrames: string[] = [];
+        page.on("websocket", (socket) => {
+            if (socket.url().includes("/terminal/ws")) {
+                socket.on("framesent", (event) => {
+                    inputFrames.push(terminalFrameSchema.parse(event.payload));
+                });
+            }
+        });
+        await page.goto(ctx.agentBrowserUrl);
+        await page.getByRole("tab", { name: "Terminal" }).click();
+        await page
+            .getByRole("button", { name: "New terminal", exact: true })
+            .click();
+        // Wait for PTY readiness so the character cannot be discarded during setup.
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+
+        const terminalInput = page
+            .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+            .locator("textarea");
+
+        await terminalInput.focus();
+        const cdp = await page.context().newCDPSession(page);
+
+        // Chromium on Linux needs explicit layout-resolved text to emulate Finnish Option+7.
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: "|",
+            code: "Digit7",
+            text: "|",
+            modifiers: 1,
+        });
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "|",
+            code: "Digit7",
+            modifiers: 1,
+        });
+        // The PTY must receive the literal pipe once, with no Escape prefix.
+        await expect
+            .poll(() => inputFrames.filter((frame) => !frame.startsWith("{")))
+            .toEqual(["|"]);
+        await terminalInput.press("Alt+ArrowLeft");
+        // Non-text Alt combinations must still reach terminal applications as navigation.
+        await expect.poll(() => inputFrames.at(-1)).toBe("\x1b[1;3D");
+    });
+
+    test("stays scrolled to the prompt when typing macOS Option characters", async ({
+        page,
+    }) => {
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "platform", {
+                get: () => "MacIntel",
+            });
+        });
+        let terminalOutput = "";
+        const inputFrames: string[] = [];
+        page.on("websocket", (socket) => {
+            if (!socket.url().includes("/terminal/ws")) {
+                return;
+            }
+
+            socket.on("framereceived", (event) => {
+                terminalOutput += terminalFrameSchema.parse(event.payload);
+            });
+            socket.on("framesent", (event) => {
+                inputFrames.push(terminalFrameSchema.parse(event.payload));
+            });
+        });
+        await page.goto(ctx.agentBrowserUrl);
+        await page.getByRole("tab", { name: "Terminal" }).click();
+        await page
+            .getByRole("button", { name: "New terminal", exact: true })
+            .click();
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+
+        const terminalHost = page
+            .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+            .filter({ has: page.locator("textarea") });
+
+        await terminalHost.locator("textarea").focus();
+        // Enough output to push the prompt far below where the input was first focused.
+        await page.keyboard.type("seq 1 300; echo scroll-''done");
+        await page.keyboard.press("Enter");
+        await expect.poll(() => terminalOutput).toContain("scroll-done");
+
+        /** Measures how far the shell viewport is from the live prompt at the bottom. */
+        const distanceFromBottom = () =>
+            terminalHost.evaluate(
+                (host) =>
+                    host.scrollHeight - host.scrollTop - host.clientHeight,
+            );
+
+        // The output must leave the viewport on the prompt before the key is typed.
+        await expect.poll(distanceFromBottom).toBeLessThan(5);
+
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: "|",
+            code: "Digit7",
+            text: "|",
+            modifiers: 1,
+        });
+        await cdp.send("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "|",
+            code: "Digit7",
+            modifiers: 1,
+        });
+        // The pipe must still reach the PTY as typed text.
+        await expect.poll(() => inputFrames.at(-1)).toBe("|");
+        // Let the browser finish any caret scroll-into-view from the native text insertion.
+        await terminalHost.evaluate(
+            () =>
+                new Promise<void>((resolve) =>
+                    requestAnimationFrame(() =>
+                        requestAnimationFrame(() => resolve()),
+                    ),
+                ),
+        );
+        // Typing must not jump the viewport back into scrollback away from the prompt.
+        expect(await distanceFromBottom()).toBeLessThan(5);
     });
 
     test("expands the terminal to the full window without replacing its session", async ({
@@ -110,9 +336,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalPanel = page.getByRole("region", {
             name: "Terminal panel",
         });
+
         const expandButton = page.getByRole("button", {
             name: "Expand terminal to full window",
         });
+
         await expect(expandButton).toHaveAttribute("aria-pressed", "false");
         await expandButton.click();
 
@@ -120,9 +348,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const viewport = page.viewportSize();
         expect(panelBox).not.toBeNull();
         expect(viewport).not.toBeNull();
+
         if (panelBox === null || viewport === null) {
             throw new Error("expected expanded terminal measurements");
         }
+
         // The terminal panel, including its tabs and controls, fills the browser window.
         expect(panelBox.x).toBe(0);
         expect(panelBox.y).toBe(0);
@@ -162,10 +392,12 @@ test.describe.serial("Terminal panel lifecycle", () => {
                 terminalSockets.push(socket);
                 socket.on("framesent", (event) => {
                     const frame = terminalFrameSchema.parse(event.payload);
+
                     try {
                         const message = terminalResizeFrameSchema.safeParse(
                             JSON.parse(frame),
                         );
+
                         if (message.success) {
                             terminalSizes.push(message.data.size);
                         }
@@ -175,9 +407,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
                 });
             }
         });
+
         const detailsResponse = await request.get(
             `${WEB_BASE_URL}/api/v1/agents/${ctx.agentId}`,
         );
+
         const agentDetails = z
             .object({ cwd: z.string() })
             .parse(await detailsResponse.json());
@@ -198,13 +432,13 @@ test.describe.serial("Terminal panel lifecycle", () => {
         expect(terminalSockets).toHaveLength(0);
 
         await page
-            .getByRole("button", { name: "Choose agent for new terminal" })
+            .getByRole("button", { name: "Choose device for new terminal" })
             .click();
         // The picker must escape the collapsed panel's clipping boundary.
         await expect(
             page.getByRole("dialog", { name: "New terminal" }),
         ).toBeVisible();
-        await page.getByRole("button", { name: "Close agent picker" }).click();
+        await page.getByRole("button", { name: "Close device picker" }).click();
 
         await page
             .getByRole("button", { name: "New terminal", exact: true })
@@ -220,8 +454,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         expect(
             new URL(terminalSockets[0]?.url() ?? "").searchParams.get("cwd"),
         ).toBe(agentDetails.cwd);
+        // The caret style belongs to the terminal host, not its equally labeled input textarea.
         await expect(
-            page.getByLabel(`agent1_src 1 for ${ctx.agentName}`),
+            page
+                .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+                .filter({ has: page.locator("textarea") }),
         ).toHaveCSS("caret-color", "rgba(0, 0, 0, 0)");
 
         await page
@@ -265,7 +502,9 @@ test.describe.serial("Terminal panel lifecycle", () => {
             page.getByRole("tab", { name: "agent1_src 1" }),
         ).toHaveAttribute("aria-selected", "true");
         await expect(
-            page.getByLabel(`agent1_src 1 for ${ctx.agentName}`),
+            page
+                .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+                .filter({ has: page.locator("textarea") }),
         ).toBeVisible();
         // Activating a terminal must leave focus in the tablist for keyboard navigation.
         await expect(
@@ -304,36 +543,73 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toBe(ctx.testDirPath);
 
         const secondSocket = terminalSockets[1];
+
         if (!secondSocket) {
             throw new Error("second terminal socket was not created");
         }
+
         const secondSocketClosed = secondSocket.waitForEvent("close");
-        await page.getByRole("button", { name: "Close agent1_src 2" }).click();
-        await secondSocketClosed;
-        // Closing an inactive tab leaves the active tab and sibling sockets alive.
+
+        const terminalTabs = page.getByRole("tablist", {
+            name: "Terminal tabs",
+        });
+
+        await dragReorderRow(
+            page,
+            page.locator(
+                '[data-sortable-item][aria-label="Terminal tab agent1_src 3"]',
+            ),
+            terminalTabs.getByRole("tab", { name: "agent1_src 1" }),
+        );
+        // Reordering changes only the strip order and retains all three live shell sessions.
+        await expect
+            .poll(() =>
+                terminalTabs
+                    .getByRole("tab")
+                    .evaluateAll((tabs) =>
+                        tabs.map((tab) => tab.getAttribute("aria-label")),
+                    ),
+            )
+            .toEqual(["agent1_src 3", "agent1_src 1", "agent1_src 2"]);
+        expect(terminalSockets).toHaveLength(3);
+        await page
+            .getByRole("tab", { name: "agent1_src 2" })
+            .click({ button: "middle" });
+        // Middle-click must leave the inactive terminal and the active selection intact.
+        await expect(
+            page.getByRole("tab", { name: "agent1_src 2" }),
+        ).toBeVisible();
         await expect(
             page.getByRole("tab", { name: "agent1_src 3" }),
         ).toHaveAttribute("aria-selected", "true");
+        expect(page.context().pages()).toHaveLength(1);
+        await page.getByRole("button", { name: "Close agent1_src 2" }).click();
+        await secondSocketClosed;
+        // The explicit close button must still end the inactive terminal session.
         await expect(
             page.getByRole("tab", { name: "agent1_src 2" }),
         ).toHaveCount(0);
 
         const thirdSocket = terminalSockets[2];
+
         if (!thirdSocket) {
             throw new Error("third terminal socket was not created");
         }
+
         const thirdSocketClosed = thirdSocket.waitForEvent("close");
         await page.getByRole("button", { name: "Close agent1_src 3" }).click();
         await thirdSocketClosed;
-        // Closing the active rightmost tab selects its left neighbor.
+        // Closing the active reordered tab selects its nearest surviving neighbor.
         await expect(
             page.getByRole("tab", { name: "agent1_src 1" }),
         ).toHaveAttribute("aria-selected", "true");
 
         const firstSocket = terminalSockets[0];
+
         if (!firstSocket) {
             throw new Error("first terminal socket was not created");
         }
+
         const firstSocketClosed = firstSocket.waitForEvent("close");
         await page.getByRole("button", { name: "Close agent1_src 1" }).click();
         await firstSocketClosed;
@@ -356,9 +632,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toBeVisible();
         const fourthSocket = terminalSockets[3];
         const fifthSocket = terminalSockets[4];
+
         if (!fourthSocket || !fifthSocket) {
             throw new Error("replacement terminal sockets were not created");
         }
+
         await page
             .getByRole("link", { name: "agent2_custom, connected" })
             .click();
@@ -390,12 +668,12 @@ test.describe.serial("Terminal panel lifecycle", () => {
             page.getByRole("button", { name: "New terminal", exact: true }),
         ).toHaveCount(0);
         await page
-            .getByRole("button", { name: "Choose agent for new terminal" })
+            .getByRole("button", { name: "Choose device for new terminal" })
             .hover();
         // Application routes advertise that the shortcut opens the required agent choice.
         await expect(
             page.getByRole("tooltip", {
-                name: "Choose agent for new terminal (t)",
+                name: "Choose device for new terminal (t)",
             }),
         ).toBeVisible();
         await page.mouse.move(0, 0);
@@ -434,9 +712,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         ).toBeVisible();
 
         await page.getByRole("tab", { name: "agent1_src 1" }).click();
+
         const firstTerminalInput = page
             .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
             .locator("textarea");
+
         await firstTerminalInput.pressSequentially("exit");
         await firstTerminalInput.press("Enter");
 
@@ -485,9 +765,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await expect(
             page.getByRole("tab", { name: "agent1_src 1" }),
         ).toHaveAttribute("aria-selected", "true");
+
         const firstTerminal = page.getByRole("textbox", {
             name: `agent1_src 1 for ${ctx.agentName}`,
         });
+
         // The shortcut must land in the shell so the user can type immediately.
         await expectTerminalFocused(firstTerminal);
 
@@ -502,6 +784,10 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await page
             .getByRole("button", { name: "Minimize bottom drawer" })
             .press("Enter");
+        // A fully closed drawer hides the shell; focusing it during expansion must still succeed.
+        await expect(
+            firstTerminal.filter({ has: page.locator("textarea") }),
+        ).toBeHidden();
         await page.keyboard.press("t");
         // A collapsed live session is restored instead of opening a duplicate.
         await expect(
@@ -580,6 +866,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const filterInput = page.getByRole("searchbox", {
             name: "Filter files",
         });
+
         await filterInput.focus();
         await page.keyboard.type("t");
         // Typing the shortcut key into an input must enter text instead of opening a terminal.
@@ -599,9 +886,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
         const terminalInput = page.getByRole("textbox", {
             name: `agent1_src 1 for ${ctx.agentName}`,
         });
+
         const terminalPanel = page.getByRole("tabpanel", {
             name: "agent1_src 1",
         });
+
         await expectTerminalFocused(terminalInput);
         // A focused shell must show a blue frame so keyboard ownership is visible.
         await expect(terminalPanel).toHaveCSS(
@@ -641,6 +930,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
             if (!socket.url().includes("/terminal/ws")) {
                 return;
             }
+
             socket.on("framereceived", (event) => {
                 terminalOutput += terminalFrameSchema.parse(event.payload);
             });
@@ -658,9 +948,10 @@ test.describe.serial("Terminal panel lifecycle", () => {
             page.getByRole("status", { name: "agent1_src 1: Connected" }),
         ).toBeVisible();
 
-        const terminalHost = page.getByLabel(
-            `agent1_src 1 for ${ctx.agentName}`,
-        );
+        const terminalHost = page
+            .getByLabel(`agent1_src 1 for ${ctx.agentName}`)
+            .filter({ has: page.locator("textarea") });
+
         const terminalInput = terminalHost.locator("textarea");
         await terminalHost.click({ button: "right" });
         const actions = page.getByRole("dialog", { name: "Terminal actions" });
@@ -683,9 +974,11 @@ test.describe.serial("Terminal panel lifecycle", () => {
 
         await terminalHost.evaluate((host) => {
             const selection = window.getSelection();
+
             if (!selection) {
                 throw new Error("browser selection is unavailable");
             }
+
             const range = document.createRange();
             range.selectNodeContents(host);
             selection.removeAllRanges();
@@ -721,6 +1014,116 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await terminalInput.press("Enter");
         // Paste must reach the PTY as input rather than staying in the browser.
         await expect.poll(() => terminalOutput).toContain("paste-ok");
+    });
+
+    test("keeps keyboard focus in the terminal after selecting text with the mouse", async ({
+        page,
+    }) => {
+        let terminalOutput = "";
+        page.on("websocket", (socket) => {
+            if (!socket.url().includes("/terminal/ws")) {
+                return;
+            }
+
+            socket.on("framereceived", (event) => {
+                terminalOutput += terminalFrameSchema.parse(event.payload);
+            });
+        });
+
+        await page.goto(ctx.agentBrowserUrl);
+        await page.getByRole("tab", { name: "Terminal" }).click();
+        await page
+            .getByRole("button", { name: "New terminal", exact: true })
+            .click();
+        await expect(
+            page.getByRole("status", { name: "agent1_src 1: Connected" }),
+        ).toBeVisible();
+
+        const terminalInput = page.getByRole("textbox", {
+            name: `agent1_src 1 for ${ctx.agentName}`,
+        });
+
+        const terminalHost = terminalInput.filter({
+            has: page.locator("textarea"),
+        });
+
+        const terminalPanel = page.getByRole("tabpanel", {
+            name: "agent1_src 1",
+        });
+
+        await terminalHost.locator("textarea").focus();
+        // Octal escapes print the marker without putting it in the echoed command.
+        await page.keyboard.type(
+            "printf '\\163\\145\\154\\145\\143\\164\\055\\155\\145\\n'",
+        );
+        await page.keyboard.press("Enter");
+        await expect.poll(() => terminalOutput).toContain("select-me");
+
+        /** Drags across the printed marker the way a user selects text to copy. */
+        const selectMarker = async () => {
+            const box = await terminalHost
+                .getByText("select-me", { exact: true })
+                .first()
+                .boundingBox();
+
+            if (!box) {
+                throw new Error("selected terminal row is not rendered");
+            }
+
+            await page.mouse.move(box.x + 1, box.y + box.height / 2);
+            await page.mouse.down();
+            await page.mouse.move(
+                box.x + box.width - 1,
+                box.y + box.height / 2,
+                { steps: 5 },
+            );
+            await page.mouse.up();
+            // The drag must produce a real native selection for the browser's Copy action.
+            await expect
+                .poll(() =>
+                    page.evaluate(() => window.getSelection()?.toString()),
+                )
+                .toContain("select");
+            // Selecting releases wterm's input, but focus must stay on the terminal host.
+            await expectTerminalFocused(terminalInput);
+        };
+
+        await selectMarker();
+        // The blue frame must remain while the terminal still owns the keyboard.
+        await expect(terminalPanel).toHaveCSS(
+            "border-color",
+            "oklch(0.623 0.214 259.815)",
+        );
+
+        await page.evaluate(() => {
+            const data = new DataTransfer();
+            data.setData(
+                "text/plain",
+                "printf '\\163\\145\\154\\145\\143\\164\\055\\160\\141\\163\\164\\145\\n'",
+            );
+            document.activeElement?.dispatchEvent(
+                new ClipboardEvent("paste", {
+                    bubbles: true,
+                    cancelable: true,
+                    clipboardData: data,
+                }),
+            );
+        });
+        // A paste while the selection is held must not become a file import.
+        await expect(
+            page.getByRole("dialog", { name: "Save pasted text" }),
+        ).toHaveCount(0);
+        await page.keyboard.press("Enter");
+        // The pasted command must reach the shell, and Enter must follow it into the PTY.
+        await expect.poll(() => terminalOutput).toContain("select-paste");
+
+        await selectMarker();
+        await page.keyboard.type("echo typed-after-select");
+        await page.keyboard.press("Enter");
+        // The first key typed over a selection must reach the shell, not be swallowed by the host.
+        await expect
+            .poll(() => terminalOutput)
+            .toContain("echo typed-after-select");
     });
 
     test("follows the app light theme without dropping the shell", async ({

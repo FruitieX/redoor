@@ -12,7 +12,10 @@ export type SelectedPath = {
     entryType: "file" | "directory";
 };
 
-function getSelectedFileKey(file: Pick<SelectedPath, "agentId" | "path">) {
+/** Identifies a selection across agents, since the same path can exist on several devices. */
+export function getSelectedFileKey(
+    file: Pick<SelectedPath, "agentId" | "path">,
+) {
     return `${file.agentId}:${file.path}`;
 }
 
@@ -26,6 +29,7 @@ export const selectedFilesAtom = atomWithLocalStorage<SelectedPath[]>(
  */
 export const selectedFileKeysAtom = atom((get) => {
     const selectedFiles = get(selectedFilesAtom);
+
     return new Set(selectedFiles.map((file) => getSelectedFileKey(file)));
 });
 
@@ -45,6 +49,7 @@ export const isFileSelectedAtom = atom(
 export const selectFileAtom = atom(null, (get, set, file: SelectedPath) => {
     const selectedFiles = get(selectedFilesAtom);
     const fileKey = getSelectedFileKey(file);
+
     const alreadySelected = selectedFiles.some(
         (entry) => getSelectedFileKey(entry) === fileKey,
     );
@@ -82,6 +87,7 @@ export const toggleSelectedFileAtom = atom(
     (get, set, file: SelectedPath) => {
         const fileKey = getSelectedFileKey(file);
         const selectedFiles = get(selectedFilesAtom);
+
         const isSelected = selectedFiles.some(
             (entry) => getSelectedFileKey(entry) === fileKey,
         );
@@ -93,6 +99,7 @@ export const toggleSelectedFileAtom = atom(
                     (entry) => getSelectedFileKey(entry) !== fileKey,
                 ),
             );
+
             return;
         }
 

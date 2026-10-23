@@ -16,6 +16,7 @@ import {
 } from "./test-utils";
 
 const processManager = new ProcessManager();
+
 const baseUrl = `http://127.0.0.1:${VITEST_SERVER_PORT}`;
 
 beforeAll(async () => {
@@ -29,9 +30,11 @@ afterAll(() => processManager.killAll());
 /** Extracts the opaque identifier while keeping cookie attributes out of request headers. */
 function sessionIdFromCookie(cookie: string): string {
     const value = cookie.split("=", 2)[1];
+
     if (!value) {
         throw new Error("Session cookie did not contain an identifier");
     }
+
     return value;
 }
 
@@ -53,6 +56,7 @@ describe("HTTP authentication", () => {
                 password: "incorrect",
             }),
         });
+
         // Invalid credentials must not create an authenticated browser session.
         expect(invalidLogin.status).toBe(401);
         // Login failures should not expose which credential was incorrect.
@@ -67,11 +71,13 @@ describe("HTTP authentication", () => {
         const cookie = api.getAuthHeaders().Cookie;
         // Node clients must retain the same opaque cookie a browser receives automatically.
         expect(cookie).toMatch(/^redoor_session=[0-9a-f-]{36}$/);
+
         if (!cookie) {
             throw new Error("Login did not return a session cookie");
         }
 
         const sessionId = sessionIdFromCookie(cookie);
+
         const sessionPath = join(
             TEST_SERVER_HOME,
             ".local/share",
@@ -79,6 +85,7 @@ describe("HTTP authentication", () => {
             "sessions",
             `session_${sessionId}.json`,
         );
+
         // A successful login must have one durable server-side file as its source of truth.
         expect(existsSync(sessionPath)).toBe(true);
 
@@ -122,6 +129,7 @@ describe("HTTP authentication", () => {
                 Cookie: "redoor_session=00000000-0000-4000-8000-000000000000",
             },
         });
+
         // Guessing a syntactically valid identifier without its session file must not authenticate.
         expect(tamperedResponse.status).toBe(401);
 

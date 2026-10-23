@@ -1,6 +1,6 @@
 import React from "react";
-import { useMutation } from "@tanstack/react-query";
-import { getRouteApi, useNavigate, useRouter } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useAtomValue, useSetAtom } from "jotai";
 import {
     ArchiveRestore,
@@ -12,47 +12,30 @@ import {
     Pencil,
     Trash2,
 } from "lucide-react";
-import type { Agent, ApiClient } from "#ui/api-client";
+import type { Agent } from "#ui/api-client";
 import { BookmarkMenuButton } from "#ui/components/browser/bookmark-action";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
 import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
-import { DeletePathsDialog } from "#ui/components/browser/delete-paths-dialog";
-import { Dialog } from "#ui/components/dialog";
-import { DialogActions } from "#ui/components/dialog-actions";
-import { InputControl } from "#ui/components/input-control";
+import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
+import { PathNameDialog } from "#ui/components/browser/path-name-dialog";
+import { browserRoute } from "#ui/browser-route";
+import { waitForTransfers } from "#ui/transfer-wait";
 import { Toast } from "#ui/components/toast";
 import { Tooltip } from "#ui/components/tooltip";
-import { focusAndSelectFileNameStem } from "#ui/utils/file-name";
 import {
-    getErrorMessage,
     getImmediateParentPath,
     joinBrowserPath,
 } from "#ui/components/browser/utils";
+import { getErrorMessage } from "#ui/utils/error";
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
+import { invalidateAgentData } from "#ui/queries";
 import {
     selectedFileKeysAtom,
     toggleSelectedFileAtom,
 } from "#ui/selected-files";
 
 const rootRouteApi = getRouteApi("__root__");
-
-/** Waits for publication because copy returns a request id before the new name exists. */
-async function waitForCopyTransfer(api: ApiClient, requestId: number) {
-    while (true) {
-        const progress = await api.getTransferProgress();
-        const transfer = progress.transfers.find(
-            (entry) => entry.request_id === requestId,
-        );
-        if (transfer?.state === "completed") {
-            return;
-        }
-        if (transfer?.state === "errored") {
-            throw new Error(transfer.error ?? "Duplicate failed");
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-    }
-}
 
 /** Renames the current entry in a focused workflow and follows its new URL. */
 function RenamePathDialog(props: {
@@ -62,21 +45,18 @@ function RenamePathDialog(props: {
     entryType: "file" | "directory";
     view?: "details" | "sync";
     navigateAfterRename: boolean;
-    isOpen: boolean;
     onClose: () => void;
 }) {
     const navigate = useNavigate();
-    const router = useRouter();
-    const [name, setName] = React.useState(props.currentName);
-    const [validationError, setValidationError] = React.useState<string | null>(
-        null,
-    );
+    const queryClient = useQueryClient();
+    const parentPath = getImmediateParentPath(props.path);
+
     const renameMutation = useMutation({
         mutationFn: (newName: string) => {
-            const parentPath = getImmediateParentPath(props.path);
             if (parentPath === null) {
                 throw new Error("The filesystem root cannot be renamed");
             }
+
             return props.agent.renamePath(
                 parentPath,
                 props.currentName,
@@ -84,138 +64,57 @@ function RenamePathDialog(props: {
             );
         },
         onSuccess: async (_, newName) => {
-            const parentPath = getImmediateParentPath(props.path);
             if (parentPath === null) {
                 return;
             }
+
             props.onClose();
+
             if (!props.navigateAfterRename) {
-                await router.invalidate();
+                await invalidateAgentData(queryClient, props.agent.id);
+
                 return;
             }
+
             await navigate({
-                to: props.agent.getBrowserUrl(
+                ...browserRoute(
+                    props.agent.id,
                     joinBrowserPath(parentPath, newName),
                 ),
-                search:
-                    props.view === "details"
-                        ? { view: "details" }
-                        : props.view === "sync"
-                          ? { view: "sync" }
-                          : {},
+                search: { view: props.view },
             });
         },
     });
-    const parentPath = getImmediateParentPath(props.path);
-    const trimmedName = name.trim();
-    const isRenaming = renameMutation.isPending;
-    const canRename =
-        parentPath !== null &&
-        trimmedName.length > 0 &&
-        trimmedName !== props.currentName &&
-        !trimmedName.includes("/") &&
-        trimmedName !== "." &&
-        trimmedName !== "..";
-
-    React.useEffect(() => {
-        setName(props.currentName);
-        setValidationError(null);
-        renameMutation.reset();
-    }, [props.currentName, props.isOpen, props.path]);
-
-    const handleRename = async (event: React.FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-
-        if (parentPath === null) {
-            setValidationError("The filesystem root cannot be renamed");
-            return;
-        }
-        if (!trimmedName) {
-            setValidationError(
-                `${props.entryType === "file" ? "File" : "Directory"} name is required`,
-            );
-            return;
-        }
-        if (
-            trimmedName.includes("/") ||
-            trimmedName === "." ||
-            trimmedName === ".."
-        ) {
-            setValidationError("Name must be a single path component");
-            return;
-        }
-        if (trimmedName === props.currentName) {
-            return;
-        }
-
-        setValidationError(null);
-        renameMutation.mutate(trimmedName);
-    };
-
-    const label = `Rename ${props.entryType}`;
 
     return (
-        <Dialog
-            isOpen={props.isOpen}
+        <PathNameDialog
             title={`Rename ${props.entryType}`}
             description={`Choose a new name for ${props.currentName}.`}
             closeAriaLabel={`Close rename ${props.entryType} dialog`}
-            isBusy={isRenaming}
-            errorMessage={
-                validationError ??
-                (renameMutation.isError
-                    ? getErrorMessage(renameMutation.error, "Rename failed")
-                    : null)
+            kind={props.entryType === "file" ? "File" : "Directory"}
+            fieldLabel="New name"
+            fieldAriaLabel={`Rename ${props.entryType}`}
+            placeholder={props.currentName}
+            fieldDescription="The entry keeps its contents and moves to this name."
+            initialName={props.currentName}
+            requireChange
+            selectNameStem
+            unavailableMessage={
+                parentPath === null
+                    ? "The filesystem root cannot be renamed"
+                    : null
             }
+            submitLabel="Rename"
+            busyLabel="Renaming..."
+            submitIcon={<Pencil className="h-4 w-4" />}
+            mutation={renameMutation}
             onClose={props.onClose}
-        >
-            <form onSubmit={handleRename} className="mt-4">
-                <label
-                    htmlFor={`${props.entryType}-rename-input`}
-                    className="mb-2 block text-sm font-medium text-slate-300"
-                >
-                    New name
-                </label>
-                <InputControl
-                    ref={focusAndSelectFileNameStem}
-                    id={`${props.entryType}-rename-input`}
-                    type="text"
-                    value={name}
-                    onChange={(event) => {
-                        setName(event.target.value);
-                        setValidationError(null);
-                        renameMutation.reset();
-                    }}
-                    aria-label={label}
-                    disabled={isRenaming || parentPath === null}
-                    className="w-full rounded-lg bg-slate-950/70 text-sm transition focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-                />
-                <DialogActions>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={props.onClose}
-                        disabled={isRenaming}
-                    >
-                        Cancel
-                    </Button>
-                    <Button
-                        type="submit"
-                        disabled={!canRename || isRenaming}
-                        isLoading={isRenaming}
-                        className="font-semibold"
-                    >
-                        <Pencil className="h-4 w-4" />
-                        {isRenaming ? "Renaming..." : "Rename"}
-                    </Button>
-                </DialogActions>
-            </form>
-        </Dialog>
+        />
     );
 }
 
 /** Owns the rename workflow so different surfaces can provide their own trigger. */
-export function RenamePathAction(props: {
+function RenamePathAction(props: {
     agent: Agent;
     path: string;
     currentName: string;
@@ -234,7 +133,7 @@ export function RenamePathAction(props: {
     return props.children({
         open: () => setIsOpen(true),
         disabled,
-        dialog: (
+        dialog: isOpen ? (
             <RenamePathDialog
                 agent={props.agent}
                 path={props.path}
@@ -242,10 +141,9 @@ export function RenamePathAction(props: {
                 entryType={props.entryType}
                 view={props.view}
                 navigateAfterRename={props.navigateAfterRename !== false}
-                isOpen={isOpen}
                 onClose={() => setIsOpen(false)}
             />
-        ),
+        ) : null,
     });
 }
 
@@ -255,21 +153,18 @@ function DuplicatePathDialog(props: {
     path: string;
     currentName: string;
     entryType: "file" | "directory";
-    isOpen: boolean;
     onClose: () => void;
 }) {
     const { api } = rootRouteApi.useRouteContext();
-    const router = useRouter();
-    const [name, setName] = React.useState(props.currentName);
-    const [validationError, setValidationError] = React.useState<string | null>(
-        null,
-    );
+    const queryClient = useQueryClient();
+    const parentPath = getImmediateParentPath(props.path);
+
     const duplicateMutation = useMutation({
         mutationFn: async (newName: string) => {
-            const parentPath = getImmediateParentPath(props.path);
             if (parentPath === null) {
                 throw new Error("The filesystem root cannot be duplicated");
             }
+
             const response = await props.agent.copyTo(
                 {
                     agent: props.agent.id,
@@ -277,121 +172,55 @@ function DuplicatePathDialog(props: {
                 },
                 props.path,
             );
-            await waitForCopyTransfer(api, response.copy_request_id);
+
+            // Copy returns a request id before the new name exists, so wait for publication.
+            await waitForTransfers({
+                queryClient,
+                api,
+                isSettled: (transfers) => {
+                    const transfer = transfers.find(
+                        (entry) =>
+                            entry.request_id === response.copy_request_id,
+                    );
+
+                    if (transfer?.state === "errored") {
+                        throw new Error(transfer.error ?? "Duplicate failed");
+                    }
+
+                    return transfer?.state === "completed";
+                },
+            });
         },
         onSuccess: async () => {
             props.onClose();
-            await router.invalidate();
+            await invalidateAgentData(queryClient, props.agent.id);
         },
     });
-    const parentPath = getImmediateParentPath(props.path);
-    const trimmedName = name.trim();
-    const isDuplicating = duplicateMutation.isPending;
-    const canDuplicate =
-        parentPath !== null &&
-        trimmedName.length > 0 &&
-        trimmedName !== props.currentName &&
-        !trimmedName.includes("/") &&
-        trimmedName !== "." &&
-        trimmedName !== "..";
-
-    React.useEffect(() => {
-        setName(props.currentName);
-        setValidationError(null);
-        duplicateMutation.reset();
-    }, [props.currentName, props.isOpen, props.path]);
-
-    const handleDuplicate = async (event: React.FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-
-        if (parentPath === null) {
-            setValidationError("The filesystem root cannot be duplicated");
-            return;
-        }
-        if (!trimmedName) {
-            setValidationError(
-                `${props.entryType === "file" ? "File" : "Directory"} name is required`,
-            );
-            return;
-        }
-        if (
-            trimmedName.includes("/") ||
-            trimmedName === "." ||
-            trimmedName === ".."
-        ) {
-            setValidationError("Name must be a single path component");
-            return;
-        }
-        if (trimmedName === props.currentName) {
-            return;
-        }
-
-        setValidationError(null);
-        duplicateMutation.mutate(trimmedName);
-    };
-
-    const label = `Duplicate ${props.entryType}`;
 
     return (
-        <Dialog
-            isOpen={props.isOpen}
+        <PathNameDialog
             title={`Duplicate ${props.entryType}`}
             description={`Choose a name for the copy of ${props.currentName}.`}
             closeAriaLabel={`Close duplicate ${props.entryType} dialog`}
-            isBusy={isDuplicating}
-            errorMessage={
-                validationError ??
-                (duplicateMutation.isError
-                    ? getErrorMessage(
-                          duplicateMutation.error,
-                          "Duplicate failed",
-                      )
-                    : null)
+            kind={props.entryType === "file" ? "File" : "Directory"}
+            fieldLabel="New name"
+            fieldAriaLabel={`Duplicate ${props.entryType}`}
+            placeholder={props.currentName}
+            fieldDescription="The copy is created beside the original."
+            initialName={props.currentName}
+            requireChange
+            selectNameStem
+            unavailableMessage={
+                parentPath === null
+                    ? "The filesystem root cannot be duplicated"
+                    : null
             }
+            submitLabel="Duplicate"
+            busyLabel="Duplicating..."
+            submitIcon={<Copy className="h-4 w-4" />}
+            mutation={duplicateMutation}
             onClose={props.onClose}
-        >
-            <form onSubmit={handleDuplicate} className="mt-4">
-                <label
-                    htmlFor={`${props.entryType}-duplicate-input`}
-                    className="mb-2 block text-sm font-medium text-slate-300"
-                >
-                    New name
-                </label>
-                <InputControl
-                    ref={focusAndSelectFileNameStem}
-                    id={`${props.entryType}-duplicate-input`}
-                    type="text"
-                    value={name}
-                    onChange={(event) => {
-                        setName(event.target.value);
-                        setValidationError(null);
-                        duplicateMutation.reset();
-                    }}
-                    aria-label={label}
-                    disabled={isDuplicating || parentPath === null}
-                    className="w-full rounded-lg bg-slate-950/70 text-sm transition focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-                />
-                <DialogActions>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={props.onClose}
-                        disabled={isDuplicating}
-                    >
-                        Cancel
-                    </Button>
-                    <Button
-                        type="submit"
-                        disabled={!canDuplicate || isDuplicating}
-                        isLoading={isDuplicating}
-                        className="font-semibold"
-                    >
-                        <Copy className="h-4 w-4" />
-                        {isDuplicating ? "Duplicating..." : "Duplicate"}
-                    </Button>
-                </DialogActions>
-            </form>
-        </Dialog>
+        />
     );
 }
 
@@ -413,16 +242,15 @@ function DuplicatePathAction(props: {
     return props.children({
         open: () => setIsOpen(true),
         disabled,
-        dialog: (
+        dialog: isOpen ? (
             <DuplicatePathDialog
                 agent={props.agent}
                 path={props.path}
                 currentName={props.currentName}
                 entryType={props.entryType}
-                isOpen={isOpen}
                 onClose={() => setIsOpen(false)}
             />
-        ),
+        ) : null,
     });
 }
 
@@ -456,7 +284,7 @@ function OpenNativelyAction(props: {
                               openMutation.error,
                               "Could not open the path",
                           )
-                        : "Opened on the agent computer"}
+                        : "Opened on the device"}
                 </Toast>
             ) : null,
     });
@@ -738,6 +566,7 @@ export function SelectPathMenuButton(props: {
                     fileName: props.fileName,
                     entryType: props.entryType,
                 });
+
                 if (!isSelected) {
                     // Menu selection has no listing checkbox, so show the chosen path immediately.
                     activateBottomDrawerTab("selected");
@@ -764,23 +593,24 @@ export function PersistentPathActions(props: {
     /** Lets a view keep Reload next to Download without hiding it in More. */
     afterDownload?: React.ReactNode;
 }) {
-    const navigate = useNavigate();
-    const parentPath = getImmediateParentPath(props.path);
     const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = React.useState(false);
+
     const downloadLink = (
-        <a
+        <Button
+            as="a"
             href={props.downloadUrl}
             download={props.downloadName}
             aria-label="Download"
+            variant={props.secondaryDownload ? "subtle" : "primary"}
             className={
                 props.secondaryDownload
-                    ? "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-white/5 hover:text-white"
-                    : "inline-flex items-center gap-2 rounded-md bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white shadow-sm shadow-blue-950/30 transition-colors hover:bg-blue-500"
+                    ? "rounded-md px-3 text-slate-200 hover:bg-tint hover:text-slate-100"
+                    : "rounded-md px-3.5 font-semibold shadow-sm shadow-blue-950/30"
             }
         >
             <Download className="h-4 w-4" aria-hidden="true" />
             <span className="hidden sm:inline">Download</span>
-        </a>
+        </Button>
     );
 
     return (
@@ -802,36 +632,16 @@ export function PersistentPathActions(props: {
                     onDelete={() => setIsConfirmDeleteOpen(true)}
                 />
             </div>
-            <DeletePathsDialog
-                isOpen={isConfirmDeleteOpen}
-                title={`Delete this ${props.entryType}?`}
-                description={
-                    <>
-                        Move
-                        <span className="mx-1 font-medium text-slate-100">
-                            {props.currentName}
-                        </span>
-                        {props.agent.supportsTrash
-                            ? "to the agent trash. You can restore it later from the Trash tab."
-                            : "to the native agent Trash."}
-                    </>
-                }
-                targets={[{ agent: props.agent, path: props.path }]}
-                trashConfirmLabel="Move to trash"
-                permanentConfirmLabel={`Delete ${props.entryType}`}
-                onClose={() => setIsConfirmDeleteOpen(false)}
-                onDeleted={async () => {
-                    if (parentPath !== null) {
-                        await navigate({
-                            to: props.agent.getBrowserUrl(parentPath),
-                        });
-                    }
-                }}
-            >
-                <p className="overflow-x-auto whitespace-nowrap rounded-md border border-slate-800 bg-[#0b0d12] px-3 py-2.5 font-mono text-sm text-slate-300">
-                    {props.path}
-                </p>
-            </DeletePathsDialog>
+            {isConfirmDeleteOpen ? (
+                <DeletePathDialog
+                    agent={props.agent}
+                    path={props.path}
+                    name={props.currentName}
+                    entryType={props.entryType}
+                    leaveToParent
+                    onClose={() => setIsConfirmDeleteOpen(false)}
+                />
+            ) : null}
         </>
     );
 }
