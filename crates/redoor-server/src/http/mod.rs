@@ -23,6 +23,7 @@ mod logging_levels;
 mod logs;
 pub(crate) mod mcp;
 mod moves;
+pub(crate) mod oidc;
 #[cfg(target_os = "linux")]
 mod pam;
 mod partials;

@@ -13,7 +13,7 @@ use redoor_protocol::ids::{AgentId, validate_device_name};
 use serde::Deserialize;
 
 use super::{
-    AgentConfig, AgentSection, AuthMode, LocalAgentConfig, RedoorConfig, RelayConfig,
+    AgentConfig, AgentSection, AuthMode, LocalAgentConfig, OidcConfig, RedoorConfig, RelayConfig,
     ServerSection, SshBackedAgentConfig, parse_relay_id, parse_server_username,
 };
 
@@ -47,7 +47,31 @@ struct RawServerSection {
     cookie_secure: bool,
     #[serde(default)]
     mcp_allowed_origins: Vec<String>,
+    oidc: Option<RawOidcSection>,
 }
+
+/// `[server.oidc]` as written; required keys are checked in `validate` for clearer messages.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOidcSection {
+    issuer: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    redirect_url: Option<String>,
+    #[serde(default)]
+    allowed_groups: Vec<String>,
+    scopes: Option<Vec<String>>,
+    provider_name: Option<String>,
+    session_lifetime_days: Option<u64>,
+}
+
+/// Default idle lifetime of OIDC sessions: long enough that daily use rarely revisits the
+/// provider, short enough that an abandoned browser stops working within a month.
+const DEFAULT_OIDC_SESSION_LIFETIME_DAYS: u64 = 30;
+/// Scopes that release the subject, display name and `groups` claim on common providers.
+const DEFAULT_OIDC_SCOPES: [&str; 3] = ["openid", "profile", "groups"];
+/// Browsers cap cookie lifetimes at 400 days, so longer server-side sessions would be unusable.
+const MAX_OIDC_SESSION_LIFETIME_DAYS: u64 = 400;
 
 /// `[agent]` as written.
 #[derive(Deserialize)]
@@ -315,7 +339,120 @@ impl RawServerSection {
             auth,
             cookie_secure: self.cookie_secure,
             mcp_allowed_origins: self.mcp_allowed_origins,
+            oidc: self.oidc.map(RawOidcSection::validate).transpose()?,
         })
+    }
+}
+
+impl RawOidcSection {
+    /// Requires every key the authorization code flow needs and rejects settings that would
+    /// weaken it, so a typo fails at startup instead of at the first sign-in.
+    fn validate(self) -> Result<OidcConfig, Invalid> {
+        let required = |value: Option<String>, key: &str| match value {
+            Some(value) if !value.trim().is_empty() => Ok(value),
+            _ => Err(invalid(format!(
+                "server.oidc.{key} is required and must be non-empty"
+            ))),
+        };
+        let issuer = required(self.issuer, "issuer")?;
+        let client_id = required(self.client_id, "client_id")?;
+        let client_secret = required(self.client_secret, "client_secret")?;
+        let redirect_url = required(self.redirect_url, "redirect_url")?;
+        let issuer_url = parse_oidc_url(&issuer, "issuer")?;
+        if issuer_url.query().is_some() || issuer_url.fragment().is_some() {
+            return Err(invalid(
+                "server.oidc.issuer must not contain a query or fragment",
+            ));
+        }
+        let redirect_url = parse_oidc_url(&redirect_url, "redirect_url")?;
+        if !redirect_url.path().ends_with(OIDC_CALLBACK_PATH) {
+            return Err(invalid(format!(
+                "server.oidc.redirect_url must end with {OIDC_CALLBACK_PATH}"
+            )));
+        }
+        // Without a group restriction every account the provider knows could open shells, so
+        // the operator must name who is allowed instead of relying on provider-side settings.
+        if self
+            .allowed_groups
+            .iter()
+            .all(|group| group.trim().is_empty())
+        {
+            return Err(invalid(
+                "server.oidc.allowed_groups must list at least one group",
+            ));
+        }
+        let days = self
+            .session_lifetime_days
+            .unwrap_or(DEFAULT_OIDC_SESSION_LIFETIME_DAYS);
+        if !(1..=MAX_OIDC_SESSION_LIFETIME_DAYS).contains(&days) {
+            return Err(invalid(format!(
+                "server.oidc.session_lifetime_days must be between 1 and {MAX_OIDC_SESSION_LIFETIME_DAYS}"
+            )));
+        }
+        let provider_name = match self.provider_name {
+            Some(name) if name.trim().is_empty() => {
+                return Err(invalid(
+                    "server.oidc.provider_name must be non-empty when set",
+                ));
+            }
+            Some(name) => name,
+            None => "single sign-on".to_string(),
+        };
+        let mut scopes = self.scopes.unwrap_or_else(|| {
+            DEFAULT_OIDC_SCOPES
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect()
+        });
+        if let Some(scope) = scopes
+            .iter()
+            .find(|scope| scope.is_empty() || scope.contains(char::is_whitespace))
+        {
+            return Err(invalid(format!(
+                "server.oidc.scopes entries must be single non-empty words; got '{scope}'"
+            )));
+        }
+        // OIDC providers only return an ID token for the `openid` scope.
+        if !scopes.iter().any(|scope| scope == "openid") {
+            scopes.insert(0, "openid".to_string());
+        }
+        Ok(OidcConfig {
+            issuer,
+            client_id,
+            client_secret,
+            redirect_url,
+            allowed_groups: self
+                .allowed_groups
+                .into_iter()
+                .filter(|group| !group.trim().is_empty())
+                .collect(),
+            scopes,
+            provider_name,
+            session_lifetime: std::time::Duration::from_secs(days * 24 * 60 * 60),
+        })
+    }
+}
+
+/// Route that finishes OIDC sign-in; the configured redirect URL must point at it.
+pub(super) const OIDC_CALLBACK_PATH: &str = "/api/v1/auth/oidc/callback";
+
+/// Accepts HTTPS everywhere and plain HTTP only for loopback hosts, so codes, tokens and the
+/// client secret never cross a network unencrypted while local test providers still work.
+fn parse_oidc_url(value: &str, key: &str) -> Result<url::Url, Invalid> {
+    let url = url::Url::parse(value)
+        .map_err(|error| invalid(format!("server.oidc.{key} is not a valid URL: {error}")))?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" if loopback => Ok(url),
+        _ => Err(invalid(format!(
+            "server.oidc.{key} must be an https:// URL (http:// is only allowed for localhost)"
+        ))),
     }
 }
 

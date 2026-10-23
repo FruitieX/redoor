@@ -3489,6 +3489,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower-http",
+ "url",
  "uuid",
  "zeroize",
 ]

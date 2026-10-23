@@ -12,7 +12,8 @@ use redoor_protocol::api::tokens::Permission::{
 /// What a route requires from the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Access {
-    /// No credential: login, logout and the agent endpoint, which checks the agent token itself.
+    /// No credential: login, logout, the OIDC sign-in round trip and the agent endpoint, which
+    /// checks the agent token itself.
     Public,
     /// Browser sessions only: server and agent configuration, token management, live sockets.
     SessionOnly,
@@ -35,6 +36,12 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
         ("GET", "/api/v1/agent/ws") | ("POST", "/api/v1/login" | "/api/v1/logout") => {
             Access::Public
         }
+        // The sign-in round trip happens before a session exists; the callback authenticates
+        // the provider's answer itself.
+        (
+            "GET",
+            "/api/v1/auth/methods" | "/api/v1/auth/oidc/login" | "/api/v1/auth/oidc/callback",
+        ) => Access::Public,
 
         // Live sockets, server configuration and agent configuration.
         (
@@ -192,6 +199,8 @@ mod tests {
         let cases = [
             (Method::GET, "/api/v1/agent/ws", Access::Public),
             (Method::POST, "/api/v1/login", Access::Public),
+            (Method::GET, "/api/v1/auth/oidc/callback", Access::Public),
+            (Method::GET, "/api/v1/auth/methods", Access::Public),
             (Method::GET, "/api/v1/agents", Access::AnyPrincipal),
             (Method::POST, "/api/v1/agents", Access::SessionOnly),
             (Method::GET, "/api/v1/agents/{agent}", Access::Device(&[])),

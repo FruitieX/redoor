@@ -27,6 +27,7 @@ jiff.workspace = true
 libc.workspace = true
 nix.workspace = true
 reqwest.workspace = true
+url.workspace = true
 rust-embed.workspace = true
 semver.workspace = true
 serde.workspace = true

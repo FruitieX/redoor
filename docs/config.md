@@ -85,6 +85,34 @@ username = "admin"
 password = "long-private-password"
 ```
 
+### `[server.oidc]` (optional OpenID Connect sign-in)
+
+Adds "Sign in with …" to the login page using any OpenID Connect provider (Pocket ID, Authentik, Keycloak, …). It is off unless this table exists. When configured, the login page leads with the provider button; the username/password (or PAM) login above stays available as a fallback, so a provider outage cannot lock you out. A successful sign-in creates a browser session for the server's single account. Agent connections, access tokens and MCP are not affected.
+
+| Key                     | Type             | Default                          | Description                                                                                                                         |
+| ----------------------- | ---------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `issuer`                | string           | required                         | Provider issuer URL. `https://` (plain `http://` only for localhost). Its `/.well-known/openid-configuration` is used for discovery. |
+| `client_id`             | string           | required                         | Client ID registered at the provider.                                                                                               |
+| `client_secret`         | string           | required                         | Client secret (confidential client).                                                                                                |
+| `redirect_url`          | string           | required                         | Public callback URL registered at the provider, ending in `/api/v1/auth/oidc/callback`, e.g. `https://redoor.example.com/api/v1/auth/oidc/callback`. |
+| `allowed_groups`        | array of strings | required                         | The ID token's `groups` claim must contain at least one of these. Checked by Redoor even if the provider also restricts the client. |
+| `scopes`                | array of strings | `["openid", "profile", "groups"]` | Requested scopes. `openid` is always added. Change this if your provider releases the `groups` claim under another scope.           |
+| `provider_name`         | string           | `single sign-on`                 | Button label: "Sign in with {provider_name}".                                                                                       |
+| `session_lifetime_days` | integer          | `30`                             | Idle lifetime of sessions created by OIDC sign-in (1–400). Every use extends it, so it only expires after this long without use.     |
+
+The provider must support the authorization code flow with PKCE (S256). The server uses `client_secret_basic` at the token endpoint unless discovery says only `client_secret_post` is supported. Changing `issuer`, `client_id` or `allowed_groups`, or removing the table, signs out all OIDC sessions; password sessions are unaffected. Set `cookie_secure = true` when serving over HTTPS.
+
+```toml
+[server.oidc]
+issuer = "https://id.example.com"
+client_id = "redoor"
+client_secret = "client-secret-from-the-provider"
+redirect_url = "https://redoor.example.com/api/v1/auth/oidc/callback"
+allowed_groups = ["admins"]
+# provider_name = "Pocket ID"
+# session_lifetime_days = 30
+```
+
 ## `[agent]`
 
 Used by a standalone `redoor agent` process (and by systemd/launchd agent units). Not used for server-managed `[[agents]]` entries.

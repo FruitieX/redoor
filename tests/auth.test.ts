@@ -66,6 +66,28 @@ describe("HTTP authentication", () => {
         });
     });
 
+    it("offers only the password login when OIDC is not configured", async () => {
+        const methods = await new ApiClient(baseUrl).getLoginMethods();
+        // Servers without an OIDC section keep the plain password form.
+        expect(methods).toEqual({ oidc: null });
+
+        const start = await fetch(`${baseUrl}/api/v1/auth/oidc/login`, {
+            redirect: "manual",
+        });
+
+        // The sign-in routes behave as if they did not exist.
+        expect(start.status).toBe(404);
+
+        const callback = await fetch(
+            `${baseUrl}/api/v1/auth/oidc/callback?code=x&state=y`,
+            { redirect: "manual" },
+        );
+
+        // A forged callback cannot create a session on a server without OIDC.
+        expect(callback.status).toBe(404);
+        expect(callback.headers.get("set-cookie")).toBeNull();
+    });
+
     it("persists login state and removes it during logout", async () => {
         const api = new ApiClient(baseUrl);
         await api.login(TEST_USERNAME, TEST_PASSWORD);

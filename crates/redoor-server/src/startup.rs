@@ -181,6 +181,8 @@ struct ServerConfig {
     auth: AuthMode,
     /// Whether session cookies require HTTPS.
     cookie_secure: bool,
+    /// Optional OpenID Connect sign-in.
+    oidc: Option<redoor_core::config::OidcConfig>,
     /// Browser origins allowed to call MCP.
     mcp_allowed_origins: Vec<String>,
     /// Shared agent registration secret.
@@ -232,6 +234,7 @@ impl ServerConfig {
             log_format,
             auth: server.auth,
             cookie_secure: server.cookie_secure,
+            oidc: server.oidc,
             mcp_allowed_origins: server.mcp_allowed_origins,
             agent_token: file.agent_token,
             agents: file.agents,
@@ -283,12 +286,26 @@ impl ServerRuntime {
         let auth_mode = ServerAuthMode::from(&config.auth);
         let auth = AuthState::new(
             config.auth,
+            config.oidc.as_ref(),
             config.agent_token.clone(),
             config.cookie_secure,
             &data_dir,
         )
         .await
         .context("Failed to initialize authentication")?;
+        let oidc = config
+            .oidc
+            .map(|oidc| {
+                log!(
+                    Level::Info,
+                    "OIDC sign-in enabled: issuer={}, client_id={}",
+                    oidc.issuer,
+                    oidc.client_id
+                );
+                crate::http::oidc::OidcClient::new(oidc).map(Arc::new)
+            })
+            .transpose()
+            .context("Failed to initialize OIDC sign-in")?;
         let tokens = crate::http::tokens::TokenStore::load(&data_dir)
             .await
             .context("Failed to load access tokens")?;
@@ -338,6 +355,7 @@ impl ServerRuntime {
             upload_requests: crate::http::upload_requests::UploadRequests::default(),
             protocol_mismatches: crate::protocol_mismatches::ProtocolMismatches::default(),
             auth,
+            oidc,
             tokens,
             mcp,
             config_path: config.config_path,
