@@ -120,4 +120,48 @@ test.describe("Authentication", () => {
             page.getByRole("heading", { name: "Sign in to Redoor" }),
         ).toBeVisible();
     });
+
+    test("leads with the identity provider when OIDC is configured", async ({
+        page,
+    }) => {
+        await page.context().clearCookies();
+        // The shared test server has no provider, so the advertised methods are stubbed.
+        await page.route("**/api/v1/auth/methods", (route) =>
+            route.fulfill({
+                json: { oidc: { provider_name: "Test ID" } },
+            }),
+        );
+        await page.goto(
+            `${WEB_BASE_URL}/login?redirect=${encodeURIComponent("/transfers?from=oidc")}&oidc_error=denied`,
+        );
+
+        const providerButton = page.getByRole("link", {
+            name: "Sign in with Test ID",
+        });
+
+        // The provider is the primary way in.
+        await expect(providerButton).toBeVisible();
+        // The provider round trip carries the page to return to.
+        await expect(providerButton).toHaveAttribute(
+            "href",
+            `${WEB_BASE_URL}/api/v1/auth/oidc/login?redirect=${encodeURIComponent("/transfers?from=oidc")}`,
+        );
+        // A refused sign-in is explained with fixed text chosen by the code.
+        await expect(page.getByRole("alert")).toHaveText(
+            "Your account is not allowed to sign in to Redoor.",
+        );
+        // The password form is a fallback and stays folded away at first.
+        await expect(page.getByLabel("Password")).toHaveCount(0);
+
+        await page
+            .getByRole("button", { name: "Use username and password instead" })
+            .click();
+        await page.getByLabel("Username").fill("test-user");
+        await page.getByLabel("Password").fill("test-password");
+        await page
+            .getByRole("button", { name: "Sign in", exact: true })
+            .click();
+        // The fallback still signs in and resumes the original page.
+        await expect(page).toHaveURL(`${WEB_BASE_URL}/transfers?from=oidc`);
+    });
 });
