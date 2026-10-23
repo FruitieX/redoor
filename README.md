@@ -148,6 +148,14 @@ agent_token = "secret"
 # bind = "0.0.0.0" # default 127.0.0.1
 # cookie_secure = false # set true behind HTTPS
 
+# Optional "Sign in with ..." through an OpenID Connect provider; see docs/config.md.
+# [server.oidc]
+# issuer = "https://id.example.com"
+# client_id = "redoor"
+# client_secret = "..."
+# redirect_url = "https://redoor.example.com/api/v1/auth/oidc/callback"
+# allowed_groups = ["admins"]
+
 ## Automatically spawn agents via SSH
 [[agents]]
 target = "user@example.com"

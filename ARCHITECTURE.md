@@ -115,7 +115,7 @@ The agent runtime and the implementation of every command.
 
 ### `redoor-server`
 
-- `http/`: Axum routes, auth (sessions, PAM), access tokens (`http/tokens`), access control
+- `http/`: Axum routes, auth (sessions, PAM, OIDC), access tokens (`http/tokens`), access control
   (`http/access`), the UI assets and MCP.
   - `agent_client`: `AgentClient::call` for any protocol request that is also an
     `AgentCall`, which adds its deadline; all deadlines are defined in one place.
@@ -1102,7 +1102,7 @@ credential only works on its own endpoints:
 
 | Client | Credential | Grants |
 |---|---|---|
-| Browser UI | `redoor_session` cookie from `POST /api/v1/login` | REST API and browser websockets, full access, including the session-only routes |
+| Browser UI | `redoor_session` cookie from `POST /api/v1/login` or OIDC sign-in | REST API and browser websockets, full access, including the session-only routes |
 | `redoor remote` CLI, MCP clients, scripts | `redoor_at_...` access token (`Authorization: Bearer`) | REST API and `/mcp`, limited by permissions and a device scope |
 | Agents | The shared `agent_token` bearer | `/api/v1/agent/ws` only |
 | Plain download links | One-time token | One file on one agent, once |
@@ -1112,6 +1112,22 @@ credential only works on its own endpoints:
   rate limited.
   - Sessions are files in the server data dir and expire after 7 days.
   - Changing the configured password invalidates existing sessions.
+- **OIDC sign-in** (optional, `[server.oidc]`, `http/oidc.rs`) is a second way to get the same
+  browser session; the password login stays as a fallback. `GET /api/v1/auth/oidc/login`
+  starts an authorization code flow with PKCE and redirects to the provider;
+  `GET /api/v1/auth/oidc/callback` finishes it. Both routes are public, so the callback is
+  its own gate:
+  - The `state` must match the `redoor_oidc_state` cookie of the browser that started the
+    attempt and name an unexpired attempt kept in memory, which it consumes (single use).
+  - The code is redeemed with the client secret and PKCE verifier. The ID token comes
+    straight from the token endpoint over TLS, so its claims (issuer, audience, expiry,
+    nonce) are checked but not its signature (OIDC Core 3.1.3.7).
+  - The `groups` claim must contain one of `allowed_groups`, checked by Redoor even if the
+    provider restricts the client too, because the session grants shell access.
+  - Every allowed identity maps to the single account. OIDC sessions record their method,
+    slide forward on use (rewritten at most daily, cookie refreshed by the access layer),
+    and are bound to a digest of issuer, client id and allowed groups, so changing those or
+    removing OIDC revokes them without touching password sessions.
 - **Access tokens** are the one credential type for clients other than the browser. They
   are created and managed only by a browser session (see "Access control" below). An MCP
   client is usually an AI assistant acting for the user, so it should get no more access

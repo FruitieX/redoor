@@ -18,7 +18,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use redoor_core::config::AuthMode;
+use redoor_core::config::{AuthMode, OidcConfig};
 use redoor_core::log_error;
 use redoor_protocol::api::{
     ErrorResponse,
@@ -35,6 +35,9 @@ use super::state::ServerState;
 const SESSION_COOKIE_NAME: &str = "redoor_session";
 /// One week, so routine use does not require frequent re-login while stolen cookies expire.
 const SESSION_LIFETIME: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+/// Upper bound on how often a sliding OIDC session file is rewritten, so busy UIs that send
+/// many requests per second do not turn every request into a disk write.
+const SESSION_RENEWAL_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 /// Caps online brute force against a single source address.
 const LOGIN_MAX_FAILURES_PER_IP: u32 = 10;
 /// Caps coordinated multi-source brute force against the whole process.
@@ -68,9 +71,47 @@ pub(crate) struct AuthState {
     /// Shared secret agents must present at registration to prevent unauthenticated hijacks.
     agent_token: String,
     login_limiter: std::sync::Arc<LoginRateLimiter>,
+    /// Present when OIDC sign-in is configured; governs the sessions it creates.
+    oidc_sessions: Option<OidcSessionPolicy>,
+    /// Orders session renewals against logouts, so a renewal racing a logout cannot write
+    /// the just-deleted session file back.
+    session_file_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Serializes PAM because blocking checks can otherwise exhaust Tokio's blocking pool.
     #[cfg(target_os = "linux")]
     pam_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+/// How sessions created by OIDC sign-in are bound and how long they live.
+#[derive(Clone)]
+struct OidcSessionPolicy {
+    /// Digest of the provider settings, so changing the issuer, client or allowed groups
+    /// invalidates sessions that were granted under the old rules.
+    fingerprint: String,
+    /// Idle lifetime; every authenticated request slides the expiry forward.
+    lifetime: Duration,
+}
+
+/// Which login created a session, because the two kinds expire and invalidate differently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionMethod {
+    /// Username and password; fixed lifetime, invalidated when the configured password changes.
+    /// The default keeps session files written before OIDC support valid.
+    #[default]
+    Password,
+    /// OpenID Connect sign-in; sliding lifetime, invalidated when the OIDC settings change.
+    Oidc,
+}
+
+/// Outcome of checking a request's session cookie.
+pub(crate) enum SessionCheck {
+    /// No usable session; the request must be treated as unauthenticated.
+    Invalid,
+    /// The session is valid and its cookie needs no update.
+    Valid,
+    /// The session is valid and its expiry slid forward, so the response must refresh the
+    /// browser cookie's lifetime to match.
+    Renewed(HeaderValue),
 }
 
 /// Distinguishes rejected credentials from temporary PAM saturation for correct HTTP responses.
@@ -167,12 +208,15 @@ struct SessionFile {
     /// Binds the cookie to the password that was current when the session was issued.
     credentials_fingerprint: String,
     expires_at: i64,
+    #[serde(default)]
+    method: SessionMethod,
 }
 
 impl AuthState {
     /// Creates the private session directory before requests arrive so login failures are actionable.
     pub(crate) async fn new(
         credentials: AuthMode,
+        oidc: Option<&OidcConfig>,
         agent_token: String,
         cookie_secure: bool,
         data_dir: &std::path::Path,
@@ -234,6 +278,11 @@ impl AuthState {
             cookie_secure,
             agent_token,
             login_limiter: std::sync::Arc::new(LoginRateLimiter::new()),
+            oidc_sessions: oidc.map(|config| OidcSessionPolicy {
+                fingerprint: oidc_fingerprint(config),
+                lifetime: config.session_lifetime,
+            }),
+            session_file_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(target_os = "linux")]
             pam_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         };
@@ -263,50 +312,108 @@ impl AuthState {
     }
 
     /// Reads the session file on every request so logout and server restarts share one source of truth.
-    pub(crate) async fn session_valid(&self, headers: &HeaderMap) -> bool {
+    pub(crate) async fn check_session(&self, headers: &HeaderMap) -> SessionCheck {
         let Some(session_id) = session_cookie(headers) else {
-            return false;
+            return SessionCheck::Invalid;
         };
         let Some(path) = self.session_path(&session_id) else {
-            return false;
+            return SessionCheck::Invalid;
         };
         let Ok(contents) = tokio::fs::read(&path).await else {
-            return false;
+            return SessionCheck::Invalid;
         };
-        let Ok(session) = serde_json::from_slice::<SessionFile>(&contents) else {
-            return false;
+        let Ok(mut session) = serde_json::from_slice::<SessionFile>(&contents) else {
+            return SessionCheck::Invalid;
         };
 
         let now = jiff::Timestamp::now().as_second();
         if session.session_id != session_id
-            || session.username != self.username
-            || session.credentials_fingerprint != self.credentials_fingerprint
+            || !self.is_current(&session)
             || session.expires_at <= now
         {
             // Remove expired or credential-mismatched files so disk does not retain stealable IDs.
             let _ = tokio::fs::remove_file(path).await;
-            return false;
+            return SessionCheck::Invalid;
         }
 
-        true
+        let Some(policy) = self
+            .oidc_sessions
+            .as_ref()
+            .filter(|_| session.method == SessionMethod::Oidc)
+        else {
+            return SessionCheck::Valid;
+        };
+        let lifetime = policy.lifetime.as_secs() as i64;
+        let renewal_interval = SESSION_RENEWAL_INTERVAL.min(policy.lifetime / 2).as_secs() as i64;
+        if session.expires_at - now > lifetime - renewal_interval {
+            return SessionCheck::Valid;
+        }
+        session.expires_at = now + lifetime;
+        let _guard = self.session_file_lock.lock().await;
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            // Logged out while this request was in flight; let this request finish but do not
+            // bring the session back.
+            return SessionCheck::Valid;
+        }
+        if let Err(error) = self.write_session(&session).await {
+            // The session is still valid until its old expiry, so a failed renewal must not
+            // log the user out; the next request simply tries again.
+            log_error!(error, "Failed to renew session");
+            return SessionCheck::Valid;
+        }
+        SessionCheck::Renewed(self.session_set_cookie(&session_id, policy.lifetime))
+    }
+
+    /// Whether a stored session still matches the account and the login rules that issued it.
+    fn is_current(&self, session: &SessionFile) -> bool {
+        if session.username != self.username {
+            return false;
+        }
+        match session.method {
+            SessionMethod::Password => {
+                session.credentials_fingerprint == self.credentials_fingerprint
+            }
+            // Removing the OIDC config revokes every session it created.
+            SessionMethod::Oidc => self
+                .oidc_sessions
+                .as_ref()
+                .is_some_and(|policy| session.credentials_fingerprint == policy.fingerprint),
+        }
+    }
+
+    /// Creates a session for the single configured account, recording how the user signed in.
+    pub(crate) async fn create_session(&self, method: SessionMethod) -> anyhow::Result<NewSession> {
+        let (fingerprint, lifetime) = match (method, &self.oidc_sessions) {
+            (SessionMethod::Password, _) => {
+                (self.credentials_fingerprint.clone(), SESSION_LIFETIME)
+            }
+            (SessionMethod::Oidc, Some(policy)) => (policy.fingerprint.clone(), policy.lifetime),
+            (SessionMethod::Oidc, None) => anyhow::bail!("OIDC sign-in is not configured"),
+        };
+        let session = SessionFile {
+            session_id: Uuid::new_v4().to_string(),
+            username: self.username.clone(),
+            credentials_fingerprint: fingerprint,
+            expires_at: (jiff::Timestamp::now() + lifetime).as_second(),
+            method,
+        };
+        self.write_session(&session).await?;
+        Ok(NewSession {
+            cookie: self.session_set_cookie(&session.session_id, lifetime),
+            username: session.username,
+        })
     }
 
     /// Writes through a temporary file so a crash cannot leave a partially valid JSON session.
-    async fn create_session(&self) -> anyhow::Result<String> {
-        let session_id = Uuid::new_v4().to_string();
+    async fn write_session(&self, session: &SessionFile) -> anyhow::Result<()> {
+        let session_id = &session.session_id;
         let path = self
-            .session_path(&session_id)
-            .expect("a generated UUID must produce a session path");
+            .session_path(session_id)
+            .ok_or_else(|| anyhow::anyhow!("session id is not a UUID"))?;
         let temporary_path = self
             .sessions_directory
             .join(format!(".session_{session_id}.tmp"));
-        let session = SessionFile {
-            session_id: session_id.clone(),
-            username: self.username.clone(),
-            credentials_fingerprint: self.credentials_fingerprint.clone(),
-            expires_at: (jiff::Timestamp::now() + SESSION_LIFETIME).as_second(),
-        };
-        let contents = serde_json::to_vec(&session)?;
+        let contents = serde_json::to_vec(session)?;
         write_private_file(&temporary_path, &contents).await?;
         tokio::fs::rename(&temporary_path, &path).await?;
         #[cfg(unix)]
@@ -314,7 +421,22 @@ impl AuthState {
             use std::os::unix::fs::PermissionsExt;
             tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
         }
-        Ok(session_id)
+        Ok(())
+    }
+
+    /// Builds the `Set-Cookie` value for a session so every issuer uses the same attributes.
+    fn session_set_cookie(&self, session_id: &str, lifetime: Duration) -> HeaderValue {
+        let cookie = format!(
+            "{SESSION_COOKIE_NAME}={session_id}; HttpOnly; SameSite=Lax; Path=/{}; Max-Age={}",
+            self.secure_flag(),
+            lifetime.as_secs()
+        );
+        HeaderValue::from_str(&cookie).expect("generated cookie contains only safe ASCII")
+    }
+
+    /// Cookie attribute that keeps cookies off plain HTTP when the deployment uses HTTPS.
+    pub(crate) fn secure_flag(&self) -> &'static str {
+        if self.cookie_secure { "; Secure" } else { "" }
     }
 
     /// Deletes only a syntactically valid session identifier, preventing path traversal via cookies.
@@ -325,6 +447,7 @@ impl AuthState {
         let Some(path) = self.session_path(&session_id) else {
             return Ok(());
         };
+        let _guard = self.session_file_lock.lock().await;
         match tokio::fs::remove_file(path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -350,9 +473,7 @@ impl AuthState {
                 let _ = tokio::fs::remove_file(&path).await;
                 continue;
             };
-            if session.username != self.username
-                || session.credentials_fingerprint != self.credentials_fingerprint
-            {
+            if !self.is_current(&session) {
                 let _ = tokio::fs::remove_file(&path).await;
             }
         }
@@ -445,6 +566,34 @@ fn credentials_fingerprint(password: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Digest of the OIDC settings that decide who may sign in. The client secret is left out on
+/// purpose: rotating it does not change who is allowed, so it should not sign everyone out.
+fn oidc_fingerprint(config: &OidcConfig) -> String {
+    let mut groups = config.allowed_groups.clone();
+    groups.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"redoor-oidc-session-v1:");
+    for part in [config.issuer.as_str(), config.client_id.as_str()]
+        .into_iter()
+        .chain(groups.iter().map(String::as_str))
+    {
+        // Length prefixes keep different field splits from hashing to the same input.
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A freshly created session: the account it belongs to and the cookie that carries it.
+pub(crate) struct NewSession {
+    pub(crate) username: String,
+    pub(crate) cookie: HeaderValue,
 }
 
 /// Constant-time string equality via fixed-length digests so length and content do not leak via timing.
@@ -560,8 +709,8 @@ pub(crate) async fn login_handler(
         }
     }
 
-    let session_id = match state.auth.create_session().await {
-        Ok(session_id) => session_id,
+    let session = match state.auth.create_session(SessionMethod::Password).await {
+        Ok(session) => session,
         Err(error) => {
             // Keep IO/path details off the wire; operators still see them in server logs.
             log_error!(error, "Failed to create session");
@@ -576,22 +725,12 @@ pub(crate) async fn login_handler(
     };
 
     let mut response = Json(LoginResponse {
-        username: request.username,
+        username: session.username,
     })
     .into_response();
-    let secure_flag = if state.auth.cookie_secure {
-        "; Secure"
-    } else {
-        ""
-    };
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}={session_id}; HttpOnly; SameSite=Lax; Path=/{secure_flag}; Max-Age={}",
-        SESSION_LIFETIME.as_secs()
-    );
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&cookie).expect("generated cookie contains only safe ASCII"),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, session.cookie);
     response
 }
 
@@ -611,11 +750,7 @@ pub(crate) async fn logout_handler(
             .into_response();
     }
 
-    let secure_flag = if state.auth.cookie_secure {
-        "; Secure"
-    } else {
-        ""
-    };
+    let secure_flag = state.auth.secure_flag();
     let mut response = Json(LogoutResponse { logged_out: true }).into_response();
     let cookie =
         format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/{secure_flag}; Max-Age=0");
@@ -629,13 +764,249 @@ pub(crate) async fn logout_handler(
 #[cfg(test)]
 mod tests {
     use super::{
-        FailureWindow, LOGIN_MAX_FAILURES_GLOBAL, LOGIN_MAX_FAILURES_PER_IP, LOGIN_MAX_TRACKED_IPS,
-        LOGIN_RATE_WINDOW, LoginRateLimiter,
+        AuthState, FailureWindow, LOGIN_MAX_FAILURES_GLOBAL, LOGIN_MAX_FAILURES_PER_IP,
+        LOGIN_MAX_TRACKED_IPS, LOGIN_RATE_WINDOW, LoginRateLimiter, SESSION_COOKIE_NAME,
+        SessionCheck, SessionFile, SessionMethod,
     };
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use redoor_core::config::{AuthMode, OidcConfig};
+    use redoor_core::test_support::TempDir;
     use std::{
         net::{IpAddr, Ipv4Addr},
-        time::Instant,
+        time::{Duration, Instant},
     };
+
+    /// OIDC settings with the given allowed groups and a one-year sliding lifetime.
+    fn oidc_config(groups: &[&str]) -> OidcConfig {
+        OidcConfig {
+            issuer: "https://id.example.org".to_string(),
+            client_id: "redoor".to_string(),
+            client_secret: "secret".to_string(),
+            redirect_url: "https://redoor.example.org/api/v1/auth/oidc/callback"
+                .parse()
+                .expect("test URL must parse"),
+            allowed_groups: groups.iter().map(|group| group.to_string()).collect(),
+            scopes: vec!["openid".to_string()],
+            provider_name: "Example".to_string(),
+            session_lifetime: Duration::from_secs(365 * 24 * 60 * 60),
+        }
+    }
+
+    /// Auth state for a password account, optionally with OIDC, stored in `directory`.
+    async fn auth_state(directory: &TempDir, oidc: Option<&OidcConfig>) -> AuthState {
+        AuthState::new(
+            AuthMode::Configured {
+                username: "admin".to_string(),
+                password: "password".to_string(),
+            },
+            oidc,
+            "agent-token".to_string(),
+            false,
+            directory.path(),
+        )
+        .await
+        .expect("auth state must initialize")
+    }
+
+    /// Request headers carrying the cookie from a `Set-Cookie` value.
+    fn cookie_headers(set_cookie: &HeaderValue) -> HeaderMap {
+        let pair = set_cookie
+            .to_str()
+            .expect("cookie is ASCII")
+            .split(';')
+            .next()
+            .expect("cookie has a name-value pair")
+            .to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, pair.parse().expect("cookie header"));
+        headers
+    }
+
+    /// Rewrites a stored session's expiry, standing in for the passage of time.
+    async fn set_expiry(directory: &TempDir, headers: &HeaderMap, expires_at: i64) {
+        let value = headers[header::COOKIE].to_str().expect("ASCII");
+        let session_id = value
+            .strip_prefix(&format!("{SESSION_COOKIE_NAME}="))
+            .expect("session cookie");
+        let path = directory
+            .path()
+            .join("sessions")
+            .join(format!("session_{session_id}.json"));
+        let mut session: SessionFile =
+            serde_json::from_slice(&tokio::fs::read(&path).await.expect("session file"))
+                .expect("session JSON");
+        session.expires_at = expires_at;
+        tokio::fs::write(&path, serde_json::to_vec(&session).expect("JSON"))
+            .await
+            .expect("rewrite session");
+    }
+
+    /// OIDC sessions slide forward on use, at most once per renewal interval, and refresh
+    /// the browser cookie when they do.
+    #[tokio::test]
+    async fn oidc_sessions_slide_and_refresh_the_cookie() {
+        let directory = TempDir::create();
+        let oidc = oidc_config(&["admins"]);
+        let auth = auth_state(&directory, Some(&oidc)).await;
+        let session = auth
+            .create_session(SessionMethod::Oidc)
+            .await
+            .expect("session must be created");
+        // The browser cookie lasts as long as the configured sliding lifetime.
+        assert!(
+            session
+                .cookie
+                .to_str()
+                .expect("ASCII")
+                .contains("Max-Age=31536000")
+        );
+        let headers = cookie_headers(&session.cookie);
+        // A brand-new session needs no renewal, so no disk write or cookie per request.
+        assert!(matches!(
+            auth.check_session(&headers).await,
+            SessionCheck::Valid
+        ));
+
+        let now = jiff::Timestamp::now().as_second();
+        set_expiry(&directory, &headers, now + 60).await;
+        // A session close to expiry is extended and the cookie is re-issued.
+        let SessionCheck::Renewed(cookie) = auth.check_session(&headers).await else {
+            panic!("a used session close to expiry must be renewed");
+        };
+        assert!(cookie.to_str().expect("ASCII").contains("Max-Age=31536000"));
+        // After renewal the stored expiry is a full lifetime away again.
+        assert!(matches!(
+            auth.check_session(&headers).await,
+            SessionCheck::Valid
+        ));
+
+        set_expiry(&directory, &headers, now - 1).await;
+        // Sliding never revives a session that already expired.
+        assert!(matches!(
+            auth.check_session(&headers).await,
+            SessionCheck::Invalid
+        ));
+    }
+
+    /// Password sessions keep their fixed lifetime even when OIDC is configured.
+    #[tokio::test]
+    async fn password_sessions_do_not_slide() {
+        let directory = TempDir::create();
+        let oidc = oidc_config(&["admins"]);
+        let auth = auth_state(&directory, Some(&oidc)).await;
+        let session = auth
+            .create_session(SessionMethod::Password)
+            .await
+            .expect("session must be created");
+        // Password sessions keep the existing one-week cookie.
+        assert!(
+            session
+                .cookie
+                .to_str()
+                .expect("ASCII")
+                .contains("Max-Age=604800")
+        );
+        let headers = cookie_headers(&session.cookie);
+        set_expiry(
+            &directory,
+            &headers,
+            jiff::Timestamp::now().as_second() + 60,
+        )
+        .await;
+        // Use near expiry does not extend a password session.
+        assert!(matches!(
+            auth.check_session(&headers).await,
+            SessionCheck::Valid
+        ));
+    }
+
+    /// Changing who may sign in, or turning OIDC off, revokes the sessions OIDC created
+    /// while leaving password sessions alone.
+    #[tokio::test]
+    async fn oidc_config_changes_revoke_oidc_sessions() {
+        let directory = TempDir::create();
+        let oidc = oidc_config(&["admins"]);
+        let auth = auth_state(&directory, Some(&oidc)).await;
+        let oidc_headers = cookie_headers(
+            &auth
+                .create_session(SessionMethod::Oidc)
+                .await
+                .expect("session")
+                .cookie,
+        );
+        let password_headers = cookie_headers(
+            &auth
+                .create_session(SessionMethod::Password)
+                .await
+                .expect("session")
+                .cookie,
+        );
+
+        let widened = oidc_config(&["admins", "family"]);
+        let restarted = auth_state(&directory, Some(&widened)).await;
+        // New group rules mean old OIDC grants no longer apply.
+        assert!(matches!(
+            restarted.check_session(&oidc_headers).await,
+            SessionCheck::Invalid
+        ));
+        // Password sessions do not depend on the OIDC settings.
+        assert!(matches!(
+            restarted.check_session(&password_headers).await,
+            SessionCheck::Valid
+        ));
+
+        let oidc_headers = cookie_headers(
+            &restarted
+                .create_session(SessionMethod::Oidc)
+                .await
+                .expect("session")
+                .cookie,
+        );
+        let without_oidc = auth_state(&directory, None).await;
+        // Removing the OIDC section revokes every session it created.
+        assert!(matches!(
+            without_oidc.check_session(&oidc_headers).await,
+            SessionCheck::Invalid
+        ));
+        // Without OIDC configured, no OIDC session can be created at all.
+        assert!(
+            without_oidc
+                .create_session(SessionMethod::Oidc)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Session files written before OIDC support have no method and stay valid.
+    #[tokio::test]
+    async fn legacy_session_files_remain_password_sessions() {
+        let directory = TempDir::create();
+        let auth = auth_state(&directory, None).await;
+        let session = auth
+            .create_session(SessionMethod::Password)
+            .await
+            .expect("session");
+        let headers = cookie_headers(&session.cookie);
+        let value = headers[header::COOKIE].to_str().expect("ASCII");
+        let session_id = value
+            .strip_prefix(&format!("{SESSION_COOKIE_NAME}="))
+            .expect("session cookie");
+        let path = directory
+            .path()
+            .join("sessions")
+            .join(format!("session_{session_id}.json"));
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.expect("file")).expect("JSON");
+        stored.as_object_mut().expect("object").remove("method");
+        tokio::fs::write(&path, serde_json::to_vec(&stored).expect("JSON"))
+            .await
+            .expect("rewrite");
+        // Upgrading the server must not sign out existing browsers.
+        assert!(matches!(
+            auth.check_session(&headers).await,
+            SessionCheck::Valid
+        ));
+    }
 
     /// Ensures failed-login state expires at the boundary without sleeps or resetting active bans.
     #[test]

@@ -63,6 +63,18 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         )
         .route("/api/v1/login", post(login_handler))
         .route("/api/v1/logout", post(logout_handler))
+        .route(
+            "/api/v1/auth/methods",
+            get(super::oidc::login_methods_handler),
+        )
+        .route(
+            "/api/v1/auth/oidc/login",
+            get(super::oidc::oidc_login_handler),
+        )
+        .route(
+            "/api/v1/auth/oidc/callback",
+            get(super::oidc::oidc_callback_handler),
+        )
         .route("/api/v1/ui/ws", get(ui_websocket_handler))
         .route("/api/v1/server/logs/ws", get(server_logs_websocket_handler))
         .route(
