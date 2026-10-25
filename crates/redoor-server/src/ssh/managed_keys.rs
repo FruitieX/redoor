@@ -14,6 +14,7 @@ use zeroize::Zeroizing;
 
 use super::ProvisionError;
 use super::keys::{HostKey, ManagedKey, SshKeyStore, device_marker};
+use super::shell::quote;
 use super::transport::{
     AuthPolicy, HostKeyPolicy, PinnedHostKey, SshConfigDump, SshHost, SshOutput, SshRunOptions,
 };
@@ -680,11 +681,13 @@ fn is_host_key_failure(output: &SshOutput) -> bool {
 /// `==`, never a regex), and receives them through `ENVIRON`, which unlike `awk -v` does
 /// not interpret backslash escapes. That works the same in GNU awk, BSD awk and busybox.
 fn install_script(device: &AgentId, keep: &[String], new: Option<(&str, &str)>) -> String {
-    let marker = shell_quote(&device_marker(device));
+    // Fingerprints and key lines never contain a single quote today, but the script runs
+    // on the device, so quoting must not depend on that.
+    let marker = quote(&device_marker(device));
     // Spaces around every entry let awk find whole fingerprints with `index`.
-    let keep = shell_quote(&format!(" {} ", keep.join(" ")));
-    let new_line = shell_quote(new.map_or("", |(line, _)| line));
-    let skip = shell_quote(new.map_or("", |(_, fingerprint)| fingerprint));
+    let keep = quote(&format!(" {} ", keep.join(" ")));
+    let new_line = quote(new.map_or("", |(line, _)| line));
+    let skip = quote(new.map_or("", |(_, fingerprint)| fingerprint));
     format!(
         r#"set -eu
 umask 077
@@ -730,12 +733,6 @@ mv -f "$temp" "$authorized_keys"
 trap - EXIT
 "#
     )
-}
-
-/// Quotes a value for a POSIX shell. Fingerprints and key lines never contain a single
-/// quote today, but the script runs on the device, so quoting must not depend on that.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 #[cfg(test)]

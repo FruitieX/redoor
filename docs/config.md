@@ -141,6 +141,8 @@ Default when `local` is omitted or `false`. The server SSHes to the host, ensure
 | `log`        | string        | no       | Local file that captures the SSH process stdout/stderr (append mode).                                                                                                        |
 | `password`   | string        | no       | Plaintext SSH login password. When set, the server answers OpenSSH via `SSH_ASKPASS`. Prefer keys or `ssh-agent` when possible.                                              |
 
+`remote_bin` and `home` are used literally on the device, except that a leading `~/`, `$HOME/` or `${HOME}/` is expanded to the remote user's home directory. Other shell syntax such as variables or `$(...)` is not interpreted.
+
 ```toml
 [[agents]]
 target = "user@example.com"

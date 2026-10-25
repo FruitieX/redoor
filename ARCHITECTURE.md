@@ -150,6 +150,15 @@ The agent runtime and the implementation of every command.
   - `transport`: `SshHost` with a `HostKeyPolicy` and an `AuthPolicy`. `build_ssh_command`
     is the only place that creates an `ssh` command, so no connection (probe, upload or
     agent session) can bypass the policies.
+  - `shell`: every remote command reaches the user's login shell as a single-line
+    `sh -c '<script>' sh '<arg>'...` of single-quoted words. The login shell may be fish or
+    tcsh, so it only ever starts POSIX `sh`, and arguments such as agent names with spaces
+    are never split or interpreted. Remote paths are literal except for a known home or data
+    directory prefix (`~/`, `$HOME/`, `${XDG_DATA_HOME:-$HOME/.local/share}/`), which is
+    expanded on the device.
+  - `provision`: the probe, launch and upload scripts and the `Installer` that picks,
+    uploads and verifies the binary. A binary upload is one session: a script creates the
+    directory, writes a temp file, marks it executable and renames it into place.
   - `keys` (`SshKeyStore`) and `managed_keys`: per-device SSH keys and pinned host keys,
     see "SSH device keys" below.
 - `startup`: `ServerConfig::resolve`, then `ServerRuntime::build`, then
@@ -587,11 +596,16 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   starts at 1 s and doubles up to 30 s, and resets after 30 s of stable connection. The
   watchdog never gives up. The latest error is shown as the agent's `connection_issue` while
   it stays `Starting`.
-- **SSH provisioning runs on every attempt**, so the UI always shows current results. It
-  probes the OS and architecture and reuses the remote binary if its version matches.
-  Otherwise it uploads the matching release from the local cache. Each step is published as
-  `provisioning_status`, which the UI lists while the agent starts. The ssh child holds the
-  remote agent's stdin, so killing ssh makes the remote agent exit (`--exit-on-stdin-eof`).
+- **SSH provisioning runs on every attempt**, so the UI always shows current results. The
+  agent is started by a launch script that first reports the OS, architecture, version and
+  SHA-1 of the binary at the default install path, and `exec`s it only when it matches this
+  server. A device with a current binary therefore starts in one SSH session. Otherwise the
+  script exits without starting anything, the server uploads the matching release from the
+  local cache and starts again, and that second report verifies the upload. Each step is
+  published as `provisioning_status`, which the UI lists while the agent starts. The ssh
+  child holds the remote agent's stdin, so killing ssh makes the remote agent exit
+  (`--exit-on-stdin-eof`). Relays probe and install once before their first start instead,
+  because they restart the agent many times from the prepared state.
 - **A stop wins every race.** Every start, shutdown and retry bumps an attempt generation, and
   the router commits a registration only if its generation is still current. An agent that
   connects while its entry is not desired-running gets `rejected` with `stopped` and exits.

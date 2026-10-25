@@ -16,8 +16,11 @@ use redoor_protocol::wire::log::Level;
 
 use super::managed_keys::ManagedKeyDevice;
 use super::provision::{
-    default_remote_bin, ensure_remote_binary, force_upload_binary, sniff_remote,
+    BinaryCheck, BinaryCheckResult, BinaryExpectation, Installer, LAUNCH_NEEDS_INSTALL,
+    LAUNCH_READY, PROBE_REPORT_LINES, ProbeCheck, RemoteSniff, default_remote_bin,
+    force_upload_binary,
 };
+use super::shell::path_word;
 use super::transport::{SshHost, SshRunOptions};
 use super::{ProvisionContext, ProvisionError};
 use crate::watchdog::ProvisioningStatusSink;
@@ -93,7 +96,7 @@ pub(super) struct RelayOptions<'a> {
 /// ssh argv to run. Launchers use the shared random spawn method to start a
 /// fresh child without re-sniffing the host or re-uploading the binary.
 #[derive(Clone)]
-pub(crate) struct PreparedSshBackedAgent {
+pub(super) struct PreparedSshBackedAgent {
     pub(super) host: SshHost,
     /// Agent registration name passed with `--name`.
     pub(super) agent_name: String,
@@ -102,9 +105,10 @@ pub(crate) struct PreparedSshBackedAgent {
     pub(super) agent_id: AgentId,
     /// Root CLI namespace passed explicitly so the remote process matches the server.
     pub(super) app_name: String,
-    /// Remote executable path (may contain shell variables expanded remotely).
+    /// Remote executable path; a home or data directory prefix is expanded remotely by
+    /// [`path_word`].
     pub(super) remote_bin: String,
-    /// Directory the UI opens first, when configured.
+    /// Directory the UI opens first, when configured; expanded like `remote_bin`.
     pub(super) home: Option<String>,
     /// Where the reverse tunnel ends.
     pub(super) destination: TunnelDestination,
@@ -117,7 +121,8 @@ pub(crate) struct PreparedSshBackedAgent {
 }
 
 impl PreparedSshBackedAgent {
-    /// Spawns the long-running ssh child on `remote_port` with `options`.
+    /// Spawns the long-running ssh child on `remote_port` with `options`, starting
+    /// `remote_bin` without checking it first.
     ///
     /// The returned `Child` is owned by the caller (the supervisor or relay) so it can
     /// wait for normal exit or kill it when the WebSocket goes stale.
@@ -139,7 +144,12 @@ impl PreparedSshBackedAgent {
             self.destination.port
         );
         let argv_refs: Vec<&str> = remote_argv.iter().map(String::as_str).collect();
-        let result = self.host.spawn(&self.remote_bin, &argv_refs, options).await;
+        let script = format!(
+            "{}exec {} \"$@\"",
+            self.home_statement(),
+            path_word(&self.remote_bin)
+        );
+        let result = self.host.spawn(&script, &argv_refs, options).await;
         match &result {
             Ok(child) => log!(
                 Level::Debug,
@@ -167,14 +177,22 @@ impl PreparedSshBackedAgent {
         Ok((remote_port, child))
     }
 
-    /// Starts a TOML-managed agent with the shared random-port policy while
-    /// leaving retries and stale-session handling to the server watchdog.
-    pub(crate) async fn spawn_managed(
+    /// Starts a TOML-managed agent from a binary that is used without checking, with the
+    /// shared random-port policy, leaving retries and stale-session handling to the
+    /// server watchdog.
+    async fn spawn_managed(
         &self,
         status: &ProvisioningStatusSink,
     ) -> std::io::Result<tokio::process::Child> {
         let remote_port = self.random_remote_port.next();
         status.report(format!("Spawning the remote binary at {}", self.remote_bin));
+        let (remote_argv, options) = self.managed_launch_settings(remote_port);
+        self.spawn_on(remote_port, &options, &remote_argv).await
+    }
+
+    /// Launch settings of a managed agent: the shared ones plus the managed-agent marker
+    /// and, without a log file, piped stderr for the watchdog.
+    fn managed_launch_settings(&self, remote_port: u16) -> (Vec<String>, SshRunOptions) {
         let (remote_argv, options) = self.launch_settings(remote_port);
         let mut options = options.with_managed_agent();
         if options.log_file().is_none() {
@@ -182,7 +200,16 @@ impl PreparedSshBackedAgent {
             // OpenSSH failures do not collapse into an unexplained status 255.
             options = options.with_piped_stderr();
         }
-        self.spawn_on(remote_port, &options, &remote_argv).await
+        (remote_argv, options)
+    }
+
+    /// Appends `--home` to the agent's arguments inside the launch script, so a
+    /// home-relative directory is expanded on the device like the binary path.
+    fn home_statement(&self) -> String {
+        match &self.home {
+            Some(home) => format!("set -- \"$@\" --home {}; ", path_word(home)),
+            None => String::new(),
+        }
     }
 
     /// Builds the matching remote agent argv and reverse-forward options so the
@@ -211,10 +238,6 @@ impl PreparedSshBackedAgent {
             if server.insecure {
                 remote_argv.push("--insecure-tls".to_string());
             }
-        }
-        if let Some(home) = &self.home {
-            remote_argv.push("--home".to_string());
-            remote_argv.push(home.clone());
         }
         log!(
             Level::Debug,
@@ -250,20 +273,13 @@ pub(super) struct Preparation<'a> {
 }
 
 impl Preparation<'_> {
-    /// Probes and installs as needed, then assembles the launchable agent.
+    /// Probes and installs as needed, then assembles the launchable agent. Used by relays,
+    /// which start the agent later and repeatedly from the prepared state.
     pub(super) async fn run(self) -> Result<PreparedSshBackedAgent, ProvisionError> {
         let started = Instant::now();
-        // Checked before touching the host: an entry without an id cannot register anyway.
-        let agent_id = self.config.id.clone().ok_or_else(|| {
-            ProvisionError::Configuration(format!(
-                "SSH agent '{}' has no device id in the config",
-                self.config.target
-            ))
-        })?;
-        let host = self.ssh_host().await?;
-        let result = self.install_binary(&host).await;
-        let remote_bin = match result {
-            Ok(remote_bin) => remote_bin,
+        let mut prepared = self.assemble().await?;
+        match self.install_binary(&prepared.host).await {
+            Ok(remote_bin) => prepared.remote_bin = remote_bin,
             Err(error) => {
                 log_error!(
                     anyhow::Error::msg(error.to_string()),
@@ -273,22 +289,81 @@ impl Preparation<'_> {
                 );
                 return Err(error);
             }
+        }
+        log!(
+            Level::Info,
+            "Prepared redoor agent on remote host: name={}, agent_id={}, remote_bin={}, home={:?}, log={:?}, elapsed={:?}",
+            prepared.agent_name,
+            prepared.agent_id,
+            prepared.remote_bin,
+            self.config.home,
+            self.config.log,
+            started.elapsed()
+        );
+        Ok(prepared)
+    }
+
+    /// Starts a server-managed agent. A binary at the default install path is probed in
+    /// the same SSH session that starts it, so a device with a current binary needs one
+    /// session; only a missing or stale binary costs an upload and a second start.
+    pub(super) async fn start_managed(self) -> Result<tokio::process::Child, ProvisionError> {
+        let started = Instant::now();
+        let prepared = self.assemble().await?;
+        let result = if self.config.remote_bin.is_some() {
+            self.trust_operator_binary(&prepared.remote_bin);
+            prepared
+                .spawn_managed(self.status)
+                .await
+                .map_err(ProvisionError::from)
+        } else {
+            Installer {
+                host: &prepared.host,
+                provision: self.provision,
+                status: self.status,
+            }
+            .ensure(&mut LaunchCheck {
+                prepared: &prepared,
+                status: self.status,
+            })
+            .await
         };
+        match &result {
+            Ok(child) => log!(
+                Level::Info,
+                "Started managed SSH agent: target={}, name={}, agent_id={}, child_id={:?}, elapsed={:?}",
+                self.config.target,
+                prepared.agent_name,
+                prepared.agent_id,
+                child.id(),
+                started.elapsed()
+            ),
+            Err(error) => log_error!(
+                anyhow::Error::msg(error.to_string()),
+                "Managed SSH agent start failed: target={}, name={}, agent_id={}, elapsed={:?}",
+                self.config.target,
+                prepared.agent_name,
+                prepared.agent_id,
+                started.elapsed()
+            ),
+        }
+        result
+    }
+
+    /// Builds the launchable agent for the requested binary path without touching the host.
+    async fn assemble(&self) -> Result<PreparedSshBackedAgent, ProvisionError> {
+        // Checked before touching the host: an entry without an id cannot register anyway.
+        let agent_id = self.config.id.clone().ok_or_else(|| {
+            ProvisionError::Configuration(format!(
+                "SSH agent '{}' has no device id in the config",
+                self.config.target
+            ))
+        })?;
+        let host = self.ssh_host().await?;
         let agent_name = self
             .config
             .name
             .clone()
             .unwrap_or_else(|| default_agent_name(&self.config.target));
-        log!(
-            Level::Info,
-            "Prepared redoor agent on remote host: name={}, agent_id={}, remote_bin={}, home={:?}, log={:?}, elapsed={:?}",
-            agent_name,
-            agent_id,
-            remote_bin,
-            self.config.home,
-            self.config.log,
-            started.elapsed()
-        );
         Ok(PreparedSshBackedAgent {
             options: self.run_options(),
             host,
@@ -297,12 +372,13 @@ impl Preparation<'_> {
             app_name: self
                 .relay
                 .agent_app_name
+                .clone()
                 .unwrap_or_else(|| self.provision.app_name.clone()),
-            remote_bin,
+            remote_bin: self.requested_remote_bin(),
             home: self.config.home.clone(),
-            destination: self.destination,
+            destination: self.destination.clone(),
             random_remote_port: RandomRemotePort::default(),
-            secure_server: self.relay.secure_server,
+            secure_server: self.relay.secure_server.clone(),
         })
     }
 
@@ -335,9 +411,22 @@ impl Preparation<'_> {
             return self.force_upload(host, binary_source, &remote_bin).await;
         }
         if self.config.remote_bin.is_some() {
-            return Ok(self.trust_operator_binary(remote_bin));
+            self.trust_operator_binary(&remote_bin);
+            return Ok(remote_bin);
         }
-        self.sniff_and_ensure(host, &remote_bin).await
+        log!(
+            Level::Info,
+            "Sniffing SSH target before relay: target={}, ssh_server_port={}",
+            self.config.target,
+            host.server_port_label()
+        );
+        Installer {
+            host,
+            provision: self.provision,
+            status: self.status,
+        }
+        .ensure(&mut ProbeCheck { host })
+        .await
     }
 
     /// Replaces the remote binary with an operator-selected local file.
@@ -357,8 +446,8 @@ impl Preparation<'_> {
         force_upload_binary(host, binary_source, remote_bin, self.status).await
     }
 
-    /// Uses an operator-provided path without touching it.
-    fn trust_operator_binary(&self, remote_bin: String) -> String {
+    /// Reports that an operator-provided path is used without touching it.
+    fn trust_operator_binary(&self, remote_bin: &str) {
         self.status.report(format!(
             "Using operator-provided remote binary at {remote_bin}"
         ));
@@ -368,25 +457,6 @@ impl Preparation<'_> {
             self.config.target,
             remote_bin
         );
-        remote_bin
-    }
-
-    /// Probes the host and installs the matching binary when it is missing or stale.
-    async fn sniff_and_ensure(
-        &self,
-        host: &SshHost,
-        remote_bin: &str,
-    ) -> Result<String, ProvisionError> {
-        self.status.report("Sniffing the SSH target");
-        log!(
-            Level::Info,
-            "Sniffing SSH target before relay: target={}, ssh_server_port={}",
-            self.config.target,
-            host.server_port_label()
-        );
-        let sniff = sniff_remote(host, remote_bin).await?;
-        self.status.report(sniff.status_message());
-        ensure_remote_binary(host, &sniff, self.provision, self.status).await
     }
 
     /// SSH options shared by every launch: the token as stdin secret, the log file and,
@@ -401,6 +471,105 @@ impl Preparation<'_> {
             options = options.with_piped_stderr();
         }
         options
+    }
+}
+
+/// Checks a managed agent's binary by starting it with the launch script, which probes
+/// first and only `exec`s a matching binary; the ready value is the running ssh child.
+struct LaunchCheck<'a> {
+    /// The agent to start.
+    prepared: &'a PreparedSshBackedAgent,
+    /// Progress lines for the lifecycle UI.
+    status: &'a ProvisioningStatusSink,
+}
+
+impl BinaryCheck for LaunchCheck<'_> {
+    type Ready = tokio::process::Child;
+
+    async fn check(
+        &mut self,
+        remote_bin: &str,
+        expect: &BinaryExpectation,
+    ) -> Result<BinaryCheckResult<tokio::process::Child>, ProvisionError> {
+        let prepared = self.prepared;
+        let target = prepared.host.target();
+        let remote_port = prepared.random_remote_port.next();
+        let (remote_argv, options) = prepared.managed_launch_settings(remote_port);
+        let argv_refs: Vec<&str> = remote_argv.iter().map(String::as_str).collect();
+        let script = format!(
+            "{}{}",
+            prepared.home_statement(),
+            expect.launch_script(remote_bin)
+        );
+        log!(
+            Level::Info,
+            "Starting SSH-backed redoor agent if its binary matches: target={}, ssh_server_port={}, name={}, remote_bin={}, random_remote_port={}, destination={}:{}",
+            target,
+            prepared.host.server_port_label(),
+            prepared.agent_name,
+            remote_bin,
+            remote_port,
+            prepared.destination.host,
+            prepared.destination.port
+        );
+        // A dropped child kills the ssh client, which stops a started agent through
+        // `--exit-on-stdin-eof`, so every early return below leaves nothing running.
+        let reported = prepared
+            .host
+            .spawn_with_report(
+                &script,
+                &argv_refs,
+                &options,
+                PROBE_REPORT_LINES + 1,
+                "agent start",
+            )
+            .await?;
+        let mut child = reported.child;
+        let (probe, decision) = reported.report.split_at(PROBE_REPORT_LINES);
+        let sniff = RemoteSniff::parse(target, probe)?;
+        match decision.first().map(String::as_str) {
+            Some(LAUNCH_READY) => {
+                self.status.report(format!(
+                    "Spawning the remote binary at {}",
+                    sniff.remote_bin
+                ));
+                Ok(BinaryCheckResult {
+                    sniff,
+                    ready: Some(child),
+                })
+            }
+            Some(LAUNCH_NEEDS_INSTALL) => {
+                // The script exits right after the report; waiting reaps the ssh client.
+                match child.wait().await {
+                    Ok(status) => log!(
+                        Level::Debug,
+                        "Launch script found no matching binary: target={}, remote_bin={}, exit_status={}",
+                        target,
+                        sniff.remote_bin,
+                        status.code().unwrap_or(-1)
+                    ),
+                    Err(error) => redoor_core::log_failure!(
+                        Level::Error,
+                        "Waiting for the finished launch script failed: target={}, error={:#}",
+                        target,
+                        error
+                    ),
+                }
+                Ok(BinaryCheckResult { sniff, ready: None })
+            }
+            other => {
+                redoor_core::log_failure!(
+                    Level::Error,
+                    "Launch script printed an unexpected decision: target={}, decision={:?}, report={:?}",
+                    target,
+                    other,
+                    reported.report
+                );
+                Err(ProvisionError::Remote(format!(
+                    "unexpected launch output from {target}: {other:?}; expected '{LAUNCH_READY}' or '{LAUNCH_NEEDS_INSTALL}'"
+                )))
+            }
+        }
     }
 }
 

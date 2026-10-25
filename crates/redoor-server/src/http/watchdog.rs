@@ -180,24 +180,19 @@ impl ManagedLauncher {
         }
     }
 
-    /// Prepares then spawns one SSH-backed child. Prepare is not cached because
-    /// the starting UI must show sniff results on every attempt.
+    /// Probes, installs when needed, and spawns one SSH-backed child. Nothing is cached
+    /// because the starting UI must show sniff results on every attempt.
     async fn ssh_backed_spawn_once(
         &self,
         config: &redoor_core::config::SshBackedAgentConfig,
         status: crate::watchdog::ProvisioningStatusSink,
     ) -> Result<Child, SpawnError> {
-        let prepared = self
-            .provision
-            .prepare_managed(config, self.redoor_port, &self.agent_token, &status)
-            .await
-            .map_err(SpawnError::Provision)?;
         // ExitOnForwardFailure makes an occupied random remote port terminate the
         // child; the supervisor's next cycle calls this again with a new port.
-        prepared
-            .spawn_managed(&status)
+        self.provision
+            .start_managed(config, self.redoor_port, &self.agent_token, &status)
             .await
-            .map_err(SpawnError::Spawn)
+            .map_err(SpawnError::Provision)
     }
 }
 

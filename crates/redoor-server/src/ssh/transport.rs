@@ -68,6 +68,9 @@ pub(super) struct SshRunOptions {
     /// Pipes stderr so a standalone launcher can detect an initial reverse
     /// forwarding bind failure while still copying agent logs to its terminal.
     pub(super) pipe_stderr: bool,
+    /// Pipes stdout so [`SshHost::spawn_with_report`] can read the launch script's report
+    /// before forwarding the rest to the log file or terminal itself.
+    pipe_stdout: bool,
     /// Managed SSH agents must skip the remote singleton PID lock so sequential
     /// TOML-backed agents on one user can start after the previous session.
     pub(super) managed_agent: bool,
@@ -295,10 +298,11 @@ impl SshHost {
             .unwrap_or_else(|| "ssh-config".to_string())
     }
 
-    /// Spawns `ssh` to execute `command` with `args` on the remote host,
-    /// applying the forwards and forwarding-failure behavior described by
-    /// `options`. Output remains observable while secret-bearing agent sessions
-    /// retain their stdin pipe until the SSH child exits.
+    /// Spawns `ssh` to run the single-line POSIX `sh` script `command` on the remote
+    /// host with `args` as its positional parameters (`"$@"`), applying the forwards and
+    /// forwarding-failure behavior described by `options`. Output remains observable
+    /// while secret-bearing agent sessions retain their stdin pipe until the SSH child
+    /// exits.
     ///
     /// Returns the spawned child. Callers (the supervisor) own the child
     /// so they can wait for it or kill it when the WebSocket goes stale.
@@ -375,9 +379,9 @@ impl SshHost {
         Ok(child)
     }
 
-    /// Spawns `ssh` to execute `command` with `args` on the remote host,
-    /// applying the forwards and forwarding-failure behavior described by
-    /// `options`. Stdio is inherited so the user can observe remote output
+    /// Runs the single-line POSIX `sh` script `command` on the remote host with `args` as
+    /// its positional parameters, applying the forwards and forwarding-failure behavior
+    /// described by `options`. Stdio is inherited so the user can observe remote output
     /// and interact with the process when needed.
     ///
     /// Returns the ssh exit status. Callers are responsible for translating
@@ -445,7 +449,9 @@ impl SshHost {
             options.compressed,
             options.secret_env.is_some()
         );
-        let mut ssh = build_ssh_command(self, "sh", &["-s"], options).await?;
+        // Streamed scripts may span lines, which a `sh -c` argument cannot for csh-family
+        // login shells, so the wrapper only replaces itself with a stdin-reading shell.
+        let mut ssh = build_ssh_command(self, "exec sh -s", &[], options).await?;
         ssh.stdin(Stdio::piped());
         ssh.stdout(Stdio::piped());
         ssh.stderr(Stdio::piped());
@@ -499,8 +505,9 @@ impl SshHost {
         if !status.success() {
             redoor_core::log_failure!(
                 Level::Error,
-                "SSH run_script_captured failed with non-zero status: target={}, status={}, stderr='{}'",
+                "SSH run_script_captured failed with non-zero status: target={}, stage={}, status={}, stderr='{}'",
                 self.target,
+                stage,
                 status.code().unwrap_or(-1),
                 sanitized_ssh_text(self, &stderr)
             );
@@ -527,10 +534,10 @@ impl SshHost {
         Ok(output)
     }
 
-    /// Runs `command` with stdin closed and stderr captured, and returns the
-    /// exit status instead of turning a failure into an error. Used where a failing ssh is
-    /// an expected answer: the host key probe always fails to authenticate, and enrollment
-    /// tries several credentials in turn.
+    /// Runs the single-line POSIX `sh` script `command` with stdin closed and stderr
+    /// captured, and returns the exit status instead of turning a failure into an error.
+    /// Used where a failing ssh is an expected answer: the host key probe always fails to
+    /// authenticate, and enrollment tries several credentials in turn.
     pub(super) async fn output(
         &self,
         command: &str,
@@ -567,76 +574,74 @@ impl SshHost {
         format_ssh_failure(self, stage, output.status, &output.stderr)
     }
 
-    /// Streams `local_path` to the remote host by piping it into
-    /// `cat > remote_path` over ssh with compression enabled. Streaming
-    /// (rather than scp/sftp) keeps the implementation simple and avoids
-    /// reading the entire binary into memory, which matters when the binary
-    /// is large or memory is constrained. The remote path is interpreted by
-    /// the remote shell so `~` and other shell expansions work as expected.
+    /// Streams `local_path` into the stdin of the single-line `sh` script `command`, which
+    /// writes it into place on the device. Streaming (rather than scp/sftp) never reads the
+    /// whole binary into memory, and letting one script create the directory, write a temp
+    /// file, mark it executable and rename it costs one SSH session instead of one each.
     ///
-    /// Stderr is captured so remote failures (permission denied, disk full,
-    /// ETXTBSY on an in-place overwrite of a running binary) become part of
-    /// the returned error instead of a bare local Broken pipe. Callers that
-    /// replace a live agent binary should write a sibling temp path and
-    /// rename over the final path.
-    pub(super) async fn upload_via_cat(
+    /// Stderr is captured so remote failures (permission denied, disk full) become part of
+    /// the returned error instead of a bare local Broken pipe.
+    pub(super) async fn upload(
         &self,
         local_path: &Path,
-        remote_path: &str,
+        command: &str,
+        stage: &str,
     ) -> Result<(), std::io::Error> {
         // Compress the upload stream so large binaries transfer faster over
         // slow uplinks. ssh compression is cheap and transparent here. Going through the
         // shared builder keeps the upload under the same host key and credential policies
         // as every other connection to the device.
         let options = SshRunOptions::default().compressed();
-        let mut ssh =
-            build_ssh_command(self, &format!("cat > {remote_path}"), &[], &options).await?;
+        let mut ssh = build_ssh_command(self, command, &[], &options).await?;
 
         ssh.stdin(Stdio::piped());
         ssh.stdout(Stdio::inherit());
         // Capture stderr so prepare/watchdog logs include the remote reason
-        // instead of only the local Broken pipe that follows early cat exit.
+        // instead of only the local Broken pipe that follows an early remote exit.
         ssh.stderr(Stdio::piped());
         ssh.kill_on_drop(true);
 
         log!(
             Level::Debug,
-            "SSH upload_via_cat starting: target={}, ssh_server_port={}, username={:?}, local_path={}, remote_path={}, argv={}",
+            "SSH upload starting: target={}, ssh_server_port={}, username={:?}, stage={}, local_path={}, argv={}",
             self.target,
             self.server_port_label(),
             self.username,
+            stage,
             local_path.display(),
-            remote_path,
             ssh_command_argv_debug(&ssh)
         );
 
         let upload_start = std::time::Instant::now();
+        let mut file = tokio::fs::File::open(local_path).await.map_err(|error| {
+            redoor_core::log_failure!(
+                Level::Error,
+                "SSH upload failed to open local file: target={}, stage={}, local_path={}, error={:#}",
+                self.target,
+                stage,
+                local_path.display(),
+                error
+            );
+            std::io::Error::other(format!(
+                "failed to open '{}' for the {stage}: {error}",
+                local_path.display()
+            ))
+        })?;
         let mut child = ssh.spawn().map_err(|error| {
             redoor_core::log_failure!(
                 Level::Error,
-                "SSH upload_via_cat failed to spawn: target={}, remote_path={}, error={:#}, elapsed={:?}",
+                "SSH upload failed to spawn: target={}, stage={}, error={:#}",
                 self.target,
-                remote_path,
-                error,
-                upload_start.elapsed()
+                stage,
+                error
             );
             error
         })?;
         let mut stdin = child.stdin.take().expect("stdin was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
-        let mut file = tokio::fs::File::open(local_path).await.map_err(|error| {
-            redoor_core::log_failure!(
-                Level::Error,
-                "SSH upload_via_cat failed to open local file: target={}, local_path={}, error={:#}",
-                self.target,
-                local_path.display(),
-                error
-            );
-            error
-        })?;
 
         // Run the copy on a separate task so we can concurrently wait for
-        // the child. If the remote `cat` exits early (e.g. disk full), the
+        // the child. If the remote script exits early (e.g. disk full), the
         // stdin pipe closes and the copy errors out; without the spawn we
         // would deadlock waiting on a write that never completes.
         let copy_handle = tokio::spawn(async move {
@@ -654,7 +659,7 @@ impl SshHost {
         let stderr_trim = stderr.trim();
 
         // Prefer remote failure details over the copy-task Broken pipe that
-        // appears whenever remote cat exits before the local stream finishes.
+        // appears whenever the remote script exits before the local stream finishes.
         let copy_result = copy_handle
             .await
             .map_err(|e| std::io::Error::other(format!("copy task panicked: {e}")))?;
@@ -662,46 +667,264 @@ impl SshHost {
         if !status.success() {
             redoor_core::log_failure!(
                 Level::Error,
-                "SSH upload_via_cat remote cat failed: target={}, remote_path={}, exit_status={}, elapsed={:?}, stderr='{}'",
+                "SSH upload failed on the remote host: target={}, stage={}, exit_status={}, elapsed={:?}, stderr='{}'",
                 self.target,
-                remote_path,
+                stage,
                 status.code().unwrap_or(-1),
                 upload_start.elapsed(),
                 stderr_trim
             );
-            let mut msg = format_ssh_failure(self, "binary upload", status, &stderr_bytes);
-            if stderr_trim.contains("text file busy") || stderr_trim.contains("ETXTBSY") {
-                msg.push_str(
-                    " (remote binary is currently executing; upload must replace via temp file + mv)",
-                );
-            }
-            return Err(std::io::Error::other(msg));
+            return Err(std::io::Error::other(format_ssh_failure(
+                self,
+                stage,
+                status,
+                &stderr_bytes,
+            )));
         }
 
         copy_result.map_err(|e| {
             redoor_core::log_failure!(
                 Level::Error,
-                "SSH upload_via_cat copy task failed: target={}, remote_path={}, error={:#}, elapsed={:?}",
+                "SSH upload copy task failed: target={}, stage={}, error={:#}, elapsed={:?}",
                 self.target,
-                remote_path,
+                stage,
                 e,
                 upload_start.elapsed()
             );
             std::io::Error::other(format!(
-                "failed while streaming local file to remote '{}': {:#}",
-                remote_path, e
+                "failed while streaming '{}' for the {stage}: {:#}",
+                local_path.display(),
+                e
             ))
         })?;
         log!(
             Level::Debug,
-            "SSH upload_via_cat succeeded: target={}, remote_path={}, elapsed={:?}, stderr='{}'",
+            "SSH upload succeeded: target={}, stage={}, elapsed={:?}, stderr='{}'",
             self.target,
-            remote_path,
+            stage,
             upload_start.elapsed(),
             stderr_trim
         );
         Ok(())
     }
+
+    /// Spawns like [`SshHost::spawn`], but first reads the `lines` report lines the remote
+    /// script prints on stdout before it `exec`s the long-running process. Reporting and
+    /// starting in one session saves a separate SSH round-trip for the report.
+    ///
+    /// The rest of stdout is then copied to where it would otherwise have gone (the log
+    /// file or the server's stdout). Stderr is piped until the report is complete, so when
+    /// the session ends early, typically because SSH itself failed, the returned error
+    /// carries OpenSSH's explanation even for agents whose output goes to a log file.
+    pub(super) async fn spawn_with_report(
+        &self,
+        command: &str,
+        args: &[&str],
+        options: &SshRunOptions,
+        lines: usize,
+        stage: &str,
+    ) -> Result<ReportedChild, std::io::Error> {
+        let mut options = options.clone();
+        options.pipe_stdout = true;
+        let caller_pipes_stderr = options.pipe_stderr;
+        options.pipe_stderr = true;
+        let mut child = self.spawn(command, args, &options).await?;
+        let stdout = child
+            .stdout
+            .take()
+            .expect("report requires piped ssh stdout");
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let report = match read_report_lines(&mut reader, lines).await {
+            Ok(report) => report,
+            Err(error) => {
+                redoor_core::log_failure!(
+                    Level::Error,
+                    "SSH report could not be read: target={}, stage={}, error={:#}",
+                    self.target,
+                    stage,
+                    error
+                );
+                // kill_on_drop stops the ssh client when the child is dropped here.
+                return Err(std::io::Error::other(format!(
+                    "failed to read the {stage} report from ssh: {error}"
+                )));
+            }
+        };
+        if report.len() < lines {
+            return Err(self
+                .report_cut_short(child, stage, &report, options.log_file.as_deref())
+                .await);
+        }
+        forward_output(reader, options.log_file.clone(), OutputStream::Stdout);
+        if !caller_pipes_stderr && let Some(stderr) = child.stderr.take() {
+            // The caller expected stderr in the log file or terminal, as an ordinary spawn
+            // would have arranged.
+            forward_output(stderr, options.log_file.clone(), OutputStream::Stderr);
+        }
+        Ok(ReportedChild { child, report })
+    }
+
+    /// Explains a session that ended before its report was complete, using the ssh exit
+    /// status and stderr. The stderr is also appended to the agent log file, if any, so
+    /// the log holds the failure like it would for an ordinary spawn.
+    async fn report_cut_short(
+        &self,
+        mut child: tokio::process::Child,
+        stage: &str,
+        report: &[String],
+        log_file: Option<&str>,
+    ) -> std::io::Error {
+        let stderr = child
+            .stderr
+            .take()
+            .expect("report requires piped ssh stderr");
+        let (status, stderr) = tokio::join!(
+            child.wait(),
+            read_bounded_tail(stderr, MAX_SSH_DIAGNOSTIC_BYTES)
+        );
+        let stderr = stderr.unwrap_or_default();
+        if let Some(path) = log_file
+            && !stderr.is_empty()
+        {
+            append_to_log(path, &stderr).await;
+        }
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                redoor_core::log_failure!(
+                    Level::Error,
+                    "SSH session ended before its report and could not be waited for: target={}, stage={}, error={:#}",
+                    self.target,
+                    stage,
+                    error
+                );
+                return error;
+            }
+        };
+        redoor_core::log_failure!(
+            Level::Error,
+            "SSH session ended before its report was complete: target={}, stage={}, exit_status={}, report_lines={:?}, stderr='{}'",
+            self.target,
+            stage,
+            status.code().unwrap_or(-1),
+            report,
+            sanitized_ssh_text(self, &stderr)
+        );
+        std::io::Error::other(format_ssh_failure(self, stage, status, &stderr))
+    }
+}
+
+/// A spawned remote process together with the report its launch script printed first.
+pub(super) struct ReportedChild {
+    /// The ssh client process, still running the remote process.
+    pub(super) child: tokio::process::Child,
+    /// The report lines, without line endings.
+    pub(super) report: Vec<String>,
+}
+
+/// Upper bound for one report line, so a remote binary printing garbage cannot make the
+/// server buffer an unbounded line.
+const MAX_REPORT_LINE_BYTES: u64 = 4 * 1024;
+
+/// Reads up to `lines` lines, stopping early at EOF. Lines are bounded and returned
+/// without their line endings.
+async fn read_report_lines(
+    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    lines: usize,
+) -> Result<Vec<String>, std::io::Error> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    let mut report = Vec::with_capacity(lines);
+    while report.len() < lines {
+        let mut line = Vec::new();
+        let read = (&mut *reader)
+            .take(MAX_REPORT_LINE_BYTES)
+            .read_until(b'\n', &mut line)
+            .await?;
+        if read == 0 {
+            break;
+        }
+        if line.last() != Some(&b'\n') && read as u64 == MAX_REPORT_LINE_BYTES {
+            return Err(std::io::Error::other(format!(
+                "report line {} is longer than {MAX_REPORT_LINE_BYTES} bytes",
+                report.len() + 1
+            )));
+        }
+        let text = String::from_utf8_lossy(&line);
+        report.push(text.trim_end_matches(['\n', '\r']).to_string());
+    }
+    Ok(report)
+}
+
+/// Appends `bytes` to the agent log file, logging instead of failing because the caller
+/// is already reporting a more important error.
+async fn append_to_log(path: &str, bytes: &[u8]) {
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        file.write_all(bytes).await
+    }
+    .await;
+    if let Err(error) = result {
+        redoor_core::log_failure!(
+            Level::Error,
+            "Appending SSH diagnostics to the agent log failed: log_file={}, error={:#}",
+            path,
+            error
+        );
+    }
+}
+
+/// Which of this process's streams a reported child's output goes to without a log file.
+#[derive(Debug, Clone, Copy)]
+enum OutputStream {
+    /// The remote process's stdout.
+    Stdout,
+    /// The remote process's stderr.
+    Stderr,
+}
+
+/// Copies the rest of a reported child's output to the agent log file, or to this
+/// process's matching stream without one, which is where it goes for ordinary spawns.
+/// Draining it also keeps a full pipe from blocking the remote process.
+fn forward_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    log_file: Option<String>,
+    stream: OutputStream,
+) {
+    tokio::spawn(async move {
+        let result = match (&log_file, stream) {
+            (Some(path), _) => match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await
+            {
+                Ok(mut file) => tokio::io::copy(&mut reader, &mut file).await,
+                Err(error) => Err(error),
+            },
+            (None, OutputStream::Stdout) => {
+                tokio::io::copy(&mut reader, &mut tokio::io::stdout()).await
+            }
+            (None, OutputStream::Stderr) => {
+                tokio::io::copy(&mut reader, &mut tokio::io::stderr()).await
+            }
+        };
+        if let Err(error) = result {
+            redoor_core::log_failure!(
+                Level::Error,
+                "Forwarding remote agent output failed: stream={:?}, log_file={:?}, error={:#}",
+                stream,
+                log_file,
+                error
+            );
+            // Keep draining so the remote process never blocks on a full pipe.
+            let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+        }
+    });
 }
 
 /// Captured result of [`SshHost::output`].
@@ -794,21 +1017,29 @@ async fn build_ssh_command(
         if stderr_route(options) == StderrRoute::Monitor {
             // Standalone relays must inspect OpenSSH stderr for bind failures;
             // their monitor tees that stream back into this same log path.
-            ssh.stdout(Stdio::from(file.into_std().await));
             ssh.stderr(Stdio::piped());
         } else {
-            // Managed agents do not inspect stderr, so let the child append both
-            // output streams directly without an intermediate forwarding task.
+            // Managed agents do not inspect stderr, so let the child append it
+            // directly without an intermediate forwarding task.
             let file_for_stderr = file.try_clone().await.map_err(|error| {
                 std::io::Error::other(format!(
                     "Failed to clone agent log file handle '{log_path}': {error}"
                 ))
             })?;
-            ssh.stdout(Stdio::from(file.into_std().await));
             ssh.stderr(Stdio::from(file_for_stderr.into_std().await));
         }
+        if options.pipe_stdout {
+            // `spawn_with_report` appends everything after the report to this same file.
+            ssh.stdout(Stdio::piped());
+        } else {
+            ssh.stdout(Stdio::from(file.into_std().await));
+        }
     } else {
-        ssh.stdout(Stdio::inherit());
+        if options.pipe_stdout {
+            ssh.stdout(Stdio::piped());
+        } else {
+            ssh.stdout(Stdio::inherit());
+        }
         match stderr_route(options) {
             StderrRoute::Monitor => {
                 ssh.stderr(Stdio::piped());
@@ -1014,25 +1245,24 @@ fn ssh_argv(
     // A session-supplied target beginning with '-' must never become a local SSH option.
     argv.push("--".to_string());
     argv.push(host.target.clone());
-    let managed_export = if options.managed_agent {
-        format!("export {}=1; ", redoor_core::process::MANAGED_AGENT_ENV)
-    } else {
-        String::new()
-    };
+    let mut script = String::new();
     if let Some((name, _)) = &options.secret_env {
         // Keep the secret out of both the local ssh argv and the remote agent argv,
         // since either can be exposed by process listings. `spawn` writes the value
-        // as the first stdin line; this preamble reads and exports it, then `exec`
-        // replaces the shell so the agent inherits the environment without a wrapper.
-        argv.push(format!(
-            "read -r {name}; export {name}; {managed_export}exec {command}"
-        ));
-    } else if options.managed_agent {
-        argv.push(format!("{managed_export}exec {command}"));
-    } else {
-        argv.push(command.to_string());
+        // as the first stdin line; this preamble reads and exports it so the agent the
+        // script `exec`s inherits it only through its environment.
+        script.push_str(&format!("read -r {name}; export {name}; "));
     }
-    argv.extend(args.iter().map(|arg| arg.to_string()));
+    if options.managed_agent {
+        script.push_str(&format!(
+            "export {}=1; ",
+            redoor_core::process::MANAGED_AGENT_ENV
+        ));
+    }
+    script.push_str(command);
+    // The login shell only sees quoted words, so fish or tcsh users get the same POSIX
+    // script and arguments with spaces or quotes are not split or interpreted.
+    argv.push(super::shell::sh_command(&script, args));
     argv
 }
 
@@ -1413,6 +1643,45 @@ mod tests {
         assert!(debug_command.contains("REDOOR_AGENT_TOKEN"));
         // The remote agent command must still be present after the environment preamble.
         assert!(debug_command.contains("/opt/redoor"));
+    }
+
+    /// The remote command line reads the secret, exports the managed marker and passes
+    /// arguments with spaces and quotes intact when a login shell runs it the way sshd does.
+    #[tokio::test]
+    async fn remote_command_runs_in_sh_with_literal_arguments() {
+        use tokio::io::AsyncWriteExt;
+
+        let host = super::SshHost::new("example.test".to_string());
+        let options = super::SshRunOptions::default()
+            .with_secret_env("REDOOR_AGENT_TOKEN", "token value")
+            .with_managed_agent();
+        let argv = super::ssh_argv(
+            &host,
+            None,
+            r#"printf '%s|' "$REDOOR_AGENT_TOKEN" "$REDOOR_MANAGED_AGENT" "$@""#,
+            &["My Laptop", "it's $(touch pwned)"],
+            &options,
+        );
+        let remote_command = argv.last().unwrap();
+        // csh-family login shells reject newlines inside quotes.
+        assert!(!remote_command.contains('\n'));
+
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(remote_command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"token value\n").await.unwrap();
+        drop(stdin);
+        let output = child.wait_with_output().await.unwrap();
+        // The secret arrives through stdin, the marker is exported and arguments stay whole.
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "token value|1|My Laptop|it's $(touch pwned)|"
+        );
     }
 
     /// Sequential managed SSH agents share one remote user and must not take the singleton lock.
@@ -1883,7 +2152,10 @@ connecttimeout 37
         let argv = super::ssh_argv(&host, None, "true", &[], &super::SshRunOptions::default());
         let end = argv.iter().position(|arg| arg == "--").unwrap();
         // The option parser must stop before it encounters an untrusted target.
-        assert_eq!(&argv[end + 1..], [host.target.clone(), "true".to_string()]);
+        assert_eq!(
+            &argv[end + 1..],
+            [host.target.clone(), "sh -c 'true' sh".to_string()]
+        );
     }
 
     /// A single jump host becomes a plain `-W` command, and a configured ProxyCommand is
