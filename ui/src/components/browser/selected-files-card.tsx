@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
 import {
+    Archive,
     Copy,
     Files,
     FolderInput,
@@ -49,6 +50,11 @@ import {
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
 import { AffectedPathsList } from "#ui/components/browser/affected-paths-list";
+import { CreateArchiveDialog } from "#ui/components/browser/create-archive-dialog";
+import {
+    getCreateArchiveSelectionError,
+    type ArchiveSource,
+} from "#ui/utils/archive";
 
 /** A selection paired with the name it lands under, which differs only when renamed. */
 type TransferItem = {
@@ -507,7 +513,7 @@ function SelectedFilesTransferButton(props: {
 }
 
 /**
- * Keeps Copy, Move, and Delete off a second mobile row by parking them in one
+ * Keeps Copy, Move, Archive, and Delete off a second mobile row by parking them in one
  * Actions dialog, while desktop still shows the verbs inline.
  */
 function SelectedFilesCardActions(props: {
@@ -515,86 +521,103 @@ function SelectedFilesCardActions(props: {
     canDelete: boolean;
     copyTrigger: SelectedFilesTransferTriggerApi;
     moveTrigger: SelectedFilesTransferTriggerApi;
+    /** Why the selection cannot be archived here, or null when it can. */
+    createArchiveError: string | null;
+    onCreateArchive: () => void;
     onDelete: () => void;
     onClear: () => void;
 }) {
-    const hasMenuActions =
-        props.copyTrigger.canTransfer ||
-        props.moveTrigger.canTransfer ||
-        props.canDelete;
-
     return (
         <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+            {/* Archive stays listed even when unavailable, so the menu always has content. */}
             {props.isMobile ? (
-                hasMenuActions ? (
-                    <ActionMenu
-                        label="Actions"
-                        icon={<MoreHorizontal className="h-4 w-4" />}
-                        className="h-9 px-2.5 py-0"
-                    >
-                        {(close) => (
-                            <>
-                                {props.copyTrigger.canTransfer ? (
+                <ActionMenu
+                    label="Actions"
+                    icon={<MoreHorizontal className="h-4 w-4" />}
+                    className="h-9 px-2.5 py-0"
+                >
+                    {(close) => (
+                        <>
+                            {props.copyTrigger.canTransfer ? (
+                                <ActionMenuButton
+                                    onClick={() => {
+                                        close();
+                                        props.copyTrigger.start();
+                                    }}
+                                >
+                                    <props.copyTrigger.labels.Icon className="h-4 w-4 text-slate-400" />
+                                    {props.copyTrigger.labels.buttonLabel}
+                                </ActionMenuButton>
+                            ) : null}
+                            {props.moveTrigger.canTransfer ? (
+                                <ActionMenuButton
+                                    onClick={() => {
+                                        close();
+                                        props.moveTrigger.start();
+                                    }}
+                                >
+                                    <props.moveTrigger.labels.Icon className="h-4 w-4 text-slate-400" />
+                                    {props.moveTrigger.labels.buttonLabel}
+                                </ActionMenuButton>
+                            ) : null}
+                            <ActionMenuButton
+                                disabled={props.createArchiveError !== null}
+                                onClick={() => {
+                                    close();
+                                    props.onCreateArchive();
+                                }}
+                            >
+                                <Archive className="h-4 w-4 text-slate-400" />
+                                Create archive
+                            </ActionMenuButton>
+                            {props.canDelete ? (
+                                <>
+                                    <div className="my-1 border-t border-slate-800" />
                                     <ActionMenuButton
+                                        tone="danger"
                                         onClick={() => {
                                             close();
-                                            props.copyTrigger.start();
+                                            props.onDelete();
                                         }}
                                     >
-                                        <props.copyTrigger.labels.Icon className="h-4 w-4 text-slate-400" />
-                                        {props.copyTrigger.labels.buttonLabel}
+                                        <Trash2 className="h-4 w-4" />
+                                        Delete
                                     </ActionMenuButton>
-                                ) : null}
-                                {props.moveTrigger.canTransfer ? (
-                                    <ActionMenuButton
-                                        onClick={() => {
-                                            close();
-                                            props.moveTrigger.start();
-                                        }}
-                                    >
-                                        <props.moveTrigger.labels.Icon className="h-4 w-4 text-slate-400" />
-                                        {props.moveTrigger.labels.buttonLabel}
-                                    </ActionMenuButton>
-                                ) : null}
-                                {props.canDelete ? (
-                                    <>
-                                        <div className="my-1 border-t border-slate-800" />
-                                        <ActionMenuButton
-                                            tone="danger"
-                                            onClick={() => {
-                                                close();
-                                                props.onDelete();
-                                            }}
-                                        >
-                                            <Trash2 className="h-4 w-4" />
-                                            Delete
-                                        </ActionMenuButton>
-                                    </>
-                                ) : null}
-                            </>
-                        )}
-                    </ActionMenu>
-                ) : null
+                                </>
+                            ) : null}
+                        </>
+                    )}
+                </ActionMenu>
             ) : (
                 <>
                     <SelectedFilesTransferButton trigger={props.copyTrigger} />
                     <SelectedFilesTransferButton trigger={props.moveTrigger} />
+                    <Button
+                        tooltip={
+                            props.createArchiveError ??
+                            "Create an archive of the selected items in this directory"
+                        }
+                        type="button"
+                        variant="secondary"
+                        aria-label="Create archive of selected items"
+                        disabled={props.createArchiveError !== null}
+                        onClick={props.onCreateArchive}
+                        size="sm"
+                        className="h-9 rounded-md px-3.5 py-0 font-semibold"
+                    >
+                        <Archive className="h-3.5 w-3.5" aria-hidden="true" />
+                        Archive
+                    </Button>
                     {props.canDelete ? (
-                        <Button
-                            tooltip="Delete selected items"
+                        <IconButton
                             type="button"
-                            variant="danger"
-                            aria-label="Delete selected items"
+                            label="Delete selected items"
                             onClick={props.onDelete}
-                            size="sm"
-                            className="h-9 rounded-md border-red-500/40 bg-red-500/10 px-3.5 py-0 font-semibold text-red-200 hover:border-red-500/60 hover:bg-red-500/20"
+                            size="xl"
+                            className="rounded-md border border-red-500/40 bg-red-500/10 text-red-200 transition-colors hover:border-red-500/60 hover:bg-red-500/20"
                         >
-                            <Trash2
-                                className="h-3.5 w-3.5"
-                                aria-hidden="true"
-                            />
-                            Delete
-                        </Button>
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                        </IconButton>
                     ) : null}
                 </>
             )}
@@ -626,6 +649,9 @@ export function SelectedFilesCard(props: {
     const activateBottomDrawerTab = useSetAtom(activateBottomDrawerTabAtom);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
 
+    const [isCreateArchiveDialogOpen, setIsCreateArchiveDialogOpen] =
+        React.useState(false);
+
     // One lock so Copy cannot start while Move is still reading or deleting sources.
     const [busyTransferOperation, setBusyTransferOperation] =
         React.useState<SelectedFilesTransferOperation | null>(null);
@@ -646,12 +672,27 @@ export function SelectedFilesCard(props: {
         setIsDeleteDialogOpen(false);
     }
 
+    if (isCreateArchiveDialogOpen && !hasSelection) {
+        setIsCreateArchiveDialogOpen(false);
+    }
+
     /** Opens confirm from both the desktop Delete button and the mobile Actions menu. */
     const openDeleteDialog = () => {
         setIsDeleteDialogOpen(true);
     };
 
     const agentsById = new Map(props.agents.map((agent) => [agent.id, agent]));
+
+    const archiveSources: ArchiveSource[] = selectedFiles.map((file) => ({
+        agentId: file.agentId,
+        path: file.path,
+    }));
+
+    const createArchiveError = getCreateArchiveSelectionError({
+        sources: archiveSources,
+        agentId: props.destinationAgent.id,
+        directoryPath: props.directoryPath,
+    });
 
     const deleteTargets: DeletePathTarget[] = selectedFiles.map((file) => ({
         agent: agentsById.get(file.agentId) ?? null,
@@ -729,6 +770,10 @@ export function SelectedFilesCard(props: {
                                         canDelete={canDelete}
                                         copyTrigger={copyTrigger}
                                         moveTrigger={moveTrigger}
+                                        createArchiveError={createArchiveError}
+                                        onCreateArchive={() =>
+                                            setIsCreateArchiveDialogOpen(true)
+                                        }
                                         onDelete={openDeleteDialog}
                                         onClear={clearSelectedFiles}
                                     />
@@ -738,6 +783,14 @@ export function SelectedFilesCard(props: {
                     </TransferSelectedFilesAction>
                 )}
             </TransferSelectedFilesAction>
+            {isCreateArchiveDialogOpen && hasSelection ? (
+                <CreateArchiveDialog
+                    agent={props.destinationAgent}
+                    directoryPath={props.directoryPath}
+                    sources={archiveSources}
+                    onClose={() => setIsCreateArchiveDialogOpen(false)}
+                />
+            ) : null}
             {isDeleteDialogOpen && hasSelection ? (
                 <DeletePathsDialog
                     title={`Delete ${selectedFiles.length === 1 ? "this selected item" : "these selected items"}?`}

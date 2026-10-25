@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useAtomValue, useSetAtom } from "jotai";
 import {
+    Archive,
     ArchiveRestore,
     Copy,
     Download,
@@ -311,6 +312,7 @@ function PathActionMenuItems(props: {
     onDownloadDirectory?: () => void;
     showUnarchive?: boolean;
     onUnarchive?: () => void;
+    onCreateArchive?: () => void;
     onDelete?: () => void;
     deleteDisabled?: boolean;
 }) {
@@ -389,6 +391,17 @@ function PathActionMenuItems(props: {
                     Unarchive
                 </ActionMenuButton>
             ) : null}
+            {props.onCreateArchive ? (
+                <ActionMenuButton
+                    onClick={() => {
+                        props.close();
+                        props.onCreateArchive?.();
+                    }}
+                >
+                    <Archive className="h-4 w-4 text-slate-400" />
+                    Create archive
+                </ActionMenuButton>
+            ) : null}
             {props.showSelect ? (
                 <SelectPathMenuButton
                     agent={props.agent}
@@ -444,6 +457,7 @@ export function PathActionMenu(props: {
     onDownloadDirectory?: () => void;
     showUnarchive?: boolean;
     onUnarchive?: () => void;
+    onCreateArchive?: () => void;
     onDelete?: () => void;
 }) {
     const canModify = getImmediateParentPath(props.path) !== null;
@@ -519,6 +533,9 @@ export function PathActionMenu(props: {
                                                     props.showUnarchive
                                                 }
                                                 onUnarchive={props.onUnarchive}
+                                                onCreateArchive={
+                                                    props.onCreateArchive
+                                                }
                                                 onDelete={props.onDelete}
                                                 deleteDisabled={!canModify}
                                             />

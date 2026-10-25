@@ -17,6 +17,7 @@ import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
 import { PathActionMenu } from "#ui/components/browser/path-actions";
 import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
+import { CreateArchiveDialog } from "#ui/components/browser/create-archive-dialog";
 import { InputControl } from "#ui/components/input-control";
 import { Dialog } from "#ui/components/dialog";
 import { DialogActions } from "#ui/components/dialog-actions";
@@ -567,6 +568,9 @@ function FileEntryActions(props: {
     const [isUnarchiveDialogOpen, setIsUnarchiveDialogOpen] =
         React.useState(false);
 
+    const [isCreateArchiveDialogOpen, setIsCreateArchiveDialogOpen] =
+        React.useState(false);
+
     const entryType = props.isDirectory ? "directory" : "file";
 
     const downloadUrl = props.agent.getRawUrl(props.fullPath, {
@@ -595,6 +599,7 @@ function FileEntryActions(props: {
                 onDownloadDirectory={() => setIsDownloadDialogOpen(true)}
                 showUnarchive={archive !== null}
                 onUnarchive={() => setIsUnarchiveDialogOpen(true)}
+                onCreateArchive={() => setIsCreateArchiveDialogOpen(true)}
                 onDelete={() => setIsDeleteDialogOpen(true)}
             />
             {isUnarchiveDialogOpen ? (
@@ -603,6 +608,16 @@ function FileEntryActions(props: {
                     entryName={props.entryName}
                     directoryPath={props.directoryPath}
                     onClose={() => setIsUnarchiveDialogOpen(false)}
+                />
+            ) : null}
+            {isCreateArchiveDialogOpen ? (
+                <CreateArchiveDialog
+                    agent={props.agent}
+                    directoryPath={props.directoryPath}
+                    sources={[
+                        { agentId: props.agent.id, path: props.fullPath },
+                    ]}
+                    onClose={() => setIsCreateArchiveDialogOpen(false)}
                 />
             ) : null}
             <Dialog
