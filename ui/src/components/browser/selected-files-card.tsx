@@ -489,7 +489,10 @@ function TransferSelectedFilesAction(props: {
     );
 }
 
-/** Renders a compact transfer button so desktop can keep Copy and Move visible. */
+/**
+ * Renders a square icon transfer button so the desktop card fits every bulk action on one
+ * row; the tooltip carries the verb that the icon alone leaves ambiguous.
+ */
 function SelectedFilesTransferButton(props: {
     trigger: SelectedFilesTransferTriggerApi;
 }) {
@@ -498,17 +501,16 @@ function SelectedFilesTransferButton(props: {
     }
 
     return (
-        <Button
+        <IconButton
             tooltip={props.trigger.labels.buttonTooltip}
             type="button"
             onClick={props.trigger.start}
-            aria-label={props.trigger.labels.buttonAriaLabel}
-            size="sm"
-            className="h-9 rounded-md px-3.5 py-0 font-semibold shadow-sm shadow-blue-950/30"
+            label={props.trigger.labels.buttonAriaLabel}
+            size="xl"
+            className="rounded-md bg-blue-600 text-white shadow-sm shadow-blue-950/30 transition-colors hover:bg-blue-500"
         >
-            <props.trigger.labels.Icon className="h-3.5 w-3.5" />
-            {props.trigger.labels.buttonLabel}
-        </Button>
+            <props.trigger.labels.Icon className="h-4 w-4" aria-hidden="true" />
+        </IconButton>
     );
 }
 
@@ -592,22 +594,20 @@ function SelectedFilesCardActions(props: {
                 <>
                     <SelectedFilesTransferButton trigger={props.copyTrigger} />
                     <SelectedFilesTransferButton trigger={props.moveTrigger} />
-                    <Button
+                    <IconButton
                         tooltip={
                             props.createArchiveError ??
                             "Create an archive of the selected items in this directory"
                         }
                         type="button"
-                        variant="secondary"
-                        aria-label="Create archive of selected items"
+                        label="Create archive of selected items"
                         disabled={props.createArchiveError !== null}
                         onClick={props.onCreateArchive}
-                        size="sm"
-                        className="h-9 rounded-md px-3.5 py-0 font-semibold"
+                        variant="outline"
+                        size="xl"
                     >
-                        <Archive className="h-3.5 w-3.5" aria-hidden="true" />
-                        Archive
-                    </Button>
+                        <Archive className="h-4 w-4" aria-hidden="true" />
+                    </IconButton>
                     {props.canDelete ? (
                         <IconButton
                             type="button"

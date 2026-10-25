@@ -916,8 +916,8 @@ test.describe.serial("Copy Operations", () => {
         });
 
         await expect(copyButton).toBeEnabled();
-        // The compact action keeps details in its accessible label and tooltip.
-        await expect(copyButton).toHaveText("Copy");
+        // The icon-only action keeps its details in the accessible label and tooltip.
+        await expect(copyButton).toHaveText("");
 
         const copyResponsePromise = page.waitForResponse(
             (response) =>

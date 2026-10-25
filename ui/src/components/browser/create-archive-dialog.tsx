@@ -129,7 +129,8 @@ export function CreateArchiveDialog(props: {
                 />
                 <RadioCardGroup
                     legend="Archive format"
-                    legendClassName="mt-4 text-sm font-medium text-slate-200"
+                    className="mt-6"
+                    legendClassName="text-sm font-medium text-slate-200"
                     optionsClassName="mt-2"
                 >
                     {archiveCreateFormats.map((entry) => (
