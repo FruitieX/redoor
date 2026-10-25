@@ -76,6 +76,7 @@ struct RawAgentEntry {
     home: Option<String>,
     log: Option<String>,
     password: Option<String>,
+    managed_ssh_key: Option<bool>,
 }
 
 /// One `[[relays]]` row.
@@ -324,6 +325,7 @@ impl RawAgentEntry {
             ("ssh_port", self.ssh_port.is_some()),
             ("remote_bin", self.remote_bin.is_some()),
             ("password", self.password.is_some()),
+            ("managed_ssh_key", self.managed_ssh_key.is_some()),
         ];
         if let Some((key, _)) = ssh_only.into_iter().find(|(_, present)| *present) {
             return Err(invalid(format!(
@@ -350,6 +352,21 @@ impl RawAgentEntry {
                 "agents entry #{index} 'password' must be non-empty when set"
             )));
         }
+        let managed_ssh_key = self.managed_ssh_key.unwrap_or(false);
+        if managed_ssh_key {
+            // A managed key turns password logins off, so both together is a hand edit gone wrong.
+            if self.password.is_some() {
+                return Err(invalid(format!(
+                    "agents entry #{index} has both 'managed_ssh_key' and 'password'; remove 'password'"
+                )));
+            }
+            // The key is stored under the device id, so a key without one is unusable.
+            if self.id.is_none() {
+                return Err(invalid(format!(
+                    "agents entry #{index} has 'managed_ssh_key' but no 'id'"
+                )));
+            }
+        }
         Ok(AgentConfig::SshBacked(SshBackedAgentConfig {
             id: parse_optional_id(self.id, &format!("agents entry #{index} 'id'"))?,
             username: self.username,
@@ -360,6 +377,7 @@ impl RawAgentEntry {
             target,
             log: self.log,
             password: self.password,
+            managed_ssh_key,
         }))
     }
 }
@@ -409,6 +427,8 @@ impl RawRelay {
                 target,
                 log: non_blank(self.log, "log")?,
                 password: non_blank(self.password, "password")?,
+                // Relays keep using the account's own credentials; managed keys are server-only.
+                managed_ssh_key: false,
             },
         })
     }

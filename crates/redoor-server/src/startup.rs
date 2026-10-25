@@ -294,12 +294,14 @@ impl ServerRuntime {
         // Built before the listener so the registry exists when the first WebSocket connects.
         let watchdogs = WatchdogRegistry::new();
         let binaries = crate::binaries::BinaryCache::new(runtime.paths.clone());
+        let ssh_keys = crate::ssh::keys::SshKeyStore::for_data_dir(&data_dir);
         let launcher = ManagedLauncher::new(
             config.port,
             config.agent_token,
             crate::ssh::ProvisionContext {
                 app_name: runtime.paths.app_name().to_string(),
                 binaries: binaries.clone(),
+                ssh_keys: ssh_keys.clone(),
             },
         );
 
@@ -326,6 +328,8 @@ impl ServerRuntime {
             mcp,
             config_path: config.config_path,
             config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            ssh_keys,
+            ssh_key_operations: crate::http::ssh_keys::SshKeyOperations::default(),
             auth_mode,
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
         });

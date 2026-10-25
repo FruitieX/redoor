@@ -105,6 +105,10 @@ fn ssh_agent_table(config: &SshBackedAgentConfig) -> Table {
     insert_optional_string(&mut table, "home", &config.home);
     insert_optional_string(&mut table, "log", &config.log);
     insert_optional_string(&mut table, "password", &config.password);
+    // Omitted when false, so devices without a managed key keep their entry unchanged.
+    if config.managed_ssh_key {
+        table.insert("managed_ssh_key", value(true));
+    }
     table
 }
 

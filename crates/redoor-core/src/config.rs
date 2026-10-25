@@ -110,6 +110,13 @@ pub struct SshBackedAgentConfig {
     /// pointing at this binary so password auth can run without a TTY or
     /// stealing the stdin used for tokens and uploads.
     pub password: Option<String>,
+    /// Whether the device logs in with its redoor-managed SSH key. When set, the server logs
+    /// in only with `<data_dir>/ssh/<device-id>/id_ed25519` and only trusts the pinned host
+    /// key next to it. A flag instead of a key reference, because the key always lives at
+    /// the same path: rotation then switches keys with one file rename and no config write,
+    /// so a connected agent is not stopped. The config never holds key material. Never set
+    /// together with `password`.
+    pub managed_ssh_key: bool,
 }
 
 impl std::fmt::Debug for SshBackedAgentConfig {
@@ -125,6 +132,7 @@ impl std::fmt::Debug for SshBackedAgentConfig {
             .field("target", &self.target)
             .field("log", &self.log)
             .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("managed_ssh_key", &self.managed_ssh_key)
             .finish()
     }
 }
@@ -452,6 +460,9 @@ impl From<SshBackedAgentConfig>
             log: config.log,
             password: None,
             has_password: config.password.is_some(),
+            has_managed_ssh_key: config.managed_ssh_key,
+            // Only the server knows its data dir; the handler fills this in.
+            has_pinned_host_key: false,
         }
     }
 }
@@ -1463,5 +1474,93 @@ name = "dev_box"
         .unwrap();
         // Other names that merely start with `dev_` are fine.
         assert!(config.validate_managed_agent_names(path).is_ok());
+    }
+
+    /// A managed key is recorded as a flag and survives the formatting-preserving rewrite
+    /// that every device edit goes through.
+    #[tokio::test]
+    async fn managed_ssh_key_round_trips_through_edits() {
+        let (_directory, path) = test_config_path();
+        write_test_config(
+            &path,
+            r#"[[agents]]
+id = "dev_abcdefghijklmnopqrst"
+target = "pi"
+managed_ssh_key = true
+"#,
+        )
+        .unwrap();
+        let config = parse_config_file(&path).await.unwrap();
+        let AgentConfig::SshBacked(agent) = &config.agents[0] else {
+            panic!("the entry is SSH-backed");
+        };
+        // The flag is read as written.
+        assert!(agent.managed_ssh_key);
+
+        let renamed = SshBackedAgentConfig {
+            name: Some("renamed".to_string()),
+            ..agent.clone()
+        };
+        edit_ssh_agent(&path, agent.id.as_ref().unwrap(), Some(&renamed))
+            .await
+            .unwrap();
+        let config = parse_config_file(&path).await.unwrap();
+        let AgentConfig::SshBacked(agent) = &config.agents[0] else {
+            panic!("the entry is SSH-backed");
+        };
+        // A rewrite keeps the key; dropping it would silently fall back to other credentials.
+        assert!(agent.managed_ssh_key);
+
+        let without_key = SshBackedAgentConfig {
+            managed_ssh_key: false,
+            ..agent.clone()
+        };
+        edit_ssh_agent(&path, agent.id.as_ref().unwrap(), Some(&without_key))
+            .await
+            .unwrap();
+        // A device without a key gets no `managed_ssh_key = false` noise in the operator's file.
+        assert!(
+            !tokio::fs::read_to_string(&path)
+                .await
+                .unwrap()
+                .contains("managed_ssh_key")
+        );
+    }
+
+    /// Hand edits that would make a managed key unusable or ambiguous fail at load time.
+    #[test]
+    fn invalid_managed_ssh_key_combinations_are_rejected() {
+        let cases = [
+            (
+                r#"id = "dev_abcdefghijklmnopqrst"
+managed_ssh_key = "key_abcdefghijklmnopqrst""#,
+                "managed_ssh_key",
+            ),
+            (
+                r#"id = "dev_abcdefghijklmnopqrst"
+managed_ssh_key = true
+password = "secret""#,
+                "both 'managed_ssh_key' and 'password'",
+            ),
+            (
+                r#"managed_ssh_key = true"#,
+                "has 'managed_ssh_key' but no 'id'",
+            ),
+        ];
+        for (fields, expected) in cases {
+            let error = parse_config_str(
+                Path::new("/etc/redoor/config.toml"),
+                &format!(
+                    r#"agent_token = "t"
+[[agents]]
+target = "host"
+{fields}
+"#
+                ),
+            )
+            .expect_err("the entry must be rejected");
+            // The message names what is wrong so the operator can fix the file.
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 }

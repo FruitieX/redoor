@@ -9,6 +9,7 @@ pub mod git;
 pub mod logging;
 pub mod search;
 pub mod server;
+pub mod ssh_keys;
 pub mod tokens;
 pub mod transfers;
 pub mod trash;

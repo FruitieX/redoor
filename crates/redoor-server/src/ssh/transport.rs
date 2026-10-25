@@ -1,7 +1,9 @@
 //! Builds and executes SSH commands without owning agent orchestration policy.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+use zeroize::Zeroizing;
 
 use redoor_core::bounded_tail::read_bounded_tail;
 use redoor_core::log;
@@ -155,11 +157,63 @@ impl SshRunOptions {
     }
 }
 
+/// How OpenSSH decides whether to trust the key the device presents.
+///
+/// Each policy writes every host key option exactly once. OpenSSH keeps the first value it
+/// sees for an option, so an unconditional default written earlier would silently win over a
+/// stricter value written later.
+#[derive(Clone)]
+pub(super) enum HostKeyPolicy {
+    /// Today's behavior for devices without a pinned key: accept and remember an unknown key
+    /// in the user's known_hosts, refuse a changed one.
+    TrustOnFirstUse,
+    /// Enrollment step 1: record whatever key the device presents into a temporary file,
+    /// isolated from every other source of trust so the key is always recorded.
+    Probe {
+        /// Temporary file the presented key is written to.
+        known_hosts: PathBuf,
+        /// Name the key is recorded under (the device id).
+        alias: String,
+    },
+    /// Only the key in the device's pinned known_hosts file is accepted.
+    Pinned(PinnedHostKey),
+}
+
+/// Where the pinned host key of one device lives and what it is.
+#[derive(Clone)]
+pub(super) struct PinnedHostKey {
+    /// The device's own known_hosts file.
+    pub(super) known_hosts: PathBuf,
+    /// Name the key is looked up by (the device id), so the pin survives a target or port
+    /// change that still reaches the same machine.
+    pub(super) alias: String,
+    /// Fingerprint of the pinned key, shown next to the presented one when they differ.
+    pub(super) fingerprint: String,
+}
+
+/// Which credentials OpenSSH may use to log in.
+#[derive(Clone)]
+pub(super) enum AuthPolicy {
+    /// The server user's own keys and ssh-agent, never prompting.
+    Default,
+    /// A login password answered by the askpass re-exec. Zeroized when dropped, because a
+    /// typed enrollment password must not outlive the enrollment in memory.
+    Password(Zeroizing<String>),
+    /// No authentication at all; used by the host key probe, which must not send any
+    /// credential to a host whose key the user has not confirmed yet.
+    NoAuth,
+    /// Only the redoor-managed key may be offered, and the user's config files are not read.
+    ManagedKey {
+        /// The device's private key file.
+        identity_file: PathBuf,
+    },
+}
+
 /// Represents an ssh reachable host and builds `ssh` invocations against it.
 ///
-/// Encapsulates the ssh connection parameters (user, port, target) so the
-/// `run` method can stay focused on the remote command and its options. The
-/// builder methods return `Self` by value so callers can chain configuration
+/// Encapsulates the ssh connection parameters (user, port, target) and the trust and
+/// credential policies so the `run` method can stay focused on the remote command and its
+/// options. The builder methods return `Self` by value so callers can chain configuration
 /// fluently before awaiting [`SshHost::run`].
 #[derive(Clone)]
 pub(super) struct SshHost {
@@ -168,8 +222,10 @@ pub(super) struct SshHost {
     /// port from its host configuration or built-in default.
     ssh_port: Option<u16>,
     target: String,
-    /// Optional login password delivered through `SSH_ASKPASS` rather than SSH stdin.
-    password: Option<String>,
+    /// How the device's host key is verified.
+    host_key: HostKeyPolicy,
+    /// Which credentials may be used.
+    auth: AuthPolicy,
 }
 
 impl SshHost {
@@ -179,8 +235,17 @@ impl SshHost {
             username: None,
             ssh_port: None,
             target,
-            password: None,
+            host_key: HostKeyPolicy::TrustOnFirstUse,
+            auth: AuthPolicy::Default,
         }
+    }
+
+    /// Starts from a device's target, username and port, with today's trust-on-first-use
+    /// host keys and the server user's own credentials.
+    pub(super) fn for_config(config: &redoor_core::config::SshBackedAgentConfig) -> Self {
+        Self::new(config.target.clone())
+            .username(config.username.clone())
+            .ssh_port(config.ssh_port)
     }
 
     /// Sets the ssh login username (`ssh -l`).
@@ -197,8 +262,22 @@ impl SshHost {
     }
 
     /// Enables non-interactive password auth via a re-exec of this binary.
-    pub(super) fn password(mut self, password: Option<String>) -> Self {
-        self.password = password;
+    pub(super) fn password(self, password: Option<String>) -> Self {
+        match password {
+            Some(password) => self.auth(AuthPolicy::Password(Zeroizing::new(password))),
+            None => self.auth(AuthPolicy::Default),
+        }
+    }
+
+    /// Selects how the host key is verified.
+    pub(super) fn host_key(mut self, policy: HostKeyPolicy) -> Self {
+        self.host_key = policy;
+        self
+    }
+
+    /// Selects which credentials may be used.
+    pub(super) fn auth(mut self, policy: AuthPolicy) -> Self {
+        self.auth = policy;
         self
     }
 
@@ -352,6 +431,7 @@ impl SshHost {
     /// captured so preparation failures can reach the lifecycle UI.
     pub(super) async fn run_script_captured(
         &self,
+        stage: &str,
         script: &str,
         options: &SshRunOptions,
     ) -> Result<String, std::io::Error> {
@@ -425,10 +505,7 @@ impl SshHost {
                 sanitized_ssh_text(self, &stderr)
             );
             return Err(std::io::Error::other(format_ssh_failure(
-                self,
-                "remote host probe",
-                status,
-                &stderr,
+                self, stage, status, &stderr,
             )));
         }
         write_result.map_err(|error| {
@@ -442,9 +519,52 @@ impl SshHost {
             "SSH run_script_captured succeeded: target={}, output_bytes={}, output_preview='{}'",
             self.target,
             output.len(),
-            output.chars().take(200).collect::<String>()
+            sanitized_ssh_text(self, &stdout)
+                .chars()
+                .take(200)
+                .collect::<String>()
         );
         Ok(output)
+    }
+
+    /// Runs `command` with stdin closed and stderr captured, and returns the
+    /// exit status instead of turning a failure into an error. Used where a failing ssh is
+    /// an expected answer: the host key probe always fails to authenticate, and enrollment
+    /// tries several credentials in turn.
+    pub(super) async fn output(
+        &self,
+        command: &str,
+        args: &[&str],
+        options: &SshRunOptions,
+    ) -> Result<SshOutput, std::io::Error> {
+        let mut ssh = build_ssh_command(self, command, args, options).await?;
+        ssh.stdin(Stdio::null());
+        ssh.stdout(Stdio::null());
+        ssh.stderr(Stdio::piped());
+        ssh.kill_on_drop(true);
+        log!(
+            Level::Debug,
+            "Running captured ssh command: target={}, argv={}",
+            self.target,
+            ssh_command_argv_debug(&ssh)
+        );
+        let mut child = ssh.spawn()?;
+        let stderr = child
+            .stderr
+            .take()
+            .expect("output requires piped ssh stderr");
+        let stderr_handle = tokio::spawn(read_bounded_tail(stderr, MAX_SSH_DIAGNOSTIC_BYTES));
+        let status = child.wait().await?;
+        Ok(SshOutput {
+            status,
+            stderr: join_diagnostic_reader(stderr_handle, "stderr").await?,
+        })
+    }
+
+    /// Turns a failed [`SshHost::output`] into the same sanitized guidance other ssh
+    /// failures get.
+    pub(super) fn failure_message(&self, stage: &str, output: &SshOutput) -> String {
+        format_ssh_failure(self, stage, output.status, &output.stderr)
     }
 
     /// Streams `local_path` to the remote host by piping it into
@@ -464,27 +584,13 @@ impl SshHost {
         local_path: &Path,
         remote_path: &str,
     ) -> Result<(), std::io::Error> {
-        let mut ssh = Command::new("ssh");
-
-        if let Some(ref username) = self.username {
-            ssh.arg("-l").arg(username);
-        }
-        if let Some(port) = self.ssh_port {
-            ssh.arg("-p").arg(port.to_string());
-        }
-        // No TTY and stdin is the upload stream, so new hosts cannot be confirmed interactively.
-        ssh.arg("-T");
-        ssh.arg("-o").arg("ExitOnForwardFailure=yes");
-        disable_connection_multiplexing(&mut ssh);
-        ssh.arg("-o").arg("StrictHostKeyChecking=accept-new");
-        ssh.arg("-o")
-            .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"));
         // Compress the upload stream so large binaries transfer faster over
-        // slow uplinks. ssh compression is cheap and transparent here.
-        ssh.arg("-C");
-        apply_non_interactive_auth(&mut ssh, self.password.as_deref())?;
-        ssh.arg(&self.target);
-        ssh.arg(format!("cat > {}", remote_path));
+        // slow uplinks. ssh compression is cheap and transparent here. Going through the
+        // shared builder keeps the upload under the same host key and credential policies
+        // as every other connection to the device.
+        let options = SshRunOptions::default().compressed();
+        let mut ssh =
+            build_ssh_command(self, &format!("cat > {remote_path}"), &[], &options).await?;
 
         ssh.stdin(Stdio::piped());
         ssh.stdout(Stdio::inherit());
@@ -598,6 +704,14 @@ impl SshHost {
     }
 }
 
+/// Captured result of [`SshHost::output`].
+pub(super) struct SshOutput {
+    /// Exit status of the ssh process; 255 means ssh itself failed.
+    pub(super) status: std::process::ExitStatus,
+    /// Bounded tail of ssh's and the remote command's stderr.
+    pub(super) stderr: Vec<u8>,
+}
+
 /// Converts a diagnostic reader task into an I/O result with a useful stream name.
 async fn join_diagnostic_reader(
     handle: tokio::task::JoinHandle<Result<Vec<u8>, std::io::Error>>,
@@ -626,66 +740,24 @@ async fn write_secret_and_retain_stdin(
     Ok(())
 }
 
-/// Builds the [`Command`] used by both [`SshHost::run`] and
-/// [`SshHost::spawn`]. Centralizing the arg/stdio wiring keeps the two
-/// spawn paths from drifting out of sync as flags are added.
+/// Builds the [`Command`] used by every ssh invocation: [`SshHost::run`],
+/// [`SshHost::spawn`], scripts and uploads. Being the only place that creates an `ssh`
+/// command means no connection can bypass the host key and credential policies.
 async fn build_ssh_command(
     host: &SshHost,
     command: &str,
     args: &[&str],
     options: &SshRunOptions,
 ) -> Result<Command, std::io::Error> {
-    let mut ssh = Command::new("ssh");
-
-    if let Some(ref username) = host.username {
-        ssh.arg("-l").arg(username);
-    }
-    if let Some(port) = host.ssh_port {
-        ssh.arg("-p").arg(port.to_string());
-    }
-
-    if options.compressed {
-        ssh.arg("-C");
-    }
-
-    // Always fail fast if a requested reverse forward cannot be bound.
-    // Without this, ssh keeps running and the remote command executes
-    // against a tunnel that will never come up.
-    ssh.arg("-o").arg("ExitOnForwardFailure=yes");
-    disable_connection_multiplexing(&mut ssh);
-    // Managed SSH has no TTY for host-key prompts; accept-new still rejects changed keys.
-    ssh.arg("-T");
-    ssh.arg("-o").arg("StrictHostKeyChecking=accept-new");
-    ssh.arg("-o")
-        .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"));
-
-    for forward in &options.reverse_forwards {
-        ssh.arg("-R").arg(forward.to_ssh_spec());
-    }
-
-    apply_non_interactive_auth(&mut ssh, host.password.as_deref())?;
-
-    ssh.arg(&host.target);
-    let managed_export = if options.managed_agent {
-        format!("export {}=1; ", redoor_core::process::MANAGED_AGENT_ENV)
-    } else {
-        String::new()
+    // Managed-key connections ignore the config files, so their routing is resolved first.
+    let routing = match &host.auth {
+        AuthPolicy::ManagedKey { .. } => Some(ResolvedRouting::resolve(host).await?),
+        _ => None,
     };
-    if let Some((name, _)) = &options.secret_env {
-        // Keep the secret out of both the local ssh argv and the remote agent argv,
-        // since either can be exposed by process listings. `spawn` writes the value
-        // as the first stdin line; this preamble reads and exports it, then `exec`
-        // replaces the shell so the agent inherits the environment without a wrapper.
-        ssh.arg(format!(
-            "read -r {name}; export {name}; {managed_export}exec {command}"
-        ));
-    } else if options.managed_agent {
-        ssh.arg(format!("{managed_export}exec {command}"));
-    } else {
-        ssh.arg(command);
-    }
-    for arg in args {
-        ssh.arg(arg);
+    let mut ssh = Command::new("ssh");
+    ssh.args(ssh_argv(host, routing.as_ref(), command, args, options));
+    if let AuthPolicy::Password(password) = &host.auth {
+        apply_askpass_env(&mut ssh, password)?;
     }
 
     if options.secret_env.is_some() {
@@ -774,10 +846,343 @@ async fn build_ssh_command(
     Ok(ssh)
 }
 
-/// Keeps a failed multiplexed session from leaving reverse forwards on an old master.
-fn disable_connection_multiplexing(ssh: &mut Command) {
-    ssh.arg("-o").arg("ControlMaster=no");
-    ssh.arg("-o").arg("ControlPath=none");
+/// Collects `-o Name=value` pairs so tests can assert every security relevant option is
+/// emitted exactly once.
+#[derive(Default)]
+struct OptionWriter {
+    /// Already rendered `-o` / value argument pairs, in emission order.
+    args: Vec<String>,
+}
+
+impl OptionWriter {
+    /// Emits one option. Callers emit each name once; OpenSSH would ignore a second value.
+    fn set(&mut self, name: &str, value: impl std::fmt::Display) {
+        self.args.push("-o".to_string());
+        self.args.push(format!("{name}={value}"));
+    }
+
+    /// Emits an option whose value is a file path, quoted so whitespace does not split it and
+    /// with `%` escaped because OpenSSH expands `%` tokens in these options.
+    fn set_path(&mut self, name: &str, path: &Path) {
+        self.set(name, quote_ssh_path(path));
+    }
+}
+
+/// Quotes a path for an OpenSSH option value: OpenSSH splits option values on whitespace
+/// unless quoted and expands `%` tokens in file options. The data dir can contain spaces,
+/// for example on macOS.
+fn quote_ssh_path(path: &Path) -> String {
+    let escaped = path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
+}
+
+impl HostKeyPolicy {
+    /// Writes this policy's host key options, each once.
+    fn write_options(&self, options: &mut OptionWriter) {
+        let (strict, known_hosts, alias) = match self {
+            Self::TrustOnFirstUse => {
+                // Managed SSH has no TTY for host-key prompts; accept-new still rejects changed keys.
+                options.set("StrictHostKeyChecking", "accept-new");
+                return;
+            }
+            Self::Probe { known_hosts, alias } => ("accept-new", known_hosts, alias),
+            Self::Pinned(pinned) => ("yes", &pinned.known_hosts, &pinned.alias),
+        };
+        options.set("StrictHostKeyChecking", strict);
+        options.set_path("UserKnownHostsFile", known_hosts);
+        // Nothing outside the device's own file may vouch for (or hide) its host key.
+        options.set("GlobalKnownHostsFile", "/dev/null");
+        options.set("KnownHostsCommand", "none");
+        options.set("VerifyHostKeyDNS", "no");
+        // User config may exempt loopback destinations from all host key checks.
+        options.set("NoHostAuthenticationForLocalhost", "no");
+        // Diagnostics must use the same fingerprint format as the confirmation UI.
+        options.set("FingerprintHash", "sha256");
+        // The device must not be able to add keys to its own pin.
+        options.set("UpdateHostKeys", "no");
+        // Plain entries let redoor read the recorded key back, and no IP entries are added.
+        options.set("HashKnownHosts", "no");
+        options.set("CheckHostIP", "no");
+        // Looked up by device id instead of host:port, so a target or port change that
+        // reaches the same machine keeps matching and a different machine never does.
+        options.set("HostKeyAlias", alias);
+    }
+}
+
+impl AuthPolicy {
+    /// Writes this policy's credential options, each once.
+    fn write_options(&self, options: &mut OptionWriter) {
+        match self {
+            Self::Default => {
+                // BatchMode prevents OpenSSH from reading a password or keyboard-interactive
+                // answer from a terminal, so managed startup fails instead of hanging.
+                options.set("BatchMode", "yes");
+                options.set("NumberOfPasswordPrompts", 0);
+            }
+            Self::Password(_) => {
+                // A second identical askpass answer cannot succeed, so fail on the first attempt.
+                // Override host configuration that would otherwise disable askpass entirely.
+                options.set("BatchMode", "no");
+                options.set("NumberOfPasswordPrompts", 1);
+            }
+            Self::NoAuth => {
+                options.set("BatchMode", "yes");
+                options.set("NumberOfPasswordPrompts", 0);
+                options.set("PreferredAuthentications", "none");
+            }
+            Self::ManagedKey { identity_file } => {
+                options.set("IdentitiesOnly", "yes");
+                options.set_path("IdentityFile", identity_file);
+                options.set("IdentityAgent", "none");
+                // A broken key must fail loudly instead of falling back to a password.
+                options.set("PasswordAuthentication", "no");
+                options.set("KbdInteractiveAuthentication", "no");
+                options.set("PreferredAuthentications", "publickey");
+                options.set("BatchMode", "yes");
+                options.set("NumberOfPasswordPrompts", 0);
+            }
+        }
+    }
+}
+
+/// Builds the complete ssh argv for one invocation from the host's policies, the resolved
+/// routing (managed-key connections only) and the per-call options.
+fn ssh_argv(
+    host: &SshHost,
+    routing: Option<&ResolvedRouting>,
+    command: &str,
+    args: &[&str],
+    options: &SshRunOptions,
+) -> Vec<String> {
+    let mut argv = Vec::new();
+    let mut ssh_options = OptionWriter::default();
+    match routing {
+        Some(routing) => {
+            // `IdentityFile`, forwards and environment settings accumulate across config
+            // files and cannot be reset, so managed-key connections read no config file and
+            // get the routing that `ssh -G` resolved for them instead. User and port are
+            // part of that routing.
+            argv.push("-F".to_string());
+            argv.push("none".to_string());
+            for (name, value) in &routing.options {
+                ssh_options.set(name, value);
+            }
+        }
+        None => {
+            if let Some(ref username) = host.username {
+                argv.push("-l".to_string());
+                argv.push(username.clone());
+            }
+            if let Some(port) = host.ssh_port {
+                argv.push("-p".to_string());
+                argv.push(port.to_string());
+            }
+        }
+    }
+    if options.compressed {
+        argv.push("-C".to_string());
+    }
+    argv.push("-T".to_string());
+    // Always fail fast if a requested reverse forward cannot be bound.
+    // Without this, ssh keeps running and the remote command executes
+    // against a tunnel that will never come up.
+    ssh_options.set("ExitOnForwardFailure", "yes");
+    // Keeps a failed multiplexed session from leaving reverse forwards on an old master,
+    // and makes every step of an enrollment authenticate on its own.
+    ssh_options.set("ControlMaster", "no");
+    ssh_options.set("ControlPath", "none");
+    if !routing.is_some_and(|routing| {
+        routing
+            .options
+            .iter()
+            .any(|(name, _)| name == "ConnectTimeout")
+    }) {
+        ssh_options.set("ConnectTimeout", SSH_CONNECT_TIMEOUT_SECONDS);
+    }
+    host.host_key.write_options(&mut ssh_options);
+    host.auth.write_options(&mut ssh_options);
+    argv.extend(ssh_options.args);
+    for forward in &options.reverse_forwards {
+        argv.push("-R".to_string());
+        argv.push(forward.to_ssh_spec());
+    }
+
+    // A session-supplied target beginning with '-' must never become a local SSH option.
+    argv.push("--".to_string());
+    argv.push(host.target.clone());
+    let managed_export = if options.managed_agent {
+        format!("export {}=1; ", redoor_core::process::MANAGED_AGENT_ENV)
+    } else {
+        String::new()
+    };
+    if let Some((name, _)) = &options.secret_env {
+        // Keep the secret out of both the local ssh argv and the remote agent argv,
+        // since either can be exposed by process listings. `spawn` writes the value
+        // as the first stdin line; this preamble reads and exports it, then `exec`
+        // replaces the shell so the agent inherits the environment without a wrapper.
+        argv.push(format!(
+            "read -r {name}; export {name}; {managed_export}exec {command}"
+        ));
+    } else if options.managed_agent {
+        argv.push(format!("{managed_export}exec {command}"));
+    } else {
+        argv.push(command.to_string());
+    }
+    argv.extend(args.iter().map(|arg| arg.to_string()));
+    argv
+}
+
+/// Connection routing resolved from the user's ssh config for a managed-key connection,
+/// which then runs with `-F none`.
+struct ResolvedRouting {
+    /// Safelisted `(option, value)` pairs passed as `-o` options.
+    options: Vec<(String, String)>,
+}
+
+/// Options copied from `ssh -G` because they decide how to reach the host and how the
+/// transport behaves. Nothing that carries credentials, forwards or environment is copied.
+/// An unset `ConnectTimeout` falls back to redoor's bounded default.
+const ROUTING_SAFELIST: &[(&str, &str)] = &[
+    ("hostname", "HostName"),
+    ("port", "Port"),
+    ("user", "User"),
+    ("addressfamily", "AddressFamily"),
+    ("bindaddress", "BindAddress"),
+    ("bindinterface", "BindInterface"),
+    ("connecttimeout", "ConnectTimeout"),
+    ("serveraliveinterval", "ServerAliveInterval"),
+    ("serveralivecountmax", "ServerAliveCountMax"),
+    ("tcpkeepalive", "TCPKeepAlive"),
+    ("ipqos", "IPQoS"),
+    ("ciphers", "Ciphers"),
+    ("macs", "MACs"),
+    ("kexalgorithms", "KexAlgorithms"),
+    ("hostkeyalgorithms", "HostKeyAlgorithms"),
+    ("proxycommand", "ProxyCommand"),
+];
+
+impl ResolvedRouting {
+    /// Runs `ssh -G` for the host. It evaluates `~/.ssh/config` and the system config,
+    /// including `Host` and `Match` blocks, and prints the effective options without
+    /// connecting.
+    async fn resolve(host: &SshHost) -> Result<Self, std::io::Error> {
+        let output = SshConfigDump::load(host).await?;
+        Ok(Self::from_dump(&output))
+    }
+
+    /// Picks the safelisted options from an `ssh -G` dump and turns a `ProxyJump` into an
+    /// explicit `ProxyCommand`.
+    fn from_dump(dump: &SshConfigDump) -> Self {
+        let mut options = Vec::new();
+        for (key, name) in ROUTING_SAFELIST {
+            if let Some(value) = dump.get(key).filter(|value| *value != "none") {
+                options.push((name.to_string(), value.to_string()));
+            }
+        }
+        let has_proxy_command = options.iter().any(|(name, _)| name == "ProxyCommand");
+        if !has_proxy_command
+            && let Some(jumps) = dump.get("proxyjump").filter(|value| *value != "none")
+            && let (Some(hostname), Some(port)) = (dump.get("hostname"), dump.get("port"))
+        {
+            options.push((
+                "ProxyCommand".to_string(),
+                proxy_jump_command(jumps, hostname, port),
+            ));
+        }
+        Self { options }
+    }
+}
+
+/// Turns a resolved `ProxyJump` list into the `ProxyCommand` OpenSSH itself would run.
+///
+/// With `-F none` OpenSSH would pass `-F none` on to the jump host's ssh too, which would
+/// lose that host's user, port and keys. The explicit command runs a normal `ssh`, so jump
+/// hosts are reached exactly as the user's config describes and only the final hop is
+/// isolated. The last jump is the `-W` destination, the earlier ones go to `-J`.
+fn proxy_jump_command(jumps: &str, hostname: &str, port: &str) -> String {
+    let mut hops: Vec<&str> = jumps.split(',').filter(|hop| !hop.is_empty()).collect();
+    let last = hops.pop().unwrap_or(jumps);
+    let destination = if last.starts_with("ssh://") {
+        last.to_string()
+    } else {
+        // The URI form is the only destination syntax that accepts `host:port`.
+        format!("ssh://{last}")
+    };
+    let mut command = "ssh".to_string();
+    if !hops.is_empty() {
+        command.push_str(" -J ");
+        command.push_str(&shell_quote_proxy_arg(&hops.join(",")));
+    }
+    // Quote the resolved destination itself. OpenSSH substitutes %h after shell quoting,
+    // so placeholders would allow hostile hostnames to break out on older SSH clients.
+    command.push_str(" -W ");
+    command.push_str(&shell_quote_proxy_arg(&format!("[{hostname}]:{port}")));
+    command.push(' ');
+    command.push_str(&shell_quote_proxy_arg(&destination));
+    command
+}
+
+/// Single-quotes a value for the shell that runs `ProxyCommand`, escaping `%` because
+/// OpenSSH expands `%` tokens in the command before the shell sees it.
+fn shell_quote_proxy_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'").replace('%', "%%"))
+}
+
+/// The effective client options for one host as printed by `ssh -G`.
+pub(super) struct SshConfigDump {
+    /// Lowercase option name to value, in the order printed.
+    entries: Vec<(String, String)>,
+}
+
+impl SshConfigDump {
+    /// Runs `ssh -G` with the host's username and port overrides.
+    pub(super) async fn load(host: &SshHost) -> Result<Self, std::io::Error> {
+        let mut ssh = Command::new("ssh");
+        ssh.arg("-G");
+        if let Some(ref username) = host.username {
+            ssh.arg("-l").arg(username);
+        }
+        if let Some(port) = host.ssh_port {
+            ssh.arg("-p").arg(port.to_string());
+        }
+        // Config resolution has the same option-injection boundary as a real connection.
+        ssh.arg("--").arg(&host.target);
+        ssh.stdin(Stdio::null());
+        ssh.kill_on_drop(true);
+        let output = ssh.output().await?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "Failed to resolve the ssh config for '{}': {}",
+                sanitized_ssh_text(host, host.target.as_bytes()),
+                sanitized_ssh_text(host, &output.stderr).trim()
+            )));
+        }
+        Ok(Self::parse(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    /// Parses `key value` lines.
+    fn parse(output: &str) -> Self {
+        let entries = output
+            .lines()
+            .filter_map(|line| {
+                let (key, value) = line.split_once(' ')?;
+                Some((key.to_ascii_lowercase(), value.trim().to_string()))
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// The first value printed for `key` (lowercase).
+    pub(super) fn get(&self, key: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// Formats argv only so configured passwords in the child environment stay out of logs.
@@ -794,26 +1199,12 @@ fn ssh_command_argv_debug(ssh: &Command) -> String {
 
 /// Points OpenSSH at this binary as `SSH_ASKPASS` so password auth can use a
 /// separate process instead of the SSH stdin already reserved for secrets and uploads.
-fn apply_non_interactive_auth(
-    ssh: &mut Command,
-    password: Option<&str>,
-) -> Result<(), std::io::Error> {
-    let Some(password) = password else {
-        // BatchMode prevents OpenSSH from reading a password or keyboard-interactive
-        // answer from a terminal, so managed startup fails instead of hanging.
-        ssh.arg("-o").arg("BatchMode=yes");
-        ssh.arg("-o").arg("NumberOfPasswordPrompts=0");
-        return Ok(());
-    };
+fn apply_askpass_env(ssh: &mut Command, password: &str) -> Result<(), std::io::Error> {
     let exe = std::env::current_exe().map_err(|error| {
         std::io::Error::other(format!(
             "failed to locate redoor executable for SSH_ASKPASS: {error}"
         ))
     })?;
-    // A second identical askpass answer cannot succeed, so fail on the first attempt.
-    // Override host configuration that would otherwise disable askpass entirely.
-    ssh.arg("-o").arg("BatchMode=no");
-    ssh.arg("-o").arg("NumberOfPasswordPrompts=1");
     ssh.env("SSH_ASKPASS", &exe);
     ssh.env("SSH_ASKPASS_REQUIRE", "force");
     ssh.env(super::askpass::ENV, "1");
@@ -844,14 +1235,48 @@ fn sanitized_ssh_text(host: &SshHost, stderr: &[u8]) -> String {
             }
         })
         .collect();
-    if let Some(password) = host
-        .password
-        .as_deref()
-        .filter(|password| !password.is_empty())
+    if let AuthPolicy::Password(password) = &host.auth
+        && !password.is_empty()
     {
-        safe = safe.replace(password, "[redacted]");
+        safe = safe.replace(password.as_str(), "[redacted]");
     }
     safe
+}
+
+/// Explains a pinned host key that no longer matches, with both fingerprints, so the user
+/// can decide whether to re-pin. `None` when the failure is not a pinned-key mismatch.
+fn host_key_change_message(host: &SshHost, diagnostic: &str) -> Option<String> {
+    let HostKeyPolicy::Pinned(pinned) = &host.host_key else {
+        return None;
+    };
+    let lower = diagnostic.to_ascii_lowercase();
+    // A different key type is reported as "no ... host key is known" instead of "changed".
+    if !lower.contains("remote host identification has changed")
+        && !lower.contains("host key is known for")
+        && !lower.contains("host key verification failed")
+    {
+        return None;
+    }
+    let presented =
+        presented_host_key_fingerprint(diagnostic).unwrap_or_else(|| "a different key".to_string());
+    Some(format!(
+        "SSH host key changed. The device presented {presented}, but {} is pinned for it. If the change is expected, re-pin the host key from the device page.",
+        pinned.fingerprint
+    ))
+}
+
+/// Finds the fingerprint OpenSSH prints after "sent by the remote host is" in its
+/// changed-host-key warning.
+fn presented_host_key_fingerprint(diagnostic: &str) -> Option<String> {
+    let after = &diagnostic[diagnostic.find("sent by the remote host is")?..];
+    let start = after.find("SHA256:")?;
+    let fingerprint: String = after[start..]
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '+' | '/' | '=')
+        })
+        .collect();
+    Some(fingerprint.trim_end_matches('.').to_string())
 }
 
 /// Converts bounded OpenSSH stderr into actionable, sanitized operator guidance.
@@ -864,12 +1289,24 @@ fn format_ssh_failure(
     let diagnostic = sanitized_ssh_text(host, stderr);
     let diagnostic = diagnostic.trim();
     let lower = diagnostic.to_ascii_lowercase();
+    if let Some(changed) = host_key_change_message(host, diagnostic) {
+        return format!(
+            "{changed} Target '{}', stage '{stage}'.\nOpenSSH: {diagnostic}",
+            sanitized_ssh_text(host, host.target.as_bytes())
+        );
+    }
     let summary = if lower.contains("permission denied") || lower.contains("authentication failed")
     {
-        if host.password.is_some() {
-            "SSH authentication failed. The configured password or SSH key was rejected."
-        } else {
-            "SSH authentication requires credentials. Configure a password, SSH key, or ssh-agent credential for this managed agent."
+        match host.auth {
+            AuthPolicy::Password(_) => {
+                "SSH authentication failed. The configured password or SSH key was rejected."
+            }
+            AuthPolicy::ManagedKey { .. } => {
+                "SSH authentication failed. The device rejected redoor's SSH key for this device; set up the SSH key again from the device page."
+            }
+            AuthPolicy::Default | AuthPolicy::NoAuth => {
+                "SSH authentication requires credentials. Configure a password, SSH key, or ssh-agent credential for this managed agent."
+            }
         }
     } else if lower.contains("host key verification failed")
         || lower.contains("remote host identification has changed")
@@ -1210,6 +1647,365 @@ mod tests {
         assert!(!issue.contains('\u{1b}'));
         assert!(!issue.contains('\u{202e}'));
         assert!(issue.contains("[redacted]"));
+    }
+
+    /// Every `-o` value given for `name` in an argv.
+    fn option_values(argv: &[String], name: &str) -> Vec<String> {
+        argv.windows(2)
+            .filter(|pair| pair[0] == "-o")
+            .filter_map(|pair| pair[1].strip_prefix(&format!("{name}=")))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// One `ssh -G` dump like OpenSSH prints for a host with a jump host and extra keys.
+    const CONFIG_DUMP: &str = "user alice
+hostname real.example
+port 2222
+addressfamily any
+tcpkeepalive yes
+serveralivecountmax 3
+serveraliveinterval 0
+identityfile ~/.ssh/id_user
+certificatefile ~/.ssh/id_user-cert.pub
+localforward 8080 [localhost]:80
+remoteforward 9090 [localhost]:90
+dynamicforward 1080
+sendenv LANG
+setenv FOO=bar
+identitiesonly no
+connecttimeout none
+ipqos lowdelay throughput
+bindaddress none
+proxyjump bob@j1:2201,carol@j2
+";
+
+    /// For every host key and credential policy combination, each security relevant option
+    /// appears exactly once with the policy's value. OpenSSH keeps the first value of an
+    /// option, so a duplicate would let an unconditional default shadow a stricter value.
+    #[test]
+    fn every_policy_combination_emits_each_option_once() {
+        let pinned = super::PinnedHostKey {
+            known_hosts: "/data/ssh/dev_x/known_hosts".into(),
+            alias: "dev_x".to_string(),
+            fingerprint: "SHA256:pinned".to_string(),
+        };
+        let host_keys = [
+            ("tofu", super::HostKeyPolicy::TrustOnFirstUse),
+            (
+                "probe",
+                super::HostKeyPolicy::Probe {
+                    known_hosts: "/data/ssh/dev_x/.probe".into(),
+                    alias: "dev_x".to_string(),
+                },
+            ),
+            ("pinned", super::HostKeyPolicy::Pinned(pinned)),
+        ];
+        let auths = [
+            ("default", super::AuthPolicy::Default),
+            (
+                "password",
+                super::AuthPolicy::Password(zeroize::Zeroizing::new("pw".to_string())),
+            ),
+            ("none", super::AuthPolicy::NoAuth),
+            (
+                "key",
+                super::AuthPolicy::ManagedKey {
+                    identity_file: "/data/ssh/dev_x/key_y/id_ed25519".into(),
+                },
+            ),
+        ];
+        let routing = super::ResolvedRouting::from_dump(&super::SshConfigDump::parse(CONFIG_DUMP));
+        for (host_key_name, host_key) in &host_keys {
+            for (auth_name, auth) in &auths {
+                let host = super::SshHost::new("device".to_string())
+                    .username(Some("alice".to_string()))
+                    .ssh_port(Some(2222))
+                    .host_key(host_key.clone())
+                    .auth(auth.clone());
+                let is_key = matches!(auth, super::AuthPolicy::ManagedKey { .. });
+                let argv = super::ssh_argv(
+                    &host,
+                    is_key.then_some(&routing),
+                    "true",
+                    &[],
+                    &super::SshRunOptions::default(),
+                );
+                let isolated = !matches!(host_key, super::HostKeyPolicy::TrustOnFirstUse);
+                let expected: Vec<(&str, Option<&str>)> = vec![
+                    (
+                        "StrictHostKeyChecking",
+                        Some(match *host_key_name {
+                            "pinned" => "yes",
+                            _ => "accept-new",
+                        }),
+                    ),
+                    (
+                        "UserKnownHostsFile",
+                        match *host_key_name {
+                            "pinned" => Some("\"/data/ssh/dev_x/known_hosts\""),
+                            "probe" => Some("\"/data/ssh/dev_x/.probe\""),
+                            _ => None,
+                        },
+                    ),
+                    ("GlobalKnownHostsFile", isolated.then_some("/dev/null")),
+                    ("KnownHostsCommand", isolated.then_some("none")),
+                    ("VerifyHostKeyDNS", isolated.then_some("no")),
+                    ("NoHostAuthenticationForLocalhost", isolated.then_some("no")),
+                    ("FingerprintHash", isolated.then_some("sha256")),
+                    ("UpdateHostKeys", isolated.then_some("no")),
+                    ("HostKeyAlias", isolated.then_some("dev_x")),
+                    (
+                        "BatchMode",
+                        Some(match *auth_name {
+                            "password" => "no",
+                            _ => "yes",
+                        }),
+                    ),
+                    ("IdentitiesOnly", is_key.then_some("yes")),
+                    (
+                        "IdentityFile",
+                        is_key.then_some("\"/data/ssh/dev_x/key_y/id_ed25519\""),
+                    ),
+                    ("IdentityAgent", is_key.then_some("none")),
+                    ("PasswordAuthentication", is_key.then_some("no")),
+                    ("ExitOnForwardFailure", Some("yes")),
+                    ("ControlMaster", Some("no")),
+                    ("ConnectTimeout", Some("15")),
+                ];
+                for (name, value) in expected {
+                    let values = option_values(&argv, name);
+                    // Exactly one value with the policy's setting, or none when the policy
+                    // leaves the option to OpenSSH.
+                    assert_eq!(
+                        values,
+                        value.map(str::to_string).into_iter().collect::<Vec<_>>(),
+                        "{name} for {host_key_name}/{auth_name}: {argv:?}"
+                    );
+                }
+                // Only managed-key connections skip the config files and take the routing
+                // from `ssh -G` (which already includes -l and -p).
+                assert_eq!(
+                    argv.windows(2)
+                        .any(|pair| pair[0] == "-F" && pair[1] == "none"),
+                    is_key,
+                    "{host_key_name}/{auth_name}: {argv:?}"
+                );
+                assert_eq!(
+                    argv.iter().any(|arg| arg == "-l"),
+                    !is_key,
+                    "{host_key_name}/{auth_name}: {argv:?}"
+                );
+            }
+        }
+    }
+
+    /// The safelist copies routing and transport options from `ssh -G` but never
+    /// credentials, forwards or environment from the user's config.
+    #[test]
+    fn config_dump_copies_only_routing_options() {
+        let routing = super::ResolvedRouting::from_dump(&super::SshConfigDump::parse(CONFIG_DUMP));
+        let names: Vec<&str> = routing
+            .options
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for copied in [
+            "HostName",
+            "Port",
+            "User",
+            "TCPKeepAlive",
+            "IPQoS",
+            "ProxyCommand",
+        ] {
+            // Routing from the user's config keeps working for managed-key connections.
+            assert!(names.contains(&copied), "{copied} missing from {names:?}");
+        }
+        for skipped in [
+            "IdentityFile",
+            "CertificateFile",
+            "LocalForward",
+            "RemoteForward",
+            "DynamicForward",
+            "SendEnv",
+            "SetEnv",
+            "IdentitiesOnly",
+            // redoor sets its own connect timeout; "none" values are OpenSSH's unset marker.
+            "ConnectTimeout",
+            "BindAddress",
+        ] {
+            // Accumulating or credential-bearing options must not reach the device.
+            assert!(!names.contains(&skipped), "{skipped} copied: {names:?}");
+        }
+        let value = |name: &str| {
+            routing
+                .options
+                .iter()
+                .find(|(option, _)| option == name)
+                .map(|(_, value)| value.clone())
+        };
+        // Multi-value options keep all their words.
+        assert_eq!(value("IPQoS").as_deref(), Some("lowdelay throughput"));
+        // The last jump is the -W destination and the earlier ones go to -J, run without
+        // -F none so jump hosts keep the user's config.
+        assert_eq!(
+            value("ProxyCommand").as_deref(),
+            Some("ssh -J 'bob@j1:2201' -W '[real.example]:2222' 'ssh://carol@j2'")
+        );
+    }
+
+    /// A configured timeout must survive config isolation without shadowing the default.
+    #[test]
+    fn configured_connect_timeout_is_emitted_once() {
+        let routing = super::ResolvedRouting::from_dump(&super::SshConfigDump::parse(
+            "hostname example.test
+connecttimeout 37
+",
+        ));
+        let host = super::SshHost::new("device".to_string()).auth(super::AuthPolicy::ManagedKey {
+            identity_file: "/data/id_ed25519".into(),
+        });
+        let argv = super::ssh_argv(
+            &host,
+            Some(&routing),
+            "true",
+            &[],
+            &super::SshRunOptions::default(),
+        );
+        // A slow route may need the user's timeout rather than redoor's 15-second fallback.
+        assert_eq!(option_values(&argv, "ConnectTimeout"), ["37"]);
+    }
+
+    /// Device targets are data, even if a caller supplies a string resembling an SSH flag.
+    #[test]
+    fn target_cannot_inject_ssh_options() {
+        let host = super::SshHost::new("-oProxyCommand=touch /tmp/not-run".to_string());
+        let argv = super::ssh_argv(&host, None, "true", &[], &super::SshRunOptions::default());
+        let end = argv.iter().position(|arg| arg == "--").unwrap();
+        // The option parser must stop before it encounters an untrusted target.
+        assert_eq!(&argv[end + 1..], [host.target.clone(), "true".to_string()]);
+    }
+
+    /// A single jump host becomes a plain `-W` command, and a configured ProxyCommand is
+    /// copied as it is.
+    #[test]
+    fn single_jump_and_explicit_proxy_command() {
+        // The URI form keeps a jump host port valid as an ssh destination.
+        assert_eq!(
+            super::proxy_jump_command("bob@j1:2201", "device", "22"),
+            "ssh -W '[device]:22' 'ssh://bob@j1:2201'"
+        );
+        let routing = super::ResolvedRouting::from_dump(&super::SshConfigDump::parse(
+            "hostname h\nproxycommand nc %h %p\n",
+        ));
+        // OpenSSH expands the tokens itself at connect time.
+        assert!(
+            routing
+                .options
+                .contains(&("ProxyCommand".to_string(), "nc %h %p".to_string()))
+        );
+        let routing =
+            super::ResolvedRouting::from_dump(&super::SshConfigDump::parse("proxycommand none\n"));
+        // "none" means no proxy and is not passed on.
+        assert!(routing.options.is_empty());
+    }
+
+    /// OpenSSH expands tokens before invoking the proxy shell, so both percent signs and
+    /// shell metacharacters must survive as literal argv bytes even on older clients.
+    #[tokio::test]
+    async fn generated_proxy_quotes_resolved_host_and_jump_arguments() {
+        let home = redoor_core::test_support::TempDir::create();
+        let ssh_path = home.path().join("ssh");
+        tokio::fs::write(
+            &ssh_path,
+            "#!/bin/sh
+printf '%s|' \"$@\"
+",
+        )
+        .await
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&ssh_path, std::fs::Permissions::from_mode(0o700))
+            .await
+            .unwrap();
+        let hostname = "host'$(exit 17)%h";
+        let jumps = "first'$(exit 19)%h,last'$(exit 23)%h:2201";
+        // Emulate the only percent expansion left for OpenSSH: %% becomes a literal %.
+        let command = super::proxy_jump_command(jumps, hostname, "2222").replace("%%", "%");
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let search_path = std::env::join_paths(
+            std::iter::once(home.path().to_path_buf())
+                .chain(std::env::split_paths(&inherited_path)),
+        )
+        .unwrap();
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("PATH", search_path)
+            .output()
+            .await
+            .unwrap();
+        // A fake SSH executable observes the literal arguments; none become shell syntax.
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "-J|first'$(exit 19)%h|-W|[host'$(exit 17)%h]:2222|ssh://last'$(exit 23)%h:2201|"
+        );
+    }
+
+    /// Paths with spaces stay one option value and `%` is not expanded as a token; the data
+    /// dir can contain spaces, for example on macOS.
+    #[test]
+    fn option_paths_are_quoted_and_escaped() {
+        let path = std::path::Path::new("/Users/a b/Library/100% \"x\"/id_ed25519");
+        // Quotes keep the value together, `%%` is a literal percent, inner quotes are escaped.
+        assert_eq!(
+            super::quote_ssh_path(path),
+            "\"/Users/a b/Library/100%% \\\"x\\\"/id_ed25519\""
+        );
+    }
+
+    /// A pinned host key mismatch names both fingerprints and the re-pin action instead of
+    /// generic host key guidance.
+    #[tokio::test]
+    async fn pinned_host_key_change_names_both_fingerprints() {
+        let host = super::SshHost::new("device".to_string()).host_key(
+            super::HostKeyPolicy::Pinned(super::PinnedHostKey {
+                known_hosts: "/data/known_hosts".into(),
+                alias: "dev_x".to_string(),
+                fingerprint: "SHA256:pinnedpinned".to_string(),
+            }),
+        );
+        let status = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 255")
+            .status()
+            .await
+            .unwrap();
+        let stderr = b"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:37GuSDsn+/eh/mfE4ljJRsBc4iIVEHdf7nKKbCHhlF0.
+Host key for dev_x has changed and you have requested strict checking.
+Host key verification failed.";
+        let issue = super::format_ssh_failure(&host, "remote host probe", status, stderr);
+        // The user sees what was pinned and what is presented now.
+        assert!(issue.starts_with("SSH host key changed."), "{issue}");
+        assert!(issue.contains("SHA256:pinnedpinned"), "{issue}");
+        assert!(
+            issue.contains("SHA256:37GuSDsn+/eh/mfE4ljJRsBc4iIVEHdf7nKKbCHhlF0,"),
+            "{issue}"
+        );
+        // The way out is named; redoor never re-pins on its own.
+        assert!(issue.contains("re-pin the host key"), "{issue}");
+
+        let unpinned = super::SshHost::new("device".to_string());
+        let issue = super::format_ssh_failure(&unpinned, "remote host probe", status, stderr);
+        // Devices without a pin keep today's generic guidance.
+        assert!(
+            issue.starts_with("SSH host key verification failed."),
+            "{issue}"
+        );
     }
 
     /// Verifies IPv6 destinations retain unambiguous OpenSSH `-R` syntax.

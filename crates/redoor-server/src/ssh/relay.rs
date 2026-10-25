@@ -67,6 +67,8 @@ pub async fn run_relay(
     redoor_core::logging::init(Some(log)).await?;
     let provision = ProvisionContext {
         app_name: paths.app_name().to_string(),
+        // Relays never have managed keys; the store is only consulted for `managed_ssh_key`.
+        ssh_keys: crate::ssh::keys::SshKeyStore::for_data_dir(&paths.data_dir()?),
         binaries: crate::binaries::BinaryCache::new(paths),
     };
     Relay {

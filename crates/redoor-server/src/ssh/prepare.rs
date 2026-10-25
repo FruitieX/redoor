@@ -14,6 +14,7 @@ use redoor_core::{log, log_error};
 use redoor_protocol::ids::AgentId;
 use redoor_protocol::wire::log::Level;
 
+use super::managed_keys::ManagedKeyDevice;
 use super::provision::{
     default_remote_bin, ensure_remote_binary, force_upload_binary, sniff_remote,
 };
@@ -259,7 +260,7 @@ impl Preparation<'_> {
                 self.config.target
             ))
         })?;
-        let host = self.ssh_host();
+        let host = self.ssh_host().await?;
         let result = self.install_binary(&host).await;
         let remote_bin = match result {
             Ok(remote_bin) => remote_bin,
@@ -305,12 +306,13 @@ impl Preparation<'_> {
         })
     }
 
-    /// Builds the SSH connection parameters from the target settings.
-    fn ssh_host(&self) -> SshHost {
-        SshHost::new(self.config.target.clone())
-            .username(self.config.username.clone())
-            .ssh_port(self.config.ssh_port)
-            .password(self.config.password.clone())
+    /// Builds the SSH connection parameters from the target settings. A device with a
+    /// managed key uses only that key and its pinned host key, for the probe, the binary
+    /// upload and the agent session alike.
+    async fn ssh_host(&self) -> Result<SshHost, ProvisionError> {
+        ManagedKeyDevice::new(self.config.clone(), self.provision.ssh_keys.clone())?
+            .connection_host()
+            .await
     }
 
     /// Operator-chosen path, or the versioned default under the local namespace.

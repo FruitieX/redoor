@@ -40,4 +40,14 @@ password: string | null,
 /**
  * Reports whether a password is stored so the edit form can choose the matching auth radio.
  */
-has_password: boolean, };
+has_password: boolean, 
+/**
+ * Whether the device logs in with a redoor-managed SSH key, so the UI can offer
+ * rotation and removal instead of the initial setup.
+ */
+has_managed_ssh_key: boolean, 
+/**
+ * Whether a host key is pinned for the device. Setting up a key again then needs no
+ * host key confirmation, and a target edit is about to discard the pin.
+ */
+has_pinned_host_key: boolean, };

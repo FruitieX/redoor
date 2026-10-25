@@ -112,6 +112,12 @@ pub struct ManagedSshAgentConfigurationResponse {
     pub password: Option<String>,
     /// Reports whether a password is stored so the edit form can choose the matching auth radio.
     pub has_password: bool,
+    /// Whether the device logs in with a redoor-managed SSH key, so the UI can offer
+    /// rotation and removal instead of the initial setup.
+    pub has_managed_ssh_key: bool,
+    /// Whether a host key is pinned for the device. Setting up a key again then needs no
+    /// host key confirmation, and a target edit is about to discard the pin.
+    pub has_pinned_host_key: bool,
 }
 
 /// Returns the replacement dormant inventory record after an SSH configuration edit.

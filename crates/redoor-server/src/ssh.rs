@@ -29,12 +29,18 @@
 //! re-executing this binary. That keeps the secret off argv and off the SSH
 //! stdin already used for tokens, sniff scripts, and uploads.
 //!
+//! A device with `managed_ssh_key = true` instead logs in only with its redoor-managed key
+//! ([`keys`], [`managed_keys`]) and only trusts its pinned host key. Those
+//! connections read no ssh config file; their routing comes from `ssh -G`.
+//!
 //! Both standalone and TOML-managed launches select a random dynamic remote
 //! port for each SSH spawn attempt. `ExitOnForwardFailure=yes` makes SSH exit
 //! when that port is already occupied. Managed agents let the watchdog retry;
 //! standalone relays detect that specific bind failure and retry locally.
 
 pub mod askpass;
+pub(crate) mod keys;
+pub(crate) mod managed_keys;
 mod prepare;
 mod provision;
 pub mod relay;
@@ -71,6 +77,8 @@ pub(crate) struct ProvisionContext {
     pub(crate) app_name: String,
     /// Release cache used when the target lacks a matching binary.
     pub(crate) binaries: crate::binaries::BinaryCache,
+    /// Managed keys and pinned host keys of devices with `managed_ssh_key = true`.
+    pub(crate) ssh_keys: keys::SshKeyStore,
 }
 
 impl ProvisionContext {

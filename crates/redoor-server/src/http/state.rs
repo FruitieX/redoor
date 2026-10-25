@@ -50,6 +50,10 @@ pub(crate) struct ServerState {
     pub(crate) config_path: PathBuf,
     /// Serializes read-modify-write config edits so concurrent submissions cannot lose entries.
     pub(crate) config_edit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Managed SSH keys and pinned host keys of SSH devices.
+    pub(crate) ssh_keys: crate::ssh::keys::SshKeyStore,
+    /// Devices with a key operation or edit in progress, so they cannot race each other.
+    pub(crate) ssh_key_operations: super::ssh_keys::SshKeyOperations,
     /// Login backend resolved from the TOML credentials (or their absence).
     pub(crate) auth_mode: ServerAuthMode,
     /// Signals axum graceful shutdown; restart fires this after a successful

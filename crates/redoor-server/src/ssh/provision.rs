@@ -193,7 +193,7 @@ pub(super) async fn sniff_remote(
         script.replace('\n', "\\n")
     );
     let options = SshRunOptions::default().compressed();
-    let output = host.run_script_captured(&script, &options).await.map_err(|error| {
+    let output = host.run_script_captured("remote host probe", &script, &options).await.map_err(|error| {
         redoor_core::log_failure!(
             Level::Error,
             "Remote sniff script execution failed: target={}, remote_bin={}, elapsed={:?}, error={:#}",

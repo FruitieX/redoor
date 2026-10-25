@@ -56,6 +56,12 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
         | ("GET" | "PUT", "/api/v1/agents/{agent}/logging-level")
         | ("POST", "/api/v1/agents/{agent}/echo") => Access::SessionOnly,
 
+        // SSH keys and host keys carry login passwords and change what the server can log
+        // in to.
+        ("GET", "/api/v1/agents/{agent}/ssh-host-key")
+        | ("POST", "/api/v1/agents/{agent}/ssh-host-key/pin")
+        | ("POST" | "DELETE", "/api/v1/agents/{agent}/ssh-key") => Access::SessionOnly,
+
         // Token management: never grantable, so a token cannot mint a broader one.
         ("GET" | "POST", "/api/v1/tokens")
         | ("PUT" | "DELETE", "/api/v1/tokens/{token_id}")
@@ -215,6 +221,16 @@ mod tests {
                 Access::SessionOnly,
             ),
             (Method::POST, "/api/v1/server/restart", Access::SessionOnly),
+            (
+                Method::POST,
+                "/api/v1/agents/{agent}/ssh-key",
+                Access::SessionOnly,
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/ssh-host-key",
+                Access::SessionOnly,
+            ),
             (Method::GET, "/api/v1/tokens", Access::SessionOnly),
             (Method::GET, "/api/v1/tokens/current", Access::AnyPrincipal),
             (

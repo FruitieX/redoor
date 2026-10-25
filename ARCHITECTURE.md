@@ -147,6 +147,11 @@ The agent runtime and the implementation of every command.
   and generation counters.
 - `ssh/`: preparing remote hosts (OS and architecture probe, binary install), launching
   agents through SSH reverse forwards, and the standalone `relay`.
+  - `transport`: `SshHost` with a `HostKeyPolicy` and an `AuthPolicy`. `build_ssh_command`
+    is the only place that creates an `ssh` command, so no connection (probe, upload or
+    agent session) can bypass the policies.
+  - `keys` (`SshKeyStore`) and `managed_keys`: per-device SSH keys and pinned host keys,
+    see "SSH device keys" below.
 - `startup`: `ServerConfig::resolve`, then `ServerRuntime::build`, then
   `serve_until_restart`.
 
@@ -233,8 +238,9 @@ behind NAT, on a phone (Termux) or on a host that is only reachable over SSH.
   <random-port>:<server>` and starts the agent on the remote host pointing at
   `ws://localhost:<random-port>/api/v1/agent/ws`. What looks like a local connection on the remote host
   reaches the server through the tunnel. The token is passed on SSH stdin and the password
-  through askpass, so neither appears on a command line. `redoor agent relay` runs the same
-  mechanism without a server, for agents of a remote server.
+  through askpass, so neither appears on a command line. A device can instead use a
+  redoor-managed SSH key and a pinned host key (see "SSH device keys"). `redoor agent relay`
+  runs the same mechanism without a server, for agents of a remote server.
 - **Browsers, the CLI and MCP clients** only use the REST API, the `/mcp` endpoint and browser
   websockets. They never talk to agents directly; the server translates each request into
   agent commands.
@@ -1236,6 +1242,102 @@ cache, so Back, reload and shared links all land on the same screen.
   binding in CodeMirror. Whether the find panel is open belongs to the editor view, which also
   shows it on the toolbar.
 
+## SSH device keys
+
+An SSH device can log in with an ed25519 key that redoor creates for that device only,
+instead of the server user's own keys or a password stored in plaintext in `config.toml`.
+Such a key works for exactly one device, can be revoked on its own, cannot be replayed to
+an impostor host and is restricted in `authorized_keys`.
+
+- **Storage.** `<data_dir>/ssh/<device-id>/` holds `known_hosts` (the pinned host key),
+  `id_ed25519` (the current private key) and, only while a setup or rotation runs,
+  `id_ed25519.next` (the staged key). There is no `.pub` file: the public key is derived
+  from the private key on every load, so switching keys is one atomic
+  `rename(id_ed25519.next, id_ed25519)` and a reader always sees a complete old or new key.
+  The directory is 0700 and every file 0600; files are written with their final mode and
+  renamed into place. Everything is keyed by the permanent device id, so a rename or a
+  reused name cannot hand a key to another device. The `[[agents]]` entry only records
+  `managed_ssh_key = true` (omitted when false); it never holds key material, and it never
+  has both `managed_ssh_key` and `password`. Keys are generated in-process (`ssh-key`
+  crate). In this phase the private key is not encrypted at rest (see
+  `plans/ssh-key-vault.md`).
+- **Policies, each option emitted once.** OpenSSH keeps the first value of an option, so
+  defaults are produced by the policies instead of being written unconditionally:
+  - `HostKeyPolicy::TrustOnFirstUse` (`accept-new`, as before) for devices without a pin,
+    `Probe` for recording the presented key, `Pinned` for devices with a pin, including
+    after their managed login key is removed. `Probe` and `Pinned` use only the device's
+    own `known_hosts` (global file, `KnownHostsCommand` and DNS off, `UpdateHostKeys=no`,
+    `NoHostAuthenticationForLocalhost=no`) and look the key up by
+    `HostKeyAlias=<device-id>`, so the pin survives a target or port change that still
+    reaches the same machine. An existing but malformed pin fails closed instead of
+    restoring trust-on-first-use.
+  - `AuthPolicy::Default` (the server user's keys, `BatchMode`), `Password` (askpass),
+    `NoAuth` (probe) and `ManagedKey` (only the managed key, no agent, no password or
+    keyboard-interactive fallback).
+- **Only the managed key is offered.** `IdentityFile`, forwards and environment settings
+  accumulate across config files and cannot be reset, so managed-key connections run with
+  `-F none`. Their routing comes from `ssh -G`: a safelist of routing and transport
+  options is copied, and a `ProxyJump` becomes an explicit `ProxyCommand=ssh -J … -W …` so
+  jump hosts still use the user's config. The generated proxy command shell-quotes the
+  resolved host and port instead of `%h`/`%p` tokens, whose later substitution could break
+  quoting on older SSH clients. Both config resolution and connections terminate local
+  option parsing with `--` before the device target. Other connections read the config
+  files as before.
+- **Enrollment** (`POST /api/v1/agents/{agent}/ssh-key`, also used for rotation):
+  1. The host key is probed without sending any credential
+     (`GET /api/v1/agents/{agent}/ssh-host-key`), confirmed by the user and pinned.
+  2. First enrollment tries the stored password, the server user's keys, then a typed
+     password. Rotation uses only the current managed key and fails if it is revoked or
+     missing; it never falls back to the server user's identities. A typed password lives
+     only in memory (zeroized) for the request and goes to ssh through
+     askpass; it is never stored or logged.
+  3. A key is generated, written to `id_ed25519.next` (replacing a stale one from an
+     interrupted run) and installed by a script over stdin that atomically rewrites
+     `~/.ssh/authorized_keys`, keeping every other line, dropping this device's lines whose
+     key fingerprint is not in the keep list, and refusing a non-regular file. The line is
+     `restrict,port-forwarding <key> redoor:<device-id>:<SHA256 fingerprint>`. The awk
+     filter gets the marker and keep list through `ENVIRON` (no escape processing) and
+     compares fingerprints only literally (`index`, `==`), because they contain `+`, `/`
+     and `=`; it behaves the same in GNU, BSD and busybox awk.
+  4. The key is verified with only that key, against the pin, with a dummy `-R 0:…`
+     forward like the agent's, so hosts that refuse forwarding fail here. On failure the
+     line is removed again with the bootstrap credential and the staged file deleted.
+  5. Commit of a first key: under the config edit lock, `.next` is renamed to `id_ed25519`
+     (and the directory synced), then `managed_ssh_key = true` is written and `password`
+     removed, and the agent comes back `Stopped` like after any edit. The rename comes
+     first so a crash never leaves a config that claims a missing key, only an unused key
+     file that the next setup overwrites. If the config write fails, the key file is
+     deleted and the remote line rolled back. A runtime registration failure after
+     persistence is reported without rolling back the now-referenced key.
+  6. Commit of a rotation (keep list during install: current and new key): only the
+     rename, with no config write, so a connected agent is not stopped; its ssh session
+     already authenticated, and every agent start loads the key file again. Then the old
+     line is removed using the new key.
+- **Removal** (`DELETE …/ssh-key`) first clears the config, then removes every
+  `redoor:<device-id>:` line using the old key and deletes it locally, reporting whether
+  the device was reached. Failed persistence leaves the remote key intact. Device deletion
+  likewise validates route ownership and persists deletion before revoking the remote key.
+  The pin stays after key removal and still protects subsequent password or default-key
+  logins. Deleting the device or changing its target deletes the whole device directory;
+  changing the username deletes the keys but keeps the pin.
+- **Host key changes** fail the connection (`StrictHostKeyChecking=yes`). The
+  `connection_issue` names the pinned and presented fingerprints, and only an explicit
+  re-pin (`POST …/ssh-host-key/pin` with the confirmed fingerprint) replaces the pin.
+- **Concurrency.** Key operations and device edits of one device are serialized by a
+  per-device busy set; a second request gets 409. The config edit lock is held only for the
+  final commit (rename and config write, or the rotation's rename), because the flow
+  includes network round trips. Mutating HTTP handlers run
+  their operation in an owned Tokio task, so disconnecting a client does not release the
+  busy guard or interrupt commit, rollback, or cleanup. Remote file rewrites are serialized
+  across devices on this server; separate servers rewriting the same account can still race.
+- **UI.** A dedicated key is the default for new SSH devices. The add form then creates the
+  device without a password and opens `SshKeySetupDialog` (host key confirmation, a
+  password used once, enrollment), so the typed password only ever travels with the
+  enroll request. Turning the option off brings back the server-keys or stored-password
+  choice. The device's configuration page has an SSH key section for set up, rotate,
+  remove and re-pin. An edit that changes the username or target warns that the key is
+  dropped and can remove the key from the device first, while it still logs in.
+
 ## Authentication and trust
 
 Redoor has a single user account. Each kind of client has its own credential, and each
@@ -1261,6 +1363,12 @@ credential only works on its own endpoints:
 - **The agent token** is one secret shared by all agents and checked during the websocket
   upgrade. It proves "this is an agent of this server", not which agent: the agent id in
   `hello` is self-reported. Agents are therefore only partly trusted.
+- **SSH device credentials** live in two places, both readable by the server's OS user
+  and root: an optional plaintext `password` in `config.toml`, or a managed key under
+  `<data_dir>/ssh/<device-id>/` (0600, unencrypted for now). Anyone who can read the data
+  dir or a copy of it can log in to the device with that key; the exposure is limited to
+  that device and revocable by removing the key. The SSH key routes are session-only,
+  because they handle passwords and change what the server can log in to.
 - **What agents are trusted with.** An agent acts as its own OS user. A local managed agent
   runs as the server's user, an SSH agent as the SSH login, and a standalone agent as
   whoever started it. The server trusts the content an agent returns (listings, file data,

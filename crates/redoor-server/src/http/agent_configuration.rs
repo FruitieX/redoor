@@ -36,7 +36,16 @@ pub(crate) async fn get_ssh_agent_configuration_handler(
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<ManagedSshAgentConfigurationResponse>, ApiError> {
     let config = find_ssh_agent(&state, &agent_id).await?;
-    Ok(Json(ManagedSshAgentConfigurationResponse::from(config)))
+    let has_pinned_host_key = state
+        .ssh_keys
+        .pinned_host_key(&agent_id)
+        .await
+        .map_err(internal_error)?
+        .is_some();
+    Ok(Json(ManagedSshAgentConfigurationResponse {
+        has_pinned_host_key,
+        ..ManagedSshAgentConfigurationResponse::from(config)
+    }))
 }
 
 /// Route: `PUT /api/v1/agents/{agent}` replaces one stopped SSH-backed TOML entry.
@@ -45,8 +54,11 @@ pub(crate) async fn update_ssh_agent_handler(
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<UpdateSshAgentRequest>,
 ) -> Result<Json<UpdateSshAgentResponse>, ApiError> {
-    let agent = update_ssh_agent(&state, &agent_id, request).await?;
-    Ok(Json(UpdateSshAgentResponse { agent }))
+    super::ssh_keys::complete_operation(async move {
+        let agent = update_ssh_agent(&state, &agent_id, request).await?;
+        Ok(Json(UpdateSshAgentResponse { agent }))
+    })
+    .await
 }
 
 /// Route: `DELETE /api/v1/agents/{agent}` removes one stopped SSH-backed TOML entry.
@@ -54,8 +66,11 @@ pub(crate) async fn delete_ssh_agent_handler(
     ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<DeleteManagedAgentResponse>, ApiError> {
-    delete_managed_agent(&state, &agent_id, ManagedAgentKind::Ssh).await?;
-    Ok(Json(DeleteManagedAgentResponse { deleted: true }))
+    super::ssh_keys::complete_operation(async move {
+        delete_managed_agent(&state, &agent_id, ManagedAgentKind::Ssh).await?;
+        Ok(Json(DeleteManagedAgentResponse { deleted: true }))
+    })
+    .await
 }
 
 /// Route: `POST /api/v1/local-agents` persists and immediately registers one local agent.
@@ -75,8 +90,11 @@ pub(crate) async fn delete_local_agent_handler(
     ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<DeleteManagedAgentResponse>, ApiError> {
-    delete_managed_agent(&state, &agent_id, ManagedAgentKind::Local).await?;
-    Ok(Json(DeleteManagedAgentResponse { deleted: true }))
+    super::ssh_keys::complete_operation(async move {
+        delete_managed_agent(&state, &agent_id, ManagedAgentKind::Local).await?;
+        Ok(Json(DeleteManagedAgentResponse { deleted: true }))
+    })
+    .await
 }
 
 /// Route: `GET /api/v1/local-agents/{agent}/configuration` returns editable local TOML fields.
@@ -136,7 +154,13 @@ async fn create_ssh_agent(
 ///
 /// The request rebuilds the whole entry, so the id is carried over from the stored entry
 /// like the password; dropping it would make the next start assign a new id and silently
-/// break every token scope that refers to the device.
+/// break every token scope that refers to the device. `managed_ssh_key` is carried over the same
+/// way, otherwise any edit, even a rename, would drop the managed key and fall back to the
+/// server user's credentials.
+///
+/// A new username points at another account where the key is not installed, so the key is
+/// dropped but the pinned host key stays (same machine). A new target may be another
+/// machine, so the pin is dropped too and the next setup asks for confirmation again.
 async fn update_ssh_agent(
     state: &ServerState,
     agent_id: &AgentId,
@@ -144,11 +168,21 @@ async fn update_ssh_agent(
 ) -> Result<AgentInfoResponse, ApiError> {
     let clear_password = request.clear_password.unwrap_or(false);
     let mut config = validate_update_request(request)?;
+    let _operation = state.ssh_key_operations.begin(agent_id)?;
     let _edit_guard = state.config_edit_lock.lock().await;
     let existing_config = find_ssh_agent(state, agent_id).await?;
     config.id = existing_config.id;
     config.password =
         apply_password_update(config.password, clear_password, existing_config.password);
+    let target_changed = config.target != existing_config.target;
+    let username_changed = config.username != existing_config.username;
+    config.managed_ssh_key =
+        existing_config.managed_ssh_key && !target_changed && !username_changed;
+    if config.managed_ssh_key && config.password.is_some() {
+        return Err(ApiError::bad_request(
+            "This device logs in with a managed SSH key; remove the key before setting a password",
+        ));
+    }
     let agent_config = AgentConfig::SshBacked(config.clone());
     let name = agent_config.effective_name();
     with_name_reserved(state, agent_id, &name, async {
@@ -159,6 +193,21 @@ async fn update_ssh_agent(
         replace_runtime_agent(state, agent_id, agent_config).await
     })
     .await?;
+    // Deleted only after the config stopped pointing at them.
+    if target_changed {
+        state
+            .ssh_keys
+            .delete_device(agent_id)
+            .await
+            .map_err(internal_error)?;
+    } else if username_changed {
+        // Also clears a key file a crashed setup may have left without the config using it.
+        state
+            .ssh_keys
+            .delete_keys(agent_id)
+            .await
+            .map_err(internal_error)?;
+    }
     Ok(stopped_agent_response(
         agent_id.clone(),
         name,
@@ -237,6 +286,7 @@ async fn delete_managed_agent(
     agent_id: &AgentId,
     expected_kind: ManagedAgentKind,
 ) -> Result<(), ApiError> {
+    let _operation = state.ssh_key_operations.begin(agent_id)?;
     let _edit_guard = state.config_edit_lock.lock().await;
     let configured = find_configured_agent(state, agent_id).await?;
     if let Some(config) = &configured {
@@ -254,7 +304,7 @@ async fn delete_managed_agent(
     }
 
     stop_for_configuration_change(state, agent_id).await?;
-    match configured {
+    match &configured {
         Some(AgentConfig::SshBacked(_)) => {
             edit_ssh_agent(&state.config_path, agent_id, None)
                 .await
@@ -267,7 +317,48 @@ async fn delete_managed_agent(
         }
         None => {}
     }
-    unregister_runtime_agent(state, agent_id).await
+    let runtime_result = unregister_runtime_agent(state, agent_id).await;
+    // Remote cleanup must follow route ownership, lifecycle checks and persistence, so a
+    // rejected deletion or failed write cannot revoke a device that still exists.
+    drop(_edit_guard);
+    if let Some(AgentConfig::SshBacked(config)) = configured {
+        remove_managed_key_from_device(state, agent_id, config).await?;
+    }
+    // A deleted device's keys and pin must never be picked up by a later device; ids are
+    // never reused, so this only keeps the data dir tidy.
+    state
+        .ssh_keys
+        .delete_device(agent_id)
+        .await
+        .map_err(internal_error)?;
+    runtime_result
+}
+
+/// Before a device with a managed key is deleted, removes its lines from the device like
+/// the "Remove key" action does. Best effort: the device may be gone for good, and its
+/// private key is deleted with it either way, so a line left behind can no longer be used.
+///
+/// Uses the deleted config after releasing the config edit lock, because reaching the
+/// device includes network round trips and the lock blocks every device start.
+async fn remove_managed_key_from_device(
+    state: &ServerState,
+    agent_id: &AgentId,
+    config: SshBackedAgentConfig,
+) -> Result<(), ApiError> {
+    if !config.managed_ssh_key {
+        return Ok(());
+    }
+    let device = crate::ssh::managed_keys::ManagedKeyDevice::new(config, state.ssh_keys.clone())
+        .map_err(internal_error)?;
+    if let Some(error) = device.remove_from_device().await {
+        redoor_core::log_failure!(
+            Level::Warn,
+            "Deleting a device whose SSH key could not be removed from it: device={}, error={}",
+            agent_id,
+            error
+        );
+    }
+    Ok(())
 }
 
 /// Distinguishes route ownership so SSH and local resources cannot delete each other.
@@ -308,7 +399,7 @@ impl ManagedAgentKind {
 ///
 /// The id stays the same, so a retry after a partial failure simply runs this again: removing
 /// an already removed supervisor and row is a no-op.
-async fn replace_runtime_agent(
+pub(super) async fn replace_runtime_agent(
     state: &ServerState,
     agent_id: &AgentId,
     config: AgentConfig,
@@ -340,7 +431,7 @@ async fn unregister_runtime_agent(state: &ServerState, agent_id: &AgentId) -> Re
 }
 
 /// Settles any delayed start before persistence while the shared edit lock blocks new starts.
-async fn stop_for_configuration_change(
+pub(super) async fn stop_for_configuration_change(
     state: &ServerState,
     agent_id: &AgentId,
 ) -> Result<(), ApiError> {
@@ -360,7 +451,7 @@ async fn stop_for_configuration_change(
 }
 
 /// Reloads the source of truth so edits include values unavailable in public inventory.
-async fn find_ssh_agent(
+pub(super) async fn find_ssh_agent(
     state: &ServerState,
     agent_id: &AgentId,
 ) -> Result<SshBackedAgentConfig, ApiError> {
@@ -405,7 +496,7 @@ async fn find_configured_agent(
 /// new name; the reservation keeps a standalone agent from taking the name in that window,
 /// so a name in a request always points to exactly one device. The reservation is dropped
 /// afterwards either way: on success the managed row holds the name itself.
-async fn with_name_reserved<T>(
+pub(super) async fn with_name_reserved<T>(
     state: &ServerState,
     agent_id: &AgentId,
     name: &str,
@@ -516,6 +607,8 @@ fn validate_request(request: CreateSshAgentRequest) -> Result<SshBackedAgentConf
         home: optional_text(request.home),
         log: optional_text(request.log),
         password: optional_password(request.password),
+        // Never part of a request: only enrollment sets it and edits copy it over.
+        managed_ssh_key: false,
     };
     // Without an explicit name the target host becomes the name, so it must pass the rules too.
     validate_device_name(&AgentConfig::SshBacked(config.clone()).effective_name())
