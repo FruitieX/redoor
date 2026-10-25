@@ -24,16 +24,16 @@ import {
     waitForValue,
 } from "./test-utils";
 import {
+    SSH_PASSWORD_USER,
     SSH_TEST_HOST,
     SSH_TEST_USER,
     cleanupSshTest,
     shellQuote,
+    sshCommandWithPassword,
     sshTestCommand,
 } from "./ssh-test-utils";
 
 const execFileAsync = promisify(execFile);
-
-const SSH_PASSWORD_USER = "redoor-password";
 
 const SSH_ROOT_USER = "root";
 
@@ -68,54 +68,13 @@ async function relayCommand(options: {
 }
 
 /** Runs a command as the password-only user so cleanup can reach that user's home. */
-async function sshPasswordTestCommand(command: string): Promise<void> {
-    await sshCommandWithPassword(SSH_PASSWORD_USER, command);
+async function sshPasswordTestCommand(command: string): Promise<string> {
+    return sshCommandWithPassword(SSH_PASSWORD_USER, command);
 }
 
 /** Runs a command as root for ownership behavior that cannot be exercised by local non-root agents. */
-async function sshRootTestCommand(command: string): Promise<void> {
-    await sshCommandWithPassword(SSH_ROOT_USER, command);
-}
-
-/** Uses the shared fixture password without exposing it in process arguments or test output. */
-async function sshCommandWithPassword(
-    username: string,
-    command: string,
-): Promise<void> {
-    const password = process.env.REDOOR_SSH_TEST_PASSWORD;
-
-    if (password === undefined || password === "") {
-        throw new Error(
-            "REDOOR_SSH_TEST_PASSWORD is required for password SSH cleanup",
-        );
-    }
-
-    const askpassDir = mkdtempSync(join(tmpdir(), "redoor-ssh-askpass-"));
-    const askpassPath = join(askpassDir, "askpass");
-    writeFileSync(
-        askpassPath,
-        `#!/bin/sh
-printf '%s\n' ${shellQuote(password)}
-`,
-        { mode: 0o700 },
-    );
-
-    try {
-        await execFileAsync(
-            "ssh",
-            ["-l", username, SSH_TEST_HOST, command],
-            {
-                env: {
-                    ...process.env,
-                    DISPLAY: process.env.DISPLAY ?? ":0",
-                    SSH_ASKPASS: askpassPath,
-                    SSH_ASKPASS_REQUIRE: "force",
-                },
-            },
-        );
-    } finally {
-        rmSync(askpassDir, { recursive: true, force: true });
-    }
+async function sshRootTestCommand(command: string): Promise<string> {
+    return sshCommandWithPassword(SSH_ROOT_USER, command);
 }
 
 /** Kills one remote relay agent so the owning local SSH process must reconnect it. */
