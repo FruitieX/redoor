@@ -61,8 +61,12 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         None => None,
     };
 
-    redoor_core::logging::init_with_options(settings.log, settings.log_level, settings.log_format)
-        .await?;
+    redoor_core::logging::init_with_options(
+        Some(settings.log),
+        settings.log_level,
+        settings.log_format,
+    )
+    .await?;
     match &loaded_config_path {
         Some(path) => {
             log!(Level::Info, "Loaded agent config: path={}", path.display());
@@ -166,8 +170,8 @@ struct AgentSettings {
     home: Option<String>,
     /// Optional exact root used instead of platform trash-location discovery.
     trash_directory: Option<String>,
-    /// Log file; always set because agents default to a persistent log.
-    log: Option<String>,
+    /// Size-bounded log file; always set because agents default to a persistent log.
+    log: redoor_core::rotating_log::LogFileSpec,
     /// Effective startup threshold resolved before logger initialization.
     log_level: Level,
     /// Effective process output format resolved before logger initialization.
@@ -246,7 +250,7 @@ impl AgentSettings {
             token,
             home,
             trash_directory: first_non_empty([args.trash_directory]),
-            log: Some(log),
+            log: redoor_core::rotating_log::LogFileSpec::new(log, agent_section.log_max_size),
             log_level,
             log_format,
             notification_delay_seconds,
@@ -366,7 +370,7 @@ log = "/tmp/file.log"
         assert_eq!(settings.name, "cli-name");
         // Values absent on the CLI come from the file rather than defaults.
         assert_eq!(settings.token, "file-token");
-        assert_eq!(settings.log.as_deref(), Some("/tmp/file.log"));
+        assert_eq!(settings.log.path, std::path::Path::new("/tmp/file.log"));
     }
 
     /// Without any server source the error names every place it can be configured.
@@ -393,8 +397,13 @@ log = "/tmp/file.log"
                 .expect("settings should resolve");
         // A persistent log keeps standalone agents diagnosable after detaching.
         assert_eq!(
-            settings.log.as_deref(),
-            Some("/home/test/.local/share/redoor-dev/agent.log")
+            settings.log.path,
+            std::path::Path::new("/home/test/.local/share/redoor-dev/agent.log")
+        );
+        // Without a configured limit the log is bounded by the shared default.
+        assert_eq!(
+            settings.log.max_bytes,
+            redoor_core::rotating_log::DEFAULT_LOG_MAX_BYTES
         );
     }
 }

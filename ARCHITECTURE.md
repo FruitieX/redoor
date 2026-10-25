@@ -77,6 +77,15 @@ Infrastructure that more than one role needs:
 - `RuntimeContext`: app name, `AppPaths` and websocket timeouts. It is built once in `main`
   and passed down instead of being read from process globals.
 - Logging, behind a replaceable logger.
+- `rotating_log`: every log file a process owns goes through `RotatingLogFile`, which keeps
+  it under its `log_max_size` (10 MB by default) so long-running processes on small
+  devices cannot fill the disk. The size is checked when the file is opened and after
+  every 100 messages, counted in memory so writes between checks cost nothing. An
+  oversized file keeps the newer half of its lines. The file is compacted in place
+  instead of renamed, so every open append handle keeps writing to the live log, and it
+  is streamed in fixed chunks so rotation never loads the log into memory. A process-wide
+  lock orders truncation against appends, because a relay writes one file from several
+  writers.
 - Filesystem safety: `safe_fs` (including `safe_rm_all`), `atomic_rename`, `destination`
   (symlink-safe placement and merges) and `staging` (self-deleting hidden staging paths with
   atomic name reservation).
@@ -591,6 +600,14 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   | Retry start | `POST /api/v1/agents/{agent}/retry-start` | Abandons the current attempt and starts a fresh one with the backoff reset |
   | Restart | `POST /api/v1/agents/{agent}/restart` | Not a watchdog action: the agent re-executes itself, so it works for any connected agent |
 
+- **Agent log files are forwarded, not inherited.** When a managed agent has a `log`, its
+  child (the local `redoor agent` or `ssh`) gets piped stdout and stderr, and the watchdog
+  forwards them line by line into a `RotatingLogFile` limited by `[server].log_max_size`.
+  A descriptor inherited straight into the file could never be kept under a limit. The
+  forwarder also returns the attempt's output tail, which explains a failed exit without
+  rereading a file that may have been truncated meanwhile. The SSH launch script's
+  report is read one byte at a time, so the output after it stays in the pipe for the
+  watchdog. Relays forward their SSH output the same way into the relay log.
 - **Supervision.** While an agent is desired-running, the watchdog restarts it when spawning or
   provisioning fails, when the child exits and when its heartbeat goes stale. The backoff
   starts at 1 s and doubles up to 30 s, and resets after 30 s of stable connection. The

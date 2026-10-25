@@ -170,6 +170,9 @@ struct ServerConfig {
     bind: String,
     /// Persistent server log file.
     log: String,
+    /// Size limit of the server log and of managed agents' forwarded logs; `None` uses
+    /// the default limit.
+    log_max_size: Option<u64>,
     /// Initial log threshold.
     log_level: Level,
     /// Process output format.
@@ -224,6 +227,7 @@ impl ServerConfig {
                 .or(server.bind)
                 .unwrap_or_else(|| DEFAULT_BIND.to_string()),
             log,
+            log_max_size: server.log_max_size,
             log_level,
             log_format,
             auth: server.auth,
@@ -260,7 +264,10 @@ impl ServerRuntime {
     /// Initializes logging, credential stores, actors and the listener, then registers inventory.
     async fn build(config: ServerConfig, runtime: RuntimeContext) -> Result<Self> {
         redoor_core::logging::init_with_options(
-            Some(config.log.clone()),
+            Some(redoor_core::rotating_log::LogFileSpec::new(
+                &config.log,
+                config.log_max_size,
+            )),
             config.log_level,
             config.log_format,
         )
@@ -302,6 +309,7 @@ impl ServerRuntime {
                 app_name: runtime.paths.app_name().to_string(),
                 binaries: binaries.clone(),
                 ssh_keys: ssh_keys.clone(),
+                log_max_size: config.log_max_size,
             },
         );
 

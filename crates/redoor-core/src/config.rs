@@ -102,9 +102,10 @@ pub struct SshBackedAgentConfig {
     /// Remote ssh target in `user@host` form.
     pub target: String,
     /// Optional local log file path. When set, the ssh process's
-    /// stdout/stderr is redirected to this file so the remote agent's
+    /// stdout/stderr is forwarded into this file so the remote agent's
     /// logs (forwarded through ssh) are captured locally. The file is
-    /// opened in append mode so agent restarts accumulate logs.
+    /// appended to so agent restarts accumulate logs, and kept under the
+    /// owner's log size limit.
     pub log: Option<String>,
     /// Optional SSH login password. When set, OpenSSH is given `SSH_ASKPASS`
     /// pointing at this binary so password auth can run without a TTY or
@@ -156,9 +157,9 @@ pub struct LocalAgentConfig {
     /// Home directory the spawned agent publishes for UI tab navigation.
     pub home: Option<String>,
     /// Log file path. When set, the spawned `redoor agent` process's
-    /// stdout/stderr is redirected (append mode) to this file. When
-    /// `None`, stdio is inherited so the agent's logs appear in the
-    /// server's terminal.
+    /// stdout/stderr is forwarded by the server into this size-bounded
+    /// file. When `None`, stdio is inherited so the agent's logs appear
+    /// in the server's terminal.
     pub log: Option<String>,
 }
 
@@ -253,6 +254,9 @@ pub struct ServerSection {
     pub bind: Option<String>,
     /// Server log file; CLI and env override it.
     pub log: Option<String>,
+    /// Size limit of the server log and of the forwarded logs of server-managed agents;
+    /// `None` uses [`crate::rotating_log::DEFAULT_LOG_MAX_BYTES`].
+    pub log_max_size: Option<u64>,
     /// Initial server threshold; runtime API changes deliberately do not rewrite it.
     pub log_level: Option<Level>,
     /// Initial process output format; browser streams remain structured.
@@ -283,6 +287,8 @@ pub struct AgentSection {
     pub home: Option<String>,
     /// Agent log file.
     pub log: Option<String>,
+    /// Size limit of the agent log; `None` uses the default limit.
+    pub log_max_size: Option<u64>,
     /// Initial standalone-agent threshold before runtime control becomes available.
     pub log_level: Option<Level>,
     /// Initial process output format; browser streams remain structured.
@@ -317,6 +323,9 @@ pub struct RelayConfig {
     pub binary_source: Option<PathBuf>,
     /// Optional remote process namespace; defaults to one derived from the local app and relay ID.
     pub agent_app_name: Option<String>,
+    /// Size limit of the relay log, shared by the relay's own output and its SSH session;
+    /// `None` uses the default limit.
+    pub log_max_size: Option<u64>,
     /// SSH-backed agent settings shared with server-managed agents.
     pub agent: SshBackedAgentConfig,
 }
@@ -1561,6 +1570,64 @@ target = "host"
             .expect_err("the entry must be rejected");
             // The message names what is wrong so the operator can fix the file.
             assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    /// Log size limits accept plain bytes and unit suffixes in every section with a log.
+    #[test]
+    fn log_max_size_accepts_bytes_and_units() {
+        let config = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[server]
+username = "admin"
+password = "secret"
+log_max_size = "10MB"
+[agent]
+log_max_size = 4096
+[[relays]]
+id = "production"
+target = "user@example.com"
+server = "https://redoor.example.com"
+log_max_size = "512kb"
+"#,
+        )
+        .expect("valid sizes must parse");
+        // Units are binary multiples, so 10MB matches the default limit exactly.
+        assert_eq!(
+            config.server.and_then(|server| server.log_max_size),
+            Some(crate::rotating_log::DEFAULT_LOG_MAX_BYTES)
+        );
+        // Plain integers are taken as bytes.
+        assert_eq!(
+            config.agent.and_then(|agent| agent.log_max_size),
+            Some(4096)
+        );
+        // Unit suffixes are case-insensitive.
+        assert_eq!(config.relays[0].log_max_size, Some(512 * 1024));
+    }
+
+    /// Unusable log size limits name the key and the accepted forms.
+    #[test]
+    fn invalid_log_max_size_is_rejected() {
+        for value in ["0", "\"0MB\"", "\"10 parsecs\"", "\"MB\""] {
+            let error = parse_config_str(
+                Path::new("config.toml"),
+                &format!(
+                    r#"agent_token = "t"
+[agent]
+log_max_size = {value}
+"#
+                ),
+            )
+            .expect_err("unusable sizes must be rejected");
+            // A zero or unparseable limit must fail at startup with the key path to fix.
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent.log_max_size must be a positive byte count"),
+                "{value}: {error}"
+            );
         }
     }
 }

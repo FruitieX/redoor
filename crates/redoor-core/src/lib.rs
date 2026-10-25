@@ -16,6 +16,7 @@ pub mod partial_signatures;
 pub mod partials;
 pub mod paths;
 pub mod process;
+pub mod rotating_log;
 pub mod runtime;
 pub mod safe_fs;
 pub mod server_address;

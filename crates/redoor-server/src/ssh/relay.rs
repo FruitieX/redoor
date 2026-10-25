@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use redoor_core::config::{RelayConfig, SshBackedAgentConfig};
 use redoor_core::paths::AppPaths;
+use redoor_core::rotating_log::RotatingLogFile;
 use redoor_core::server_address::ServerAddress;
 use redoor_core::{log, log_error};
 use redoor_protocol::wire::log::Level;
@@ -64,13 +65,14 @@ pub async fn run_relay(
         .log
         .clone()
         .context("relay startup must resolve a log path")?;
-    redoor_core::logging::init(Some(log)).await?;
     let provision = ProvisionContext {
         app_name: paths.app_name().to_string(),
         // Relays never have managed keys; the store is only consulted for `managed_ssh_key`.
         ssh_keys: crate::ssh::keys::SshKeyStore::for_data_dir(&paths.data_dir()?),
         binaries: crate::binaries::BinaryCache::new(paths),
+        log_max_size: relay.log_max_size,
     };
+    redoor_core::logging::init(Some(provision.log_file(&log))).await?;
     Relay {
         secure_server: server.is_secure().then(|| SecureRelayServer {
             authority: server.authority(),
@@ -194,12 +196,27 @@ impl Relay {
     }
 
     /// Runs one random-port SSH session to completion and classifies how it ended.
+    ///
+    /// The logs are opened before spawning so an unwritable log fails the attempt instead
+    /// of leaving SSH blocked on an undrained stdout pipe.
     async fn run_attempt(prepared: &PreparedSshBackedAgent) -> std::io::Result<AttemptOutcome> {
+        let (stdout_log, stderr_log) = match prepared.options.log_file() {
+            Some(spec) => (Some(spec.open().await?), Some(spec.open().await?)),
+            None => (None, None),
+        };
         let (remote_port, mut child) = prepared.spawn_random().await?;
+        if let Some(log_file) = stdout_log {
+            let stdout = child.stdout.take();
+            tokio::spawn(log_file.forward_child_output(
+                stdout,
+                None::<tokio::process::ChildStderr>,
+                0,
+            ));
+        }
         let stderr = child.stderr.take().ok_or_else(|| {
             std::io::Error::other("standalone SSH stderr was not piped for forward monitoring")
         })?;
-        let forward_failed = monitor_forward_failure(stderr, prepared.options.log_file().cloned())
+        let forward_failed = monitor_forward_failure(stderr, stderr_log)
             .await
             .unwrap_or(false);
         let status = child.wait().await?;
@@ -287,7 +304,7 @@ impl ForwardFailureDetector {
 /// OpenSSH said its random remote listener could not bind.
 fn monitor_forward_failure<R>(
     mut input: R,
-    log_path: Option<String>,
+    mut log_file: Option<RotatingLogFile>,
 ) -> tokio::sync::oneshot::Receiver<bool>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -297,15 +314,6 @@ where
         let mut sender = Some(sender);
         let mut detector = ForwardFailureDetector::default();
         let mut output = tokio::io::stderr();
-        let mut log_file = match log_path {
-            Some(path) => tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await
-                .ok(),
-            None => None,
-        };
         let mut buffer = [0_u8; 8 * 1024];
         loop {
             match input.read(&mut buffer).await {
@@ -314,7 +322,7 @@ where
                     let chunk = &buffer[..read];
                     let _ = output.write_all(chunk).await;
                     if let Some(log_file) = &mut log_file {
-                        let _ = log_file.write_all(chunk).await;
+                        let _ = log_file.write_message(chunk).await;
                     }
                     if detector.observe(chunk)
                         && let Some(sender) = sender.take()

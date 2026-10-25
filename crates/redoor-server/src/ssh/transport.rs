@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 
 use redoor_core::bounded_tail::read_bounded_tail;
 use redoor_core::log;
+use redoor_core::rotating_log::LogFileSpec;
 use redoor_protocol::wire::log::Level;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -61,10 +62,11 @@ pub(super) struct SshRunOptions {
     /// When set, the value is sent through ssh stdin and exported by a remote
     /// shell preamble so secrets never appear in either process's argv.
     pub(super) secret_env: Option<(String, String)>,
-    /// When set, the ssh process's stdout/stderr is redirected (append
-    /// mode) to this local file path. Used only for the long-running
-    /// agent run so sniff/upload diagnostics still go to the terminal.
-    pub(super) log_file: Option<String>,
+    /// When set, the ssh process's stdout and stderr are piped so their owner
+    /// (the watchdog or the relay) forwards them into this size-bounded local
+    /// file. Used only for the long-running agent run so sniff/upload
+    /// diagnostics still go to the terminal.
+    pub(super) log_file: Option<LogFileSpec>,
     /// Pipes stderr so a standalone launcher can detect an initial reverse
     /// forwarding bind failure while still copying agent logs to its terminal.
     pub(super) pipe_stderr: bool,
@@ -76,27 +78,28 @@ pub(super) struct SshRunOptions {
     pub(super) managed_agent: bool,
 }
 
-/// Selects who owns SSH stderr so forwarding diagnostics remain observable even
+/// Selects where SSH output goes so forwarding diagnostics remain observable even
 /// when ordinary remote output is persisted to a log file.
 #[derive(Debug, PartialEq, Eq)]
-enum StderrRoute {
-    /// The relay monitor drains stderr, detects bind failures, and tees it to the log.
-    Monitor,
-    /// The SSH child appends stderr directly to the configured log file.
+enum OutputRoute {
+    /// Both streams are piped; the owner forwards them into the log file and a relay
+    /// monitor also inspects stderr for bind failures.
     LogFile,
-    /// The SSH child writes stderr directly to the invoking terminal.
+    /// Stdout reaches the terminal while stderr is piped for the relay monitor or the
+    /// watchdog's exit diagnostic.
+    PipedStderr,
+    /// Both streams reach the invoking terminal.
     Inherit,
 }
 
-/// Gives active forwarding monitoring precedence over direct log redirection;
-/// otherwise the child would have no stderr pipe for detecting bind failures.
-fn stderr_route(options: &SshRunOptions) -> StderrRoute {
-    if options.pipe_stderr {
-        StderrRoute::Monitor
-    } else if options.log_file.is_some() {
-        StderrRoute::LogFile
+/// A configured log needs both pipes, which also gives a relay monitor its stderr.
+fn output_route(options: &SshRunOptions) -> OutputRoute {
+    if options.log_file.is_some() {
+        OutputRoute::LogFile
+    } else if options.pipe_stderr {
+        OutputRoute::PipedStderr
     } else {
-        StderrRoute::Inherit
+        OutputRoute::Inherit
     }
 }
 
@@ -135,8 +138,8 @@ impl SshRunOptions {
     }
 
     /// Sets a local log file to redirect the ssh process's stdout/stderr into.
-    pub(super) fn with_log_file(mut self, path: impl Into<String>) -> Self {
-        self.log_file = Some(path.into());
+    pub(super) fn with_log_file(mut self, log_file: LogFileSpec) -> Self {
+        self.log_file = Some(log_file);
         self
     }
 
@@ -155,7 +158,7 @@ impl SshRunOptions {
 
     /// Exposes the configured log sink so a piped-stderr monitor can tee the
     /// stream that the SSH child can no longer write there directly.
-    pub(super) fn log_file(&self) -> Option<&String> {
+    pub(super) fn log_file(&self) -> Option<&LogFileSpec> {
         self.log_file.as_ref()
     }
 }
@@ -712,10 +715,12 @@ impl SshHost {
     /// script prints on stdout before it `exec`s the long-running process. Reporting and
     /// starting in one session saves a separate SSH round-trip for the report.
     ///
-    /// The rest of stdout is then copied to where it would otherwise have gone (the log
-    /// file or the server's stdout). Stderr is piped until the report is complete, so when
-    /// the session ends early, typically because SSH itself failed, the returned error
-    /// carries OpenSSH's explanation even for agents whose output goes to a log file.
+    /// With a log file, the report is read without buffering ahead, so the rest of the
+    /// output stays in the child's pipes for its owner to forward into the size-bounded
+    /// log exactly like an ordinary spawn, keeping the exit diagnostic intact. Without one,
+    /// the rest goes to the server's terminal. Stderr is piped until the report is
+    /// complete, so when the session ends early, typically because SSH itself failed, the
+    /// returned error carries OpenSSH's explanation even for agents with a log file.
     pub(super) async fn spawn_with_report(
         &self,
         command: &str,
@@ -729,12 +734,11 @@ impl SshHost {
         let caller_pipes_stderr = options.pipe_stderr;
         options.pipe_stderr = true;
         let mut child = self.spawn(command, args, &options).await?;
-        let stdout = child
+        let mut stdout = child
             .stdout
             .take()
             .expect("report requires piped ssh stdout");
-        let mut reader = tokio::io::BufReader::new(stdout);
-        let report = match read_report_lines(&mut reader, lines).await {
+        let report = match read_report_lines(&mut stdout, lines).await {
             Ok(report) => report,
             Err(error) => {
                 redoor_core::log_failure!(
@@ -752,14 +756,19 @@ impl SshHost {
         };
         if report.len() < lines {
             return Err(self
-                .report_cut_short(child, stage, &report, options.log_file.as_deref())
+                .report_cut_short(child, stage, &report, options.log_file.as_ref())
                 .await);
         }
-        forward_output(reader, options.log_file.clone(), OutputStream::Stdout);
-        if !caller_pipes_stderr && let Some(stderr) = child.stderr.take() {
-            // The caller expected stderr in the log file or terminal, as an ordinary spawn
-            // would have arranged.
-            forward_output(stderr, options.log_file.clone(), OutputStream::Stderr);
+        if options.log_file.is_some() {
+            // Both pipes go back to the child; the owner forwards them into the log.
+            child.stdout = Some(stdout);
+        } else {
+            forward_output(stdout, OutputStream::Stdout);
+            if !caller_pipes_stderr && let Some(stderr) = child.stderr.take() {
+                // The caller expected stderr on the terminal, as an ordinary spawn would
+                // have arranged.
+                forward_output(stderr, OutputStream::Stderr);
+            }
         }
         Ok(ReportedChild { child, report })
     }
@@ -772,7 +781,7 @@ impl SshHost {
         mut child: tokio::process::Child,
         stage: &str,
         report: &[String],
-        log_file: Option<&str>,
+        log_file: Option<&LogFileSpec>,
     ) -> std::io::Error {
         let stderr = child
             .stderr
@@ -783,10 +792,10 @@ impl SshHost {
             read_bounded_tail(stderr, MAX_SSH_DIAGNOSTIC_BYTES)
         );
         let stderr = stderr.unwrap_or_default();
-        if let Some(path) = log_file
+        if let Some(log_file) = log_file
             && !stderr.is_empty()
         {
-            append_to_log(path, &stderr).await;
+            append_to_log(log_file, &stderr).await;
         }
         let status = match status {
             Ok(status) => status,
@@ -828,51 +837,49 @@ const MAX_REPORT_LINE_BYTES: u64 = 4 * 1024;
 
 /// Reads up to `lines` lines, stopping early at EOF. Lines are bounded and returned
 /// without their line endings.
+///
+/// Reads one byte at a time so nothing after the report is consumed: the rest of the
+/// output must stay in the pipe for whoever forwards it into the agent log. The report is
+/// a handful of short lines, so the extra reads are negligible.
 async fn read_report_lines(
-    reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    reader: &mut tokio::process::ChildStdout,
     lines: usize,
 ) -> Result<Vec<String>, std::io::Error> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    use tokio::io::AsyncReadExt;
 
     let mut report = Vec::with_capacity(lines);
+    let mut line = Vec::new();
     while report.len() < lines {
-        let mut line = Vec::new();
-        let read = (&mut *reader)
-            .take(MAX_REPORT_LINE_BYTES)
-            .read_until(b'\n', &mut line)
-            .await?;
-        if read == 0 {
+        let mut byte = [0_u8; 1];
+        if reader.read(&mut byte).await? == 0 {
             break;
         }
-        if line.last() != Some(&b'\n') && read as u64 == MAX_REPORT_LINE_BYTES {
+        if byte[0] == b'\n' {
+            let text = String::from_utf8_lossy(&line);
+            report.push(text.trim_end_matches('\r').to_string());
+            line.clear();
+            continue;
+        }
+        if line.len() as u64 >= MAX_REPORT_LINE_BYTES {
             return Err(std::io::Error::other(format!(
                 "report line {} is longer than {MAX_REPORT_LINE_BYTES} bytes",
                 report.len() + 1
             )));
         }
-        let text = String::from_utf8_lossy(&line);
-        report.push(text.trim_end_matches(['\n', '\r']).to_string());
+        line.push(byte[0]);
     }
     Ok(report)
 }
 
 /// Appends `bytes` to the agent log file, logging instead of failing because the caller
 /// is already reporting a more important error.
-async fn append_to_log(path: &str, bytes: &[u8]) {
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
-        file.write_all(bytes).await
-    }
-    .await;
+async fn append_to_log(log_file: &LogFileSpec, bytes: &[u8]) {
+    let result = async { log_file.open().await?.write_message(bytes).await }.await;
     if let Err(error) = result {
         redoor_core::log_failure!(
             Level::Error,
             "Appending SSH diagnostics to the agent log failed: log_file={}, error={:#}",
-            path,
+            log_file.path.display(),
             error
         );
     }
@@ -887,38 +894,23 @@ enum OutputStream {
     Stderr,
 }
 
-/// Copies the rest of a reported child's output to the agent log file, or to this
-/// process's matching stream without one, which is where it goes for ordinary spawns.
-/// Draining it also keeps a full pipe from blocking the remote process.
+/// Copies the rest of a reported child's output to this process's matching stream, which
+/// is where it goes for ordinary spawns without a log file. Draining it also keeps a full
+/// pipe from blocking the remote process.
 fn forward_output(
     mut reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    log_file: Option<String>,
     stream: OutputStream,
 ) {
     tokio::spawn(async move {
-        let result = match (&log_file, stream) {
-            (Some(path), _) => match tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await
-            {
-                Ok(mut file) => tokio::io::copy(&mut reader, &mut file).await,
-                Err(error) => Err(error),
-            },
-            (None, OutputStream::Stdout) => {
-                tokio::io::copy(&mut reader, &mut tokio::io::stdout()).await
-            }
-            (None, OutputStream::Stderr) => {
-                tokio::io::copy(&mut reader, &mut tokio::io::stderr()).await
-            }
+        let result = match stream {
+            OutputStream::Stdout => tokio::io::copy(&mut reader, &mut tokio::io::stdout()).await,
+            OutputStream::Stderr => tokio::io::copy(&mut reader, &mut tokio::io::stderr()).await,
         };
         if let Err(error) = result {
             redoor_core::log_failure!(
                 Level::Error,
-                "Forwarding remote agent output failed: stream={:?}, log_file={:?}, error={:#}",
+                "Forwarding remote agent output failed: stream={:?}, error={:#}",
                 stream,
-                log_file,
                 error
             );
             // Keep draining so the remote process never blocks on a full pipe.
@@ -989,73 +981,23 @@ async fn build_ssh_command(
         ssh.stdin(Stdio::inherit());
     }
 
-    if let Some(log_path) = &options.log_file {
-        // Open in append mode via the async tokio API, then convert to a
-        // std::fs::File so it can be turned into a Stdio for the child.
-        let path = Path::new(log_path);
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                std::io::Error::other(format!(
-                    "Failed to create agent log directory '{}': {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .await
-            .map_err(|error| {
-                std::io::Error::other(format!(
-                    "Failed to open agent log file '{log_path}': {error}"
-                ))
-            })?;
-        if stderr_route(options) == StderrRoute::Monitor {
-            // Standalone relays must inspect OpenSSH stderr for bind failures;
-            // their monitor tees that stream back into this same log path.
-            ssh.stderr(Stdio::piped());
-        } else {
-            // Managed agents do not inspect stderr, so let the child append it
-            // directly without an intermediate forwarding task.
-            let file_for_stderr = file.try_clone().await.map_err(|error| {
-                std::io::Error::other(format!(
-                    "Failed to clone agent log file handle '{log_path}': {error}"
-                ))
-            })?;
-            ssh.stderr(Stdio::from(file_for_stderr.into_std().await));
-        }
-        if options.pipe_stdout {
-            // `spawn_with_report` appends everything after the report to this same file.
-            ssh.stdout(Stdio::piped());
-        } else {
-            ssh.stdout(Stdio::from(file.into_std().await));
-        }
+    let route = output_route(options);
+    // A report reader needs stdout piped even when the rest of the output reaches the
+    // terminal; a log file needs both streams piped so their owner can forward them.
+    if route == OutputRoute::LogFile || options.pipe_stdout {
+        ssh.stdout(Stdio::piped());
     } else {
-        if options.pipe_stdout {
-            ssh.stdout(Stdio::piped());
-        } else {
-            ssh.stdout(Stdio::inherit());
-        }
-        match stderr_route(options) {
-            StderrRoute::Monitor => {
-                ssh.stderr(Stdio::piped());
-            }
-            StderrRoute::Inherit => {
-                ssh.stderr(Stdio::inherit());
-            }
-            StderrRoute::LogFile => {
-                unreachable!("a log-file stderr route requires a configured log path")
-            }
-        }
+        ssh.stdout(Stdio::inherit());
+    }
+    if route == OutputRoute::Inherit {
+        ssh.stderr(Stdio::inherit());
+    } else {
+        ssh.stderr(Stdio::piped());
     }
 
     log!(
         Level::Debug,
-        "Built SSH command: target={}, ssh_server_port={}, command={}, args={:?}, argv={}, reverse_forwards={:?}, has_secret={}, log_file={:?}, managed_agent={}, pipe_stderr={}, compressed={}, stderr_route={:?}",
+        "Built SSH command: target={}, ssh_server_port={}, command={}, args={:?}, argv={}, reverse_forwards={:?}, has_secret={}, log_file={:?}, managed_agent={}, pipe_stderr={}, compressed={}, output_route={:?}",
         host.target,
         host.server_port_label(),
         command,
@@ -1071,7 +1013,7 @@ async fn build_ssh_command(
         options.managed_agent,
         options.pipe_stderr,
         options.compressed,
-        stderr_route(options)
+        output_route(options)
     );
 
     Ok(ssh)
@@ -1570,20 +1512,19 @@ fn format_ssh_failure(
 #[cfg(test)]
 mod tests {
     /// Protects standalone forwarding monitoring when relay output also has a
-    /// persistent log sink, which previously redirected stderr away from the monitor.
+    /// persistent log sink, which once redirected stderr away from the monitor.
     #[test]
-    fn forwarding_monitor_takes_precedence_over_log_redirection() {
+    fn logged_output_keeps_stderr_piped_for_the_forwarding_monitor() {
+        let log_file =
+            redoor_core::rotating_log::LogFileSpec::new("/tmp/redoor-relay-test.log", None);
         let options = super::SshRunOptions::default()
-            .with_log_file("/tmp/redoor-relay-test.log")
+            .with_log_file(log_file.clone())
             .with_piped_stderr();
 
-        // The monitor must own stderr or relay startup fails before waiting on SSH.
-        assert_eq!(super::stderr_route(&options), super::StderrRoute::Monitor);
+        // Both pipes are needed: stdout for the log and stderr for the bind-failure monitor.
+        assert_eq!(super::output_route(&options), super::OutputRoute::LogFile);
         // The log remains available so the monitor can tee remote diagnostics into it.
-        assert_eq!(
-            options.log_file().map(String::as_str),
-            Some("/tmp/redoor-relay-test.log")
-        );
+        assert_eq!(options.log_file(), Some(&log_file));
     }
 
     /// Keeps the secret-bearing channel open after its first line so daemon stdin EOF is not forwarded.

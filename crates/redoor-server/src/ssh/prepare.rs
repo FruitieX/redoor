@@ -465,7 +465,7 @@ impl Preparation<'_> {
         let mut options =
             SshRunOptions::default().with_secret_env("REDOOR_AGENT_TOKEN", self.agent_token);
         if let Some(log) = &self.config.log {
-            options = options.with_log_file(log);
+            options = options.with_log_file(self.provision.log_file(log));
         }
         if self.relay.monitor_forward_failure {
             options = options.with_piped_stderr();

@@ -89,9 +89,17 @@ pub(crate) struct ProvisionContext {
     pub(crate) binaries: crate::binaries::BinaryCache,
     /// Managed keys and pinned host keys of devices with `managed_ssh_key = true`.
     pub(crate) ssh_keys: keys::SshKeyStore,
+    /// Size limit of the agent log files this process forwards SSH and child output into;
+    /// `None` uses the default limit.
+    pub(crate) log_max_size: Option<u64>,
 }
 
 impl ProvisionContext {
+    /// Pairs an agent's configured log path with this process's log size limit.
+    pub(crate) fn log_file(&self, path: &str) -> redoor_core::rotating_log::LogFileSpec {
+        redoor_core::rotating_log::LogFileSpec::new(path, self.log_max_size)
+    }
+
     /// Starts a server-managed agent whose tunnel ends at this server's own listener,
     /// installing its binary first when needed.
     ///

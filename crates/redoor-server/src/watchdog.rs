@@ -6,15 +6,15 @@
 //! intentional shutdown without coupling the generic lifecycle code to Axum.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 
 use redoor_core::log;
+use redoor_core::rotating_log::{LogFileSpec, RotatingLogFile};
 use redoor_protocol::api::agents::{AgentConnectionStatus, ProvisioningStatusMessage};
 use redoor_protocol::ids::{SocketId, UnixTimestampMillis};
 use redoor_protocol::wire::log::Level;
@@ -128,7 +128,8 @@ pub struct SpawnFn {
             + Send
             + Sync,
     >,
-    diagnostic_log: Option<PathBuf>,
+    /// Size-bounded file the child's piped stdout and stderr are forwarded into.
+    log_file: Option<LogFileSpec>,
     process_name: &'static str,
 }
 
@@ -141,15 +142,25 @@ impl SpawnFn {
     {
         Self {
             inner: Arc::new(move |status| Box::pin(f(status))),
-            diagnostic_log: None,
+            log_file: None,
             process_name: "Agent process",
         }
     }
 
-    /// Records where redirected child output can be read after an unsuccessful exit.
-    pub fn with_diagnostic_log(mut self, path: impl Into<PathBuf>) -> Self {
-        self.diagnostic_log = Some(path.into());
+    /// Forwards the child's piped stdout and stderr into `log_file`; the spawn closure must
+    /// pipe both streams. The forwarded tail also explains an unsuccessful exit.
+    pub fn with_log_file(mut self, log_file: LogFileSpec) -> Self {
+        self.log_file = Some(log_file);
         self
+    }
+
+    /// Opens the configured log before spawning, so an unwritable log fails the attempt
+    /// instead of leaving a child blocked on an undrained pipe.
+    async fn open_log_file(&self) -> std::io::Result<Option<RotatingLogFile>> {
+        match &self.log_file {
+            Some(spec) => spec.open().await.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Names the owned child accurately in browser-visible lifecycle failures.
@@ -649,7 +660,12 @@ async fn run_started_cycle(
     commands: &mut mpsc::Receiver<SupervisorCommand>,
     attempt_generation: u64,
 ) -> CycleResult {
-    let diagnostic_log_offset = diagnostic_log_len(spawn.diagnostic_log.as_deref()).await;
+    let log_file = match spawn.open_log_file().await {
+        Ok(log_file) => log_file,
+        Err(error) => {
+            return report_spawn_failure(watchdog, attempt_generation, SpawnError::Spawn(error));
+        }
+    };
     let spawn_future = spawn.spawn(watchdog.provisioning_status_sink(attempt_generation));
     tokio::pin!(spawn_future);
     let child = loop {
@@ -670,26 +686,32 @@ async fn run_started_cycle(
                 child,
                 watchdog,
                 commands,
-                spawn.diagnostic_log.as_deref(),
-                diagnostic_log_offset,
+                log_file,
                 spawn.process_name,
                 attempt_generation,
             )
             .await
         }
-        Err(error) => {
-            let issue = error.user_message();
-            redoor_core::log_error!(
-                anyhow::Error::new(error),
-                "Watchdog spawn failed: key={}",
-                watchdog.key()
-            );
-            publish_issue(watchdog, attempt_generation, issue);
-            CycleResult {
-                action: CommandAction::Continue,
-                was_connected: false,
-            }
-        }
+        Err(error) => report_spawn_failure(watchdog, attempt_generation, error),
+    }
+}
+
+/// Publishes why an attempt produced no child; the supervisor retries after backoff.
+fn report_spawn_failure(
+    watchdog: &WatchdogHandle,
+    attempt_generation: u64,
+    error: SpawnError,
+) -> CycleResult {
+    let issue = error.user_message();
+    redoor_core::log_error!(
+        anyhow::Error::new(error),
+        "Watchdog spawn failed: key={}",
+        watchdog.key()
+    );
+    publish_issue(watchdog, attempt_generation, issue);
+    CycleResult {
+        action: CommandAction::Continue,
+        was_connected: false,
     }
 }
 
@@ -732,20 +754,17 @@ async fn wait_for_child(
     mut child: Child,
     watchdog: &WatchdogHandle,
     commands: &mut mpsc::Receiver<SupervisorCommand>,
-    diagnostic_log: Option<&Path>,
-    diagnostic_log_offset: u64,
+    log_file: Option<RotatingLogFile>,
     process_name: &str,
     attempt_generation: u64,
 ) -> CycleResult {
     // Tokio closes Child::stdin when wait() is polled. Managed SSH agents retain
     // that pipe so the remote process sees EOF only when this watchdog cycle ends.
     let _retained_stdin = child.stdin.take();
-    let stderr_reader = child.stderr.take().map(|stderr| {
-        tokio::spawn(redoor_core::bounded_tail::read_bounded_tail(
-            stderr,
-            MAX_EXIT_DIAGNOSTIC_BYTES as usize,
-        ))
-    });
+    let log_path = log_file
+        .as_ref()
+        .map(|log_file| log_file.path().to_path_buf());
+    let output_reader = spawn_output_reader(&mut child, log_file);
     let startup_timeout = tokio::time::sleep(STARTUP_CONNECTION_TIMEOUT);
     tokio::pin!(startup_timeout);
     let mut connected = false;
@@ -754,14 +773,13 @@ async fn wait_for_child(
     loop {
         tokio::select! {
             status = child.wait() => {
-                let stderr = read_child_diagnostic(stderr_reader, CHILD_DIAGNOSTIC_TIMEOUT).await;
+                let output = read_child_diagnostic(output_reader, CHILD_DIAGNOSTIC_TIMEOUT).await;
                 let issue = format_exit_issue(
                     status,
-                    diagnostic_log,
-                    diagnostic_log_offset,
+                    log_path.as_deref(),
                     process_name,
-                    stderr.as_deref(),
-                ).await;
+                    output.as_deref(),
+                );
                 publish_issue(watchdog, attempt_generation, issue);
                 return CycleResult { action: CommandAction::Continue, was_connected: connected };
             }
@@ -975,22 +993,37 @@ fn publish_issue(watchdog: &WatchdogHandle, attempt_generation: u64, issue: Stri
     });
 }
 
-/// Returns the current log length so exit diagnostics only include the latest attempt.
-async fn diagnostic_log_len(path: Option<&Path>) -> u64 {
-    let Some(path) = path else {
-        return 0;
-    };
-    tokio::fs::metadata(path)
-        .await
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+/// Starts draining the child's output so its diagnostic tail is available after exit.
+///
+/// With a log file both pipes are forwarded into it; otherwise only a piped stderr is
+/// read, because unpiped streams already reach the server's terminal.
+fn spawn_output_reader(
+    child: &mut Child,
+    log_file: Option<RotatingLogFile>,
+) -> Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>> {
+    let tail_limit = MAX_EXIT_DIAGNOSTIC_BYTES as usize;
+    match log_file {
+        Some(log_file) => {
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            Some(tokio::spawn(async move {
+                Ok(log_file
+                    .forward_child_output(stdout, stderr, tail_limit)
+                    .await)
+            }))
+        }
+        None => child.stderr.take().map(|stderr| {
+            tokio::spawn(redoor_core::bounded_tail::read_bounded_tail(
+                stderr, tail_limit,
+            ))
+        }),
+    }
 }
 
-/// Adds a bounded tail of redirected output so clients receive the child process's real error.
-async fn format_exit_issue(
+/// Adds a bounded tail of the child's output so clients receive its real error.
+fn format_exit_issue(
     status: std::io::Result<std::process::ExitStatus>,
-    diagnostic_log: Option<&Path>,
-    attempt_offset: u64,
+    log_path: Option<&Path>,
     process_name: &str,
     captured_output: Option<&[u8]>,
 ) -> String {
@@ -1001,33 +1034,22 @@ async fn format_exit_issue(
         },
         Err(error) => format!("Failed to wait for {process_name}: {error}"),
     };
-    if let Some(output) = captured_output.filter(|output| !output.is_empty()) {
-        issue.push_str(&format!(
-            "\n{process_name} output:\n{}",
-            sanitize_diagnostic_output(output).trim()
-        ));
-        return issue;
-    }
-    let Some(path) = diagnostic_log else {
+    let Some(output) = captured_output else {
         return issue;
     };
-
-    match read_attempt_log_tail(path, attempt_offset).await {
-        Ok(output) if !output.trim().is_empty() => {
-            issue.push_str(&format!(
-                "\nAgent output from '{}':\n{}",
-                path.display(),
-                output.trim()
-            ));
-        }
-        Ok(_) => issue.push_str(&format!(
+    let output = sanitize_diagnostic_output(output);
+    let output = output.trim();
+    match log_path {
+        Some(path) if output.is_empty() => issue.push_str(&format!(
             "\nThe configured agent log '{}' contained no output for this attempt.",
             path.display()
         )),
-        Err(error) => issue.push_str(&format!(
-            "\nFailed to read configured agent log '{}': {error}",
+        Some(path) => issue.push_str(&format!(
+            "\nAgent output from '{}':\n{output}",
             path.display()
         )),
+        None if output.is_empty() => {}
+        None => issue.push_str(&format!("\n{process_name} output:\n{output}")),
     }
     issue
 }
@@ -1035,8 +1057,9 @@ async fn format_exit_issue(
 /// Resolves a completed stderr reader without replacing the process status on read failure.
 ///
 /// The read waits for EOF, which a surviving grandchild holding the pipe can postpone
-/// indefinitely, so it is bounded by `timeout`; the caller then falls back to the configured
-/// diagnostic log.
+/// indefinitely, so it is bounded by `timeout`. The reader is left running rather than
+/// aborted: it keeps forwarding the grandchild's output into the configured log and
+/// keeps the pipe drained so that process never blocks on a full pipe.
 async fn read_child_diagnostic(
     reader: Option<tokio::task::JoinHandle<std::io::Result<Vec<u8>>>>,
     timeout: Duration,
@@ -1047,7 +1070,6 @@ async fn read_child_diagnostic(
         Ok(Ok(Err(error))) => Some(format!("Failed to read process output: {error}").into_bytes()),
         Ok(Err(error)) => Some(format!("Process output task failed: {error}").into_bytes()),
         Err(_) => {
-            reader.abort();
             log!(
                 Level::Warning,
                 "Process output stayed open after exit; skipping its diagnostic"
@@ -1077,17 +1099,6 @@ fn sanitize_diagnostic_output(output: &[u8]) -> String {
         .collect()
 }
 
-/// Reads at most the final diagnostic window written since this process attempt began.
-async fn read_attempt_log_tail(path: &Path, attempt_offset: u64) -> std::io::Result<String> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let end = file.metadata().await?.len();
-    let start = attempt_offset.max(end.saturating_sub(MAX_EXIT_DIAGNOSTIC_BYTES));
-    file.seek(std::io::SeekFrom::Start(start)).await?;
-    let mut output = Vec::with_capacity((end - start) as usize);
-    file.read_to_end(&mut output).await?;
-    Ok(String::from_utf8_lossy(&output).into_owned())
-}
-
 /// Terminates and reaps the owned child so intentional shutdown cannot leave zombies.
 async fn kill_and_reap(child: &mut Child) {
     let _ = child.start_kill();
@@ -1100,7 +1111,6 @@ mod tests {
     use redoor_core::test_support::TempDir;
     use std::process::Stdio;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
 
     /// Aborts a supervisor on every test exit path while child `kill_on_drop` handles cleanup.
@@ -1399,35 +1409,57 @@ mod tests {
         assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
     }
 
+    /// Output of a child with a configured log is forwarded into the log, and only the
+    /// latest attempt's output explains its exit.
     #[tokio::test]
-    async fn exit_issue_includes_output_from_the_latest_attempt() {
+    async fn exit_issue_includes_forwarded_output_from_the_latest_attempt() {
         let temp_dir = TempDir::create();
         let path = temp_dir.path().join("exit-diagnostic.log");
         tokio::fs::write(&path, "output from an earlier attempt\n")
             .await
             .expect("seed diagnostic log");
-        let attempt_offset = tokio::fs::metadata(&path)
-            .await
-            .expect("diagnostic metadata")
-            .len();
-        let mut file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .await
-            .expect("open diagnostic log");
-        file.write_all(b"invalid configured directory: /missing\n")
-            .await
-            .expect("append current attempt output");
-        file.flush().await.expect("flush current attempt output");
-        let status = Command::new("sh").arg("-c").arg("exit 1").status().await;
+        let registry = WatchdogRegistry::new();
+        let spawn = SpawnFn::new(|_status| async {
+            Command::new("sh")
+                .arg("-c")
+                .arg("echo 'starting agent'; echo 'invalid configured directory: /missing' >&2; exit 1")
+                .kill_on_drop(true)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(SpawnError::Spawn)
+        })
+        .with_log_file(LogFileSpec::new(&path, None));
+        let _guard = SupervisorGuard(
+            spawn_supervisor("log-diagnostic".into(), spawn, &registry, callback())
+                .expect("register"),
+        );
+        let handle = registry.lookup("log-diagnostic").expect("managed handle");
 
-        let issue =
-            format_exit_issue(status, Some(&path), attempt_offset, "Agent process", None).await;
+        handle.start().await.expect("start accepted");
+        wait_until(|| handle.snapshot().connection_issue.is_some()).await;
+        let issue = handle
+            .snapshot()
+            .connection_issue
+            .expect("failed child should publish its output");
+        handle.shutdown().await.expect("backoff interrupted");
 
         // The browser-facing issue must expose the subprocess's actionable error.
-        assert!(issue.contains("invalid configured directory: /missing"));
+        assert!(
+            issue.contains("invalid configured directory: /missing"),
+            "{issue}"
+        );
         // Output from an old retry must not be presented as part of the latest failure.
-        assert!(!issue.contains("output from an earlier attempt"));
+        assert!(!issue.contains("output from an earlier attempt"), "{issue}");
+        let log = tokio::fs::read_to_string(&path).await.expect("read log");
+        // Both streams are persisted after the existing history.
+        assert!(log.starts_with("output from an earlier attempt\n"), "{log}");
+        assert!(log.contains("starting agent\n"), "{log}");
+        assert!(
+            log.contains("invalid configured directory: /missing\n"),
+            "{log}"
+        );
     }
 
     #[tokio::test]

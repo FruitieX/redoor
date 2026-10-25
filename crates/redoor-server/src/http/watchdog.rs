@@ -126,7 +126,7 @@ impl ManagedLauncher {
 
     /// Re-invoking just spawns a fresh `redoor agent` child; the supervisor handles restarts.
     fn local_spawn_fn(&self, config: LocalAgentConfig) -> SpawnFn {
-        let diagnostic_log = config.log.clone();
+        let log_file = self.log_file(config.log.as_deref());
         let launcher = self.clone();
         let spawn = SpawnFn::new(move |_status| {
             let config = config.clone();
@@ -142,8 +142,8 @@ impl ManagedLauncher {
                 .map_err(SpawnError::Spawn)
             }
         });
-        match diagnostic_log {
-            Some(path) => spawn.with_diagnostic_log(path),
+        match log_file {
+            Some(log_file) => spawn.with_log_file(log_file),
             None => spawn,
         }
     }
@@ -165,7 +165,7 @@ impl ManagedLauncher {
             config.log,
             config.username
         );
-        let diagnostic_log = config.log.clone();
+        let log_file = self.log_file(config.log.as_deref());
         let config = std::sync::Arc::new(config);
         let launcher = self.clone();
         let spawn = SpawnFn::new(move |status| {
@@ -174,10 +174,15 @@ impl ManagedLauncher {
             async move { launcher.ssh_backed_spawn_once(&config, status).await }
         })
         .with_process_name("SSH process");
-        match diagnostic_log {
-            Some(path) => spawn.with_diagnostic_log(path),
+        match log_file {
+            Some(log_file) => spawn.with_log_file(log_file),
             None => spawn,
         }
+    }
+
+    /// Applies the server's log size limit to an agent's configured log file.
+    fn log_file(&self, path: Option<&str>) -> Option<redoor_core::rotating_log::LogFileSpec> {
+        path.map(|path| self.provision.log_file(path))
     }
 
     /// Probes, installs when needed, and spawns one SSH-backed child. Nothing is cached

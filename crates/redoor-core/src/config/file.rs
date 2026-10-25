@@ -38,6 +38,7 @@ struct RawServerSection {
     port: Option<u16>,
     bind: Option<String>,
     log: Option<String>,
+    log_max_size: Option<RawByteSize>,
     log_level: Option<String>,
     log_format: Option<String>,
     username: Option<String>,
@@ -57,6 +58,7 @@ struct RawAgentSection {
     name: Option<String>,
     home: Option<String>,
     log: Option<String>,
+    log_max_size: Option<RawByteSize>,
     log_level: Option<String>,
     log_format: Option<String>,
 }
@@ -94,10 +96,63 @@ struct RawRelay {
     binary_source: Option<String>,
     home: Option<String>,
     log: Option<String>,
+    log_max_size: Option<RawByteSize>,
     #[serde(default)]
     insecure: bool,
     agent_app_name: Option<String>,
     password: Option<String>,
+}
+
+/// A size as written: plain bytes, or a string with a unit such as `"10MB"`.
+///
+/// Both forms are accepted because sizes like ten megabytes are unreadable as bytes, while
+/// scripts that generate the file find plain integers easiest.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawByteSize {
+    /// Exact byte count.
+    Bytes(u64),
+    /// Number with an optional `B`, `KB`, `MB` or `GB` suffix.
+    Text(String),
+}
+
+impl RawByteSize {
+    /// Resolves the byte count; zero is rejected because a log that may hold nothing
+    /// would be emptied on every check.
+    fn parse(self, key: &str) -> Result<u64, Invalid> {
+        let bytes = match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Text(text) => Self::parse_text(&text),
+        };
+        bytes.filter(|bytes| *bytes > 0).ok_or_else(|| {
+            invalid(format!(
+                "{key} must be a positive byte count or a size such as \"512KB\", \"10MB\" or \"1GB\""
+            ))
+        })
+    }
+
+    /// Parses `<number><unit>` with binary multiples, matching how `ls -h` and most log
+    /// tools report sizes.
+    fn parse_text(text: &str) -> Option<u64> {
+        let text = text.trim();
+        let digits_end = text
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(text.len());
+        let (number, unit) = text.split_at(digits_end);
+        let multiplier: u64 = match unit.trim().to_ascii_uppercase().as_str() {
+            "" | "B" => 1,
+            "K" | "KB" | "KIB" => 1024,
+            "M" | "MB" | "MIB" => 1024 * 1024,
+            "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+            _ => return None,
+        };
+        number.parse::<u64>().ok()?.checked_mul(multiplier)
+    }
+}
+
+/// Parses an optional size key with its path in the error.
+fn parse_byte_size(value: Option<RawByteSize>, key: &str) -> Result<Option<u64>, Invalid> {
+    value.map(|value| value.parse(key)).transpose()
 }
 
 /// A violated cross-key rule; the text names the key path and how to fix it.
@@ -254,6 +309,7 @@ impl RawServerSection {
             port: self.port,
             bind: self.bind,
             log: self.log,
+            log_max_size: parse_byte_size(self.log_max_size, "server.log_max_size")?,
             log_level,
             log_format,
             auth,
@@ -292,6 +348,7 @@ impl RawAgentSection {
             name: non_empty(self.name, "name")?,
             home: non_empty(self.home, "home")?,
             log: non_empty(self.log, "log")?,
+            log_max_size: parse_byte_size(self.log_max_size, "agent.log_max_size")?,
             log_level: parse_named(non_empty(self.log_level, "log_level")?, "agent.log_level")?,
             log_format: parse_named(
                 non_empty(self.log_format, "log_format")?,
@@ -411,9 +468,14 @@ impl RawRelay {
             .map(|value| crate::app_name::parse_app_name(&value).map_err(invalid))
             .transpose()?;
         let agent_id = parse_optional_id(self.agent_id, &format!("relay '{id}' 'agent_id'"))?;
+        let log_max_size = parse_byte_size(
+            self.log_max_size,
+            &format!("relays entry #{index} 'log_max_size'"),
+        )?;
         Ok(RelayConfig {
             id,
             server,
+            log_max_size,
             insecure: self.insecure,
             binary_source: non_blank(self.binary_source, "binary_source")?.map(PathBuf::from),
             agent_app_name,
