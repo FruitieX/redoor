@@ -88,6 +88,9 @@ export const queryKeys = {
     /** Editable TOML settings of a managed agent. */
     agentConfiguration: (agentId: string) =>
         [...queryKeys.agent(agentId), "configuration"] as const,
+    /** Host key an SSH device presents right now, probed over the network. */
+    sshHostKey: (agentId: string) =>
+        [...queryKeys.agent(agentId), "ssh-host-key"] as const,
     agentLoggingLevel: (agentId: string) =>
         [...queryKeys.agent(agentId), "logging-level"] as const,
     accounts: (agentId: string) =>
@@ -336,6 +339,22 @@ export function agentConfigurationQueryOptions(
                       value: await api.getSshAgentConfiguration(agentId),
                   },
         staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * Probes the host key an SSH device presents. The answer is what the user confirms before
+ * any credential is sent, so it is never served from cache: every confirmation step asks
+ * the device again instead of trusting an earlier probe. A failed probe is not retried
+ * because each attempt is a network round trip the user is waiting on.
+ */
+export function sshHostKeyQueryOptions(api: ApiClient, agentId: string) {
+    return queryOptions({
+        queryKey: queryKeys.sshHostKey(agentId),
+        queryFn: () => api.getSshHostKey(agentId),
+        staleTime: 0,
+        gcTime: 0,
+        retry: false,
     });
 }
 

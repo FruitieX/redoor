@@ -11,6 +11,8 @@ import {
     type ManagedAgentKind,
     type ManagedAgentSubmitRequest,
 } from "#ui/components/managed-agent-form";
+import { SshKeySection } from "#ui/components/ssh-key-section";
+import { Toast } from "#ui/components/toast";
 import {
     agentConfigurationQueryOptions,
     agentsQueryOptions,
@@ -59,10 +61,31 @@ function EditManagedAgentPage() {
 
     const router = useRouter();
     const [isDeleteOpen, setIsDeleteOpen] = React.useState(false);
+
+    const [keyLeftBehind, setKeyLeftBehind] = React.useState<string | null>(
+        null,
+    );
+
     const isRunning = agent.status !== "stopped";
 
     const updateMutation = useMutation({
         mutationFn: async (submission: ManagedAgentSubmitRequest) => {
+            // The edit is about to drop the key; remove its line from the device first, while
+            // the key can still log in to do it. The local key is deleted even when the
+            // device is unreachable, so the save goes ahead and the user is told instead.
+            if (
+                submission.kind === "ssh" &&
+                submission.sshKey.action === "remove-first"
+            ) {
+                const removal = await api.removeSshKey(agent.id);
+
+                if (!removal.removed_from_device) {
+                    setKeyLeftBehind(
+                        `The SSH key was deleted from this server, but its line was left in the device's authorized_keys${removal.device_error ? `: ${removal.device_error}` : "."}`,
+                    );
+                }
+            }
+
             const response =
                 submission.kind === "local"
                     ? await api.updateLocalAgent(agent.id, submission.request)
@@ -86,6 +109,12 @@ function EditManagedAgentPage() {
 
             return response;
         },
+        // A failed save may follow a successful key removal, so the form must not keep
+        // offering a key that no longer exists.
+        onError: () =>
+            queryClient.invalidateQueries({
+                queryKey: queryKeys.agentConfiguration(agent.id),
+            }),
     });
 
     const deleteMutation = useMutation({
@@ -111,6 +140,15 @@ function EditManagedAgentPage() {
                 key={agent.id}
                 mode="edit"
                 configuration={configuration}
+                beforeForm={
+                    configuration.kind === "ssh" ? (
+                        <SshKeySection
+                            agentId={agent.id}
+                            deviceName={agent.name}
+                            configuration={configuration.value}
+                        />
+                    ) : null
+                }
                 configPath={serverInfo.config_path}
                 isSubmitting={updateMutation.isPending}
                 isDisabled={isBusy}
@@ -174,6 +212,11 @@ function EditManagedAgentPage() {
                 }}
                 onConfirm={() => deleteMutation.mutate()}
             />
+            {keyLeftBehind ? (
+                <Toast tone="error" onDismiss={() => setKeyLeftBehind(null)}>
+                    {keyLeftBehind}
+                </Toast>
+            ) : null}
         </>
     );
 }

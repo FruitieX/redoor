@@ -97,6 +97,21 @@ test.describe.serial("Agent management", () => {
             "true",
         );
         await expect(page.getByText("Required", { exact: true })).toBeVisible();
+
+        const dedicatedKey = page.getByRole("checkbox", {
+            name: "Create a dedicated SSH key (recommended)",
+        });
+
+        // New SSH devices default to a dedicated key, which never stores the password.
+        await expect(dedicatedKey).toBeChecked();
+        await expect(
+            page.getByLabel("SSH password (used once, not saved)"),
+        ).toBeEnabled();
+        // The password storage choice is hidden while the dedicated key replaces it.
+        await expect(
+            page.getByRole("radio", { name: "Use ssh password" }),
+        ).toHaveCount(0);
+        await dedicatedKey.uncheck();
         await expect(
             page.getByText(
                 "Password authentication stores the secret as plaintext in config.toml. Key mode uses a preconfigured SSH key or ssh-agent.",
@@ -115,6 +130,11 @@ test.describe.serial("Agent management", () => {
         page,
     }) => {
         await page.goto(`${WEB_BASE_URL}/agents/new`);
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
         await page.getByRole("radio", { name: "Use ssh password" }).check();
         const password = page.getByLabel("SSH password", { exact: true });
         await password.fill("secret-value");
@@ -328,6 +348,12 @@ test.describe.serial("Agent management", () => {
         await page.getByLabel("SSH target").fill("redoor-ssh-test");
         await page.getByLabel("SSH username").fill("redoor");
         await page.getByLabel("Device name").fill(CREATED_SSH_AGENT);
+        // This test covers the server user's own keys, not a dedicated device key.
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
         await page
             .getByRole("radio", { name: "Use preconfigured ssh key" })
             .check();
@@ -488,6 +514,12 @@ test.describe.serial("Agent management", () => {
         await page.getByLabel("SSH target").fill("redoor-ssh-test");
         await page.getByLabel("SSH username").fill("redoor-password");
         await page.getByLabel("Device name").fill(CREATED_SSH_PASSWORD_AGENT);
+        // Storing the password is only offered without a dedicated key.
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
         await page.getByRole("radio", { name: "Use ssh password" }).check();
         // Password mode must enable the field before a secret can be typed.
         await expect(
@@ -537,6 +569,11 @@ test.describe.serial("Agent management", () => {
         await page
             .getByLabel("Device name")
             .fill(CREATED_SSH_MODE_SWITCH_AGENT);
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
         await page.getByRole("radio", { name: "Use ssh password" }).check();
         await page.getByLabel("SSH password", { exact: true }).fill(password);
         await page.getByRole("button", { name: "Add device" }).click();

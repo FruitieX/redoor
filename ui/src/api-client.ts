@@ -60,6 +60,12 @@ import type { CreateSshAgentResponse } from "#bindings/CreateSshAgentResponse";
 import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
 import type { UpdateSshAgentResponse } from "#bindings/UpdateSshAgentResponse";
 import type { UpdateSshAgentRequest } from "#bindings/UpdateSshAgentRequest";
+import type { SshHostKeyResponse } from "#bindings/SshHostKeyResponse";
+import type { EnrollSshKeyRequest } from "#bindings/EnrollSshKeyRequest";
+import type { SshKeyEnrollmentResponse } from "#bindings/SshKeyEnrollmentResponse";
+import type { SshKeyRemovalResponse } from "#bindings/SshKeyRemovalResponse";
+import type { PinSshHostKeyRequest } from "#bindings/PinSshHostKeyRequest";
+import type { SshHostKeyPinResponse } from "#bindings/SshHostKeyPinResponse";
 import type { CreateLocalAgentRequest } from "#bindings/CreateLocalAgentRequest";
 import type { CreateLocalAgentResponse } from "#bindings/CreateLocalAgentResponse";
 import type { ManagedLocalAgentConfigurationResponse } from "#bindings/ManagedLocalAgentConfigurationResponse";
@@ -1013,6 +1019,56 @@ export class ApiClient {
         return apiRequest<ManagedSshAgentConfigurationResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/configuration`,
             undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Probes the host key an SSH device presents, so the user can confirm it before any credential is sent. */
+    async getSshHostKey(agentId: string): Promise<SshHostKeyResponse> {
+        return apiRequest<SshHostKeyResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-host-key`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Re-pins an SSH device's host key after the user confirmed a change. */
+    async pinSshHostKey(
+        agentId: string,
+        request: PinSshHostKeyRequest,
+    ): Promise<SshHostKeyPinResponse> {
+        return apiRequest<SshHostKeyPinResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-host-key/pin`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Sets up, or rotates, the redoor-managed SSH key of an SSH device. */
+    async enrollSshKey(
+        agentId: string,
+        request: EnrollSshKeyRequest,
+    ): Promise<SshKeyEnrollmentResponse> {
+        return apiRequest<SshKeyEnrollmentResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-key`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Removes the managed SSH key from the device (when reachable) and from the server. */
+    async removeSshKey(agentId: string): Promise<SshKeyRemovalResponse> {
+        return apiRequest<SshKeyRemovalResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-key`,
+            { method: "DELETE" },
             this.requestContext(),
         );
     }
