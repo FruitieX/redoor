@@ -33,6 +33,7 @@ function agentInfo(id: string, name: string): AgentInfoResponse {
         supports_trash: false,
         uid: null,
         is_root: false,
+        duplicate_id: null,
     };
 }
 

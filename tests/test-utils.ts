@@ -7,6 +7,7 @@ import {
     realpathSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -93,6 +94,8 @@ export async function createToxiproxyAgent(options: {
             supports_trash: options.agent.supportsTrash,
             uid: options.agent.uid,
             is_root: options.agent.isRoot,
+            // The proxy only reroutes traffic; clone warnings are irrelevant to it.
+            duplicate_id: null,
         },
         {
             getSessionCookie: () =>
@@ -261,6 +264,19 @@ export type SpawnAgentArgs = {
     log?: string;
     token?: string;
     env?: NodeJS.ProcessEnv;
+    /**
+     * Fixed `--agent-id`, for tests that restart an agent and keep addressing it by id.
+     * Without it the agent creates its own id in its data directory, like a real standalone
+     * agent.
+     */
+    agentId?: string;
+    /**
+     * `REDOOR_APP_NAME` whose data directory holds the agent's `agent-id` file. A caller-chosen
+     * name survives `kill()`, so restarting with the same name keeps the device id; the caller
+     * removes it with `removeAgentDataDir`. Without it every spawn gets a fresh, private data
+     * directory and therefore a fresh id.
+     */
+    appName?: string;
 };
 
 export type SpawnServerArgs = {
@@ -275,6 +291,25 @@ type SpawnOptions = {
     cwd?: string;
     env?: NodeJS.ProcessEnv;
 };
+
+/**
+ * Data directory of a standalone test agent started with `REDOOR_APP_NAME=appName`; it holds
+ * the agent's `agent-id` file. Test agents inherit the runner's `HOME`.
+ */
+export function agentDataDir(appName: string): string {
+    const home = process.env.HOME;
+
+    if (home === undefined) {
+        throw new Error("HOME is not set");
+    }
+
+    return join(home, ".local", "share", appName);
+}
+
+/** Deletes a test agent's data directory, and with it the device id it remembers. */
+export function removeAgentDataDir(appName: string): void {
+    rmSync(agentDataDir(appName), { recursive: true, force: true });
+}
 
 export class ProcessManager {
     private processes: Map<number, ChildProcess> = new Map();
@@ -327,6 +362,10 @@ export class ProcessManager {
             cliArgs.push("--name", args.name);
         }
 
+        if (args.agentId !== undefined) {
+            cliArgs.push("--agent-id", args.agentId);
+        }
+
         if (args.home !== undefined) {
             cliArgs.push("--home", args.home);
         }
@@ -345,7 +384,14 @@ export class ProcessManager {
             cliArgs.push("--log", logPath);
         }
 
-        const appName = `${TEST_APP_NAME}-agent-${this.agentNamespace++}`;
+        const appName =
+            args.appName ?? `${TEST_APP_NAME}-agent-${this.agentNamespace++}`;
+
+        if (args.appName === undefined) {
+            // Namespaces restart at 0 in every test file, so a data directory left behind by a
+            // crashed run would otherwise hand its device id to an unrelated agent.
+            removeAgentDataDir(appName);
+        }
 
         const pid = this.spawn(args.executablePath ?? AGENT_PATH, cliArgs, {
             cwd: args.cwd,
@@ -355,7 +401,9 @@ export class ProcessManager {
             },
         });
 
-        this.agentAppNames.set(pid, appName);
+        if (args.appName === undefined) {
+            this.agentAppNames.set(pid, appName);
+        }
 
         return pid;
     }
@@ -410,13 +458,9 @@ password = "${TEST_PASSWORD}"
         this.processes.delete(pid);
         this.stdoutBuffers.delete(pid);
         const appName = this.agentAppNames.get(pid);
-        const home = process.env.HOME;
 
-        if (appName !== undefined && home !== undefined) {
-            rmSync(join(home, ".local", "share", appName), {
-                recursive: true,
-                force: true,
-            });
+        if (appName !== undefined) {
+            removeAgentDataDir(appName);
         }
 
         this.agentAppNames.delete(pid);
@@ -524,13 +568,7 @@ export async function startServerAndAgent(options: {
         throw new Error("Server process not found");
     }
 
-    const waitForAgentPromise = waitForLogMessage(
-        serverProcess,
-        new RegExp(`Agent registered:.*agent_name=${options.agentName}`),
-        10000,
-    );
-
-    const waitForTransferPromise = waitForAgentReady(
+    const waitForAgentPromise = waitForAgentReady(
         serverProcess,
         options.agentName,
     );
@@ -544,7 +582,7 @@ export async function startServerAndAgent(options: {
         env: options.agentEnv,
     });
 
-    await Promise.all([waitForAgentPromise, waitForTransferPromise]);
+    await waitForAgentPromise;
 
     const agents = await apiClient.listAgents();
     const testAgent = agents.find((agent) => agent.name === options.agentName);
@@ -563,15 +601,56 @@ export async function startServerAndAgent(options: {
     };
 }
 
+/** RFC 4648 base32 alphabet in lowercase, the character set of device ids. */
+const DEVICE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
+
+/** Pattern of a device id, for matching ids in log lines and API responses. */
+export const DEVICE_ID_PATTERN = "dev_[a-z2-7]{20}";
+
+/** Matches a whole value that is a device id. */
+export const DEVICE_ID_REGEXP = new RegExp(`^${DEVICE_ID_PATTERN}$`);
+
+/**
+ * Creates a fresh device id in the format the router requires in `hello`.
+ *
+ * Every test that needs an id it controls (fake agents, `--agent-id`, config entries) uses
+ * this, so a change of the id format only has to be made here.
+ */
+export function generateDeviceId(): string {
+    const random = [...randomBytes(20)]
+        .map((byte) => DEVICE_ID_ALPHABET[byte % 32])
+        .join("");
+
+    return `dev_${random}`;
+}
+
+/** Escapes a literal for use inside a `RegExp`, since device names may contain metacharacters. */
+export function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Matches the router's registration log line for the device called `agentName`.
+ *
+ * The line logs the opaque id first and the name second, so tests that only know the name
+ * they started the agent with match on the name and capture the id.
+ */
+export function agentRegisteredPattern(agentName: string): RegExp {
+    return new RegExp(
+        `Agent registered: agent_id=(${DEVICE_ID_PATTERN}), agent_name=${escapeRegExp(agentName)},`,
+    );
+}
+
 /** Waits until the router accepted the agent's connection, which carries all of its streams. */
 export async function waitForAgentReady(
     serverProcess: ChildProcess,
-    agentId: string,
+    agentName: string,
+    timeoutMs = 10000,
 ): Promise<void> {
     await waitForLogMessage(
         serverProcess,
-        new RegExp(`Agent registered: agent_id=${agentId},`),
-        10000,
+        agentRegisteredPattern(agentName),
+        timeoutMs,
     );
 }
 

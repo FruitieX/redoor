@@ -9,6 +9,7 @@ import {
     upgradeAgentSocket,
 } from "./fake-agent";
 import {
+    generateDeviceId,
     ProcessManager,
     TempFileManager,
     startServerAndAgent,
@@ -128,7 +129,6 @@ describe("agent websocket handshake", () => {
         try {
             await FakeAgent.connect({
                 serverPort,
-                agentId: "handshake-impostor",
                 agentName: AGENT_NAME,
             });
         } catch (caught) {
@@ -143,10 +143,63 @@ describe("agent websocket handshake", () => {
         expect(
             agents.find((agent) => agent.name === AGENT_NAME)?.status,
         ).toBe("connected");
-        // The impostor never appears in the inventory.
-        expect(agents.some((agent) => agent.id === "handshake-impostor")).toBe(
-            false,
-        );
+        // The impostor never appears in the inventory: only one device carries the name.
+        expect(
+            agents.filter((agent) => agent.name === AGENT_NAME),
+        ).toHaveLength(1);
+    });
+
+    it("rejects a hello whose id or name is not a valid device identity", async () => {
+        const invalidHellos = [
+            // The id is the old name-style identity, not an opaque device id.
+            { agentId: "handshake-name-as-id", agentName: "handshake-bad-id" },
+            // Upper-case and too-short ids look close to the format but are not in it.
+            {
+                agentId: "dev_ABCDEFGHIJKLMNOPQRST",
+                agentName: "handshake-upper-id",
+            },
+            { agentId: "dev_abc", agentName: "handshake-short-id" },
+            // Names cannot contain the CLI's `device:path` separator or a URL separator.
+            { agentName: "handshake:colon" },
+            { agentName: "handshake/slash" },
+            { agentName: "" },
+            // A name in the id format would make name-or-id lookups ambiguous.
+            { agentName: generateDeviceId() },
+        ];
+
+        for (const hello of invalidHellos) {
+            let error: unknown;
+
+            try {
+                await FakeAgent.connect({ serverPort, ...hello });
+            } catch (caught) {
+                error = caught;
+            }
+
+            // The router refuses the identity instead of registering a device under it.
+            expect(error, JSON.stringify(hello)).toBeInstanceOf(
+                FakeAgentRejectedError,
+            );
+            expect(error, JSON.stringify(hello)).toMatchObject({
+                reason: "invalid_identity",
+            });
+        }
+
+        const names = (await api.listAgents()).map((agent) => agent.name);
+
+        // None of the refused identities reached the inventory.
+        for (const hello of invalidHellos) {
+            expect(names).not.toContain(hello.agentName);
+        }
+
+        // A name that only starts with `dev_` is a normal name and is accepted.
+        const fake = await FakeAgent.connect({
+            serverPort,
+            agentName: "dev_handshake-name",
+        });
+
+        onTestFinished(() => fake.close());
+        expect(fake.connectionId).not.toBe("");
     });
 
     it("closes a socket that sends frames before hello", async () => {
@@ -180,7 +233,7 @@ describe("agent websocket handshake", () => {
 
     it("lets a fake agent run commands over the authenticated connection", async () => {
         const fakeName = "handshake-fake-agent";
-        const fake = await FakeAgent.connect({ serverPort, agentId: fakeName });
+        const fake = await FakeAgent.connect({ serverPort, agentName: fakeName });
         onTestFinished(() => fake.close());
         fake.onCommand(({ id, command }) => {
             if (command.type === "Echo") {

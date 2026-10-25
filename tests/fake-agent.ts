@@ -2,7 +2,11 @@ import WebSocket from "ws";
 import { z } from "zod";
 
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
-import { TEST_AGENT_TOKEN, webSocketDataToString } from "./test-utils";
+import {
+    generateDeviceId,
+    TEST_AGENT_TOKEN,
+    webSocketDataToString,
+} from "./test-utils";
 
 /** Subprotocol of the agent websocket that this helper speaks. */
 export const AGENT_PROTOCOL = "redoor.v2";
@@ -17,9 +21,7 @@ const STREAM_HEADER_SIZE = 9;
 const FLAG_FIN = 0x01;
 
 /** Every control frame is a JSON object tagged by `type`. */
-const controlFrameSchema = z
-    .object({ type: z.string() })
-    .catchall(z.unknown());
+const controlFrameSchema = z.object({ type: z.string() }).catchall(z.unknown());
 
 /** Any JSON document, the shape of a response payload the fake agent sends. */
 export type JsonValue =
@@ -84,7 +86,9 @@ export async function upgradeAgentSocket(
     options: UpgradeOptions,
 ): Promise<UpgradeOutcome> {
     const url = `ws://127.0.0.1:${options.serverPort}${AGENT_WS_PATH}`;
-    const token = options.token === undefined ? TEST_AGENT_TOKEN : options.token;
+
+    const token =
+        options.token === undefined ? TEST_AGENT_TOKEN : options.token;
 
     const versionHeader = {
         "X-Redoor-Agent-Version": options.version ?? "0.0.0-fake-agent",
@@ -119,9 +123,13 @@ export async function upgradeAgentSocket(
 
 /** Identity and capabilities a fake agent announces in its `hello`. */
 export type HelloOptions = {
-    agentId: string;
-    /** Defaults to the agent id, like real agents. */
-    agentName?: string;
+    /** Display name; the router requires it to be unique and not in the id format. */
+    agentName: string;
+    /**
+     * Device id sent in `hello`; a fresh valid id when omitted. Tests pass one to reconnect as
+     * the same device or to send a malformed id on purpose.
+     */
+    agentId?: string;
     os?: string;
     arch?: string;
     hostname?: string;
@@ -155,8 +163,8 @@ export type HelloFrame = {
 export function helloFrame(options: HelloOptions): HelloFrame {
     return {
         type: "hello",
-        agent_id: options.agentId,
-        agent_name: options.agentName ?? options.agentId,
+        agent_id: options.agentId ?? generateDeviceId(),
+        agent_name: options.agentName,
         os: options.os ?? "linux",
         arch: options.arch ?? "x86_64",
         hostname: options.hostname ?? "fake-host",
@@ -215,7 +223,10 @@ export class FakeAgent {
     connectionId = "";
 
     private constructor(
+        /** Device id the agent announced, which the REST API also accepts in paths. */
         readonly agentId: string,
+        /** Display name the agent announced. */
+        readonly agentName: string,
         readonly control: WebSocket,
     ) {
         control.on("message", (data, isBinary) => {
@@ -250,8 +261,11 @@ export class FakeAgent {
             );
         }
 
-        const agent = new FakeAgent(options.agentId, outcome.socket);
-        agent.send(helloFrame(options));
+        const agentId = options.agentId ?? generateDeviceId();
+
+        const agent = new FakeAgent(agentId, options.agentName, outcome.socket);
+
+        agent.send(helloFrame({ ...options, agentId }));
 
         const answer = await agent.waitForFrame(
             (frame) => frame.type === "welcome" || frame.type === "rejected",

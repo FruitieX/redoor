@@ -9,6 +9,7 @@ import {
 } from "vitest";
 import { Agent, ApiClient } from "#ui/api-client";
 import {
+    agentRegisteredPattern,
     ProcessManager,
     TempFileManager,
     startServerAndAgent,
@@ -82,9 +83,7 @@ describe("File Diff API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${secondAgentName},`,
-            ),
+            agentRegisteredPattern(secondAgentName),
             10000,
         );
 

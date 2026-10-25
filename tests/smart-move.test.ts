@@ -4,6 +4,7 @@ import path from "node:path";
 import { ApiClient, Agent } from "#ui/api-client";
 import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import {
+    agentRegisteredPattern,
     ProcessManager,
     TempFileManager,
     startServerAndAgent,
@@ -40,9 +41,7 @@ describe("Smart Move API", () => {
 
         const connected = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${destinationName},`,
-            ),
+            agentRegisteredPattern(destinationName),
             10000,
         );
 

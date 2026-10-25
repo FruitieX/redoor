@@ -50,13 +50,14 @@ let rootB: string;
 
 let trashA: string;
 
+/** Inventory records keyed by device name, the handle the tests address devices with. */
 const infos = new Map<string, AgentInfoResponse>();
 
 /** Builds an agent handle that authenticates only with the given access token. */
-function agentAs(token: string, id: string): Agent {
-    const info = infos.get(id);
+function agentAs(token: string, name: string): Agent {
+    const info = infos.get(name);
 
-    if (info === undefined) throw new Error(`Unknown test agent ${id}`);
+    if (info === undefined) throw new Error(`Unknown test agent ${name}`);
 
     return new Agent(baseUrl, info, { getAccessToken: () => token });
 }
@@ -180,7 +181,7 @@ log = "${join(directory, "managed.log")}"
 
     const listed: AgentListResponse = await response.json();
 
-    for (const info of listed.agents) infos.set(info.id, info);
+    for (const info of listed.agents) infos.set(info.name, info);
 }, 30_000);
 
 afterAll(async () => {
@@ -324,9 +325,9 @@ describe("Access token device scope", () => {
         });
 
         const client = clientAs(bearer);
-        const listed = (await client.listAgents()).map((agent) => agent.id);
+        const listed = (await client.listAgents()).map((agent) => agent.name);
 
-        // Inventory lists only in-scope devices.
+        // Inventory lists only in-scope devices; the scope was given by name and stored as id.
         expect(listed).toEqual([agentA]);
         // Out-of-scope device details and files are refused.
         expect(
@@ -705,7 +706,7 @@ describe("Route access table", () => {
 
         // The managed agent's configuration survived the refused delete.
         expect(
-            (await api.listAgents()).some((agent) => agent.id === managedAgent),
+            (await api.listAgents()).some((agent) => agent.name === managedAgent),
         ).toBe(true);
     });
 });

@@ -36,15 +36,16 @@ describe("request lifecycle on the multiplexed connection", () => {
     });
 
     /** Connects a fake agent and waits until the server lists it as connected. */
-    async function connectFake(agentId: string): Promise<FakeAgent> {
-        const fake = await FakeAgent.connect({ serverPort, agentId });
+    async function connectFake(agentName: string): Promise<FakeAgent> {
+        const fake = await FakeAgent.connect({ serverPort, agentName });
 
         onTestFinished(() => fake.close());
         await waitForValue({
             description: "fake agent connected",
             predicate: async () =>
                 (await api.listAgents()).find(
-                    (agent) => agent.id === agentId && agent.status === "connected",
+                    (agent) =>
+                        agent.id === fake.agentId && agent.status === "connected",
                 ),
         });
 
@@ -70,8 +71,8 @@ describe("request lifecycle on the multiplexed connection", () => {
     }
 
     it("sends upload data only after the agent's credit grant and never publishes a canceled upload", async () => {
-        const agentId = "request-lifecycle-upload";
-        const fake = await connectFake(agentId);
+        const agentName = "request-lifecycle-upload";
+        const fake = await connectFake(agentName);
         const path = "/tmp/request-lifecycle.bin";
         const frames: StreamFrame[] = [];
         let granted = false;
@@ -85,7 +86,7 @@ describe("request lifecycle on the multiplexed connection", () => {
             frames.push(frame);
         });
 
-        const upload = fetch(`${api.baseUrl}/api/v1/agents/${agentId}/raw${path}`, {
+        const upload = fetch(`${api.baseUrl}/api/v1/agents/${agentName}/raw${path}`, {
             method: "PUT",
             headers: {
                 ...api.getAuthHeaders(),
@@ -157,11 +158,11 @@ describe("request lifecycle on the multiplexed connection", () => {
     });
 
     it("delivers a download's data before settling it on the result that follows", async () => {
-        const agentId = "request-lifecycle-download";
-        const fake = await connectFake(agentId);
+        const agentName = "request-lifecycle-download";
+        const fake = await connectFake(agentName);
         const path = "/tmp/request-lifecycle-download.bin";
 
-        const response = fetch(`${api.baseUrl}/api/v1/agents/${agentId}/raw${path}`, {
+        const response = fetch(`${api.baseUrl}/api/v1/agents/${agentName}/raw${path}`, {
             headers: api.getAuthHeaders(),
         });
 
@@ -194,11 +195,11 @@ describe("request lifecycle on the multiplexed connection", () => {
     });
 
     it("fails a download whose result reports an error after partial data", async () => {
-        const agentId = "request-lifecycle-failed-download";
-        const fake = await connectFake(agentId);
+        const agentName = "request-lifecycle-failed-download";
+        const fake = await connectFake(agentName);
         const path = "/tmp/request-lifecycle-failed.bin";
 
-        const response = fetch(`${api.baseUrl}/api/v1/agents/${agentId}/raw${path}`, {
+        const response = fetch(`${api.baseUrl}/api/v1/agents/${agentName}/raw${path}`, {
             headers: api.getAuthHeaders(),
         });
 

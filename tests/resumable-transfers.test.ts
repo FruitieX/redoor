@@ -107,7 +107,7 @@ describe("resumable transfers", () => {
             predicate: async () =>
                 (await api.listAgents()).find(
                     (agent) =>
-                        agent.id === "resume-dest" &&
+                        agent.name === "resume-dest" &&
                         agent.status === "connected",
                 ),
         });

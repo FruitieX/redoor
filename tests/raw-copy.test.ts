@@ -12,6 +12,7 @@ import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import path from "node:path";
 import fs from "node:fs/promises";
 import {
+    agentRegisteredPattern,
     ProcessManager,
     TempFileManager,
     waitForLogMessage,
@@ -123,9 +124,7 @@ describe("Raw Copy API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${secondAgentName},`,
-            ),
+            agentRegisteredPattern(secondAgentName),
             10000,
         );
 
@@ -311,9 +310,7 @@ describe("Raw Copy API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${secondAgentName},`,
-            ),
+            agentRegisteredPattern(secondAgentName),
             10000,
         );
 
@@ -523,9 +520,7 @@ describe("Raw Copy API", () => {
 
             const waitForSecondAgent = waitForLogMessage(
                 serverProcess,
-                new RegExp(
-                    `Agent registered: agent_id=${secondAgentName},`,
-                ),
+                agentRegisteredPattern(secondAgentName),
                 10000,
             );
 

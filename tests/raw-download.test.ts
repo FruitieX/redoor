@@ -12,6 +12,7 @@ import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 
 import fs from "node:fs";
 import {
+    agentRegisteredPattern,
     ProcessManager,
     TempFileManager,
     getAvailablePort,
@@ -95,9 +96,7 @@ describe("Raw Download API", () => {
 
         const connected = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${proxiedAgentName},`,
-            ),
+            agentRegisteredPattern(proxiedAgentName),
             10000,
         );
 
@@ -405,6 +404,7 @@ describe("Raw Download API", () => {
                 supports_trash: false,
                 uid: null,
                 is_root: false,
+                duplicate_id: null,
             },
             {
                 getSessionCookie: () =>
@@ -440,9 +440,7 @@ describe("Raw Download API", () => {
 
         const waitForEphemeralAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${ephemeralAgentName},`,
-            ),
+            agentRegisteredPattern(ephemeralAgentName),
             10000,
         );
 
@@ -599,9 +597,7 @@ describe("Raw Download API", () => {
 
         const waitForProxiedAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${proxiedAgentName},`,
-            ),
+            agentRegisteredPattern(proxiedAgentName),
             10000,
         );
 
@@ -730,9 +726,7 @@ describe("Raw Download API", () => {
 
         const waitForProxiedAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${proxiedAgentName},`,
-            ),
+            agentRegisteredPattern(proxiedAgentName),
             10000,
         );
 

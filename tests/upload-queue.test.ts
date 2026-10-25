@@ -53,6 +53,7 @@ const agentInfo: AgentInfoResponse = {
     supports_trash: false,
     uid: null,
     is_root: false,
+    duplicate_id: null,
 };
 
 /** Builds a queue whose agent's requests are controlled by the test, never sent anywhere. */

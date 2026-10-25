@@ -23,12 +23,15 @@ import {
     waitForPort,
     waitForValue,
 } from "./test-utils";
+import {
+    SSH_TEST_HOST,
+    SSH_TEST_USER,
+    cleanupSshTest,
+    shellQuote,
+    sshTestCommand,
+} from "./ssh-test-utils";
 
 const execFileAsync = promisify(execFile);
-
-const SSH_TEST_HOST = "redoor-ssh-test";
-
-const SSH_TEST_USER = "redoor";
 
 const SSH_PASSWORD_USER = "redoor-password";
 
@@ -48,11 +51,6 @@ const relayPidMetadataSchema: z.ZodType<RelayPidMetadata> = z.object({
     agent_app_name: z.string(),
 });
 
-/** Quotes one controlled value for the remote POSIX shell used by OpenSSH. */
-function shellQuote(value: string): string {
-    return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 /** Runs a finite relay lifecycle command inside the test's isolated local namespace. */
 async function relayCommand(options: {
     home: string;
@@ -67,11 +65,6 @@ async function relayCommand(options: {
             REDOOR_AGENT_NOTIFICATION: "off",
         },
     });
-}
-
-/** Runs a command on the SSH test host as the required redoor user. */
-async function sshTestCommand(command: string): Promise<void> {
-    await execFileAsync("ssh", ["-l", SSH_TEST_USER, SSH_TEST_HOST, command]);
 }
 
 /** Runs a command as the password-only user so cleanup can reach that user's home. */
@@ -123,18 +116,6 @@ printf '%s\n' ${shellQuote(password)}
     } finally {
         rmSync(askpassDir, { recursive: true, force: true });
     }
-}
-
-/** Stops any orphaned remote agent and removes only this test's isolated files. */
-async function cleanupSshTest(options: {
-    remoteRoot: string;
-    agentAppNames: string[];
-    sshCommand?: (command: string) => Promise<void>;
-}): Promise<void> {
-    const run = options.sshCommand ?? sshTestCommand;
-    const appNames = options.agentAppNames.map(shellQuote).join(" ");
-    const command = `for app in ${appNames}; do pid_file="$HOME/.local/share/$app/agent.pid"; if [ -f "$pid_file" ]; then pid=$(tr -d '[:space:]' < "$pid_file"); case "$pid" in *[!0-9]*|'') ;; *) kill "$pid" 2>/dev/null || true ;; esac; fi; rm -rf "$HOME/.local/share/$app"; done; rm -rf ${shellQuote(options.remoteRoot)}`;
-    await run(command);
 }
 
 /** Kills one remote relay agent so the owning local SSH process must reconnect it. */
@@ -964,6 +945,8 @@ log = "${agentLogPath}"
         await connected.upload(
             `${parentPath}/root-file.txt`,
             new File(["replacement"], "root-file.txt"),
+            // Uploads refuse to overwrite unless asked, and this replacement is intentional.
+            { on_existing: "override" },
         );
         const listing = await connected.ls(parentPath);
 

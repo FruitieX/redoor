@@ -203,7 +203,7 @@ describe("connected external agent upgrade", () => {
 
         const earlyAgent = await FakeAgent.connect({
             serverPort,
-            agentId: earlyAgentName,
+            agentName: earlyAgentName,
             arch,
             hostname: "early-host",
             username: "early-user",
