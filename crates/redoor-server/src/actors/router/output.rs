@@ -285,7 +285,7 @@ mod tests {
         /// Single-slot control lanes make saturation deterministic without a network peer.
         fn new() -> Self {
             let mut state = RouterState::new(tokio::spawn(std::future::pending()));
-            let agent = AgentId::from("output-test");
+            let agent = redoor_core::test_support::test_agent_id("output-test");
             let (lanes, receivers) = ControlLanes::bounded(1, 1);
             let streams = ConnectionStreams::new(agent.clone());
             let connection = AgentConnection::from_register_request(

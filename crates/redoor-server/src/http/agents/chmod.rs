@@ -1,13 +1,11 @@
 //! REST endpoint that changes permission bits on an agent path.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     extract::{Path, State as AxumState},
 };
-use redoor_protocol::{
-    api::files::{ChmodPathRequest, ChmodPathResponse},
-    ids::AgentId,
-};
+use redoor_protocol::api::files::{ChmodPathRequest, ChmodPathResponse};
 
 use crate::http::{
     agent_client::ChmodPath,
@@ -18,7 +16,8 @@ use crate::http::{
 
 /// Route: `POST /api/v1/agents/{agent}/chmod/{*path}` replaces ordinary rwx bits only.
 pub(crate) async fn chmod_path_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<ChmodPathRequest>,
 ) -> Result<Json<ChmodPathResponse>, ApiError> {
@@ -32,5 +31,5 @@ pub(crate) async fn chmod_path_handler(
         path: absolute_path_from_url(path.unwrap_or_default()),
         permissions: request.permissions,
     };
-    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
+    Ok(Json(state.agents.call(&agent_id, call).await?))
 }

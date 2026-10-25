@@ -17,7 +17,7 @@ pub(crate) async fn restart_server_handler(State(state): State<ServerState>) -> 
         let config = parse_config_file(&state.config_path).await?;
         require_server_section(&config)?;
         // Startup would refuse colliding managed names, so refuse them before shutting down.
-        config.ensure_unique_agent_names(&state.config_path)?;
+        config.validate_managed_agent_names(&state.config_path)?;
         Ok::<(), redoor_core::config::ConfigError>(())
     }
     .await;

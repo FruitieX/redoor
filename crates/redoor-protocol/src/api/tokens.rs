@@ -200,19 +200,21 @@ mod tests {
             serde_json::to_value(DeviceScope::All).unwrap(),
             serde_json::json!({"kind": "all"})
         );
+        let a = AgentId::generate();
+        let b = AgentId::generate();
         let only = DeviceScope::Only {
-            device_ids: vec![AgentId::from("a")],
+            device_ids: vec![a.clone()],
         };
         let json = serde_json::to_value(&only).unwrap();
         // Explicit ids are listed under the "only" kind.
         assert_eq!(
             json,
-            serde_json::json!({"kind": "only", "device_ids": ["a"]})
+            serde_json::json!({"kind": "only", "device_ids": [a.as_str()]})
         );
         assert_eq!(serde_json::from_value::<DeviceScope>(json).unwrap(), only);
         // Membership follows the scope kind.
-        assert!(only.contains(&AgentId::from("a")));
-        assert!(!only.contains(&AgentId::from("b")));
-        assert!(DeviceScope::All.contains(&AgentId::from("b")));
+        assert!(only.contains(&a));
+        assert!(!only.contains(&b));
+        assert!(DeviceScope::All.contains(&b));
     }
 }

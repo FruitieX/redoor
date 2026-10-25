@@ -4,10 +4,12 @@ use serde::Deserialize;
 
 use super::error::ApiError;
 
-/// Extracts an agent and its optional file path from exact-root and wildcard routes.
+/// Extracts the optional file path from exact-root and wildcard routes.
+///
+/// The `{agent}` parameter is deliberately not read here: handlers take the device from
+/// [`super::access::ResolvedDevice`], which the access middleware resolved from a name or id.
 #[derive(Deserialize)]
 pub(crate) struct AgentFilePath {
-    pub(crate) agent: String,
     pub(crate) path: Option<String>,
 }
 

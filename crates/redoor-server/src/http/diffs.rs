@@ -21,8 +21,12 @@ use super::{
 pub(crate) async fn diff_files_handler(
     AxumState(state): AxumState<ServerState>,
     Extension(principal): Extension<Principal>,
-    Json(payload): Json<DiffFilesRequest>,
+    Json(mut payload): Json<DiffFilesRequest>,
 ) -> Result<Json<DiffFilesResponse>, ApiError> {
+    // Body fields accept a name or an id; resolving before `require` keeps scope checks on
+    // ids, so a name that now belongs to another device cannot slip past a scope.
+    payload.left.agent = state.agents.resolve(payload.left.agent.as_str()).await?;
+    payload.right.agent = state.agents.resolve(payload.right.agent.as_str()).await?;
     principal.require(&[Permission::FilesRead], &payload.left.agent)?;
     principal.require(&[Permission::FilesRead], &payload.right.agent)?;
     let left = DiffEndpoint {

@@ -8,3 +8,5 @@ dev_agents
 *.log
 .opencode/package-lock.json
 .DS_Store
+# Cross-process locks the server and relays take next to a config file while rewriting it.
+.*.toml.lock

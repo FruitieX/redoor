@@ -42,7 +42,9 @@ pub enum ServerToAgent {
     },
 
     /// Ends an accepted connection on purpose (replaced by a newer connection of the same
-    /// agent, or the managed agent was stopped), so the agent exits instead of reconnecting.
+    /// agent, or the managed agent was stopped). Managed agents exit instead of reconnecting;
+    /// standalone agents reconnect with backoff, because being replaced means another machine
+    /// uses their id and the server can only detect that while both keep trying.
     Evicted { message: String },
 
     /// Returns flow-control credit for one agent-to-server stream (download or exec output).

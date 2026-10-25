@@ -31,6 +31,11 @@ pub struct AgentArgs {
     /// Overrides `REDOOR_AGENT_NAME` and `[agent].name`.
     #[arg(long, env = "REDOOR_AGENT_NAME")]
     pub(crate) name: Option<String>,
+    /// Device id assigned by the server or relay config for managed agents. When set, the
+    /// agent never reads or writes `<data_dir>/agent-id`, because several managed entries may
+    /// share one data dir.
+    #[arg(long, hide = true)]
+    pub(crate) agent_id: Option<String>,
     /// Shared secret from top-level `agent_token` so registration cannot be spoofed.
     /// Overrides `REDOOR_AGENT_TOKEN` and the config file.
     #[arg(long, env = "REDOOR_AGENT_TOKEN")]

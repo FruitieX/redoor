@@ -18,6 +18,8 @@ fn generate_secret() -> Result<String> {
 /// demo credentials, and one managed local agent so a fresh install is demoable.
 fn default_config_content(agent_token: &str) -> String {
     let agent_token = toml_edit::Value::from(agent_token).to_string();
+    // Written up front so the first start does not have to rewrite the fresh file.
+    let local_agent_id = redoor_protocol::ids::AgentId::generate();
     #[cfg(target_os = "linux")]
     let credentials = concat!(
         "# Web UI login. On Linux, omit both to use PAM (system user).\n",
@@ -47,6 +49,7 @@ agent_token = {agent_token}
 
 [[agents]]
 # local agent that runs on the same computer as the server
+id = "{local_agent_id}"
 local = true
 name = "local"
 "#
@@ -118,8 +121,8 @@ pub async fn create_default_config_if_missing(path: &Path) -> Result<Option<Crea
 /// Returns the default agent name for a local entry: the system hostname.
 /// Using the hostname (rather than e.g. `"local"`) means multiple servers on
 /// different machines each spawn a local agent with a distinct, meaningful
-/// name without the operator having to configure it. The supervisor imports
-/// this helper so its registry key matches the name the spawned agent uses.
+/// name without the operator having to configure it. The server imports this
+/// helper so the name it shows matches the one the spawned agent registers with.
 pub fn default_local_agent_name() -> String {
     sysinfo::System::host_name().unwrap_or_else(|| "local".to_string())
 }

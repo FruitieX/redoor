@@ -17,7 +17,8 @@ username: string | null,
  */
 ssh_port: number | null, 
 /**
- * Stable managed-agent name; defaults to the target hostname when omitted.
+ * Editable display name; defaults to the target hostname when omitted. The device id is
+ * created by the server and never part of this body.
  */
 name: string | null, 
 /**

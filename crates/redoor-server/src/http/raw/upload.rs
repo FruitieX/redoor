@@ -1,5 +1,6 @@
 //! Streamed raw file upload endpoint.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     body::Body,
@@ -10,7 +11,6 @@ use headers::HeaderMap;
 use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::files::{CreationOwnershipOptions, RawUploadResponse},
-    ids::AgentId,
     wire::command::Command,
 };
 
@@ -69,7 +69,8 @@ pub(crate) fn required_content_length(
 
 /// Route: `PUT /api/v1/agents/{agent}/raw/{*path}`
 pub(crate) async fn raw_agent_put_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     Query(params): Query<RawUploadQueryParams>,
     AxumState(state): AxumState<ServerState>,
     headers: HeaderMap,
@@ -88,7 +89,7 @@ pub(crate) async fn raw_agent_put_handler(
     });
     let upload = AgentUpload::start(
         &state.router_ref,
-        AgentId::from(agent),
+        agent_id,
         command,
         path.clone(),
         total_bytes,

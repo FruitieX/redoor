@@ -1,12 +1,12 @@
 //! REST endpoints for git context, status and diffs in agent repositories.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     extract::{Path, State as AxumState},
 };
-use redoor_protocol::{
-    api::git::{GitContextResponse, GitDiffRequest, GitDiffResponse, GitStatusResponse},
-    ids::AgentId,
+use redoor_protocol::api::git::{
+    GitContextResponse, GitDiffRequest, GitDiffResponse, GitStatusResponse,
 };
 
 use super::{
@@ -18,39 +18,31 @@ use super::{
 
 /// Route: `GET /api/v1/agents/{agent}/git/context[/{*path}]`.
 pub(crate) async fn git_context_handler(
+    ResolvedDevice(agent_id): ResolvedDevice,
     Path(params): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<GitContextResponse>, ApiError> {
     let call = GitContext {
         path: route_path(params.path)?,
     };
-    Ok(Json(
-        state
-            .agents
-            .call(&AgentId::from(params.agent), call)
-            .await?,
-    ))
+    Ok(Json(state.agents.call(&agent_id, call).await?))
 }
 
 /// Route: `GET /api/v1/agents/{agent}/git/status[/{*path}]`.
 pub(crate) async fn git_status_handler(
+    ResolvedDevice(agent_id): ResolvedDevice,
     Path(params): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<GitStatusResponse>, ApiError> {
     let call = GitStatus {
         path: route_path(params.path)?,
     };
-    Ok(Json(
-        state
-            .agents
-            .call(&AgentId::from(params.agent), call)
-            .await?,
-    ))
+    Ok(Json(state.agents.call(&agent_id, call).await?))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/git/diff`.
 pub(crate) async fn git_diff_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(mut request): Json<GitDiffRequest>,
 ) -> Result<Json<GitDiffResponse>, ApiError> {
@@ -61,7 +53,7 @@ pub(crate) async fn git_diff_handler(
         files: request.files,
         mode: request.mode,
     };
-    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
+    Ok(Json(state.agents.call(&agent_id, call).await?))
 }
 
 /// Restores the implicit root and applies the shared absolute-path policy.

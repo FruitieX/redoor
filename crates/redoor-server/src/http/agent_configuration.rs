@@ -1,14 +1,8 @@
 //! REST endpoints that create, edit and remove server-managed local and SSH agents in the
 //! TOML config.
 
-use crate::actors::router::{
-    RegisterManagedAgentRequest, RouterMsg, UnregisterManagedAgentRequest,
-};
-use axum::{
-    Json,
-    extract::{Path, State as AxumState},
-    http::StatusCode,
-};
+use crate::actors::router::{RouterMsg, UnregisterManagedAgentRequest};
+use axum::{Json, extract::State as AxumState, http::StatusCode};
 use redoor_protocol::api::agents::{
     AgentConnectionStatus, AgentInfoResponse, CreateLocalAgentRequest, CreateLocalAgentResponse,
     CreateSshAgentRequest, CreateSshAgentResponse, DeleteManagedAgentResponse,
@@ -16,13 +10,16 @@ use redoor_protocol::api::agents::{
     UpdateLocalAgentRequest, UpdateLocalAgentResponse, UpdateSshAgentRequest,
     UpdateSshAgentResponse,
 };
+use redoor_protocol::ids::{AgentId, validate_device_name};
 
 use redoor_core::config::{
     AgentConfig, LocalAgentConfig, SshBackedAgentConfig, append_local_agent, append_ssh_agent,
     edit_local_agent, edit_ssh_agent, parse_config_file,
 };
 
-use super::{agents::list_agent_snapshots, error::ApiError, state::ServerState, watchdog};
+use super::{
+    access::ResolvedDevice, agents::list_agent_snapshots, error::ApiError, state::ServerState,
+};
 
 /// Route: `POST /api/v1/agents` persists and immediately registers one SSH-backed agent.
 pub(crate) async fn create_ssh_agent_handler(
@@ -35,7 +32,7 @@ pub(crate) async fn create_ssh_agent_handler(
 
 /// Route: `GET /api/v1/agents/{agent}/configuration` returns editable SSH TOML fields.
 pub(crate) async fn get_ssh_agent_configuration_handler(
-    Path(agent_id): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<ManagedSshAgentConfigurationResponse>, ApiError> {
     let config = find_ssh_agent(&state, &agent_id).await?;
@@ -44,7 +41,7 @@ pub(crate) async fn get_ssh_agent_configuration_handler(
 
 /// Route: `PUT /api/v1/agents/{agent}` replaces one stopped SSH-backed TOML entry.
 pub(crate) async fn update_ssh_agent_handler(
-    Path(agent_id): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<UpdateSshAgentRequest>,
 ) -> Result<Json<UpdateSshAgentResponse>, ApiError> {
@@ -54,7 +51,7 @@ pub(crate) async fn update_ssh_agent_handler(
 
 /// Route: `DELETE /api/v1/agents/{agent}` removes one stopped SSH-backed TOML entry.
 pub(crate) async fn delete_ssh_agent_handler(
-    Path(agent_id): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<DeleteManagedAgentResponse>, ApiError> {
     delete_managed_agent(&state, &agent_id, ManagedAgentKind::Ssh).await?;
@@ -75,7 +72,7 @@ pub(crate) async fn create_local_agent_handler(
 
 /// Route: `DELETE /api/v1/local-agents/{agent}` removes one stopped local TOML entry.
 pub(crate) async fn delete_local_agent_handler(
-    Path(agent_id): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<DeleteManagedAgentResponse>, ApiError> {
     delete_managed_agent(&state, &agent_id, ManagedAgentKind::Local).await?;
@@ -84,7 +81,7 @@ pub(crate) async fn delete_local_agent_handler(
 
 /// Route: `GET /api/v1/local-agents/{agent}/configuration` returns editable local TOML fields.
 pub(crate) async fn get_local_agent_configuration_handler(
-    Path(agent_id): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<ManagedLocalAgentConfigurationResponse>, ApiError> {
     let config = find_local_agent(&state, &agent_id).await?;
@@ -93,7 +90,7 @@ pub(crate) async fn get_local_agent_configuration_handler(
 
 /// Route: `PUT /api/v1/local-agents/{agent}` replaces one stopped local TOML entry.
 pub(crate) async fn update_local_agent_handler(
-    Path(agent_id): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<UpdateLocalAgentRequest>,
 ) -> Result<Json<UpdateLocalAgentResponse>, ApiError> {
@@ -102,126 +99,142 @@ pub(crate) async fn update_local_agent_handler(
 }
 
 /// Serializes persistence and runtime registration so effective names stay unique.
+///
+/// The server owns managed ids, so the id is generated here and never taken from the request.
 async fn create_ssh_agent(
     state: &ServerState,
     request: CreateSshAgentRequest,
 ) -> Result<AgentInfoResponse, ApiError> {
-    let config = validate_request(request)?;
+    let mut config = validate_request(request)?;
+    let agent_id = AgentId::generate();
+    config.id = Some(agent_id.clone());
     let agent_config = AgentConfig::SshBacked(config.clone());
-    let agent_id = watchdog::supervisor_key(&agent_config);
+    let name = agent_config.effective_name();
     let _edit_guard = state.config_edit_lock.lock().await;
 
-    ensure_unique_agent_id(state, &agent_id).await?;
-
-    append_ssh_agent(&state.config_path, &config)
-        .await
-        .map_err(internal_error)?;
-    let registered_id = state
-        .launcher
-        .register(agent_config, &state.watchdog_registry, &state.router_ref)
-        .await
-        .map_err(internal_error)?;
+    let registered_id = with_name_reserved(state, &agent_id, &name, async {
+        append_ssh_agent(&state.config_path, &config)
+            .await
+            .map_err(internal_error)?;
+        state
+            .launcher
+            .register(agent_config, &state.watchdog_registry, &state.router_ref)
+            .await
+            .map_err(internal_error)
+    })
+    .await?;
 
     Ok(stopped_agent_response(
         registered_id,
+        name,
         config.home,
         Some(config.target),
     ))
 }
 
 /// Replaces durable and runtime configuration while the old supervisor is dormant.
+///
+/// The request rebuilds the whole entry, so the id is carried over from the stored entry
+/// like the password; dropping it would make the next start assign a new id and silently
+/// break every token scope that refers to the device.
 async fn update_ssh_agent(
     state: &ServerState,
-    old_id: &str,
+    agent_id: &AgentId,
     request: UpdateSshAgentRequest,
 ) -> Result<AgentInfoResponse, ApiError> {
     let clear_password = request.clear_password.unwrap_or(false);
     let mut config = validate_update_request(request)?;
-    let new_id = watchdog::supervisor_key(&AgentConfig::SshBacked(config.clone()));
     let _edit_guard = state.config_edit_lock.lock().await;
-    let existing_config = find_ssh_agent_for_update(state, old_id, &new_id).await?;
+    let existing_config = find_ssh_agent(state, agent_id).await?;
+    config.id = existing_config.id;
     config.password =
         apply_password_update(config.password, clear_password, existing_config.password);
-
-    if new_id != old_id {
-        match find_ssh_agent(state, old_id).await {
-            Ok(_) => {
-                ensure_unique_agent_id(state, &new_id).await?;
-            }
-            // A retry after rename persist no longer has the old identity, so skip this check.
-            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
-            Err(error) => return Err(error),
-        }
-    }
-
-    stop_for_configuration_change(state, old_id).await?;
-    persist_ssh_replacement(state, old_id, &new_id, &config).await?;
-    unregister_runtime_agent(state, old_id).await?;
-    ensure_ssh_agent_registered(state, config.clone()).await?;
+    let agent_config = AgentConfig::SshBacked(config.clone());
+    let name = agent_config.effective_name();
+    with_name_reserved(state, agent_id, &name, async {
+        stop_for_configuration_change(state, agent_id).await?;
+        edit_ssh_agent(&state.config_path, agent_id, Some(&config))
+            .await
+            .map_err(internal_error)?;
+        replace_runtime_agent(state, agent_id, agent_config).await
+    })
+    .await?;
     Ok(stopped_agent_response(
-        new_id.into(),
+        agent_id.clone(),
+        name,
         config.home,
         Some(config.target),
     ))
 }
 
 /// Serializes persistence and runtime registration so effective names stay unique.
+///
+/// The server owns managed ids, so the id is generated here and never taken from the request.
 async fn create_local_agent(
     state: &ServerState,
     request: CreateLocalAgentRequest,
 ) -> Result<AgentInfoResponse, ApiError> {
-    let config = validate_local_request(request);
+    let mut config = validate_local_request(request)?;
+    let agent_id = AgentId::generate();
+    config.id = Some(agent_id.clone());
     let agent_config = AgentConfig::Local(config.clone());
-    let agent_id = watchdog::supervisor_key(&agent_config);
+    let name = agent_config.effective_name();
     let _edit_guard = state.config_edit_lock.lock().await;
 
-    ensure_unique_agent_id(state, &agent_id).await?;
+    let registered_id = with_name_reserved(state, &agent_id, &name, async {
+        append_local_agent(&state.config_path, &config)
+            .await
+            .map_err(internal_error)?;
+        state
+            .launcher
+            .register(agent_config, &state.watchdog_registry, &state.router_ref)
+            .await
+            .map_err(internal_error)
+    })
+    .await?;
 
-    append_local_agent(&state.config_path, &config)
-        .await
-        .map_err(internal_error)?;
-    let registered_id = state
-        .launcher
-        .register(agent_config, &state.watchdog_registry, &state.router_ref)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(stopped_agent_response(registered_id, config.home, None))
+    Ok(stopped_agent_response(
+        registered_id,
+        name,
+        config.home,
+        None,
+    ))
 }
 
 /// Replaces durable and runtime local configuration while the old supervisor is dormant.
+///
+/// Carries the stored id over for the same reason as [`update_ssh_agent`].
 async fn update_local_agent(
     state: &ServerState,
-    old_id: &str,
+    agent_id: &AgentId,
     request: UpdateLocalAgentRequest,
 ) -> Result<AgentInfoResponse, ApiError> {
-    let config = validate_local_update_request(request);
-    let new_id = watchdog::supervisor_key(&AgentConfig::Local(config.clone()));
+    let mut config = validate_local_update_request(request)?;
     let _edit_guard = state.config_edit_lock.lock().await;
-    find_local_agent_for_update(state, old_id, &new_id).await?;
-
-    if new_id != old_id {
-        match find_local_agent(state, old_id).await {
-            Ok(_) => {
-                ensure_unique_agent_id(state, &new_id).await?;
-            }
-            // A retry after rename persist no longer has the old identity, so skip this check.
-            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
-            Err(error) => return Err(error),
-        }
-    }
-
-    stop_for_configuration_change(state, old_id).await?;
-    persist_local_replacement(state, old_id, &new_id, &config).await?;
-    unregister_runtime_agent(state, old_id).await?;
-    ensure_local_agent_registered(state, config.clone()).await?;
-    Ok(stopped_agent_response(new_id.into(), config.home, None))
+    let existing_config = find_local_agent(state, agent_id).await?;
+    config.id = existing_config.id;
+    let agent_config = AgentConfig::Local(config.clone());
+    let name = agent_config.effective_name();
+    with_name_reserved(state, agent_id, &name, async {
+        stop_for_configuration_change(state, agent_id).await?;
+        edit_local_agent(&state.config_path, agent_id, Some(&config))
+            .await
+            .map_err(internal_error)?;
+        replace_runtime_agent(state, agent_id, agent_config).await
+    })
+    .await?;
+    Ok(stopped_agent_response(
+        agent_id.clone(),
+        name,
+        config.home,
+        None,
+    ))
 }
 
 /// Deletes durable configuration only after confirming no managed process is running.
 async fn delete_managed_agent(
     state: &ServerState,
-    agent_id: &str,
+    agent_id: &AgentId,
     expected_kind: ManagedAgentKind,
 ) -> Result<(), ApiError> {
     let _edit_guard = state.config_edit_lock.lock().await;
@@ -234,7 +247,7 @@ async fn delete_managed_agent(
         let inventory = list_agent_snapshots(state).await?;
         let retained = inventory
             .iter()
-            .find(|agent| agent.id.to_string() == agent_id && agent.configuration_editable);
+            .find(|agent| &agent.id == agent_id && agent.configuration_editable);
         if !retained.is_some_and(|agent| expected_kind.matches_inventory(agent)) {
             return Err(expected_kind.not_found(agent_id));
         }
@@ -282,7 +295,7 @@ impl ManagedAgentKind {
     }
 
     /// Uses resource-specific wording so a cross-kind route does not reveal another collection.
-    fn not_found(self, agent_id: &str) -> ApiError {
+    fn not_found(self, agent_id: &AgentId) -> ApiError {
         let kind = match self {
             Self::Ssh => "SSH",
             Self::Local => "local",
@@ -291,14 +304,32 @@ impl ManagedAgentKind {
     }
 }
 
+/// Swaps the dormant supervisor and inventory row for ones built from the new entry.
+///
+/// The id stays the same, so a retry after a partial failure simply runs this again: removing
+/// an already removed supervisor and row is a no-op.
+async fn replace_runtime_agent(
+    state: &ServerState,
+    agent_id: &AgentId,
+    config: AgentConfig,
+) -> Result<(), ApiError> {
+    unregister_runtime_agent(state, agent_id).await?;
+    state
+        .launcher
+        .register(config, &state.watchdog_registry, &state.router_ref)
+        .await
+        .map_err(internal_error)?;
+    Ok(())
+}
+
 /// Removes the dormant supervisor and retained router inventory together.
-async fn unregister_runtime_agent(state: &ServerState, agent_id: &str) -> Result<(), ApiError> {
-    state.watchdog_registry.remove_stopped(agent_id)?;
+async fn unregister_runtime_agent(state: &ServerState, agent_id: &AgentId) -> Result<(), ApiError> {
+    state.watchdog_registry.remove_stopped(agent_id.as_str())?;
     state
         .router_ref
         .request(|reply| {
             RouterMsg::UnregisterManagedAgent(UnregisterManagedAgentRequest {
-                agent_id: agent_id.to_string().into(),
+                agent_id: agent_id.clone(),
                 reply,
             })
         })
@@ -311,9 +342,9 @@ async fn unregister_runtime_agent(state: &ServerState, agent_id: &str) -> Result
 /// Settles any delayed start before persistence while the shared edit lock blocks new starts.
 async fn stop_for_configuration_change(
     state: &ServerState,
-    agent_id: &str,
+    agent_id: &AgentId,
 ) -> Result<(), ApiError> {
-    let Some(handle) = state.watchdog_registry.lookup(agent_id) else {
+    let Some(handle) = state.watchdog_registry.lookup(agent_id.as_str()) else {
         // A retry after persist+remove must not 404 just because the supervisor is already gone.
         return Ok(());
     };
@@ -328,168 +359,10 @@ async fn stop_for_configuration_change(
     }
 }
 
-/// Writes the replacement only when the previous identity is still in TOML so retries stay idempotent.
-async fn persist_ssh_replacement(
-    state: &ServerState,
-    old_id: &str,
-    new_id: &str,
-    config: &SshBackedAgentConfig,
-) -> Result<(), ApiError> {
-    match find_ssh_agent(state, old_id).await {
-        Ok(_) => {
-            return edit_ssh_agent(&state.config_path, old_id, Some(config))
-                .await
-                .map_err(internal_error);
-        }
-        Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
-        Err(error) => return Err(error),
-    }
-    if new_id != old_id {
-        match find_ssh_agent(state, new_id).await {
-            Ok(_) => return Ok(()),
-            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(ApiError::not_found(format!(
-        "Managed SSH agent '{old_id}' was not found"
-    )))
-}
-
-/// Writes the local replacement only when the previous identity is still in TOML so retries stay idempotent.
-async fn persist_local_replacement(
-    state: &ServerState,
-    old_id: &str,
-    new_id: &str,
-    config: &LocalAgentConfig,
-) -> Result<(), ApiError> {
-    match find_local_agent(state, old_id).await {
-        Ok(_) => {
-            return edit_local_agent(&state.config_path, old_id, Some(config))
-                .await
-                .map_err(internal_error);
-        }
-        Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
-        Err(error) => return Err(error),
-    }
-    if new_id != old_id {
-        match find_local_agent(state, new_id).await {
-            Ok(_) => return Ok(()),
-            Err(error) if error.status_code() == StatusCode::NOT_FOUND => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(ApiError::not_found(format!(
-        "Managed local agent '{old_id}' was not found"
-    )))
-}
-
-/// Registers the replacement supervisor unless a previous attempt already spawned it.
-async fn ensure_ssh_agent_registered(
-    state: &ServerState,
-    config: SshBackedAgentConfig,
-) -> Result<redoor_protocol::ids::AgentId, ApiError> {
-    let agent_id = watchdog::supervisor_key(&AgentConfig::SshBacked(config.clone()));
-    if state.watchdog_registry.lookup(&agent_id).is_some() {
-        // Persist succeeded and the supervisor survived; only router inventory may still be missing.
-        state
-            .router_ref
-            .request(|reply| {
-                RouterMsg::RegisterManagedAgent(RegisterManagedAgentRequest {
-                    agent_id: agent_id.clone().into(),
-                    default_directory: config.home,
-                    configuration_editable: true,
-                    ssh_target: Some(config.target),
-                    reply,
-                })
-            })
-            .await
-            .map_err(|error| {
-                ApiError::internal(format!("Failed to register managed inventory: {error}"))
-            })?;
-        return Ok(agent_id.into());
-    }
-    state
-        .launcher
-        .register(
-            AgentConfig::SshBacked(config),
-            &state.watchdog_registry,
-            &state.router_ref,
-        )
-        .await
-        .map_err(internal_error)
-}
-
-/// Registers the replacement local supervisor unless a previous attempt already spawned it.
-async fn ensure_local_agent_registered(
-    state: &ServerState,
-    config: LocalAgentConfig,
-) -> Result<redoor_protocol::ids::AgentId, ApiError> {
-    let agent_id = watchdog::supervisor_key(&AgentConfig::Local(config.clone()));
-    if state.watchdog_registry.lookup(&agent_id).is_some() {
-        // Persist succeeded and the supervisor survived; only router inventory may still be missing.
-        state
-            .router_ref
-            .request(|reply| {
-                RouterMsg::RegisterManagedAgent(RegisterManagedAgentRequest {
-                    agent_id: agent_id.clone().into(),
-                    default_directory: config.home,
-                    configuration_editable: true,
-                    ssh_target: None,
-                    reply,
-                })
-            })
-            .await
-            .map_err(|error| {
-                ApiError::internal(format!("Failed to register managed inventory: {error}"))
-            })?;
-        return Ok(agent_id.into());
-    }
-    state
-        .launcher
-        .register(
-            AgentConfig::Local(config),
-            &state.watchdog_registry,
-            &state.router_ref,
-        )
-        .await
-        .map_err(internal_error)
-}
-
-/// Accepts either the pre-rename or post-rename identity so a failed persist-then-replace can retry.
-async fn find_ssh_agent_for_update(
-    state: &ServerState,
-    old_id: &str,
-    new_id: &str,
-) -> Result<SshBackedAgentConfig, ApiError> {
-    match find_ssh_agent(state, old_id).await {
-        Ok(config) => Ok(config),
-        Err(error) if error.status_code() == StatusCode::NOT_FOUND && new_id != old_id => {
-            find_ssh_agent(state, new_id).await
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// Accepts either the pre-rename or post-rename local identity so a failed persist-then-replace can retry.
-async fn find_local_agent_for_update(
-    state: &ServerState,
-    old_id: &str,
-    new_id: &str,
-) -> Result<LocalAgentConfig, ApiError> {
-    match find_local_agent(state, old_id).await {
-        Ok(config) => Ok(config),
-        Err(error) if error.status_code() == StatusCode::NOT_FOUND && new_id != old_id => {
-            find_local_agent(state, new_id).await
-        }
-        Err(error) => Err(error),
-    }
-}
-
 /// Reloads the source of truth so edits include values unavailable in public inventory.
 async fn find_ssh_agent(
     state: &ServerState,
-    agent_id: &str,
+    agent_id: &AgentId,
 ) -> Result<SshBackedAgentConfig, ApiError> {
     match find_configured_agent(state, agent_id).await? {
         Some(AgentConfig::SshBacked(config)) => Ok(config),
@@ -502,7 +375,7 @@ async fn find_ssh_agent(
 /// Reloads local TOML fields and refuses to treat an SSH row as a local edit.
 async fn find_local_agent(
     state: &ServerState,
-    agent_id: &str,
+    agent_id: &AgentId,
 ) -> Result<LocalAgentConfig, ApiError> {
     match find_configured_agent(state, agent_id).await? {
         Some(AgentConfig::Local(config)) => Ok(config),
@@ -515,7 +388,7 @@ async fn find_local_agent(
 /// Distinguishes a missing row from a local entry so SSH APIs cannot mutate non-SSH agents.
 async fn find_configured_agent(
     state: &ServerState,
-    agent_id: &str,
+    agent_id: &AgentId,
 ) -> Result<Option<AgentConfig>, ApiError> {
     let config = parse_config_file(&state.config_path)
         .await
@@ -523,21 +396,43 @@ async fn find_configured_agent(
     Ok(config
         .agents
         .into_iter()
-        .find(|config| watchdog::supervisor_key(config) == agent_id))
+        .find(|config| config.id() == Some(agent_id)))
 }
 
-/// Rejects a new identity that would collide with any retained inventory row.
-async fn ensure_unique_agent_id(state: &ServerState, agent_id: &str) -> Result<(), ApiError> {
-    let existing = list_agent_snapshots(state).await?;
-    if existing
-        .iter()
-        .any(|agent| agent.id.to_string() == agent_id)
-    {
+/// Runs a create or rename while the router holds `name` for `agent_id`.
+///
+/// The edit stops the agent and rewrites the config before the inventory row carries the
+/// new name; the reservation keeps a standalone agent from taking the name in that window,
+/// so a name in a request always points to exactly one device. The reservation is dropped
+/// afterwards either way: on success the managed row holds the name itself.
+async fn with_name_reserved<T>(
+    state: &ServerState,
+    agent_id: &AgentId,
+    name: &str,
+    operation: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    let reserved = state
+        .router_ref
+        .request(|reply| RouterMsg::ReserveName {
+            agent_id: agent_id.clone(),
+            name: name.to_string(),
+            reply,
+        })
+        .await?;
+    if let Err(holder) = reserved {
         return Err(ApiError::conflict(format!(
-            "Agent '{agent_id}' already exists"
+            "Device name '{name}' is already used by device '{holder}'"
         )));
     }
-    Ok(())
+    let result = operation.await;
+    // Best effort: a stopped router has no reservations left to release.
+    let _ = state
+        .router_ref
+        .send_async(RouterMsg::ReleaseName {
+            agent_id: agent_id.clone(),
+        })
+        .await;
+    result
 }
 
 /// Maps unexpected persistence/runtime failures to one consistent REST error shape.
@@ -547,13 +442,14 @@ fn internal_error(error: impl std::fmt::Display) -> ApiError {
 
 /// Builds the public dormant projection shared by create and update responses.
 fn stopped_agent_response(
-    agent_id: redoor_protocol::ids::AgentId,
+    agent_id: AgentId,
+    name: String,
     home: Option<String>,
     ssh_target: Option<String>,
 ) -> AgentInfoResponse {
     AgentInfoResponse {
-        id: agent_id.clone(),
-        name: agent_id.to_string(),
+        id: agent_id,
+        name,
         cwd: home,
         managed: true,
         configuration_editable: true,
@@ -570,25 +466,32 @@ fn stopped_agent_response(
         supports_trash: false,
         uid: None,
         is_root: false,
+        duplicate_id: None,
     }
 }
 
-/// Trims optional local fields; nothing is required because hostname/home/stdio already have defaults.
-fn validate_local_request(request: CreateLocalAgentRequest) -> LocalAgentConfig {
-    LocalAgentConfig {
-        name: optional_text(request.name),
+/// Trims optional local fields; nothing is required because hostname/home/stdio already have
+/// defaults. The id is never part of the request: the server creates it on add and copies it
+/// on edit.
+fn validate_local_request(request: CreateLocalAgentRequest) -> Result<LocalAgentConfig, ApiError> {
+    let name = validated_name(request.name)?;
+    Ok(LocalAgentConfig {
+        id: None,
+        name,
         home: optional_text(request.home),
         log: optional_text(request.log),
-    }
+    })
 }
 
 /// Applies the same normalization to the distinct local update wire type.
-fn validate_local_update_request(request: UpdateLocalAgentRequest) -> LocalAgentConfig {
-    LocalAgentConfig {
-        name: optional_text(request.name),
-        home: optional_text(request.home),
-        log: optional_text(request.log),
-    }
+fn validate_local_update_request(
+    request: UpdateLocalAgentRequest,
+) -> Result<LocalAgentConfig, ApiError> {
+    validate_local_request(CreateLocalAgentRequest {
+        name: request.name,
+        home: request.home,
+        log: request.log,
+    })
 }
 
 /// Normalizes optional text and rejects values that would create unusable TOML entries.
@@ -602,16 +505,22 @@ fn validate_request(request: CreateSshAgentRequest) -> Result<SshBackedAgentConf
             "SSH port must be between 1 and 65535",
         ));
     }
-    Ok(SshBackedAgentConfig {
+    let name = validated_name(request.name)?;
+    let config = SshBackedAgentConfig {
+        id: None,
         target,
         username: optional_text(request.username),
         ssh_port: request.ssh_port,
-        name: optional_text(request.name),
+        name,
         remote_bin: optional_text(request.remote_bin),
         home: optional_text(request.home),
         log: optional_text(request.log),
         password: optional_password(request.password),
-    })
+    };
+    // Without an explicit name the target host becomes the name, so it must pass the rules too.
+    validate_device_name(&AgentConfig::SshBacked(config.clone()).effective_name())
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(config)
 }
 
 /// Applies common SSH validation to the distinct update wire type.
@@ -629,6 +538,16 @@ fn validate_update_request(
         password: request.password,
         clear_password: request.clear_password,
     })
+}
+
+/// Trims an optional name and checks the device name rules, so a name that would break
+/// `device:path`, URLs or name-or-id lookups never reaches the config.
+fn validated_name(value: Option<String>) -> Result<Option<String>, ApiError> {
+    let name = optional_text(value);
+    if let Some(name) = &name {
+        validate_device_name(name).map_err(|error| ApiError::bad_request(error.to_string()))?;
+    }
+    Ok(name)
 }
 
 /// Resolves keep / replace / clear without forcing the browser to echo the stored secret.

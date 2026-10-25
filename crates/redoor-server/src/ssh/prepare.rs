@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use redoor_core::config::{SshBackedAgentConfig, default_agent_name};
 use redoor_core::{log, log_error};
+use redoor_protocol::ids::AgentId;
 use redoor_protocol::wire::log::Level;
 
 use super::provision::{
@@ -93,10 +94,11 @@ pub(super) struct RelayOptions<'a> {
 #[derive(Clone)]
 pub(crate) struct PreparedSshBackedAgent {
     pub(super) host: SshHost,
-    /// Agent registration name; used to kill orphaned remote processes that
-    /// would otherwise reconnect through a new reverse tunnel and steal this
-    /// name from the freshly spawned agent.
+    /// Agent registration name passed with `--name`.
     pub(super) agent_name: String,
+    /// Device id passed with `--agent-id`; owned by the server or relay config so wiped
+    /// remote state and several entries on one `user@host` cannot change or share it.
+    pub(super) agent_id: AgentId,
     /// Root CLI namespace passed explicitly so the remote process matches the server.
     pub(super) app_name: String,
     /// Remote executable path (may contain shell variables expanded remotely).
@@ -199,6 +201,8 @@ impl PreparedSshBackedAgent {
             "line".to_string(),
             "--name".to_string(),
             self.agent_name.clone(),
+            "--agent-id".to_string(),
+            self.agent_id.to_string(),
         ];
         if let Some(server) = &self.secure_server {
             remote_argv.push("--connect-address".to_string());
@@ -248,6 +252,13 @@ impl Preparation<'_> {
     /// Probes and installs as needed, then assembles the launchable agent.
     pub(super) async fn run(self) -> Result<PreparedSshBackedAgent, ProvisionError> {
         let started = Instant::now();
+        // Checked before touching the host: an entry without an id cannot register anyway.
+        let agent_id = self.config.id.clone().ok_or_else(|| {
+            ProvisionError::Configuration(format!(
+                "SSH agent '{}' has no device id in the config",
+                self.config.target
+            ))
+        })?;
         let host = self.ssh_host();
         let result = self.install_binary(&host).await;
         let remote_bin = match result {
@@ -269,8 +280,9 @@ impl Preparation<'_> {
             .unwrap_or_else(|| default_agent_name(&self.config.target));
         log!(
             Level::Info,
-            "Prepared redoor agent on remote host: name={}, remote_bin={}, home={:?}, log={:?}, elapsed={:?}",
+            "Prepared redoor agent on remote host: name={}, agent_id={}, remote_bin={}, home={:?}, log={:?}, elapsed={:?}",
             agent_name,
+            agent_id,
             remote_bin,
             self.config.home,
             self.config.log,
@@ -280,6 +292,7 @@ impl Preparation<'_> {
             options: self.run_options(),
             host,
             agent_name,
+            agent_id,
             app_name: self
                 .relay
                 .agent_app_name
@@ -428,6 +441,7 @@ mod tests {
         PreparedSshBackedAgent {
             host: SshHost::new("user@target".to_string()),
             agent_name: "target".to_string(),
+            agent_id: AgentId::generate(),
             app_name: "redoor".to_string(),
             remote_bin: "/tmp/redoor".to_string(),
             home: None,

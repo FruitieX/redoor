@@ -6,6 +6,8 @@ bind = "0.0.0.0"
 username = "redoor"
 password = "redoor"
 
+# The container cannot write ids back into this file, so the entry carries its own.
 [[agents]]
+id = "dev_demolocalagent222222"
 local = true
 name = "local"

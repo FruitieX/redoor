@@ -7,6 +7,7 @@
 
 mod agents;
 mod cleanup;
+mod duplicate_ids;
 mod error;
 mod flows;
 mod messages;
@@ -308,6 +309,7 @@ impl RouterState {
             self.notify_transfer_refresh();
         }
         self.check_pending_refresh();
+        self.expire_duplicate_ids();
     }
 
     /// Handles one message; every handler is synchronous so the mailbox never waits on a peer.
@@ -339,6 +341,19 @@ impl RouterState {
             }
             RouterMsg::GetAgentList { reply } => {
                 let _ = reply.send(self.list_agents());
+            }
+            RouterMsg::ResolveDevice { value, reply } => {
+                let _ = reply.send(self.resolve_device(&value));
+            }
+            RouterMsg::ReserveName {
+                agent_id,
+                name,
+                reply,
+            } => {
+                let _ = reply.send(self.reserve_name(agent_id, name));
+            }
+            RouterMsg::ReleaseName { agent_id } => {
+                self.agents.reserved_names.remove(&agent_id);
             }
             RouterMsg::GetTransferProgress { reply } => {
                 self.sync_progress();
@@ -419,7 +434,7 @@ mod tests {
     use super::*;
     use crate::actors::lanes::ControlLanes;
     use crate::actors::router::messages::AgentListEntry;
-    use redoor_protocol::ids::{AgentId, RequestId};
+    use redoor_protocol::ids::RequestId;
     use redoor_protocol::wire::command::Command;
     use redoor_protocol::wire::exec::ExecRequest;
     use redoor_protocol::wire::request;
@@ -484,11 +499,12 @@ mod tests {
         let (lanes, receivers) = ControlLanes::bounded(64, 16);
         let (mut text_rx, mut priority_rx, mut binary_rx) =
             (receivers.commands, receivers.priority, receivers.bulk);
-        let agent_id = AgentId::from("agent-1");
+        let agent_id = redoor_core::test_support::test_agent_id("agent-1");
         // Every stream is credited, so the reader never waits on any stream's consumer.
         let streams = ConnectionStreams::new(agent_id.clone());
 
-        let registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
+        let mut registration = RegisterAgentRequest::for_test(&agent_id, lanes, streams.clone());
+        registration.agent_name = "agent-1".to_string();
         let socket_id = registration.socket_id.clone();
         router_ref
             .send_async(RouterMsg::RegisterAgent(Box::new(registration)))
@@ -507,7 +523,7 @@ mod tests {
             router_for_start
                 .request(|reply| {
                     RouterMsg::StartUploadStreamRest(StartUploadRequest {
-                        agent_id: AgentId::from("agent-1"),
+                        agent_id: redoor_core::test_support::test_agent_id("agent-1"),
                         command: Command::EditFile(request::EditFile {
                             path: "/tmp/file.bin".to_string(),
                         }),
@@ -607,6 +623,7 @@ mod tests {
                     supports_trash: true,
                     supports_move_to_trash: true,
                 },
+                duplicate_id: None,
             }]
         );
 

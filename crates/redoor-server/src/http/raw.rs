@@ -1,5 +1,6 @@
 //! Streamed raw file downloads (with single-range resume) and one-time download tokens.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     body::Body,
@@ -101,13 +102,13 @@ fn parse_range_header(range: &RangeHeader, file_size: u64) -> Option<(u64, u64)>
 /// download path so the browser can save a folder as an archive without a
 /// separate copy endpoint.
 pub(crate) async fn raw_agent_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     Query(params): Query<RawQueryParams>,
     AxumState(state): AxumState<ServerState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent);
     let token_download = if let Some(one_time_token) = params.one_time_token.as_ref() {
         if !state
             .one_time_token_registry
@@ -320,11 +321,11 @@ async fn ensure_download_started(output: &mut OutputStream, path: &str) -> Resul
 
 /// Route: `POST /api/v1/agents/{agent}/one-time-token/{*path}`
 pub(crate) async fn create_one_time_token_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<CreateOneTimeTokenResponse>, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent);
     let metadata = state.agents.call(&agent_id, Metadata { path }).await?;
     if !metadata.is_file {
         return Err(ApiError::bad_request(

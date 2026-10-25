@@ -19,11 +19,15 @@ use std::path::{Path, PathBuf};
 pub use bootstrap::{
     CreatedDefaultConfig, create_default_config_if_missing, default_local_agent_name,
 };
-pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_agent};
+pub use edit::{
+    DeviceIdScope, append_local_agent, append_ssh_agent, assign_missing_device_ids,
+    edit_local_agent, edit_ssh_agent,
+};
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;
 
 use crate::logging::LogFormat;
+use redoor_protocol::ids::AgentId;
 use redoor_protocol::wire::log::Level;
 
 /// Derives a default agent name from the ssh target by stripping any
@@ -77,6 +81,10 @@ pub enum ConfigError {
 /// `start_relay` fills it in when `None`.
 #[derive(Clone)]
 pub struct SshBackedAgentConfig {
+    /// Stable device id the remote agent registers with (`id` in `[[agents]]`, `agent_id` in
+    /// `[[relays]]`). `None` only for hand-written entries until startup assigns one, because
+    /// the server and relay own these ids rather than the remote agent.
+    pub id: Option<AgentId>,
     /// SSH login username. Forwarded to ssh via `-l`. When `None`, ssh config
     /// or the `user@host` target syntax supplies the username.
     pub username: Option<String>,
@@ -108,6 +116,7 @@ impl std::fmt::Debug for SshBackedAgentConfig {
     /// Redacts the SSH password so debug logging cannot leak it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SshBackedAgentConfig")
+            .field("id", &self.id)
             .field("username", &self.username)
             .field("ssh_port", &self.ssh_port)
             .field("name", &self.name)
@@ -129,6 +138,9 @@ impl std::fmt::Debug for SshBackedAgentConfig {
 /// needs to be configured.
 #[derive(Debug, Clone)]
 pub struct LocalAgentConfig {
+    /// Stable device id passed to the spawned agent; `None` only for hand-written entries
+    /// until startup assigns one.
+    pub id: Option<AgentId>,
     /// Name the local agent registers with on the server. When `None`,
     /// defaults to the system hostname so multiple local agents on
     /// different machines are naturally distinguishable.
@@ -150,6 +162,31 @@ pub struct LocalAgentConfig {
 pub enum AgentConfig {
     SshBacked(SshBackedAgentConfig),
     Local(LocalAgentConfig),
+}
+
+impl AgentConfig {
+    /// The configured device id; `None` only before startup assigned one to a hand-written
+    /// entry.
+    pub fn id(&self) -> Option<&AgentId> {
+        match self {
+            AgentConfig::SshBacked(config) => config.id.as_ref(),
+            AgentConfig::Local(config) => config.id.as_ref(),
+        }
+    }
+
+    /// The name the agent registers with: the explicit `name`, else the target host for SSH
+    /// entries and the hostname for local ones, so hand-written entries need no name.
+    pub fn effective_name(&self) -> String {
+        match self {
+            AgentConfig::SshBacked(config) => config
+                .name
+                .clone()
+                .unwrap_or_else(|| default_agent_name(&config.target)),
+            AgentConfig::Local(config) => {
+                config.name.clone().unwrap_or_else(default_local_agent_name)
+            }
+        }
+    }
 }
 
 /// Browser login backend selected by the `[server]` credentials.
@@ -310,12 +347,13 @@ fn parse_config_str(path: &Path, content: &str) -> Result<RedoorConfig, ConfigEr
 }
 
 impl RedoorConfig {
-    /// Rejects `[[agents]]` rows that would register under the same effective name.
+    /// Rejects `[[agents]]` rows whose effective names break the device name rules or would
+    /// register under the same name.
     ///
     /// Only the server registers managed agents, so only its startup and restart
     /// pre-validation call this; other roles reading the file keep working.
-    pub fn ensure_unique_agent_names(&self, path: &Path) -> Result<(), ConfigError> {
-        file::reject_duplicate_agent_names(&self.agents).map_err(|file::Invalid(message)| {
+    pub fn validate_managed_agent_names(&self, path: &Path) -> Result<(), ConfigError> {
+        file::validate_managed_agent_names(&self.agents).map_err(|file::Invalid(message)| {
             ConfigError::Invalid {
                 path: path.to_path_buf(),
                 message,
@@ -1314,7 +1352,7 @@ target = "web"
         )
         .expect("parsing alone must accept duplicate names, which only the server rejects");
         let error = config
-            .ensure_unique_agent_names(path)
+            .validate_managed_agent_names(path)
             .expect_err("both rows default to the name 'web'");
         // The message names the colliding identity and how to resolve it.
         assert!(
@@ -1341,5 +1379,89 @@ log_level = "loud"
             error.to_string(),
             "Invalid config file 'config.toml': agent.log_level: logging level must be one of: trace, debug, info, warning, error"
         );
+    }
+
+    /// Copying an entry copies its id, which would silently merge two devices, so any role
+    /// reading the file refuses it and names both entries.
+    #[test]
+    fn duplicate_device_ids_name_both_entries() {
+        let error = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[[agents]]
+id = "dev_abcdefghijklmnopqrst"
+target = "one"
+[[relays]]
+id = "copy"
+agent_id = "dev_abcdefghijklmnopqrst"
+target = "two"
+server = "http://redoor.example.com"
+"#,
+        )
+        .expect_err("an id shared by two entries must be rejected");
+        let message = error.to_string();
+        // Both entries are named so the operator knows which copy to fix.
+        assert!(
+            message.contains("[[agents]] entry #0 ('one')")
+                && message.contains("[[relays]] entry 'copy'"),
+            "{message}"
+        );
+    }
+
+    /// A hand-edited id must be in the id format, or `hello` would be rejected later with a
+    /// less obvious error.
+    #[test]
+    fn malformed_device_id_points_at_the_entry() {
+        let error = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[[agents]]
+id = "pi"
+target = "pi"
+"#,
+        )
+        .expect_err("a malformed id must be rejected");
+        // The message names the entry and the expected format.
+        assert!(
+            error.to_string().contains("agents entry #0 'id'")
+                && error.to_string().contains("not a valid device id"),
+            "{error}"
+        );
+    }
+
+    /// Managed names follow the device name rules, checked by the server before any supervisor
+    /// exists.
+    #[test]
+    fn managed_agent_names_follow_the_name_rules() {
+        let path = Path::new("config.toml");
+        for name in ["a:b", "a/b", "dev_abcdefghijklmnopqrst"] {
+            let config = parse_config_str(
+                path,
+                &format!(
+                    r#"agent_token = "t"
+[[agents]]
+local = true
+name = "{name}"
+"#
+                ),
+            )
+            .expect("parsing alone accepts any name");
+            // Each of these names would break `device:path`, URLs or name-or-id lookups.
+            assert!(
+                config.validate_managed_agent_names(path).is_err(),
+                "{name} must be rejected"
+            );
+        }
+        let config = parse_config_str(
+            path,
+            r#"agent_token = "t"
+[[agents]]
+local = true
+name = "dev_box"
+"#,
+        )
+        .unwrap();
+        // Other names that merely start with `dev_` are fine.
+        assert!(config.validate_managed_agent_names(path).is_ok());
     }
 }

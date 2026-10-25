@@ -1,14 +1,9 @@
 //! REST endpoints that read and change server and agent log levels at runtime.
 
-use axum::{
-    Json,
-    extract::{Path, State as AxumState},
-};
+use crate::http::access::ResolvedDevice;
+use axum::{Json, extract::State as AxumState};
 use redoor_core::logging;
-use redoor_protocol::{
-    api::logging::{LoggingLevelRequest, LoggingLevelResponse},
-    ids::AgentId,
-};
+use redoor_protocol::api::logging::{LoggingLevelRequest, LoggingLevelResponse};
 
 use super::{
     agent_client::{GetLoggingLevel, SetLoggingLevel},
@@ -35,25 +30,22 @@ pub(crate) async fn update_server_logging_level_handler(
 
 /// Reads the threshold over the connected agent's authoritative command socket.
 pub(crate) async fn get_agent_logging_level_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<LoggingLevelResponse>, ApiError> {
-    let level = state
-        .agents
-        .call(&AgentId::from(agent), GetLoggingLevel {})
-        .await?;
+    let level = state.agents.call(&agent_id, GetLoggingLevel {}).await?;
     Ok(Json(LoggingLevelResponse { level }))
 }
 
 /// Updates a connected agent without coupling the setting to its ephemeral log-stream socket.
 pub(crate) async fn update_agent_logging_level_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<LoggingLevelRequest>,
 ) -> Result<Json<LoggingLevelResponse>, ApiError> {
     let call = SetLoggingLevel {
         level: request.level,
     };
-    let level = state.agents.call(&AgentId::from(agent), call).await?;
+    let level = state.agents.call(&agent_id, call).await?;
     Ok(Json(LoggingLevelResponse { level }))
 }

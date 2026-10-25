@@ -50,7 +50,7 @@ pub(super) async fn get_agent_details(
     };
 
     Ok(AgentDetailsResponse {
-        id: AgentId::from(""),
+        id: AgentId::unchecked(""),
         name: String::new(),
         pid,
         cwd,

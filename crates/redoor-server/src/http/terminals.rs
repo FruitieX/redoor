@@ -11,9 +11,10 @@ use crate::actors::{
         StreamCloseGuard, TerminalStream,
     },
 };
+use crate::http::access::ResolvedDevice;
 use axum::{
     extract::{
-        Path, Query, State as AxumState,
+        Query, State as AxumState,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
@@ -56,7 +57,7 @@ pub(crate) struct TerminalQuery {
 
 /// Upgrades a same-origin browser request and opens one terminal stream for it.
 pub(crate) async fn browser_terminal_websocket_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     Query(query): Query<TerminalQuery>,
     headers: HeaderMap,
     AxumState(state): AxumState<ServerState>,
@@ -80,7 +81,7 @@ pub(crate) async fn browser_terminal_websocket_handler(
     websocket
         .max_message_size(MAX_TERMINAL_MESSAGE_SIZE)
         .max_frame_size(MAX_TERMINAL_MESSAGE_SIZE)
-        .on_upgrade(move |socket| run_terminal(socket, AgentId::from(agent), size, cwd, state))
+        .on_upgrade(move |socket| run_terminal(socket, agent_id, size, cwd, state))
         .into_response()
 }
 

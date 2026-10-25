@@ -59,6 +59,9 @@ pub(crate) enum ProvisionError {
     /// a binary that does not verify after upload).
     #[error("{0}")]
     Remote(String),
+    /// The entry cannot be launched as configured (for example it has no device id yet).
+    #[error("{0}")]
+    Configuration(String),
 }
 
 /// Local facts every SSH preparation needs besides the target's own settings.

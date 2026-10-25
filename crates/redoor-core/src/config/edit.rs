@@ -8,6 +8,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::config::LocalAgentConfig;
 use crate::config::SshBackedAgentConfig;
+use redoor_protocol::ids::AgentId;
 
 /// Appends one SSH agent while retaining comments and formatting in unrelated settings.
 pub async fn append_ssh_agent(path: &Path, config: &SshBackedAgentConfig) -> Result<()> {
@@ -21,12 +22,8 @@ pub async fn append_local_agent(path: &Path, config: &LocalAgentConfig) -> Resul
 
 /// Pushes one `[[agents]]` table without rewriting unrelated document formatting.
 async fn append_agent_table(path: &Path, table: Table) -> Result<()> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .with_context(|| format!("Failed to parse config file '{}'", path.display()))?;
+    let mut transaction = ConfigTransaction::begin(path).await?;
+    let document = &mut transaction.document;
 
     match document.get_mut("agents") {
         Some(item) => item
@@ -40,66 +37,64 @@ async fn append_agent_table(path: &Path, table: Table) -> Result<()> {
         }
     }
 
-    replace_atomically(path, document.to_string().as_bytes()).await
+    transaction.commit().await
 }
 
 /// Applies an in-place array edit while retaining unrelated document formatting.
+///
+/// The entry is found by its `id`, which never changes, so a rename in the same edit cannot
+/// lose track of it.
 pub async fn edit_ssh_agent(
     path: &Path,
-    agent_id: &str,
+    agent_id: &AgentId,
     replacement: Option<&SshBackedAgentConfig>,
 ) -> Result<()> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .with_context(|| format!("Failed to parse config file '{}'", path.display()))?;
-    let agents = document
+    let mut transaction = ConfigTransaction::begin(path).await?;
+    let agents = transaction
+        .document
         .get_mut("agents")
         .and_then(Item::as_array_of_tables_mut)
         .context("top-level 'agents' must be an array of tables")?;
     let index = agents
         .iter()
-        .position(|table| ssh_agent_id(table).as_deref() == Some(agent_id))
+        .position(|table| is_entry(table, agent_id, false))
         .with_context(|| format!("Managed SSH agent '{agent_id}' was not found"))?;
     agents.remove(index);
     if let Some(config) = replacement {
         agents.insert(index, ssh_agent_table(config));
     }
-    replace_atomically(path, document.to_string().as_bytes()).await
+    transaction.commit().await
 }
 
 /// Applies an in-place local-agent edit while retaining unrelated document formatting.
+///
+/// Found by `id` like [`edit_ssh_agent`].
 pub async fn edit_local_agent(
     path: &Path,
-    agent_id: &str,
+    agent_id: &AgentId,
     replacement: Option<&LocalAgentConfig>,
 ) -> Result<()> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
-    let mut document = content
-        .parse::<DocumentMut>()
-        .with_context(|| format!("Failed to parse config file '{}'", path.display()))?;
-    let agents = document
+    let mut transaction = ConfigTransaction::begin(path).await?;
+    let agents = transaction
+        .document
         .get_mut("agents")
         .and_then(Item::as_array_of_tables_mut)
         .context("top-level 'agents' must be an array of tables")?;
     let index = agents
         .iter()
-        .position(|table| local_agent_id(table).as_deref() == Some(agent_id))
+        .position(|table| is_entry(table, agent_id, true))
         .with_context(|| format!("Managed local agent '{agent_id}' was not found"))?;
     agents.remove(index);
     if let Some(config) = replacement {
         agents.insert(index, local_agent_table(config));
     }
-    replace_atomically(path, document.to_string().as_bytes()).await
+    transaction.commit().await
 }
 
 /// Builds the persisted table in one place so create and update stay identical.
 fn ssh_agent_table(config: &SshBackedAgentConfig) -> Table {
     let mut table = Table::new();
+    insert_id(&mut table, "id", config.id.as_ref());
     table.insert("target", value(&config.target));
     insert_optional_string(&mut table, "username", &config.username);
     if let Some(ssh_port) = config.ssh_port {
@@ -116,6 +111,7 @@ fn ssh_agent_table(config: &SshBackedAgentConfig) -> Table {
 /// Writes `local = true` so parse cannot treat the row as SSH after a later edit.
 fn local_agent_table(config: &LocalAgentConfig) -> Table {
     let mut table = Table::new();
+    insert_id(&mut table, "id", config.id.as_ref());
     table.insert("local", value(true));
     insert_optional_string(&mut table, "name", &config.name);
     insert_optional_string(&mut table, "home", &config.home);
@@ -123,39 +119,253 @@ fn local_agent_table(config: &LocalAgentConfig) -> Table {
     table
 }
 
-/// Derives the runtime identity without treating local-agent entries as editable SSH entries.
-fn ssh_agent_id(table: &Table) -> Option<String> {
-    if table.get("local").and_then(Item::as_bool).unwrap_or(false) {
-        return None;
-    }
-    let target = table.get("target")?.as_str()?;
-    Some(
-        table
-            .get("name")
-            .and_then(Item::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| crate::config::default_agent_name(target)),
-    )
+/// Whether a table is the entry with this id and kind, so an SSH edit can never replace a
+/// local entry that somehow shares the id, or the other way around.
+fn is_entry(table: &Table, agent_id: &AgentId, local: bool) -> bool {
+    let is_local = table.get("local").and_then(Item::as_bool).unwrap_or(false);
+    is_local == local && table.get("id").and_then(Item::as_str) == Some(agent_id.as_str())
 }
 
-/// Derives the runtime identity without treating SSH-backed entries as local edits.
-fn local_agent_id(table: &Table) -> Option<String> {
-    if !table.get("local").and_then(Item::as_bool).unwrap_or(false) {
-        return None;
+/// Writes the id first so it stays at the top of the entry where operators look for it.
+fn insert_id(table: &mut Table, key: &str, id: Option<&AgentId>) {
+    if let Some(id) = id {
+        table.insert(key, value(id.as_str()));
     }
-    Some(
-        table
-            .get("name")
-            .and_then(Item::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(crate::config::default_local_agent_name),
-    )
 }
 
 /// Omits absent values so OpenSSH and agent-side defaults remain effective.
 fn insert_optional_string(table: &mut Table, key: &str, setting: &Option<String>) {
     if let Some(setting) = setting {
         table.insert(key, value(setting));
+    }
+}
+
+/// Which entries [`assign_missing_device_ids`] gives ids to; each process only assigns the
+/// ids it owns, so a read-only file fails only the process that needs the write.
+pub enum DeviceIdScope<'a> {
+    /// Every `[[agents]]` entry, owned by the server.
+    ManagedAgents,
+    /// The `agent_id` of one `[[relays]]` entry, owned by the relay process with this ID.
+    Relay(&'a str),
+}
+
+/// One entry that has no id yet, with the id generated for it.
+struct MissingId {
+    /// Human-readable entry label used in the read-only error.
+    label: String,
+    /// Key the id is stored under (`id` or `agent_id`).
+    key: &'static str,
+    /// Freshly generated id written into the entry.
+    id: AgentId,
+}
+
+/// Gives every entry in `scope` that has no id a fresh one and writes it into the file.
+///
+/// Users write entries by hand and should not have to invent ids, but an id kept only in
+/// memory would change on every start and silently break token scopes. So the id is written
+/// back with the same formatting-preserving rewrite agent edits use, and when the file cannot
+/// be written, startup fails with ready-to-paste lines instead. Returns how many ids were
+/// assigned.
+///
+/// The common case of a file whose entries all have ids is checked without the config lock,
+/// so a read-only deployment never needs to create the lock file.
+pub async fn assign_missing_device_ids(path: &Path, scope: DeviceIdScope<'_>) -> Result<usize> {
+    let mut snapshot = read_document(path).await?;
+    let unlocked_missing = insert_missing_ids(&mut snapshot, &scope);
+    if unlocked_missing.is_empty() {
+        return Ok(0);
+    }
+    let mut transaction = match ConfigTransaction::begin(path).await {
+        Ok(transaction) => transaction,
+        Err(error) => bail!(
+            "{}",
+            read_only_message(path, &format!("{error:#}"), &unlocked_missing)
+        ),
+    };
+    // Generated again under the lock: another process may have assigned ids meanwhile, and
+    // writing back the unlocked snapshot would erase them.
+    let missing = insert_missing_ids(&mut transaction.document, &scope);
+    if missing.is_empty() {
+        return Ok(0);
+    }
+    // The atomic replace writes a sibling and renames it, which would also succeed for a
+    // read-only file in a writable directory; opening it for writing first respects the
+    // operator's choice to make the file read-only.
+    let writable = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .await
+        .map(drop)
+        .with_context(|| {
+            format!(
+                "Failed to open config file '{}' for writing",
+                path.display()
+            )
+        });
+    let written = match writable {
+        Ok(()) => transaction.commit().await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = written {
+        bail!(
+            "{}",
+            read_only_message(path, &format!("{error:#}"), &missing)
+        );
+    }
+    Ok(missing.len())
+}
+
+/// Adds generated ids to the entries in scope that lack one and reports what was added.
+fn insert_missing_ids(document: &mut DocumentMut, scope: &DeviceIdScope<'_>) -> Vec<MissingId> {
+    let (section, key) = match scope {
+        DeviceIdScope::ManagedAgents => ("agents", "id"),
+        DeviceIdScope::Relay(_) => ("relays", "agent_id"),
+    };
+    let Some(tables) = document
+        .get_mut(section)
+        .and_then(Item::as_array_of_tables_mut)
+    else {
+        return Vec::new();
+    };
+    let mut missing = Vec::new();
+    for (index, table) in tables.iter_mut().enumerate() {
+        if let DeviceIdScope::Relay(relay_id) = scope
+            && table.get("id").and_then(Item::as_str) != Some(*relay_id)
+        {
+            continue;
+        }
+        if table.contains_key(key) {
+            continue;
+        }
+        let id = AgentId::generate();
+        let label = entry_label(section, index, table);
+        table.insert(key, value(id.as_str()));
+        // `insert` appends; moving the id first keeps it where operators look for it.
+        table.sort_values_by(|left, _, right, _| (right.get() == key).cmp(&(left.get() == key)));
+        missing.push(MissingId { label, key, id });
+    }
+    missing
+}
+
+/// Labels an entry by position and the fields that identify it to a human.
+fn entry_label(section: &str, index: usize, table: &Table) -> String {
+    let field = |key: &str| table.get(key).and_then(Item::as_str).map(str::to_string);
+    let details = [
+        field("id").map(|id| format!("id '{id}'")),
+        field("name").map(|name| format!("name '{name}'")),
+        field("target").map(|target| format!("target '{target}'")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if details.is_empty() {
+        format!("[[{section}]] entry #{index}")
+    } else {
+        format!("[[{section}]] entry #{index} ({})", details.join(", "))
+    }
+}
+
+/// Builds the error for a config that cannot be written, with one ready-to-paste line per
+/// entry so operators of read-only mounts can fix the file themselves.
+fn read_only_message(path: &Path, error: &str, missing: &[MissingId]) -> String {
+    let entries = missing
+        .iter()
+        .map(|entry| {
+            format!(
+                "  {}:
+    {} = \"{}\"",
+                entry.label, entry.key, entry.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    format!(
+        "Config file '{}' has entries without a device id, and the generated ids could not be written back: {error}
+Add these lines to the entries and start again:
+{entries}",
+        path.display()
+    )
+}
+
+/// Reads and parses the config with `toml_edit` so edits keep the operator's formatting.
+async fn read_document(path: &Path) -> Result<DocumentMut> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("Failed to read config file '{}'", path.display()))?;
+    content
+        .parse::<DocumentMut>()
+        .with_context(|| format!("Failed to parse config file '{}'", path.display()))
+}
+
+/// One read-modify-write of the config file under an exclusive cross-process lock.
+///
+/// The server's edit routes, server startup and every relay process rewrite the same file.
+/// Each replaces the whole file, so without a lock held from read to replace, a writer
+/// working from an older read would silently drop another's change, such as a device id
+/// that is already in use.
+struct ConfigTransaction {
+    /// Config file being rewritten.
+    path: PathBuf,
+    /// Document read after the lock was taken; edits are applied to it.
+    document: DocumentMut,
+    /// Advisory `flock` on the sibling lock file; closing the descriptor releases it.
+    _lock: std::fs::File,
+}
+
+impl ConfigTransaction {
+    /// Waits for the config lock, then reads the current document.
+    async fn begin(path: &Path) -> Result<Self> {
+        let lock = Self::lock(path).await?;
+        let document = read_document(path).await?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            document,
+            _lock: lock,
+        })
+    }
+
+    /// Takes an exclusive `flock` on `.<file>.lock` next to the config.
+    ///
+    /// A separate file is locked because the config itself is replaced by rename, which
+    /// would leave a lock on the old inode. The lock file is never deleted, since removing
+    /// it would let two processes lock different inodes. `flock` blocks, so it runs on the
+    /// blocking pool; config edits are rare and short.
+    async fn lock(path: &Path) -> Result<std::fs::File> {
+        let parent = path
+            .parent()
+            .with_context(|| format!("Config path '{}' has no parent", path.display()))?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("Config path '{}' has no UTF-8 file name", path.display()))?;
+        let lock_path = parent.join(format!(".{file_name}.lock"));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options
+            .open(&lock_path)
+            .await
+            .with_context(|| format!("Failed to open config lock '{}'", lock_path.display()))?
+            .into_std()
+            .await;
+        tokio::task::spawn_blocking(move || {
+            use std::os::fd::AsRawFd;
+            // SAFETY: `file` owns a valid descriptor for the duration of this blocking call.
+            nix::errno::Errno::result(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) })
+                .map(|_| file)
+        })
+        .await
+        .context("Config lock task failed")?
+        .with_context(|| format!("Failed to lock config lock '{}'", lock_path.display()))
+    }
+
+    /// Replaces the config with the edited document, still under the lock.
+    async fn commit(self) -> Result<()> {
+        replace_atomically(&self.path, self.document.to_string().as_bytes()).await
     }
 }
 
@@ -209,4 +419,164 @@ fn temporary_path(parent: &Path, file_name: &str) -> PathBuf {
         std::process::id(),
         uuid::Uuid::new_v4()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TempDir;
+
+    /// Writes `content` to a config file in a fresh directory.
+    async fn config_file(content: &str) -> (TempDir, PathBuf) {
+        let directory = TempDir::create();
+        let path = directory.path().join("config.toml");
+        tokio::fs::write(&path, content).await.unwrap();
+        (directory, path)
+    }
+
+    /// Hand-written entries get ids written back without disturbing the operator's comments
+    /// and formatting, and the ids stay the same on the next start.
+    #[tokio::test]
+    async fn assigns_missing_ids_and_keeps_formatting() {
+        let original = r#"# top comment
+agent_token = "t"
+
+[[agents]]
+# the pi in the closet
+target = "pi"   # trailing comment
+
+[[agents]]
+id = "dev_abcdefghijklmnopqrst"
+local = true
+"#;
+        let (_directory, path) = config_file(original).await;
+        let assigned = assign_missing_device_ids(&path, DeviceIdScope::ManagedAgents)
+            .await
+            .unwrap();
+        // Only the entry without an id gets one.
+        assert_eq!(assigned, 1);
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        // Comments and the existing id survive the rewrite.
+        for kept in [
+            "# top comment",
+            "# the pi in the closet",
+            r#"target = "pi"   # trailing comment"#,
+            r#"id = "dev_abcdefghijklmnopqrst""#,
+        ] {
+            assert!(written.contains(kept), "{kept} missing from: {written}");
+        }
+        let config = crate::config::parse_config_file(&path).await.unwrap();
+        let first_id = config.agents[0].id().cloned().expect("id was written back");
+        // A second start finds every id present and leaves the file alone.
+        assert_eq!(
+            assign_missing_device_ids(&path, DeviceIdScope::ManagedAgents)
+                .await
+                .unwrap(),
+            0
+        );
+        let config = crate::config::parse_config_file(&path).await.unwrap();
+        assert_eq!(config.agents[0].id(), Some(&first_id));
+    }
+
+    /// The relay scope only touches its own entry, so a relay never rewrites entries owned by
+    /// the server or other relays.
+    #[tokio::test]
+    async fn relay_scope_assigns_only_its_own_entry() {
+        let (_directory, path) = config_file(
+            r#"agent_token = "t"
+[[agents]]
+target = "pi"
+[[relays]]
+id = "one"
+target = "a"
+server = "http://redoor.example.com"
+[[relays]]
+id = "two"
+target = "b"
+server = "http://redoor.example.com"
+"#,
+        )
+        .await;
+        assign_missing_device_ids(&path, DeviceIdScope::Relay("two"))
+            .await
+            .unwrap();
+        let config = crate::config::parse_config_file(&path).await.unwrap();
+        // Only relay "two" got an agent_id.
+        assert!(config.agents[0].id().is_none());
+        assert!(config.relays[0].agent.id.is_none());
+        assert!(config.relays[1].agent.id.is_some());
+    }
+
+    /// Two relays starting at the same time both keep their ids: each rewrite happens under
+    /// the config lock and starts from the other's result instead of an older read.
+    #[tokio::test]
+    async fn concurrent_relay_assignments_keep_both_ids() {
+        // Several rounds, because an unlocked read-modify-write only loses an id when the
+        // two rewrites interleave.
+        for _ in 0..20 {
+            let (_directory, path) = config_file(
+                r#"agent_token = "t"
+[[relays]]
+id = "one"
+target = "a"
+server = "http://redoor.example.com"
+[[relays]]
+id = "two"
+target = "b"
+server = "http://redoor.example.com"
+"#,
+            )
+            .await;
+            let (one, two) = tokio::join!(
+                assign_missing_device_ids(&path, DeviceIdScope::Relay("one")),
+                assign_missing_device_ids(&path, DeviceIdScope::Relay("two")),
+            );
+            one.unwrap();
+            two.unwrap();
+            let config = crate::config::parse_config_file(&path).await.unwrap();
+            // Neither write erased the other's id.
+            assert!(config.relays.iter().all(|relay| relay.agent.id.is_some()));
+        }
+    }
+
+    /// A config that cannot be written fails with ready-to-paste lines instead of keeping ids
+    /// only in memory, which would change them on every start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_config_prints_ready_to_paste_ids() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_directory, path) = config_file(
+            r#"agent_token = "t"
+[[agents]]
+name = "pi"
+target = "pi.local"
+"#,
+        )
+        .await;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            .await
+            .unwrap();
+        // Root ignores file permissions, so the scenario cannot be produced there.
+        if tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        let error = assign_missing_device_ids(&path, DeviceIdScope::ManagedAgents)
+            .await
+            .expect_err("a read-only config cannot take the ids");
+        let message = format!("{error:#}");
+        // The entry is named and a complete `id = "dev_..."` line is printed for it.
+        assert!(
+            message.contains("[[agents]] entry #0 (name 'pi', target 'pi.local')"),
+            "{message}"
+        );
+        assert!(message.contains(r#"id = "dev_"#), "{message}");
+        // The file itself is untouched.
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!content.contains("dev_"), "{content}");
+    }
 }

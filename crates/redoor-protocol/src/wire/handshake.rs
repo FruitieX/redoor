@@ -64,8 +64,14 @@ pub struct ProtocolMismatchListResponse {
 pub enum RejectReason {
     /// Another live agent id already uses this agent name.
     DuplicateName,
-    /// The managed agent with this name was intentionally stopped.
+    /// The managed agent with this id was intentionally stopped.
     Stopped,
+    /// The `hello` carried an id that is not in the device id format or a name that breaks
+    /// the device name rules; retrying cannot help until the agent is reconfigured.
+    InvalidIdentity,
+    /// Several machines keep replacing each other's healthy connections with the same id
+    /// (a cloned data dir); the agent retries with backoff so a fixed clone gets through.
+    DuplicateId,
 }
 
 /// Parses the offered subprotocols of one upgrade request (a comma-separated header value).

@@ -6,6 +6,7 @@ use super::{
     services::upload::{AgentUpload, UploadStart},
     state::ServerState,
 };
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     body::Body,
@@ -15,7 +16,6 @@ use axum::{
 use redoor_protocol::wire::request;
 use redoor_protocol::{
     api::transfers::{ArchiveUploadResponse, CopyExistingMode},
-    ids::AgentId,
     wire::command::Command,
 };
 
@@ -30,7 +30,8 @@ pub(crate) struct ArchiveQuery {
 ///
 /// Returns success only after extraction and conflict-policy placement finish on the agent.
 pub(crate) async fn upload_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     Query(query): Query<ArchiveQuery>,
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -42,14 +43,7 @@ pub(crate) async fn upload_handler(
         path: path.clone(),
         on_existing: query.on_existing,
     });
-    let upload = AgentUpload::start(
-        &state.router_ref,
-        AgentId::from(agent),
-        command,
-        path.clone(),
-        0,
-    )
-    .await?;
+    let upload = AgentUpload::start(&state.router_ref, agent_id, command, path.clone(), 0).await?;
     let UploadStart::Ready(mut upload) = upload else {
         return Ok(Json(ArchiveUploadResponse {
             path,

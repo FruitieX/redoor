@@ -3,6 +3,7 @@
 pub mod args;
 mod commands;
 mod connection;
+mod device_id;
 mod errors;
 mod exec;
 mod logs;
@@ -45,6 +46,7 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     };
     let settings = AgentSettings::resolve(args, file_config.as_ref(), &runtime.paths)?;
     let default_directory = settings.default_directory().await?;
+    let (agent_id, id_source) = settings.device_id(&runtime.paths).await?;
 
     let connection = connection::AgentConnection::new(
         settings.ws_address,
@@ -74,8 +76,9 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     }
     log!(
         Level::Info,
-        "Starting agent '{}': ws={}, home={}",
+        "Starting agent '{}': agent_id={}, ws={}, home={}",
         settings.name,
+        agent_id,
         connection.server_url(),
         default_directory
     );
@@ -91,7 +94,8 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         .await;
     let agent = AgentRuntime::new(
         AgentProfile {
-            agent_id: AgentId::from(settings.name.clone()),
+            agent_id,
+            id_source,
             agent_name: settings.name,
             default_directory,
             token: settings.token,
@@ -154,6 +158,8 @@ struct AgentSettings {
     insecure_tls: bool,
     /// Registration name; the hostname when nothing else is configured.
     name: String,
+    /// Device id from `--agent-id`; `None` for standalone agents, which use their id file.
+    agent_id: Option<AgentId>,
     /// Shared registration secret.
     token: String,
     /// Directory the UI opens first; the account home when unset.
@@ -192,6 +198,14 @@ impl AgentSettings {
         let name = first_non_empty([args.name, agent_section.name])
             .or_else(System::host_name)
             .context("agent name is not configured and the computer hostname is unavailable")?;
+        // The server would reject the `hello` anyway; failing here explains it at the source.
+        redoor_protocol::ids::validate_device_name(&name)?;
+        let agent_id = args
+            .agent_id
+            .as_deref()
+            .map(AgentId::parse)
+            .transpose()
+            .context("invalid --agent-id")?;
 
         let token = first_non_empty([args.token, file.map(|config| config.agent_token.clone())])
             .context(
@@ -228,6 +242,7 @@ impl AgentSettings {
             connect_address: args.connect_address,
             insecure_tls: args.insecure_tls,
             name,
+            agent_id,
             token,
             home,
             trash_directory: first_non_empty([args.trash_directory]),
@@ -237,6 +252,22 @@ impl AgentSettings {
             notification_delay_seconds,
             partial_max_age_days: agent_section.partial_max_age_days.unwrap_or(7),
         })
+    }
+
+    /// Returns the managed id from `--agent-id`, or the standalone agent's remembered id,
+    /// together with where it came from so the runtime knows how to react to an id conflict.
+    async fn device_id(&self, paths: &AppPaths) -> Result<(AgentId, device_id::DeviceIdSource)> {
+        match &self.agent_id {
+            Some(agent_id) => Ok((agent_id.clone(), device_id::DeviceIdSource::Assigned)),
+            None => {
+                let file = device_id::DeviceIdFile::in_data_dir(&paths.data_dir()?);
+                let agent_id = file.load_or_create().await?;
+                Ok((
+                    agent_id,
+                    device_id::DeviceIdSource::File(file.path().to_path_buf()),
+                ))
+            }
+        }
     }
 
     /// Canonicalizes the UI home directory and insists it is a UTF-8 directory.

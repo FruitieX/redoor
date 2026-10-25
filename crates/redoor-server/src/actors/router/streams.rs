@@ -538,7 +538,7 @@ mod tests {
     /// Builds a session's tables plus the priority lane its credit grants use.
     fn session() -> (ConnectionStreams, AgentLink, mpsc::Receiver<ServerToAgent>) {
         let (lanes, receivers) = ControlLanes::bounded(16, 16);
-        let agent = AgentId::from("agent");
+        let agent = redoor_core::test_support::test_agent_id("agent");
         (
             ConnectionStreams::new(agent.clone()),
             AgentLink::new(lanes),
@@ -692,7 +692,7 @@ mod tests {
     /// a producer cannot send before it.
     #[tokio::test]
     async fn upload_waits_for_first_grant() {
-        let streams = ConnectionStreams::new(AgentId::from("agent"));
+        let streams = ConnectionStreams::new(redoor_core::test_support::test_agent_id("agent"));
         let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         let lease = StreamLease::new(RequestId::new(8), AgentLink::new(lanes), 0);
         let outbound = OutboundStream::new(
@@ -723,7 +723,7 @@ mod tests {
     /// producer waiting for credit.
     #[tokio::test]
     async fn outbound_stream_spends_credit_and_stops_promptly() {
-        let streams = ConnectionStreams::new(AgentId::from("agent"));
+        let streams = ConnectionStreams::new(redoor_core::test_support::test_agent_id("agent"));
         let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         let lease = StreamLease::new(RequestId::new(7), AgentLink::new(lanes), 0);
         let outbound = OutboundStream::new(

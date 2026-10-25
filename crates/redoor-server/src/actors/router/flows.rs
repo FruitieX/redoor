@@ -518,7 +518,7 @@ mod tests {
         (
             Flow::Command(CommandFlow {
                 request_id: RequestId::new(id),
-                agent_id: AgentId::from(agent),
+                agent_id: redoor_core::test_support::test_agent_id(agent),
                 cancelable: false,
                 reply,
             }),
@@ -534,16 +534,23 @@ mod tests {
         let (kept, _kept_reply) = command(2, "kept");
         table.insert(RequestId::new(1), lost);
         table.insert(RequestId::new(2), kept);
-        let extracted = table.extract_if(|flow| flow.involves(&AgentId::from("lost")));
+        let extracted = table
+            .extract_if(|flow| flow.involves(&redoor_core::test_support::test_agent_id("lost")));
         // Only the lost agent's work is settled by its disconnect.
         assert_eq!(extracted.len(), 1);
         assert_eq!(
-            table.id_for(&AgentId::from("lost"), RequestId::new(1)),
+            table.id_for(
+                &redoor_core::test_support::test_agent_id("lost"),
+                RequestId::new(1)
+            ),
             None
         );
         // Unrelated flows and their routing survive.
         assert_eq!(
-            table.id_for(&AgentId::from("kept"), RequestId::new(2)),
+            table.id_for(
+                &redoor_core::test_support::test_agent_id("kept"),
+                RequestId::new(2)
+            ),
             Some(RequestId::new(2))
         );
     }
@@ -557,13 +564,19 @@ mod tests {
         // The owning agent's frames reach the flow.
         assert!(
             table
-                .id_for(&AgentId::from("owner"), RequestId::new(7))
+                .id_for(
+                    &redoor_core::test_support::test_agent_id("owner"),
+                    RequestId::new(7)
+                )
                 .is_some()
         );
         // The same number from another connection must not resolve someone else's work.
         assert!(
             table
-                .id_for(&AgentId::from("other"), RequestId::new(7))
+                .id_for(
+                    &redoor_core::test_support::test_agent_id("other"),
+                    RequestId::new(7)
+                )
                 .is_none()
         );
     }
@@ -574,8 +587,8 @@ mod tests {
             pause: None,
             resumable: false,
             progress_id: TransferId::new(1),
-            source_agent_id: AgentId::from("source"),
-            dest_agent_id: AgentId::from("dest"),
+            source_agent_id: redoor_core::test_support::test_agent_id("source"),
+            dest_agent_id: redoor_core::test_support::test_agent_id("dest"),
             content_kind: CopyContentKind::RawFile,
             then: Some(DeleteSource {
                 path: "/src".to_string(),
@@ -599,13 +612,13 @@ mod tests {
         let flow = move_flow(CopyPhase::DeletingSource {
             request_id: RequestId::new(9),
         });
-        assert!(flow.involves(&AgentId::from("source")));
-        assert!(!flow.involves(&AgentId::from("dest")));
+        assert!(flow.involves(&redoor_core::test_support::test_agent_id("source")));
+        assert!(!flow.involves(&redoor_core::test_support::test_agent_id("dest")));
         // A local phase likewise runs entirely on the source agent.
         let local = move_flow(CopyPhase::Local {
             request_id: RequestId::new(9),
         });
-        assert!(!local.involves(&AgentId::from("dest")));
+        assert!(!local.involves(&redoor_core::test_support::test_agent_id("dest")));
     }
 
     /// Abandoned REST replies are pruned without touching live callers.
@@ -625,7 +638,10 @@ mod tests {
         assert_eq!(table.len(), 1);
         assert!(
             table
-                .id_for(&AgentId::from("agent"), RequestId::new(2))
+                .id_for(
+                    &redoor_core::test_support::test_agent_id("agent"),
+                    RequestId::new(2)
+                )
                 .is_some()
         );
     }

@@ -1,11 +1,7 @@
 //! REST endpoint that installs a selected release binary on an agent and restarts it.
 
-use axum::{
-    Json,
-    extract::{Path, State as AxumState},
-    http::StatusCode,
-    response::IntoResponse,
-};
+use crate::http::access::ResolvedDevice;
+use axum::{Json, extract::State as AxumState, http::StatusCode, response::IntoResponse};
 use redoor_core::{log, log_error};
 use redoor_protocol::wire::request;
 use redoor_protocol::{
@@ -144,11 +140,10 @@ async fn upload_upgrade_binary(
 
 /// Route: `POST /api/v1/agents/{agent}/upgrade` installs and execs a selected release.
 pub(crate) async fn upgrade_agent_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<UpgradeAgentRequest>,
 ) -> impl IntoResponse {
-    let agent_id = AgentId::from(agent.clone());
     let snapshot = match list_agent_snapshots(&state).await {
         Ok(agents) => agents.into_iter().find(|entry| entry.id == agent_id),
         Err(error) => return error.into_response(),
@@ -157,7 +152,7 @@ pub(crate) async fn upgrade_agent_handler(
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Agent not found: {agent}"),
+                error: format!("Agent not found: {agent_id}"),
             }),
         )
             .into_response();
@@ -166,7 +161,7 @@ pub(crate) async fn upgrade_agent_handler(
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
-                error: format!("Agent is not connected: {agent}"),
+                error: format!("Agent is not connected: {agent_id}"),
             }),
         )
             .into_response();

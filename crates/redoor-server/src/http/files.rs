@@ -1,16 +1,14 @@
 //! REST endpoints for delete, mkdir and rename on agent filesystems.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     extract::{Path, Query, State as AxumState},
     http::StatusCode,
 };
-use redoor_protocol::{
-    api::files::{
-        CreateDirectoryResponse, CreationOwnershipOptions, RawDeleteResponse, RenamePathRequest,
-        RenamePathResponse,
-    },
-    ids::AgentId,
+use redoor_protocol::api::files::{
+    CreateDirectoryResponse, CreationOwnershipOptions, RawDeleteResponse, RenamePathRequest,
+    RenamePathResponse,
 };
 use serde::Deserialize;
 use std::path::Path as FilePath;
@@ -32,11 +30,11 @@ pub(crate) struct RawDeleteQuery {
 
 /// Route: `DELETE /api/v1/agents/{agent}/raw/{*path}`
 pub(crate) async fn raw_agent_delete_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     Query(query): Query<RawDeleteQuery>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<RawDeleteResponse>, ApiError> {
-    let agent_id = AgentId::from(agent);
     let path = absolute_path_from_url(path.unwrap_or_default());
     if query.trash {
         require_move_to_trash_support(&state, &agent_id).await?;
@@ -57,7 +55,8 @@ pub(crate) async fn raw_agent_delete_handler(
 
 /// Route: `POST /api/v1/agents/{agent}/mkdir/{*path}`
 pub(crate) async fn create_directory_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     Query(ownership): Query<CreationOwnershipOptions>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<(StatusCode, Json<CreateDirectoryResponse>), ApiError> {
@@ -67,13 +66,13 @@ pub(crate) async fn create_directory_handler(
         path: path.clone(),
         ownership,
     };
-    state.agents.call(&AgentId::from(agent), call).await?;
+    state.agents.call(&agent_id, call).await?;
     Ok((StatusCode::CREATED, Json(CreateDirectoryResponse { path })))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/rename`
 pub(crate) async fn rename_path_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<RenamePathRequest>,
 ) -> Result<Json<RenamePathResponse>, ApiError> {
@@ -96,7 +95,7 @@ pub(crate) async fn rename_path_handler(
         old: request.old,
         new: request.new,
     };
-    state.agents.call(&AgentId::from(agent), call).await?;
+    state.agents.call(&agent_id, call).await?;
     Ok(Json(RenamePathResponse {
         source_path,
         dest_path,

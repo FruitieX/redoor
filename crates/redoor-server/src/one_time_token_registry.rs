@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn supports_multiple_tokens_and_removes_completed_tokens() {
         let registry = OneTimeTokenRegistry::new();
-        let agent_id = AgentId::from("agent-1");
+        let agent_id = redoor_core::test_support::test_agent_id("agent-1");
         let first = registry.create(agent_id.clone(), "/tmp/file".to_string());
         let second = registry.create(agent_id.clone(), "/tmp/file".to_string());
 
@@ -160,13 +160,17 @@ mod tests {
     #[test]
     fn failed_matches_preserve_the_valid_token() {
         let registry = OneTimeTokenRegistry::new();
-        let agent_id = AgentId::from("agent-1");
+        let agent_id = redoor_core::test_support::test_agent_id("agent-1");
         let token = registry.create(agent_id.clone(), "/tmp/file".to_string());
 
         // Matching the UUID against another path must not authorize access.
         assert!(!registry.contains(&agent_id, "/tmp/other", &token));
         // Matching the UUID against another agent must not authorize access.
-        assert!(!registry.contains(&AgentId::from("agent-2"), "/tmp/file", &token));
+        assert!(!registry.contains(
+            &redoor_core::test_support::test_agent_id("agent-2"),
+            "/tmp/file",
+            &token
+        ));
         // The correctly bound request remains authorized after failed attempts.
         assert!(registry.contains(&agent_id, "/tmp/file", &token));
     }
@@ -175,7 +179,7 @@ mod tests {
     #[test]
     fn merges_retry_ranges_before_consuming_token() {
         let registry = OneTimeTokenRegistry::new();
-        let agent_id = AgentId::from("agent-1");
+        let agent_id = redoor_core::test_support::test_agent_id("agent-1");
         let token = registry.create(agent_id.clone(), "/tmp/file".to_string());
 
         // A suffix alone must not consume a token or imply that its prefix was downloaded.
@@ -190,7 +194,7 @@ mod tests {
     #[test]
     fn concurrent_completion_has_one_winner() {
         let registry = OneTimeTokenRegistry::new();
-        let agent_id = AgentId::from("agent-1");
+        let agent_id = redoor_core::test_support::test_agent_id("agent-1");
         let token = registry.create(agent_id.clone(), "/tmp/file".to_string());
         let barrier = Arc::new(Barrier::new(3));
         let handles = (0..2)

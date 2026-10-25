@@ -29,7 +29,7 @@ pub(crate) struct MkdirArgs {
 pub(crate) async fn run(store: CredentialStore, args: MkdirArgs) -> Result<()> {
     let endpoint = Location::remote(&args.path).await?;
     let client = RemoteClient::load(&store).await?;
-    client.ensure_agent_running(&endpoint.agent.0).await?;
+    client.ensure_agent_running(endpoint.agent.as_str()).await?;
     if !args.parents {
         require_plain_mkdir(&client, &endpoint).await?;
     }

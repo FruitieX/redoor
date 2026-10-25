@@ -21,8 +21,12 @@ use crate::actors::router::CopyOperation;
 pub(crate) async fn move_file_handler(
     AxumState(state): AxumState<ServerState>,
     Extension(principal): Extension<Principal>,
-    Json(payload): Json<MoveFileRequest>,
+    Json(mut payload): Json<MoveFileRequest>,
 ) -> Result<Json<MoveFileResponse>, ApiError> {
+    // Body fields accept a name or an id; resolving before `require` keeps scope checks on
+    // ids, so a name that now belongs to another device cannot slip past a scope.
+    payload.source.agent = state.agents.resolve(payload.source.agent.as_str()).await?;
+    payload.dest.agent = state.agents.resolve(payload.dest.agent.as_str()).await?;
     principal.require(
         &[
             Permission::FilesRead,

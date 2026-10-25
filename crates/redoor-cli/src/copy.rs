@@ -19,7 +19,7 @@ use redoor_protocol::{
             TransferProgressListResponse, TransferProgressState,
         },
     },
-    ids::TransferId,
+    ids::{AgentId, TransferId},
 };
 use reqwest::{Method, StatusCode};
 use std::{
@@ -95,14 +95,15 @@ impl Location {
             );
             ensure!(
                 agent != "." && agent != ".." && !agent.contains('/'),
-                "Invalid device ID"
+                "Invalid device name or ID"
             );
             ensure!(
                 !path.split('/').any(|part| part == "." || part == ".."),
                 "Remote paths must not contain . or .. components; use the resolved absolute path"
             );
+            // Passed to the server as typed: it accepts a name or an id and resolves it.
             return Ok(Self::Remote(CopyEndpoint {
-                agent: agent.into(),
+                agent: AgentId::unchecked(agent),
                 path: path.into(),
             }));
         }
@@ -218,12 +219,12 @@ impl Transfer {
         );
         let basename = source.basename()?;
         if let Location::Remote(remote) = &source {
-            client.ensure_agent_running(&remote.agent.0).await?;
+            client.ensure_agent_running(remote.agent.as_str()).await?;
         }
         if let Location::Remote(remote) = &destination
             && !matches!(&source, Location::Remote(source) if source.agent == remote.agent)
         {
-            client.ensure_agent_running(&remote.agent.0).await?;
+            client.ensure_agent_running(remote.agent.as_str()).await?;
         }
         let (directory, size) = match &source {
             Location::Local(path) => {

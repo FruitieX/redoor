@@ -1,6 +1,7 @@
 //! Per-agent websocket session actor: requires the `hello`, then bridges the multiplexed
 //! connection to the router and the stream tables through bounded, prioritized lanes.
 
+use crate::actors::activity::ConnectionActivity;
 use crate::actors::lanes::{ControlLaneReceivers, ControlLanes, QueuedCommand};
 use crate::actors::router::{
     ConnectionStreams, RegisterAgentRequest, RegistrationRejection, RouteResponse,
@@ -21,8 +22,8 @@ use redoor_protocol::{
         stream::StreamChunk,
     },
 };
-use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+use tokio::time::{Duration, Instant};
 
 /// Per-agent command backlog allowed before REST admission fails fast.
 pub(crate) const CONTROL_COMMAND_QUEUE_CAPACITY: usize = 64;
@@ -119,7 +120,7 @@ struct SessionRuntime {
     /// Typed command and priority lanes this session's writer drains.
     lanes: ControlLanes,
 
-    /// Populated after `hello` if the agent name has a matching watchdog supervisor. The stale
+    /// Populated after `hello` if the agent id has a matching watchdog supervisor. The stale
     /// check uses this to signal the supervisor when the WebSocket goes silent. Stays `None`
     /// for agents that aren't supervised (e.g. manually-spawned external agents), whose stale
     /// sockets are closed without restarting a process.
@@ -127,6 +128,9 @@ struct SessionRuntime {
     /// Payload stream tables of the registered session; credit the agent returns for
     /// server-to-agent streams is applied here directly, never through the router mailbox.
     streams: Option<ConnectionStreams>,
+    /// When the agent last sent anything; drives the stale check here and tells the router
+    /// whether this connection is still healthy when another `hello` claims its id.
+    activity: ConnectionActivity,
 }
 
 impl SessionRuntime {
@@ -187,10 +191,11 @@ impl SessionRuntime {
         hello: Hello,
         watchdog_registry: &WatchdogRegistry,
     ) -> SessionStep {
-        // Look up the supervisor for this agent name. A `None` result is fine: it just means
-        // the agent is not supervised by the watchdog (e.g. an external agent spawned outside
-        // the server) and stale cleanup has no process to restart.
-        self.watchdog = watchdog_registry.lookup(&hello.agent_name);
+        // Look up the supervisor for this agent id, which the server passed to the agents it
+        // spawns. A `None` result is fine: it just means the agent is not supervised by the
+        // watchdog (e.g. an external agent spawned outside the server) and stale cleanup has
+        // no process to restart.
+        self.watchdog = watchdog_registry.lookup(hello.agent_id.as_str());
         let mut watchdog_attempt_generation = None;
         if let Some(watchdog) = self.watchdog.as_ref() {
             let Some(attempt_generation) = watchdog.mark_connected(self.socket_id.clone()).await
@@ -222,6 +227,7 @@ impl SessionRuntime {
             self.watchdog.clone(),
         );
         let registered_streams = streams.clone();
+        let activity = self.activity.clone();
         // Registration installs the routing entry every later frame depends on, so a
         // momentarily full mailbox must delay it rather than silently drop it.
         let decision = self
@@ -237,6 +243,7 @@ impl SessionRuntime {
                     watchdog,
                     watchdog_attempt_generation,
                     streams: registered_streams,
+                    activity,
                     reply: Some(reply),
                 }))
             })
@@ -431,12 +438,7 @@ impl SessionRuntime {
     /// Decides on a periodic check whether the socket must close: a socket that never said
     /// `hello`, or one that has been silent past the stale timeout (a half-open connection,
     /// e.g. a dead SSH tunnel). Managed agents also ask their watchdog for a restart.
-    fn should_close(
-        &self,
-        opened_at: Instant,
-        last_seen: Instant,
-        timeouts: &WebSocketTimeouts,
-    ) -> bool {
+    fn should_close(&self, opened_at: Instant, timeouts: &WebSocketTimeouts) -> bool {
         if self.agent_id.is_none() && opened_at.elapsed() > HELLO_TIMEOUT {
             log!(
                 Level::Warning,
@@ -445,14 +447,15 @@ impl SessionRuntime {
             );
             return true;
         }
-        if last_seen.elapsed() <= timeouts.stale_timeout {
+        let idle = self.activity.idle();
+        if idle <= timeouts.stale_timeout {
             return false;
         }
         if let Some(watchdog) = self.watchdog.as_ref() {
             log!(
                 Level::Warning,
                 "WebSocket stale for {:?}, requesting restart: agent_name={}, socket_id={}",
-                last_seen.elapsed(),
+                idle,
                 watchdog.key(),
                 self.socket_id
             );
@@ -461,7 +464,7 @@ impl SessionRuntime {
             log!(
                 Level::Warning,
                 "Unmanaged WebSocket stale for {:?}, closing session: socket_id={}",
-                last_seen.elapsed(),
+                idle,
                 self.socket_id
             );
         }
@@ -586,6 +589,7 @@ pub async fn handle_websocket(
         lanes,
         watchdog: None,
         streams: None,
+        activity: ConnectionActivity::new(ConnectionActivity::healthy_window(&timeouts)),
     };
 
     log!(Level::Info, "Session started: socket_id={}", socket_id);
@@ -642,12 +646,11 @@ pub async fn handle_websocket(
         let _ = writer_done_tx.send(());
     });
 
-    // Track the last time we received any frame on the WebSocket. Any
-    // inbound frame (Text, Binary, Ping, Pong, Close) resets the timer.
-    // If no frame arrives for the configured stale timeout we assume the
-    // connection is half-open (e.g. SSH tunnel died without a TCP
-    // close). Managed sessions also ask their watchdog to restart the subprocess.
-    let mut last_seen = Instant::now();
+    // The runtime's activity clock tracks the last time we received any frame on the
+    // WebSocket. Any inbound frame (Text, Binary, Ping, Pong, Close) resets it. If no frame
+    // arrives for the configured stale timeout we assume the connection is half-open (e.g.
+    // SSH tunnel died without a TCP close). Managed sessions also ask their watchdog to
+    // restart the subprocess.
     let opened_at = Instant::now();
     let mut stale_check = tokio::time::interval(timeouts.stale_check_interval);
     stale_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -663,7 +666,7 @@ pub async fn handle_websocket(
             _ = stale_check.tick() => {
                 // Breaking out lets `runtime.shutdown()` below unregister the agent and close
                 // the writer lane.
-                if runtime.should_close(opened_at, last_seen, &timeouts) {
+                if runtime.should_close(opened_at, &timeouts) {
                     break;
                 }
             }
@@ -672,7 +675,7 @@ pub async fn handle_websocket(
                     // Any inbound frame (including Pong) resets the
                     // stale timer. The dispatch below happens before
                     // we drop the frame so the runtime can act on it.
-                    last_seen = Instant::now();
+                    runtime.activity.touch();
                     match runtime.handle_ws_message(message, &watchdog_registry).await {
                         SessionStep::Continue => {}
                         SessionStep::Close => break,
@@ -690,7 +693,8 @@ pub async fn handle_websocket(
     runtime.shutdown().await;
     if rejected {
         // The session held the last lane senders, so the writer flushes the queued `rejected`
-        // frame, closes the socket and ends; the agent then exits instead of reconnecting.
+        // frame, closes the socket and ends; the agent then exits, or retries later when the
+        // reason was `duplicate_id`.
         if tokio::time::timeout(REJECTION_FLUSH_TIMEOUT, &mut writer_task)
             .await
             .is_err()
@@ -733,6 +737,7 @@ mod tests {
             lanes,
             watchdog: None,
             streams: None,
+            activity: ConnectionActivity::new(Duration::from_secs(20)),
         };
         (runtime, receiver)
     }
@@ -741,7 +746,7 @@ mod tests {
     /// wait forever for a result that already came.
     #[tokio::test]
     async fn malformed_result_fails_its_request() {
-        let agent_id = AgentId::from("agent");
+        let agent_id = redoor_core::test_support::test_agent_id("agent");
         let (mut runtime, mut receiver) = capture_session(Some(agent_id.clone()));
         let step = runtime
             .handle_ws_message(
@@ -799,7 +804,7 @@ mod tests {
     /// A registered session routes frames under its own agent id, because frames carry none.
     #[tokio::test]
     async fn registered_session_routes_frames_under_its_own_agent_id() {
-        let own = AgentId::from("own");
+        let own = redoor_core::test_support::test_agent_id("own");
         let (mut runtime, mut receiver) = capture_session(Some(own.clone()));
         let socket_id = runtime.socket_id.clone();
         runtime
@@ -822,7 +827,8 @@ mod tests {
     /// A second hello on an accepted connection is a protocol violation, not a re-register.
     #[tokio::test]
     async fn second_hello_closes_the_socket() {
-        let (mut runtime, mut receiver) = capture_session(Some(AgentId::from("own")));
+        let (mut runtime, mut receiver) =
+            capture_session(Some(redoor_core::test_support::test_agent_id("own")));
         let hello: AgentToServer = serde_json::from_str(
             r#"{"type":"hello","agent_id":"other","agent_name":"other","os":"linux","arch":"x86_64","hostname":"h","username":"u","cwd":"/","binary":{"version":"0.0.0","git_rev":"r","git_dirty":false,"version_dirty":false,"build_mode":"debug","build_date":"d"},"uid":1000,"is_root":false,"supports_native_open":false,"supports_trash":false,"supports_move_to_trash":false}"#,
         )
@@ -843,7 +849,7 @@ mod tests {
         router_ref
             .send(RouterMsg::CheckPendingUiRefresh)
             .expect("router mailbox filled");
-        let agent_id = AgentId::from("agent");
+        let agent_id = redoor_core::test_support::test_agent_id("agent");
         let request_id = RequestId::new(42);
         let (lanes, _receivers) = ControlLanes::bounded(1, 1);
         let mut runtime = SessionRuntime {
@@ -853,6 +859,7 @@ mod tests {
             lanes,
             watchdog: None,
             streams: None,
+            activity: ConnectionActivity::new(Duration::from_secs(20)),
         };
         let watchdog_registry = WatchdogRegistry::new();
         let response = runtime.handle_control_message(
@@ -897,10 +904,11 @@ mod tests {
         let runtime = SessionRuntime {
             socket_id: socket_id.clone(),
             router_ref,
-            agent_id: Some(AgentId::from("agent")),
+            agent_id: Some(redoor_core::test_support::test_agent_id("agent")),
             lanes,
             watchdog: None,
             streams: None,
+            activity: ConnectionActivity::new(Duration::from_secs(20)),
         };
 
         let shutdown_task = tokio::spawn(runtime.shutdown());
@@ -919,7 +927,7 @@ mod tests {
             Some(RouterMsg::UnregisterAgent {
                 agent_id,
                 socket_id: received_socket_id,
-            }) if agent_id == AgentId::from("agent") && received_socket_id == socket_id
+            }) if agent_id == redoor_core::test_support::test_agent_id("agent") && received_socket_id == socket_id
         ));
         shutdown_task.await.expect("session shutdown task joined");
     }

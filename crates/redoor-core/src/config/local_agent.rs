@@ -25,6 +25,12 @@ pub async fn spawn_local_agent(
     agent_token: &str,
 ) -> std::io::Result<tokio::process::Child> {
     let name = config.name.clone().unwrap_or_else(default_local_agent_name);
+    // The server owns managed ids; startup assigned one to every entry before spawning.
+    let agent_id = config.id.as_ref().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "local agent '{name}' has no device id in the config"
+        ))
+    })?;
     let ws_url = format!(
         "ws://localhost:{}{}",
         redoor_port,
@@ -46,6 +52,8 @@ pub async fn spawn_local_agent(
         .arg("line")
         .arg("--name")
         .arg(&name)
+        .arg("--agent-id")
+        .arg(agent_id.as_str())
         .arg("--token")
         .arg(agent_token);
 
@@ -98,8 +106,9 @@ pub async fn spawn_local_agent(
 
     log!(
         Level::Info,
-        "Starting local redoor agent: name={}, ws_url={}, bin={}, log={:?}",
+        "Starting local redoor agent: name={}, agent_id={}, ws_url={}, bin={}, log={:?}",
         name,
+        agent_id,
         ws_url,
         bin.display(),
         config.log,

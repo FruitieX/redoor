@@ -9,12 +9,12 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use redoor_protocol::ids::{AgentId, validate_device_name};
 use serde::Deserialize;
 
 use super::{
     AgentConfig, AgentSection, AuthMode, LocalAgentConfig, RedoorConfig, RelayConfig,
-    ServerSection, SshBackedAgentConfig, default_agent_name, default_local_agent_name,
-    parse_relay_id, parse_server_username,
+    ServerSection, SshBackedAgentConfig, parse_relay_id, parse_server_username,
 };
 
 /// Whole-document shape; every section is optional because roles validate their own needs.
@@ -65,6 +65,7 @@ struct RawAgentSection {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgentEntry {
+    id: Option<String>,
     #[serde(default)]
     local: bool,
     target: Option<String>,
@@ -82,6 +83,7 @@ struct RawAgentEntry {
 #[serde(deny_unknown_fields)]
 struct RawRelay {
     id: Option<String>,
+    agent_id: Option<String>,
     target: Option<String>,
     server: Option<String>,
     username: Option<String>,
@@ -135,6 +137,7 @@ impl RawConfig {
             }
             relays.push(relay);
         }
+        reject_duplicate_device_ids(&agents, &relays)?;
         Ok(RedoorConfig {
             agent_token,
             server,
@@ -145,22 +148,52 @@ impl RawConfig {
     }
 }
 
-/// Rejects two managed rows that would register under one name, before any supervisor exists.
+/// Rejects two entries with the same device id, naming both.
+///
+/// Copying an `[[agents]]` or `[[relays]]` block copies its id, which would silently merge
+/// two devices. Ids are opaque, so a duplicate is never intended and every role may refuse it.
+fn reject_duplicate_device_ids(
+    agents: &[AgentConfig],
+    relays: &[RelayConfig],
+) -> Result<(), Invalid> {
+    let agent_ids = agents.iter().enumerate().filter_map(|(index, agent)| {
+        agent.id().map(|id| {
+            (
+                id,
+                format!("[[agents]] entry #{index} ('{}')", agent.effective_name()),
+            )
+        })
+    });
+    let relay_ids = relays.iter().filter_map(|relay| {
+        relay
+            .agent
+            .id
+            .as_ref()
+            .map(|id| (id, format!("[[relays]] entry '{}'", relay.id)))
+    });
+    let mut seen: Vec<(&AgentId, String)> = Vec::new();
+    for (id, label) in agent_ids.chain(relay_ids) {
+        if let Some((_, first)) = seen.iter().find(|(existing, _)| *existing == id) {
+            return Err(invalid(format!(
+                "duplicate device id '{id}' in {first} and {label}; remove the id from the copied entry so a new one is generated"
+            )));
+        }
+        seen.push((id, label));
+    }
+    Ok(())
+}
+
+/// Rejects managed rows whose effective names break the device name rules or collide,
+/// before any supervisor exists.
 ///
 /// Not part of `validate`: only the server registers managed agents, so other roles reading
 /// the same file (logs, relays, service install) must not fail on it.
-pub(super) fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
+pub(super) fn validate_managed_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
     let mut names = HashSet::new();
-    for agent in agents {
-        let name = match agent {
-            AgentConfig::Local(local) => {
-                local.name.clone().unwrap_or_else(default_local_agent_name)
-            }
-            AgentConfig::SshBacked(ssh) => ssh
-                .name
-                .clone()
-                .unwrap_or_else(|| default_agent_name(&ssh.target)),
-        };
+    for (index, agent) in agents.iter().enumerate() {
+        let name = agent.effective_name();
+        validate_device_name(&name)
+            .map_err(|error| invalid(format!("agents entry #{index}: {error}")))?;
         if !names.insert(name.clone()) {
             return Err(invalid(format!(
                 "duplicate managed agent name '{name}' in [[agents]]; set a distinct 'name' on one of the entries"
@@ -168,6 +201,13 @@ pub(super) fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Parses an optional configured device id with the entry label in the error.
+fn parse_optional_id(value: Option<String>, label: &str) -> Result<Option<AgentId>, Invalid> {
+    value
+        .map(|value| AgentId::parse(&value).map_err(|error| invalid(format!("{label}: {error}"))))
+        .transpose()
 }
 
 impl RawServerSection {
@@ -291,6 +331,7 @@ impl RawAgentEntry {
             )));
         }
         Ok(AgentConfig::Local(LocalAgentConfig {
+            id: parse_optional_id(self.id, &format!("agents entry #{index} 'id'"))?,
             name: self.name,
             home,
             log: self.log,
@@ -310,6 +351,7 @@ impl RawAgentEntry {
             )));
         }
         Ok(AgentConfig::SshBacked(SshBackedAgentConfig {
+            id: parse_optional_id(self.id, &format!("agents entry #{index} 'id'"))?,
             username: self.username,
             ssh_port: self.ssh_port,
             name: self.name,
@@ -350,6 +392,7 @@ impl RawRelay {
         let agent_app_name = non_blank(self.agent_app_name, "agent_app_name")?
             .map(|value| crate::app_name::parse_app_name(&value).map_err(invalid))
             .transpose()?;
+        let agent_id = parse_optional_id(self.agent_id, &format!("relay '{id}' 'agent_id'"))?;
         Ok(RelayConfig {
             id,
             server,
@@ -357,6 +400,7 @@ impl RawRelay {
             binary_source: non_blank(self.binary_source, "binary_source")?.map(PathBuf::from),
             agent_app_name,
             agent: SshBackedAgentConfig {
+                id: agent_id,
                 username: non_blank(self.username, "username")?,
                 ssh_port: self.ssh_port,
                 name: non_blank(self.name, "name")?,

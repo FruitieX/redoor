@@ -415,7 +415,11 @@ async fn run_named_relay(
     parent: LaunchParent,
 ) -> Result<ExitCode> {
     let paths = &context.paths;
-    let parsed = config::parse_config_file(&config_path(args.config, paths)?).await?;
+    let path = config_path(args.config, paths)?;
+    // The relay owns the id of the agent it launches, like the server owns managed ids, so a
+    // hand-written entry gets one before the remote agent first connects.
+    config::assign_missing_device_ids(&path, config::DeviceIdScope::Relay(&args.id)).await?;
+    let parsed = config::parse_config_file(&path).await?;
     let mut relay = config::require_relay(&parsed, &args.id)?.clone();
     let log = match relay.agent.log.clone() {
         Some(log) => log,

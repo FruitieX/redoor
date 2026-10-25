@@ -38,6 +38,9 @@ pub struct AgentConnection {
     pub capabilities: AgentCapabilities,
     /// Payload stream routing shared with the connection's session.
     pub streams: ConnectionStreams,
+    /// The session's inbound-traffic clock; tells whether this connection is still healthy
+    /// when another `hello` claims the same id.
+    pub activity: crate::actors::activity::ConnectionActivity,
     /// Open terminal streams, bounded per connection.
     pub terminals: HashSet<RequestId>,
     /// Open log streams, bounded per connection.
@@ -78,6 +81,8 @@ pub struct KnownAgent {
     pub identity: Option<AgentIdentity>,
     /// Last advertised capabilities, retained after disconnect like the identity.
     pub capabilities: AgentCapabilities,
+    /// Active warning that several machines use this device's id.
+    pub duplicate_id: Option<redoor_protocol::api::agents::DuplicateIdWarning>,
 }
 
 impl KnownAgent {
@@ -102,6 +107,7 @@ impl KnownAgent {
             socket_id: None,
             identity: None,
             capabilities: AgentCapabilities::default(),
+            duplicate_id: None,
         }
     }
 }
@@ -113,6 +119,14 @@ pub struct AgentRegistry {
     pub(crate) by_id: HashMap<AgentId, AgentConnection>,
     /// All agents known during this server process lifetime.
     pub(crate) known_by_id: HashMap<AgentId, KnownAgent>,
+    /// Recent takeovers of healthy connections per id, kept only while they can still add
+    /// up to a duplicate-id conflict or one is active.
+    pub(crate) takeovers: HashMap<AgentId, super::duplicate_ids::TakeoverHistory>,
+    /// Names claimed by managed devices that are being created or renamed, by device id.
+    /// The config edit stops the agent and rewrites the file before the inventory row
+    /// carries the new name, so without a reservation a standalone agent could take the
+    /// name in between and leave two devices with it.
+    pub(crate) reserved_names: HashMap<AgentId, String>,
 }
 
 impl AgentRegistry {

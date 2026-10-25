@@ -43,9 +43,15 @@ const LOG_FORMAT_ENV: &str = "REDOOR_SERVER_LOG_FORMAT";
 /// a restart re-reads `config.toml` from scratch.
 pub async fn run_server(args: CoordinatorArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     let location = ConfigLocation::find_or_bootstrap(args.config.clone(), &runtime.paths).await?;
+    // The server owns managed ids, so hand-written entries get theirs before anything uses them.
+    let assigned = redoor_core::config::assign_missing_device_ids(
+        &location.path,
+        redoor_core::config::DeviceIdScope::ManagedAgents,
+    )
+    .await?;
     let file = redoor_core::config::parse_config_file(&location.path).await?;
-    // Only the server registers managed agents, so only it rejects colliding names.
-    file.ensure_unique_agent_names(&location.path)?;
+    // Only the server registers managed agents, so only it rejects invalid or colliding names.
+    file.validate_managed_agent_names(&location.path)?;
     let config = ServerConfig::resolve(
         &args,
         &ServerEnvironment::from_process(),
@@ -54,6 +60,14 @@ pub async fn run_server(args: CoordinatorArgs, runtime: RuntimeContext) -> Resul
         &runtime.paths,
     )?;
     let server = ServerRuntime::build(config, runtime).await?;
+    // Logged only now because the logger starts inside `build`.
+    if assigned > 0 {
+        log!(
+            Level::Info,
+            "Assigned device ids to {} [[agents]] entries and wrote them to the config file",
+            assigned
+        );
+    }
     if location.created {
         server.open_first_run_login();
     }

@@ -42,6 +42,7 @@ impl AgentConnection {
             identity: request.identity,
             capabilities: request.capabilities,
             streams: request.streams,
+            activity: request.activity,
             terminals: Default::default(),
             log_streams: Default::default(),
             tickets: Default::default(),
@@ -144,6 +145,19 @@ pub(crate) enum CancelDelivery {
     Sent(Option<tokio::task::JoinHandle<()>>),
 }
 
+/// Why a `hello`'s identity is unacceptable, if it is; ids must be in the device id format
+/// and names must follow the name rules, or stored references and lookups would break.
+fn invalid_identity(request: &RegisterAgentRequest) -> Option<String> {
+    if !request.agent_id.is_valid() {
+        return Some(
+            redoor_protocol::ids::InvalidAgentId(request.agent_id.to_string()).to_string(),
+        );
+    }
+    redoor_protocol::ids::validate_device_name(&request.agent_name)
+        .err()
+        .map(|error| error.to_string())
+}
+
 /// Current wall-clock second, used for inventory timestamps.
 fn now() -> UnixTimestampSeconds {
     UnixTimestampSeconds::new(jiff::Timestamp::now().as_second())
@@ -242,32 +256,54 @@ impl RouterState {
     /// connection takes over and the old session is evicted. The stale session's later
     /// `UnregisterAgent` is ignored because its `socket_id` will not match.
     ///
-    /// A *different* agent id claiming a name that a live agent uses is refused instead, so
-    /// one agent can never silently take over another one's inventory row.
+    /// A `hello` whose id is not in the device id format or whose name breaks the name rules
+    /// is refused, because ids are stored in token scopes and names are used to address
+    /// devices. A *different* id claiming a name that a live or configured device uses is
+    /// refused too, so a name in a request always points to exactly one device. A `hello`
+    /// that keeps taking over healthy connections of its id is refused with `duplicate_id`,
+    /// because that is several machines sharing one id rather than a reconnect (see
+    /// `duplicate_ids`).
     pub(crate) fn register_agent(&mut self, request: RegisterAgentRequest) {
         // The token was validated during the websocket upgrade, so takeover here is only
         // reachable with a valid agent_token.
-        let name_owner = self
-            .agents
-            .by_id
-            .values()
-            .find(|info| info.agent_name == request.agent_name)
-            .map(|info| info.agent_id.clone());
-        if let Some(owner) = name_owner.filter(|owner| owner != &request.agent_id) {
+        if let Some(message) = invalid_identity(&request) {
             log!(
                 Level::Warning,
-                "Rejecting agent whose name is used by another live agent: agent_name={}, agent_id={}, owner_agent_id={}",
+                "Rejecting agent with an invalid identity: agent_name={}, agent_id={}, reason={}",
+                request.agent_name,
+                request.agent_id,
+                message
+            );
+            Self::reject_registration(request, RejectReason::InvalidIdentity, message);
+            return;
+        }
+        if let Some(owner) = self.name_owner(&request.agent_name, &request.agent_id) {
+            log!(
+                Level::Warning,
+                "Rejecting agent whose name is used by another device: agent_name={}, agent_id={}, owner_agent_id={}",
                 request.agent_name,
                 request.agent_id,
                 owner
             );
             let message = format!(
-                "Agent name '{}' is already used by connected agent '{}'",
+                "Device name '{}' is already used by device '{}'",
                 request.agent_name, owner
             );
             Self::reject_registration(request, RejectReason::DuplicateName, message);
             return;
         }
+        if let Err(message) = self.admit_takeover(&request) {
+            log!(
+                Level::Warning,
+                "Rejecting agent whose id is held by a healthy connection of another machine: agent_name={}, agent_id={}, hostname={}",
+                request.agent_name,
+                request.agent_id,
+                request.identity.hostname
+            );
+            Self::reject_registration(request, RejectReason::DuplicateId, message);
+            return;
+        }
+        self.forget_stale_name_holders(&request.agent_name, &request.agent_id);
         if let Some(old_connection) = self.agents.by_id.remove(&request.agent_id) {
             log!(
                 Level::Warning,
@@ -358,11 +394,15 @@ impl RouterState {
     /// Adds a configured stopped record before its dormant supervisor can be controlled.
     pub(crate) fn register_managed(&mut self, request: RegisterManagedAgentRequest) {
         let id = request.agent_id;
+        // Configuration checks already refused names of other configured or live devices, so
+        // only a previously seen standalone agent can still hold this name.
+        self.forget_stale_name_holders(&request.name, &id);
         let mut known = KnownAgent::unregistered(
             id.clone(),
             request.default_directory,
             AgentConnectionStatus::Stopped,
         );
+        known.name = request.name;
         known.managed = true;
         known.configuration_editable = request.configuration_editable;
         known.ssh_target = request.ssh_target;
@@ -374,6 +414,7 @@ impl RouterState {
     /// Removes all retained state for a managed agent whose supervisor is already dormant.
     pub(crate) fn unregister_managed(&mut self, request: UnregisterManagedAgentRequest) {
         self.agents.known_by_id.remove(&request.agent_id);
+        self.agents.takeovers.remove(&request.agent_id);
         if let Some(connection) = self.agents.by_id.remove(&request.agent_id) {
             self.release_connection(connection, None);
         }
@@ -444,6 +485,76 @@ impl RouterState {
         }
     }
 
+    /// Resolves a device value from a request: an exact id wins, otherwise the name.
+    ///
+    /// Names cannot be in the id format, so the two never compete. Resolution happens once,
+    /// before access control, so scope checks always compare ids.
+    pub(crate) fn resolve_device(&self, value: &str) -> Option<AgentId> {
+        if let Some((id, _)) = self
+            .agents
+            .known_by_id
+            .get_key_value(&AgentId::unchecked(value))
+        {
+            return Some(id.clone());
+        }
+        self.agents
+            .known_by_id
+            .values()
+            .find(|known| known.name == value)
+            .map(|known| known.id.clone())
+    }
+
+    /// Another device that holds `name` and must keep it: one that is connected or configured.
+    fn name_owner(&self, name: &str, agent_id: &AgentId) -> Option<AgentId> {
+        self.agents
+            .known_by_id
+            .values()
+            .filter(|known| &known.id != agent_id && known.name == name)
+            .find(|known| known.managed || self.agents.by_id.contains_key(&known.id))
+            .map(|known| known.id.clone())
+            .or_else(|| self.name_reserved_by_other(name, agent_id))
+    }
+
+    /// Another device's pending reservation of `name`, which a config edit is about to give
+    /// to that device.
+    fn name_reserved_by_other(&self, name: &str, agent_id: &AgentId) -> Option<AgentId> {
+        self.agents
+            .reserved_names
+            .iter()
+            .find(|(id, reserved)| *id != agent_id && reserved.as_str() == name)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// Claims `name` for a managed device before its config edit, atomically with every
+    /// `hello`, so no other device can take the name while the edit runs.
+    ///
+    /// Any device in the inventory holding the name refuses it, even a disconnected one,
+    /// because it is still listed under that name; a pending reservation of another device
+    /// refuses it too. The holder is returned so the caller can name it.
+    pub(crate) fn reserve_name(&mut self, agent_id: AgentId, name: String) -> Result<(), AgentId> {
+        let holder = self
+            .agents
+            .known_by_id
+            .values()
+            .find(|known| known.id != agent_id && known.name == name)
+            .map(|known| known.id.clone())
+            .or_else(|| self.name_reserved_by_other(&name, &agent_id));
+        if let Some(holder) = holder {
+            return Err(holder);
+        }
+        self.agents.reserved_names.insert(agent_id, name);
+        Ok(())
+    }
+
+    /// Drops inventory rows of disconnected standalone agents that held `name`, so a new
+    /// device can take over the name of one that is gone without making names ambiguous.
+    fn forget_stale_name_holders(&mut self, name: &str, agent_id: &AgentId) {
+        let live = &self.agents.by_id;
+        self.agents.known_by_id.retain(|id, known| {
+            id == agent_id || known.name != name || known.managed || live.contains_key(id)
+        });
+    }
+
     /// Projects every retained inventory entry for deterministic REST sorting.
     pub(crate) fn list_agents(&self) -> Vec<AgentListEntry> {
         self.agents
@@ -464,6 +575,7 @@ impl RouterState {
                 provisioning_status: info.provisioning_status.clone(),
                 identity: info.identity.clone(),
                 capabilities: info.capabilities,
+                duplicate_id: info.duplicate_id.clone(),
             })
             .collect()
     }
@@ -728,9 +840,11 @@ mod tests {
     fn insert_control(state: &mut RouterState, agent_id: &str) {
         let (lanes, _receivers) = ControlLanes::bounded(64, 16);
         let request = RegisterAgentRequest::for_test(
-            &AgentId::from(agent_id),
+            &redoor_core::test_support::test_agent_id(agent_id),
             lanes,
-            super::super::streams::ConnectionStreams::new(AgentId::from(agent_id)),
+            super::super::streams::ConnectionStreams::new(
+                redoor_core::test_support::test_agent_id(agent_id),
+            ),
         );
         state.commit_registration(request);
     }
@@ -747,7 +861,7 @@ mod tests {
             request_id,
             Flow::Command(CommandFlow {
                 request_id,
-                agent_id: AgentId::from(agent_id),
+                agent_id: redoor_core::test_support::test_agent_id(agent_id),
                 cancelable: false,
                 reply,
             }),
@@ -758,7 +872,7 @@ mod tests {
     /// Builds the router message a session sends for an agent's `command_response`.
     fn response_message(agent_id: &str, socket_id: SocketId, id: u64) -> super::super::RouterMsg {
         super::super::RouterMsg::RouteResponse(RouteResponse {
-            agent_id: AgentId::from(agent_id),
+            agent_id: redoor_core::test_support::test_agent_id(agent_id),
             socket_id,
             request_id: redoor_protocol::ids::RequestId::new(id),
             result: CommandOutcome::Ok(serde_json::Value::Null),
@@ -772,10 +886,10 @@ mod tests {
         let mut state = test_state();
         insert_control(&mut state, "owner");
         insert_control(&mut state, "other");
-        let owner_socket = state.agents.by_id[&AgentId::from("owner")]
+        let owner_socket = state.agents.by_id[&redoor_core::test_support::test_agent_id("owner")]
             .socket_id
             .clone();
-        let other_socket = state.agents.by_id[&AgentId::from("other")]
+        let other_socket = state.agents.by_id[&redoor_core::test_support::test_agent_id("other")]
             .socket_id
             .clone();
         let mut reply = insert_command(&mut state, 7, "owner");
@@ -806,16 +920,22 @@ mod tests {
     async fn duplicate_name_from_another_agent_id_is_rejected() {
         let mut state = test_state();
         let (owner_lanes, _owner_receivers) = ControlLanes::bounded(4, 4);
-        state.register_agent(RegisterAgentRequest::for_test(
-            &AgentId::from("owner"),
+        let mut owner = RegisterAgentRequest::for_test(
+            &redoor_core::test_support::test_agent_id("owner"),
             owner_lanes,
-            super::super::streams::ConnectionStreams::new(AgentId::from("owner")),
-        ));
+            super::super::streams::ConnectionStreams::new(
+                redoor_core::test_support::test_agent_id("owner"),
+            ),
+        );
+        owner.agent_name = "owner".to_string();
+        state.register_agent(owner);
         let (lanes, mut receivers) = ControlLanes::bounded(4, 4);
         let mut request = RegisterAgentRequest::for_test(
-            &AgentId::from("impostor"),
+            &redoor_core::test_support::test_agent_id("impostor"),
             lanes,
-            super::super::streams::ConnectionStreams::new(AgentId::from("impostor")),
+            super::super::streams::ConnectionStreams::new(
+                redoor_core::test_support::test_agent_id("impostor"),
+            ),
         );
         request.agent_name = "owner".to_string();
         let (reply, decision) = oneshot::channel();
@@ -840,8 +960,18 @@ mod tests {
             })
         ));
         // The live owner keeps its connection and the impostor gets none.
-        assert!(state.agents.by_id.contains_key(&AgentId::from("owner")));
-        assert!(!state.agents.by_id.contains_key(&AgentId::from("impostor")));
+        assert!(
+            state
+                .agents
+                .by_id
+                .contains_key(&redoor_core::test_support::test_agent_id("owner"))
+        );
+        assert!(
+            !state
+                .agents
+                .by_id
+                .contains_key(&redoor_core::test_support::test_agent_id("impostor"))
+        );
         state.ui.refresh_check_task.abort();
     }
 
@@ -849,7 +979,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_of_the_same_agent_evicts_the_previous_connection() {
         let mut state = test_state();
-        let agent_id = AgentId::from("agent");
+        let agent_id = redoor_core::test_support::test_agent_id("agent");
         let (old_lanes, mut old_receivers) = ControlLanes::bounded(4, 4);
         state.register_agent(RegisterAgentRequest::for_test(
             &agent_id,
@@ -892,7 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn pruning_abandoned_cancelable_command_cancels_it_on_the_agent() {
         let mut state = test_state();
-        let agent_id = AgentId::from("prune-agent");
+        let agent_id = redoor_core::test_support::test_agent_id("prune-agent");
         let (lanes, mut receivers) = ControlLanes::bounded(64, 16);
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
@@ -931,10 +1061,11 @@ mod tests {
     #[tokio::test]
     async fn retry_lifecycle_evicts_existing_managed_connection() {
         let mut state = test_state();
-        let agent_id = AgentId::from("managed-retry");
+        let agent_id = redoor_core::test_support::test_agent_id("managed-retry");
         let (register_reply, register_receiver) = oneshot::channel();
         state.register_managed(RegisterManagedAgentRequest {
             agent_id: agent_id.clone(),
+            name: "managed-retry".to_string(),
             default_directory: Some("/tmp".to_string()),
             configuration_editable: true,
             ssh_target: None,
@@ -976,7 +1107,7 @@ mod tests {
         insert_control(&mut state, "agent");
         // Clients that gate transfers on Connected may start them right after the welcome.
         assert_eq!(
-            state.agents.known_by_id[&AgentId::from("agent")].status,
+            state.agents.known_by_id[&redoor_core::test_support::test_agent_id("agent")].status,
             AgentConnectionStatus::Connected
         );
         state.ui.refresh_check_task.abort();
@@ -986,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_streams_are_capped_and_closing_cancels_them_on_the_agent() {
         let mut state = test_state();
-        let agent_id = AgentId::from("agent");
+        let agent_id = redoor_core::test_support::test_agent_id("agent");
         let (lanes, mut receivers) = ControlLanes::bounded(64, 16);
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
@@ -996,7 +1127,7 @@ mod tests {
         let open = |state: &mut RouterState| {
             let (reply, receiver) = oneshot::channel();
             state.open_terminal(super::super::messages::OpenTerminalRequest {
-                agent_id: AgentId::from("agent"),
+                agent_id: redoor_core::test_support::test_agent_id("agent"),
                 size: redoor_protocol::wire::terminal::TerminalSize::new(24, 80).unwrap(),
                 cwd: "/".to_string(),
                 reply,
@@ -1043,7 +1174,7 @@ mod tests {
     #[tokio::test]
     async fn full_control_queue_rejects_commands_and_preserves_priority_lane() {
         let mut state = test_state();
-        let agent_id = AgentId::from("bounded-agent");
+        let agent_id = redoor_core::test_support::test_agent_id("bounded-agent");
         let (lanes, mut receivers) = ControlLanes::bounded(1, 1);
         state.commit_registration(RegisterAgentRequest::for_test(
             &agent_id,
@@ -1113,5 +1244,151 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Registers a connected test agent with an explicit name and returns its id.
+    fn register_named(state: &mut RouterState, label: &str, name: &str) -> AgentId {
+        let agent_id = redoor_core::test_support::test_agent_id(label);
+        let (lanes, _receivers) = ControlLanes::bounded(4, 4);
+        let mut request = RegisterAgentRequest::for_test(
+            &agent_id,
+            lanes,
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
+        );
+        request.agent_name = name.to_string();
+        state.register_agent(request);
+        agent_id
+    }
+
+    /// Refuses a `hello` and returns the rejection the session would see.
+    fn rejection_for(state: &mut RouterState, agent_id: AgentId, name: &str) -> RejectReason {
+        let (lanes, _receivers) = ControlLanes::bounded(4, 4);
+        let mut request = RegisterAgentRequest::for_test(
+            &agent_id,
+            lanes,
+            super::super::streams::ConnectionStreams::new(agent_id.clone()),
+        );
+        request.agent_name = name.to_string();
+        let (reply, mut decision) = oneshot::channel();
+        request.reply = Some(reply);
+        state.register_agent(request);
+        match decision.try_recv() {
+            Ok(Err(rejection)) => rejection.reason,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    /// Ids are stored in token scopes and names address devices, so a `hello` that breaks
+    /// either format is refused before it can enter the inventory.
+    #[tokio::test]
+    async fn hello_with_invalid_id_or_name_is_rejected() {
+        let mut state = test_state();
+        // Readable ids from earlier versions are not accepted.
+        assert_eq!(
+            rejection_for(&mut state, AgentId::unchecked("pi"), "pi"),
+            RejectReason::InvalidIdentity
+        );
+        // A missing id deserializes as an empty string and is refused the same way.
+        assert_eq!(
+            rejection_for(&mut state, AgentId::unchecked(""), "pi"),
+            RejectReason::InvalidIdentity
+        );
+        let valid = redoor_core::test_support::test_agent_id("valid");
+        // A name that looks like an id would make name-or-id lookups ambiguous.
+        assert_eq!(
+            rejection_for(&mut state, valid.clone(), "dev_abcdefghijklmnopqrst"),
+            RejectReason::InvalidIdentity
+        );
+        // ':' and '/' would break `device:path` and URLs.
+        assert_eq!(
+            rejection_for(&mut state, valid, "a:b"),
+            RejectReason::InvalidIdentity
+        );
+        // Nothing reached the inventory.
+        assert!(state.agents.known_by_id.is_empty());
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// Requests accept a name or an id; an exact id wins and unknown values resolve to nothing.
+    #[tokio::test]
+    async fn resolve_device_prefers_ids_then_names() {
+        let mut state = test_state();
+        let pi = register_named(&mut state, "pi", "pi");
+        let laptop = register_named(&mut state, "laptop", "laptop");
+        // A name resolves to the device that currently has it.
+        assert_eq!(state.resolve_device("pi"), Some(pi.clone()));
+        // An id resolves to its device regardless of names.
+        assert_eq!(state.resolve_device(laptop.as_str()), Some(laptop));
+        // Unknown values are "device not found".
+        assert_eq!(state.resolve_device("nope"), None);
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// A name reserved for a managed rename cannot be taken by a standalone agent that
+    /// connects while the config edit runs, and is free again once released.
+    #[tokio::test]
+    async fn reserved_name_refuses_a_standalone_hello_until_released() {
+        let mut state = test_state();
+        let managed = redoor_core::test_support::test_agent_id("managed");
+        assert!(
+            state
+                .reserve_name(managed.clone(), "pi".to_string())
+                .is_ok()
+        );
+        // A standalone agent claiming the reserved name is refused like a live holder.
+        assert_eq!(
+            rejection_for(
+                &mut state,
+                redoor_core::test_support::test_agent_id("standalone"),
+                "pi"
+            ),
+            RejectReason::DuplicateName
+        );
+        // A second edit reserving the same name for another device is refused too.
+        let other = redoor_core::test_support::test_agent_id("other");
+        assert_eq!(
+            state.reserve_name(other.clone(), "pi".to_string()),
+            Err(managed.clone())
+        );
+        state.agents.reserved_names.remove(&managed);
+        // Once released, the name is free again.
+        assert!(state.reserve_name(other, "pi".to_string()).is_ok());
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// Any listed device holds its name for reservations, even a disconnected one, so a
+    /// create or rename never produces two rows with one name.
+    #[tokio::test]
+    async fn reserve_name_refuses_names_of_listed_devices() {
+        let mut state = test_state();
+        let holder = register_named(&mut state, "holder", "pi");
+        let socket = state.agents.by_id[&holder].socket_id.clone();
+        state.unregister_agent(holder.clone(), socket);
+        // The disconnected device is still listed as `pi`.
+        assert_eq!(
+            state.reserve_name(
+                redoor_core::test_support::test_agent_id("managed"),
+                "pi".to_string()
+            ),
+            Err(holder.clone())
+        );
+        // A device may always reserve its own current name.
+        assert!(state.reserve_name(holder, "pi".to_string()).is_ok());
+        state.ui.refresh_check_task.abort();
+    }
+
+    /// A new device may take the name of a disconnected standalone agent, and the stale row is
+    /// dropped so the name keeps pointing at exactly one device.
+    #[tokio::test]
+    async fn new_device_takes_the_name_of_a_disconnected_standalone_agent() {
+        let mut state = test_state();
+        let old = register_named(&mut state, "old", "pi");
+        let socket = state.agents.by_id[&old].socket_id.clone();
+        state.unregister_agent(old.clone(), socket);
+        let new = register_named(&mut state, "new", "pi");
+        // The name now resolves to the new device only.
+        assert_eq!(state.resolve_device("pi"), Some(new));
+        assert!(!state.agents.known_by_id.contains_key(&old));
+        state.ui.refresh_check_task.abort();
     }
 }
