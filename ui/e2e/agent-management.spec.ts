@@ -187,10 +187,12 @@ test.describe.serial("Agent management", () => {
             name: `Remove ${EDITED_LOCAL_AGENT} from Redoor?`,
         });
 
+        // The UI addresses the device by its id, which the rename kept.
+        const localDeleteUrl = `${WEB_BASE_URL}/api/v1/local-agents/${(await getAgent(page.request, EDITED_LOCAL_AGENT)).id}`;
+
         const localDeleteRequest = page.waitForRequest(
             (request) =>
-                request.url() ===
-                    `${WEB_BASE_URL}/api/v1/local-agents/${encodeURIComponent(EDITED_LOCAL_AGENT)}` &&
+                request.url() === localDeleteUrl &&
                 request.method() === "DELETE",
         );
 
@@ -286,11 +288,12 @@ test.describe.serial("Agent management", () => {
             name: `Remove ${EDITED_AGENT} from Redoor?`,
         });
 
+        // The UI addresses the device by its id, which the rename kept.
+        const sshDeleteUrl = `${WEB_BASE_URL}/api/v1/agents/${(await getAgent(page.request, EDITED_AGENT)).id}`;
+
         const sshDeleteRequest = page.waitForRequest(
             (request) =>
-                request.url() ===
-                    `${WEB_BASE_URL}/api/v1/agents/${encodeURIComponent(EDITED_AGENT)}` &&
-                request.method() === "DELETE",
+                request.url() === sshDeleteUrl && request.method() === "DELETE",
         );
 
         await confirmation
@@ -561,7 +564,8 @@ test.describe.serial("Agent management", () => {
             page.getByLabel("SSH password", { exact: true }),
         ).toBeDisabled();
         await page.getByLabel("SSH username").fill("redoor");
-        const updateUrl = `${WEB_BASE_URL}/api/v1/agents/${encodeURIComponent(CREATED_SSH_MODE_SWITCH_AGENT)}`;
+        // The UI addresses the device by its id.
+        const updateUrl = `${WEB_BASE_URL}/api/v1/agents/${(await getAgent(page.request, CREATED_SSH_MODE_SWITCH_AGENT)).id}`;
 
         const [updateResponse] = await Promise.all([
             page.waitForResponse(
@@ -811,7 +815,7 @@ test.describe.serial("Agent management", () => {
 
         const log = await fs.readFile(SERVER_LOG, "utf8");
         // Absence of registration proves the valid managed child was not launched at server startup.
-        expect(log).not.toContain(`Agent registered: agent_id=${VALID_AGENT}`);
+        expect(log).not.toContain(`agent_name=${VALID_AGENT},`);
     });
 
     test("keeps offline file tabs at their destinations and opens them on connection", async ({
@@ -894,15 +898,14 @@ test.describe.serial("Agent management", () => {
         });
 
         let startRequests = 0;
-        await page.route(
-            `**/api/v1/agents/${VALID_AGENT}/start`,
-            async (route) => {
-                startRequests += 1;
-                await gate;
-                await route.continue();
-                markContinued?.();
-            },
-        );
+        // The UI addresses devices by id, so intercept the id's start endpoint.
+        const startRoute = `**/api/v1/agents/${(await getAgent(page.request, VALID_AGENT)).id}/start`;
+        await page.route(startRoute, async (route) => {
+            startRequests += 1;
+            await gate;
+            await route.continue();
+            markContinued?.();
+        });
         await page.goto(`${WEB_BASE_URL}/`);
         await page
             .getByRole("link", { name: `${VALID_AGENT}, stopped` })
@@ -932,7 +935,7 @@ test.describe.serial("Agent management", () => {
 
         releaseStart();
         await continued;
-        await page.unroute(`**/api/v1/agents/${VALID_AGENT}/start`);
+        await page.unroute(startRoute);
 
         await expect
             .poll(

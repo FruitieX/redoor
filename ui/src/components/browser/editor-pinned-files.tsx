@@ -2,6 +2,7 @@ import * as React from "react";
 import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
 
+import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { IconButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
@@ -12,6 +13,7 @@ import {
     unpinFile,
     useUserState,
 } from "#ui/user-state";
+import { useAgents } from "#ui/use-agents";
 
 /** Keeps pinned destinations reachable when the full-window editor covers the sidebar. */
 export function EditorPinnedFiles(props: {
@@ -19,6 +21,7 @@ export function EditorPinnedFiles(props: {
     filePath: string;
 }) {
     const [userState, setUserState] = useUserState();
+    const agents = useAgents();
     const listRef = React.useRef<HTMLElement>(null);
 
     if (userState.pinnedFiles.length === 0) {
@@ -63,6 +66,9 @@ export function EditorPinnedFiles(props: {
                         <EditorPin
                             key={getPinnedFileKey(file)}
                             file={file}
+                            agent={agents.find(
+                                (agent) => agent.id === file.agentId,
+                            )}
                             isActive={
                                 file.agentId === props.agentId &&
                                 file.path === props.filePath
@@ -92,15 +98,20 @@ function EditorPin(props: {
         name: string;
         agentName: string;
     };
+    /** The pinned file's device, or undefined while it is absent from the inventory. */
+    agent: Agent | undefined;
     isActive: boolean;
     onClose: () => void;
 }) {
+    // The stored name is only a label for a device the inventory no longer lists.
+    const deviceName = props.agent?.name ?? props.file.agentName;
+
     return (
         <SortableItem id={getPinnedFileKey(props.file)}>
             {(item) => (
                 <li
                     {...item.dragProps}
-                    aria-label={`Pinned file ${props.file.name} on ${props.file.agentName}`}
+                    aria-label={`Pinned file ${props.file.name} on ${deviceName}`}
                     ref={item.setNodeRef}
                     style={item.style}
                     className={`flex items-center rounded ${
@@ -116,19 +127,35 @@ function EditorPin(props: {
                     }`}
                 >
                     <Tooltip
-                        content={`Open ${props.file.path} on ${props.file.agentName}`}
+                        content={
+                            props.agent
+                                ? `Open ${props.file.path} on ${deviceName}`
+                                : `${deviceName} is not available`
+                        }
                     >
-                        <Link
-                            {...browserRoute(
-                                props.file.agentId,
-                                props.file.path,
-                            )}
-                            aria-label={props.file.name}
-                            aria-current={props.isActive ? "page" : undefined}
-                            className="block px-3 py-1 text-sm whitespace-nowrap"
-                        >
-                            {props.file.name}
-                        </Link>
+                        {/* Links follow the device id, never the stored name, which another
+                            device may have taken since the file was pinned. */}
+                        {props.agent ? (
+                            <Link
+                                {...browserRoute(props.agent, props.file.path)}
+                                aria-label={props.file.name}
+                                aria-current={
+                                    props.isActive ? "page" : undefined
+                                }
+                                className="block px-3 py-1 text-sm whitespace-nowrap"
+                            >
+                                {props.file.name}
+                            </Link>
+                        ) : (
+                            <span
+                                aria-label={props.file.name}
+                                aria-disabled="true"
+                                tabIndex={0}
+                                className="block px-3 py-1 text-sm whitespace-nowrap opacity-60"
+                            >
+                                {props.file.name}
+                            </span>
+                        )}
                     </Tooltip>
                     <IconButton
                         type="button"

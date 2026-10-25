@@ -53,7 +53,7 @@ test.describe("Open diff line", () => {
         await $`git -C ${repositoryPath} commit -m baseline`;
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?view=git`,
         );
         const diff = page.getByRole("region", { name: "Full Git diff" });
         await expect(diff).toContainText(TARGET_TEXT);

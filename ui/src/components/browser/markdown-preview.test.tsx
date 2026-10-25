@@ -11,7 +11,7 @@ afterEach(() => {
 test("highlights a labeled TypeScript fence", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`\`\`\`typescript
@@ -32,7 +32,7 @@ test("leaves inline code unhighlighted", () => {
     const view = render(
         <MarkdownPreview
             content="Use `const` inline."
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
         />,
@@ -49,7 +49,7 @@ test("leaves inline code unhighlighted", () => {
 test("leaves an unknown language fence readable", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`\`\`\`unknown-language
@@ -69,7 +69,7 @@ some readable source
 test("escapes HTML-like source in a recognized fence", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`\`\`\`typescript
@@ -88,33 +88,32 @@ test("escapes HTML-like source in a recognized fence", () => {
 test("resolves relative file links from the markdown directory", () => {
     const link = resolveMarkdownFileLink({
         href: "../source/file%20name.ts#L10",
-        agentId: "agent one",
         filePath: "/repo/docs/README.md",
         repositoryRoot: "/repo",
     });
 
     // Relative links follow the source document and retain useful URL fragments.
-    expect(link).toBe(
-        "/agents/agent%20one/browser/repo/source/file%20name.ts#L10",
-    );
+    expect(link).toEqual({
+        path: "/repo/source/file name.ts",
+        hash: "L10",
+    });
 });
 
 test("resolves absolute markdown links from the repository root", () => {
     const link = resolveMarkdownFileLink({
         href: "/source/main.ts",
-        agentId: "agent",
         filePath: "/repo/docs/README.md",
         repositoryRoot: "/repo",
     });
 
     // A leading slash follows Git hosting conventions while browsing a worktree.
-    expect(link).toBe("/agents/agent/browser/repo/source/main.ts");
+    expect(link).toEqual({ path: "/repo/source/main.ts", hash: undefined });
 });
 
 test("renders nested YAML frontmatter with indentation preserved", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`---
@@ -147,7 +146,7 @@ completions:
 test("collapses YAML frontmatter without hiding the document body", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`---
@@ -176,11 +175,10 @@ Visible body
 test("keeps absolute markdown links filesystem-rooted outside git", () => {
     const link = resolveMarkdownFileLink({
         href: "/etc/hosts",
-        agentId: "agent",
         filePath: "/tmp/README.md",
         repositoryRoot: null,
     });
 
     // Outside a worktree there is no repository root to reinterpret the path against.
-    expect(link).toBe("/agents/agent/browser/etc/hosts");
+    expect(link).toEqual({ path: "/etc/hosts", hash: undefined });
 });

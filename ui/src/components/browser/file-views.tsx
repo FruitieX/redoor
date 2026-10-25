@@ -441,7 +441,7 @@ function useFileSaveShortcut(onSave: () => void) {
 
 /** Selects the editor body without coupling its loading states to draft ownership. */
 function FileEditorSurface(props: {
-    agentId: string;
+    deviceName: string;
     filePath: string;
     repositoryRoot: string | null;
     isPending: boolean;
@@ -505,7 +505,7 @@ function FileEditorSurface(props: {
             >
                 <MarkdownPreview
                     content={props.content}
-                    agentId={props.agentId}
+                    deviceName={props.deviceName}
                     filePath={props.filePath}
                     repositoryRoot={props.repositoryRoot}
                 />
@@ -860,7 +860,7 @@ export function FileEditView(props: FileEditViewProps) {
 
                 <div className="flex min-h-0 flex-1 flex-col">
                     <FileEditorSurface
-                        agentId={props.agent.id}
+                        deviceName={props.agent.name}
                         filePath={props.filePath}
                         repositoryRoot={props.repositoryRoot}
                         isPending={contentQuery.isPending}

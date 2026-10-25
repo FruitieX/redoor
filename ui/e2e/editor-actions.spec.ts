@@ -72,7 +72,7 @@ test.describe.serial("Editor file actions", () => {
             }
 
             await page.goto(
-                `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+                `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
             );
             const editor = page.getByLabel("File editor", { exact: true });
             await expect(editor).toHaveText("original content");
@@ -130,7 +130,7 @@ test.describe.serial("Editor file actions", () => {
             await deletion;
             // Successful removal returns directly to the parent without a second discard prompt.
             await expect(page).toHaveURL(
-                `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(ctx.testDirPath)}`,
+                `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(ctx.testDirPath)}`,
             );
             await expect(
                 page.getByRole("dialog", { name: "Discard unsaved changes?" }),
@@ -163,7 +163,7 @@ test.describe.serial("Editor file actions", () => {
             });
         });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         const editor = page.getByLabel("File editor", { exact: true });
         await expect(editor).toHaveText("original content");

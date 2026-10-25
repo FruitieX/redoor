@@ -8,6 +8,7 @@ import { Button } from "#ui/components/button";
 import { TextField } from "#ui/components/text-field";
 import { browserRoute } from "#ui/browser-route";
 import { invalidateAgentData } from "#ui/queries";
+import { invalidateDeviceViews } from "#ui/use-active-agent";
 import {
     getImmediateParentPath,
     joinBrowserPath,
@@ -59,14 +60,14 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
                 // The route must resolve again to turn this missing path into the new entry.
                 await Promise.all([
                     invalidateAgentData(queryClient, props.agent.id),
-                    router.invalidate(),
+                    invalidateDeviceViews(router),
                 ]);
 
                 return;
             }
 
             await navigate({
-                ...browserRoute(props.agent.id, entry.path),
+                ...browserRoute(props.agent, entry.path),
                 search: {},
             });
         },

@@ -48,7 +48,7 @@ test.describe.serial("File editor options", () => {
         const filePath = path.join(ctx.testDirPath, "vim-mode.txt");
         await fs.writeFile(filePath, "content1");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor");
@@ -107,7 +107,7 @@ test.describe.serial("File editor options", () => {
         const filePath = path.join(ctx.testDirPath, "vim-status-line.txt");
         await fs.writeFile(filePath, "content1");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await page.getByRole("button", { name: "Editor actions" }).click();
@@ -157,7 +157,7 @@ three four
 five`,
         );
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await page.getByRole("button", { name: "Editor actions" }).click();
@@ -220,7 +220,7 @@ five`,
         const filePath = path.join(ctx.testDirPath, "wrap-lines.txt");
         await fs.writeFile(filePath, "x".repeat(500));
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor");
@@ -261,7 +261,7 @@ five`,
         const filePath = path.join(ctx.testDirPath, "vim-mode.txt");
         await fs.writeFile(filePath, "content1");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await page.getByRole("button", { name: "Editor actions" }).click();
@@ -301,7 +301,7 @@ five`,
         const filePath = path.join(ctx.testDirPath, "vim-write.txt");
         await fs.writeFile(filePath, "content1");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await page.getByRole("button", { name: "Editor actions" }).click();

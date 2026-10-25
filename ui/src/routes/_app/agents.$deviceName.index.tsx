@@ -20,7 +20,7 @@ import {
     Package,
 } from "lucide-react";
 import { type Agent } from "#ui/api-client";
-import { getBrowserUrl } from "#ui/api-paths";
+import { browserRoute, deviceRoute } from "#ui/browser-route";
 import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import {
@@ -32,8 +32,12 @@ import {
     ProvisioningStatusList,
 } from "#ui/components/agent-lifecycle";
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
-import { CopyablePath } from "#ui/components/copyable-code-row";
+import {
+    CopyableCodeRow,
+    CopyablePath,
+} from "#ui/components/copyable-code-row";
 import { DetailCard } from "#ui/components/detail-card";
+import { DuplicateIdWarning } from "#ui/components/duplicate-id-warning";
 import { LinkButton } from "#ui/components/link-button";
 import { AgentRestartButton } from "#ui/components/agent-restart-button";
 import { UpgradeButton } from "#ui/components/upgrade-button";
@@ -41,7 +45,7 @@ import { provisioningStatusStoreAtom } from "#ui/provisioning-status";
 import { RouteError } from "#ui/components/route-error";
 import { agentDetailsQueryOptions, serverInfoQueryOptions } from "#ui/queries";
 import { useAgentReconnect } from "#ui/use-agent-reconnect";
-import { useRequiredAgent } from "#ui/use-agents";
+import { useRouteAgent } from "#ui/use-active-agent";
 import { formatAgentRecency, useNow } from "#ui/utils/agent-time";
 import { formatSize } from "#ui/utils/path";
 
@@ -62,7 +66,7 @@ const HIDDEN_MOUNT_TYPES = new Set([
     "binfmt_misc",
 ]);
 
-export const Route = createFileRoute("/_app/agents/$agentId/")({
+export const Route = createFileRoute("/_app/agents/$deviceName/")({
     component: AgentBoundary,
 });
 
@@ -71,14 +75,22 @@ export const Route = createFileRoute("/_app/agents/$agentId/")({
  * the page follows a connect or disconnect without reloading the route.
  */
 function AgentBoundary() {
-    const { agentId } = Route.useParams();
-    const agent = useRequiredAgent(agentId);
+    const agent = useRouteAgent();
 
     if (agent.status === "connected") {
         return <AgentDetails agent={agent} />;
     }
 
-    return <AgentLifecycle agent={agent} />;
+    return (
+        <>
+            {agent.duplicateId ? (
+                <div className="mx-auto max-w-4xl px-8 pt-8">
+                    <DuplicateIdWarning warning={agent.duplicateId} />
+                </div>
+            ) : null}
+            <AgentLifecycle agent={agent} />
+        </>
+    );
 }
 
 /** Shows the last remembered start attempt after the lifecycle page unmounts. */
@@ -141,11 +153,11 @@ function AgentDetailsContent(props: {
     const startStates = useAtomValue(agentStartStatesAtom);
     const setStartStates = useSetAtom(agentStartStatesAtom);
     const locations = useAtomValue(agentTabLocationsAtom);
-    const storedProvisioningByName = useAtomValue(provisioningStatusStoreAtom);
+    const storedProvisioningById = useAtomValue(provisioningStatusStoreAtom);
     const now = useNow();
     const startState = startStates[props.agent.id];
     const configPath = props.details.config_path || "No config file loaded";
-    const storedProvisioning = storedProvisioningByName[props.agent.name] ?? [];
+    const storedProvisioning = storedProvisioningById[props.agent.id] ?? [];
 
     const provisioningNowMs =
         props.agent.connectedAt !== null ? props.agent.connectedAt * 1000 : now;
@@ -156,10 +168,10 @@ function AgentDetailsContent(props: {
     React.useEffect(() => {
         if (!startState?.autoRedirect || props.agent.cwd === null) return;
 
-        const target = getAgentTabLocation(
+        const targetPath = getAgentTabLocation(
             locations,
             props.agent.id,
-            props.agent.getBrowserUrl(props.agent.cwd),
+            props.agent.cwd,
         );
 
         setStartStates((states) => {
@@ -168,7 +180,7 @@ function AgentDetailsContent(props: {
 
             return next;
         });
-        void router.navigate({ to: target });
+        void router.navigate(browserRoute(props.agent, targetPath));
     }, [
         locations,
         props.agent,
@@ -198,9 +210,10 @@ function AgentDetailsContent(props: {
                             label="Config file"
                             value={configPath}
                             copyAriaLabel="Copy config file path"
-                            browserUrl={
+                            browserLink={
                                 props.details.config_path
-                                    ? props.agent.getBrowserUrl(
+                                    ? browserRoute(
+                                          props.agent,
                                           props.details.config_path,
                                       )
                                     : undefined
@@ -313,7 +326,7 @@ function AgentUpgradeControls(props: {
     return (
         <div className="md:col-span-2">
             <UpgradeButton
-                target={`agent ${props.details.name}`}
+                target={`agent ${props.agent.name}`}
                 agentOs={props.details.os}
                 agentArch={props.details.arch}
                 agentExePath={props.details.exe_path}
@@ -380,7 +393,8 @@ function MountPoints(props: {
                                 <tr key={mountPoint.path}>
                                     <td className="max-w-md px-4 py-2.5">
                                         <Link
-                                            to={props.agent.getBrowserUrl(
+                                            {...browserRoute(
+                                                props.agent,
                                                 mountPoint.path,
                                             )}
                                             aria-label={`Browse mount point ${mountPoint.path}`}
@@ -439,27 +453,39 @@ function AgentDetailsHeader(props: {
                     className="flex min-w-0 items-center gap-3 text-2xl font-bold text-slate-100"
                 >
                     <HardDrive className="h-8 w-8 shrink-0 text-blue-400" />
-                    <span className="truncate">{props.details.name}</span>
+                    <span className="truncate">{props.agent.name}</span>
                 </h1>
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <AgentRestartButton agent={props.agent} />
                     <LinkButton
-                        to="/agents/$agentId/logs"
-                        params={{ agentId: props.details.id }}
+                        {...deviceRoute(
+                            props.agent,
+                            "/agents/$deviceName/logs",
+                        )}
                         variant="secondary"
                     >
                         <ScrollText className="h-4 w-4" /> View logs
                     </LinkButton>
                     <LinkButton
-                        to={getBrowserUrl(props.details.id, props.details.cwd)}
+                        {...browserRoute(props.agent, props.details.cwd)}
                     >
                         <FolderOpen className="h-4 w-4" /> Browse Files
                     </LinkButton>
                 </div>
             </div>
-            <p className="mt-1 text-sm text-slate-500">
-                ID: {props.details.id}
-            </p>
+            {/* Scripts that must stay on this device across renames address it by id. */}
+            <div className="mt-4 max-w-xl">
+                <CopyableCodeRow
+                    label="Device ID"
+                    value={props.agent.id}
+                    copyAriaLabel="Copy device id"
+                />
+            </div>
+            {props.agent.duplicateId ? (
+                <div className="mt-4">
+                    <DuplicateIdWarning warning={props.agent.duplicateId} />
+                </div>
+            ) : null}
         </div>
     );
 }
@@ -484,7 +510,7 @@ function DetailPathItem(props: {
     label: string;
     value: string;
     copyAriaLabel: string;
-    browserUrl?: string;
+    browserLink?: ReturnType<typeof browserRoute>;
 }) {
     return (
         <div className="flex min-w-0 items-center gap-3 text-sm">
@@ -493,9 +519,9 @@ function DetailPathItem(props: {
                 <CopyablePath
                     value={props.value}
                     copyAriaLabel={props.copyAriaLabel}
-                    to={props.browserUrl}
+                    link={props.browserLink}
                     linkAriaLabel={
-                        props.browserUrl
+                        props.browserLink
                             ? `Open ${props.label.toLowerCase()} in file browser`
                             : undefined
                     }

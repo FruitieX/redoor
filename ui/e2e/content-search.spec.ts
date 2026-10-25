@@ -78,7 +78,7 @@ last line`,
     test("searches paths by default and only requests the active mode", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?timeout=9&hidden=true&gitignore=false`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?timeout=9&hidden=true&gitignore=false`;
         const requests: URL[] = [];
         const requestBodies = new Map<URL, string | null>();
         page.on("request", (request) => {
@@ -129,7 +129,7 @@ last line`,
         await expect(pathResult).toBeVisible();
         await expect(pathResult).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(nestedPath)}`,
         );
 
         const [pathResultBounds, pathTextBounds] = await Promise.all([
@@ -213,7 +213,7 @@ last line`,
         // A real destination href preserves native middle-click and context-menu navigation.
         await expect(contentResult).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}?line=1`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(nestedPath)}?line=1`,
         );
 
         const searchRequestCount = requests.filter((request) =>
@@ -296,7 +296,7 @@ last line`,
     test("opens from shared entry points and restores results after navigation", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const launcher = page.getByRole("button", {
@@ -457,7 +457,7 @@ last line`,
 
         await dialog.getByRole("button", { name: "Close search" }).click();
         await expect(dialog).toBeHidden();
-        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentId}/logs`);
+        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentName}/logs`);
         await expect(
             page.getByRole("button", { name: "Search device" }),
         ).toBeVisible();
@@ -497,7 +497,7 @@ last line`,
             });
         });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?q=`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?q=`,
         );
 
         const dialog = page.getByRole("dialog", {
@@ -532,7 +532,7 @@ last line`,
         );
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?q=&timeout=9&hidden=false&gitignore=true`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?q=&timeout=9&hidden=false&gitignore=true`,
         );
         // Explicit URL state overrides preferences for shareable searches.
         await expect(
@@ -553,7 +553,7 @@ last line`,
     }) => {
         const filePath = path.join(ctx.testDirPath, "search-target.txt");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?q=hidden-search-value&mode=content&hidden=false&gitignore=true`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?q=hidden-search-value&mode=content&hidden=false&gitignore=true`,
         );
 
         const dialog = page.getByRole("dialog", {
@@ -620,7 +620,7 @@ last line`,
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(gitRootNestedPath)}?q=git-root-unique-value&mode=content`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(gitRootNestedPath)}?q=git-root-unique-value&mode=content`,
         );
 
         const dialog = page.getByRole("dialog", {
@@ -653,7 +653,7 @@ last line`,
         ).toBeVisible();
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(gitRootOutsidePath)}?q=&mode=content`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(gitRootOutsidePath)}?q=&mode=content`,
         );
         // Paths outside a worktree must not offer git-root search because no extra git lookup is allowed.
         await expect(
@@ -678,7 +678,7 @@ test.describe("Mobile agent search", () => {
 
     test("fills the viewport", async ({ page }) => {
         await page.setViewportSize({ width: 390, height: 844 });
-        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentId}?q=`);
+        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentName}?q=`);
 
         const dialog = page.getByRole("dialog", {
             name: "Search device",

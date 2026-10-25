@@ -860,7 +860,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
     test("does not invoke single-key shortcuts while the terminal is focused", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const filterInput = page.getByRole("searchbox", {

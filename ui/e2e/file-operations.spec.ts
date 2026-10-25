@@ -61,10 +61,10 @@ test.describe.serial("File Operations", () => {
             await page.goto(ctx.agentBrowserUrl);
             await page
                 .locator(
-                    `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                    `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
                 )
                 .click();
-            const uploadDestinationUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+            const uploadDestinationUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
             await Promise.all([
                 page.waitForURL(uploadDestinationUrl),
                 page
@@ -150,7 +150,7 @@ test.describe.serial("File Operations", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const uploadName = `single-upload-${Date.now()}.txt`;
         let releaseUpload = () => {};
 
@@ -237,7 +237,7 @@ test.describe.serial("File Operations", () => {
         );
 
         try {
-            const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+            const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
             await page.goto(directoryUrl);
             await page
                 .getByLabel("Choose directory to upload")
@@ -280,7 +280,7 @@ test.describe.serial("File Operations", () => {
     });
 
     test("should reject selections over 100 files", async ({ page }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         await page.goto(directoryUrl);
 
         const files = Array.from({ length: 101 }, (_value, index) => ({
@@ -300,7 +300,7 @@ test.describe.serial("File Operations", () => {
     });
 
     test("should upload at most five files concurrently", async ({ page }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         let activeUploads = 0;
         let maximumActiveUploads = 0;
         let enteredUploads = 0;
@@ -369,7 +369,7 @@ test.describe.serial("File Operations", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
         await page.getByRole("link", { name: "subdir3", exact: true }).click();
@@ -413,7 +413,7 @@ test.describe.serial("File Operations", () => {
 
         // The created directory becomes the active location so users can work in it immediately.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(createdDirectoryPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(createdDirectoryPath)}`,
         );
 
         const createdDirectoryStats = await fs.stat(createdDirectoryPath);
@@ -426,7 +426,7 @@ test.describe.serial("File Operations", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page.getByRole("button", { name: "New", exact: true }).click();
         await page
@@ -471,7 +471,7 @@ test.describe.serial("File Operations", () => {
     }) => {
         const fileName = `created-via-ui-${Date.now()}.txt`;
         const filePath = path.join(ctx.testDirPath, "subdir3", fileName);
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
 
         await page.goto(directoryUrl);
         await page.getByRole("button", { name: "New", exact: true }).click();
@@ -495,7 +495,7 @@ test.describe.serial("File Operations", () => {
 
         // New files open directly in edit mode so content can be entered immediately.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         // The editor being ready proves the empty upload produced an editable text file.
         await expect(
@@ -506,7 +506,7 @@ test.describe.serial("File Operations", () => {
     });
 
     test("should explain clipboard paste behavior", async ({ page }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         await page.goto(directoryUrl);
 
         await page.getByRole("button", { name: "Paste files or text" }).hover();
@@ -520,7 +520,7 @@ test.describe.serial("File Operations", () => {
     test("should preselect the pasted text filename before its extension", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         await page.goto(directoryUrl);
         await expect(
             page.getByRole("button", { name: "Paste files or text" }),
@@ -561,7 +561,7 @@ test.describe.serial("File Operations", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const originalName = `inline.${Date.now()}.archive.txt`;
         const renamedName = `inline-renamed-${Date.now()}.txt`;
         const originalPath = path.join(directoryPath, originalName);
@@ -635,7 +635,7 @@ test.describe.serial("File Operations", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const originalName = `inline-directory-${Date.now()}`;
         const renamedName = `inline-renamed-directory-${Date.now()}`;
         const originalPath = path.join(directoryPath, originalName);
@@ -699,7 +699,7 @@ test.describe.serial("File Operations", () => {
 
     test("should delete a file from its row action menu", async ({ page }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const fileName = `delete-from-row-${Date.now()}.txt`;
         const filePath = path.join(directoryPath, fileName);
         await fs.writeFile(filePath, "temporary row content");
@@ -756,7 +756,7 @@ test.describe.serial("File Operations", () => {
         await interceptMacosTrashMove(page, deletableFilePath);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(deletableFilePath)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(deletableFilePath)}?view=details`,
         );
 
         await page.getByRole("button", { name: "More", exact: true }).click();
@@ -798,7 +798,7 @@ test.describe.serial("File Operations", () => {
         // Redirecting back to the parent directory confirms the delete request completed successfully.
         await expect(page).toHaveURL(
             new RegExp(
-                `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}$`,
+                `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}$`,
             ),
         );
         // The deleted entry disappearing from the listing proves the route refreshed with the new filesystem state.
@@ -812,7 +812,7 @@ test.describe.serial("File Operations", () => {
     }) => {
         const fileName = `trash-error-${Date.now()}.txt`;
         const filePath = path.join(ctx.testDirPath, "subdir3", fileName);
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         await fs.writeFile(filePath, "must remain after failure");
         await page.route("**/raw/**?trash=true", async (route) => {
             await route.fulfill({
@@ -859,11 +859,11 @@ test.describe.serial("File Operations", () => {
             deletableDirectoryName,
         );
 
-        const parentDirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(parentDirectoryPath)}`;
+        const parentDirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(parentDirectoryPath)}`;
         await fs.mkdir(deletableDirectoryPath);
         await interceptMacosTrashMove(page, deletableDirectoryPath);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(deletableDirectoryPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(deletableDirectoryPath)}`,
         );
 
         await page.getByRole("button", { name: "More", exact: true }).click();
@@ -910,7 +910,7 @@ test.describe.serial("File Operations", () => {
     test("should select the open directory from the more menu", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
         await page.goto(directoryUrl);
         await expect(
             page.getByRole("navigation", { name: "Breadcrumbs" }),
@@ -976,7 +976,7 @@ test.describe.serial("File Operations", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
         await page.getByRole("link", { name: "subdir3", exact: true }).click();
@@ -1085,7 +1085,7 @@ test.describe.serial("File Operations", () => {
         const restoredPath = path.join(directoryPath, `restored-${secondName}`);
         await fs.writeFile(firstPath, "first trash item");
         await fs.writeFile(secondPath, "second trash item");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         await page.goto(directoryUrl);
 
         for (const [index, name] of [firstName, secondName].entries()) {
@@ -1138,7 +1138,7 @@ test.describe.serial("File Operations", () => {
             secondRow.getByRole("link", { name: secondName, exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(expectedTrashPayload)}`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(expectedTrashPayload)}`,
         );
         await secondRow
             .getByRole("link", { name: secondName, exact: true })

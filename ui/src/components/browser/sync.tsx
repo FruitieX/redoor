@@ -37,7 +37,7 @@ import {
 } from "#ui/utils/path";
 
 /** Names the destination a "view" link opens, so the router builds a real, typed link. */
-type ViewTarget = { agentId: string; path: string };
+type ViewTarget = { agent: Agent; path: string };
 
 /** Reuses the agent and path controls for cross-agent file operations. */
 function AgentPathFields(props: {
@@ -93,7 +93,7 @@ function AgentPathFields(props: {
                 ) : (
                     <Link
                         {...browserRoute(
-                            props.viewTarget.agentId,
+                            props.viewTarget.agent,
                             props.viewTarget.path,
                         )}
                         search={{}}
@@ -548,7 +548,7 @@ function useSyncWorkspace(props: {
         /** The "view" link target, which only exists for an absolute path. */
         viewTarget: selectedEndpoint?.path.startsWith("/")
             ? {
-                  agentId: selectedEndpoint.agent.id,
+                  agent: selectedEndpoint.agent,
                   path: selectedEndpoint.path,
               }
             : null,

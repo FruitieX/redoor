@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
 
 import type { Agent } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { IconButton } from "#ui/components/icon-button";
 import { useAgents } from "#ui/use-agents";
@@ -38,6 +39,41 @@ function SelectedFilesPanelActions(props: {
     );
 }
 
+/** Finds a selected path's device by id; the stored name is only a fallback label. */
+function findAgent(
+    agents: Agent[],
+    file: Pick<SelectedPath, "agentId">,
+): Agent | undefined {
+    return agents.find((agent) => agent.id === file.agentId);
+}
+
+/**
+ * Opens a selected path on its device. The link carries the device's current name, so it
+ * follows a rename; while the device is absent from the inventory there is nothing to open.
+ */
+function SelectedFileLink(props: {
+    agent: Agent | undefined;
+    file: SelectedPath;
+    className: string;
+}) {
+    if (!props.agent) {
+        return (
+            <span className={`${props.className} text-slate-400`}>
+                {props.file.fileName}
+            </span>
+        );
+    }
+
+    return (
+        <Link
+            {...browserRoute(props.agent, props.file.path)}
+            className={`${props.className} text-blue-400 hover:underline`}
+        >
+            {props.file.fileName}
+        </Link>
+    );
+}
+
 /** Displays selected paths in their scan-friendly order with per-item removal controls. */
 function SelectedFilesTable(props: {
     agents: Agent[];
@@ -53,21 +89,14 @@ function SelectedFilesTable(props: {
                         className="flex min-w-0 items-start gap-3 p-3"
                     >
                         <div className="min-w-0 flex-1">
-                            <Link
-                                to={
-                                    props.agents
-                                        .find(
-                                            (agent) =>
-                                                agent.id === file.agentId,
-                                        )
-                                        ?.getBrowserUrl(file.path) ?? "/"
-                                }
-                                className="block break-words text-sm font-medium text-blue-400 hover:underline"
-                            >
-                                {file.fileName}
-                            </Link>
+                            <SelectedFileLink
+                                agent={findAgent(props.agents, file)}
+                                file={file}
+                                className="block break-words text-sm font-medium"
+                            />
                             <p className="mt-1 text-xs text-slate-500">
-                                {file.agentName}
+                                {findAgent(props.agents, file)?.name ??
+                                    file.agentName}
                             </p>
                             <p className="mt-1 break-all font-mono text-xs leading-relaxed text-slate-400">
                                 {file.path}
@@ -116,29 +145,17 @@ function SelectedFilesTable(props: {
                             className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint align-top"
                         >
                             <td className="p-3">
-                                <div className="flex flex-col">
-                                    <span className="text-sm font-medium text-slate-100">
-                                        {file.agentName}
-                                    </span>
-                                    <span className="text-xs text-slate-500">
-                                        {file.agentId}
-                                    </span>
-                                </div>
+                                <span className="text-sm font-medium text-slate-100">
+                                    {findAgent(props.agents, file)?.name ??
+                                        file.agentName}
+                                </span>
                             </td>
                             <td className="p-3">
-                                <Link
-                                    to={
-                                        props.agents
-                                            .find(
-                                                (agent) =>
-                                                    agent.id === file.agentId,
-                                            )
-                                            ?.getBrowserUrl(file.path) ?? "/"
-                                    }
-                                    className="text-sm font-medium text-blue-400 hover:underline"
-                                >
-                                    {file.fileName}
-                                </Link>
+                                <SelectedFileLink
+                                    agent={findAgent(props.agents, file)}
+                                    file={file}
+                                    className="text-sm font-medium"
+                                />
                             </td>
                             <td className="p-3">
                                 <div className="break-all font-mono text-xs text-slate-300">

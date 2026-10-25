@@ -49,17 +49,17 @@ export function useAgentViewContext(): AgentViewContext {
     }
 
     switch (leafRouteId) {
-        case "/_app/agents/$agentId/":
+        case "/_app/agents/$deviceName/":
             return { kind: "agent", agent: activeAgent };
-        case "/_app/agents/$agentId/edit":
+        case "/_app/agents/$deviceName/edit":
             return activeAgent.configurationEditable
                 ? { kind: "configuration", agent: activeAgent }
                 : null;
-        case "/_app/agents/$agentId/logs":
+        case "/_app/agents/$deviceName/logs":
             return isBrowsable(activeAgent)
                 ? { kind: "logs", agent: activeAgent }
                 : null;
-        case "/_app/agents/$agentId/trash":
+        case "/_app/agents/$deviceName/trash":
             return isBrowsable(activeAgent)
                 ? { kind: "trash", agent: activeAgent }
                 : null;

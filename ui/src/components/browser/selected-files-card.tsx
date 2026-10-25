@@ -236,7 +236,7 @@ function useTransferStarts(props: {
 
                         if (!sourceAgent) {
                             throw new Error(
-                                `Source device unavailable for selected item: ${file.agentId}`,
+                                `Source device unavailable for selected item: ${file.agentName}`,
                             );
                         }
 

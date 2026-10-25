@@ -24,10 +24,10 @@ test.describe.serial("Missing path creation", () => {
     }) => {
         const missingName = `created-from-missing-${Date.now()}`;
         const missingPath = `${ctx.testDirPath}/${missingName}`;
-        const missingUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(missingPath)}`;
+        const missingUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(missingPath)}`;
         const missingFileName = "new-file.txt";
         const missingFilePath = `${missingPath}/${missingFileName}`;
-        const missingFileUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(missingFilePath)}`;
+        const missingFileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(missingFilePath)}`;
         await page.goto(missingUrl);
 
         // A direct missing-path navigation remains at the requested destination.
@@ -89,7 +89,7 @@ test.describe.serial("Missing path creation", () => {
     }) => {
         const root = `${ctx.testDirPath}/nested-${Date.now()}`;
         const filePath = `${root}/file-parent/deeper/hosts.yml`;
-        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`;
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`;
         await page.goto(fileUrl);
 
         // The final segment is offered even when several ancestor directories are absent.
@@ -110,7 +110,7 @@ test.describe.serial("Missing path creation", () => {
         ).toBe(true);
 
         const directoryPath = `${root}/directory-parent/deeper/new-directory`;
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         await page.goto(directoryUrl);
         await page
             .getByRole("button", { name: "Directory", exact: true })
@@ -131,8 +131,8 @@ test.describe.serial("Missing path creation", () => {
         const missingParent = `missing-parent-${Date.now()}`;
         const missingChild = "missing-child";
         const missingPath = `${ctx.testDirPath}/${missingParent}/${missingChild}`;
-        const missingUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(missingPath)}`;
-        const existingParentUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const missingUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(missingPath)}`;
+        const existingParentUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(missingUrl);
 
         // The missing nested path must show the create form before breadcrumb navigation.

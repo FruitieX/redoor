@@ -36,7 +36,7 @@ test.describe.serial("Resumable transfer workflow", () => {
             }),
         );
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: "Select file file1.txt" })
@@ -182,13 +182,13 @@ test.describe.serial("Resumable transfer workflow", () => {
             });
         });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: "Select file file1.txt" })
             .click();
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agent2Id}/browser/${ctx.testDirUrlPath}/subdir2`,
+            `${WEB_BASE_URL}/agents/${ctx.agent2Name}/browser/${ctx.testDirUrlPath}/subdir2`,
         );
         await page
             .getByRole("button", {

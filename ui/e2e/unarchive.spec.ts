@@ -99,7 +99,7 @@ test.describe.serial("Unarchive file action", () => {
             });
         });
 
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         await page
@@ -397,7 +397,7 @@ test.describe.serial("Unarchive file action", () => {
                 listingRequests.push(request.url());
             }
         });
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         await page
             .getByRole("button", { name: "Actions for file isolation.tar.gz" })

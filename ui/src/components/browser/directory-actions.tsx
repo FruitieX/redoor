@@ -119,7 +119,7 @@ function CreateDirectoryDialog(props: {
         onSuccess: async (_, name) => {
             await navigate(
                 browserRoute(
-                    props.agent.id,
+                    props.agent,
                     joinBrowserPath(props.directoryPath, name),
                 ),
             );
@@ -170,7 +170,7 @@ function CreateFileDialog(props: {
         onSuccess: async (_, name) => {
             await navigate(
                 browserRoute(
-                    props.agent.id,
+                    props.agent,
                     joinBrowserPath(props.directoryPath, name),
                 ),
             );

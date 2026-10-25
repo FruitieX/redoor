@@ -43,7 +43,7 @@ test.describe.serial("Pending transfers in the file list", () => {
         }
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         // The listing must be loaded before the upload starts, so only the delayed relist can reveal staging.
         await expect(page.getByLabel("File entry file1.txt")).toBeVisible();

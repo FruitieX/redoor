@@ -88,6 +88,30 @@ function initialKind(
     return configuration?.kind ?? "ssh";
 }
 
+/** The device id format (`dev_` and 20 lowercase base32 characters), which names may not take. */
+const DEVICE_ID_FORMAT = /^dev_[a-z2-7]{20}$/;
+
+/**
+ * Mirrors the server's device name rules so a bad name is explained before the request. A
+ * blank name is allowed because the server then uses the hostname. `:` would break the CLI's
+ * `device:path` syntax and `/` the device URLs, and a name in the id format would be
+ * ambiguous because devices are addressed by name or id. The server still checks every
+ * name, so this is only earlier feedback.
+ */
+function validateDeviceName(name: string): string | null {
+    const trimmed = name.trim();
+
+    if (/[:/]/.test(trimmed)) {
+        return "Device name must not contain ':' or '/'";
+    }
+
+    if (DEVICE_ID_FORMAT.test(trimmed)) {
+        return "Device name must not look like a device id ('dev_' followed by 20 base32 characters)";
+    }
+
+    return null;
+}
+
 /** Builds the local POST/PUT body from trimmed optional inputs. */
 function localSubmitRequest(form: FormState): ManagedAgentSubmitRequest {
     const optional = (value: string) => value.trim() || null;
@@ -217,6 +241,14 @@ export function ManagedAgentForm(props: {
     /** Converts blank optional inputs to null so TOML only receives explicit settings. */
     const submit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+
+        const nameError = validateDeviceName(form.name);
+
+        if (nameError !== null) {
+            setValidationError(nameError);
+
+            return;
+        }
 
         if (kind === "local") {
             props.onSubmit(localSubmitRequest(form));
@@ -443,7 +475,7 @@ function LocalFields(props: {
                     label="Device name"
                     value={props.form.name}
                     placeholder="Defaults to hostname"
-                    description="Name shown in the UI. Defaults to this server's hostname when omitted."
+                    description="Unique name shown in the UI and device URLs, without : or /. Renaming keeps the device id. Defaults to this server's hostname when omitted."
                     autoFocus
                     disabled={props.disabled}
                     onChange={(value) => props.onChange("name", value)}
@@ -505,7 +537,7 @@ function ConnectionFields(props: {
                     label="Device name"
                     value={props.form.name}
                     placeholder="Defaults to target hostname"
-                    description="Name shown in the UI. Defaults to the target hostname when omitted."
+                    description="Unique name shown in the UI and device URLs, without : or /. Renaming keeps the device id. Defaults to the target hostname when omitted."
                     disabled={props.disabled}
                     onChange={(value) => props.onChange("name", value)}
                 />

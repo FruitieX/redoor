@@ -1,18 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { deviceRoute } from "#ui/browser-route";
 import { AlertCircle, HardDrive } from "lucide-react";
 
 import { LinkButton } from "#ui/components/link-button";
 import { LogViewer } from "#ui/components/log-viewer";
 import {
     agentLoggingLevelQueryOptions,
-    loadAgent,
+    loadDeviceRouteAgent,
     queryKeys,
 } from "#ui/queries";
-import { useRequiredAgent } from "#ui/use-agents";
+import { useRouteAgent } from "#ui/use-active-agent";
 
-export const Route = createFileRoute("/_app/agents/$agentId/logs")({
-    loader: async ({ params, context }) => {
-        const agent = await loadAgent(context, params.agentId);
+export const Route = createFileRoute("/_app/agents/$deviceName/logs")({
+    loader: async ({ context, parentMatchPromise }) => {
+        const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
 
         if (agent.status === "connected") {
             await context.queryClient.ensureQueryData(
@@ -25,8 +26,7 @@ export const Route = createFileRoute("/_app/agents/$agentId/logs")({
 
 /** Avoids opening a retrying live socket when retained inventory says the agent is disconnected. */
 function AgentLogsPage() {
-    const { agentId } = Route.useParams();
-    const agent = useRequiredAgent(agentId);
+    const agent = useRouteAgent();
 
     if (agent.status !== "connected") {
         return (
@@ -41,8 +41,7 @@ function AgentLogsPage() {
                         logs.
                     </p>
                     <LinkButton
-                        to="/agents/$agentId"
-                        params={{ agentId: agent.id }}
+                        {...deviceRoute(agent, "/agents/$deviceName")}
                         className="mt-6"
                     >
                         <HardDrive className="h-4 w-4" />

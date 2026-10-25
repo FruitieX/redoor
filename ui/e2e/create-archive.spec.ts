@@ -48,7 +48,7 @@ test.describe.serial("Create archive", () => {
 
     test.beforeAll(async () => {
         ctx = await setupTestDir("create-archive");
-        directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
     });
 
     test.afterAll(async () => {
@@ -258,7 +258,7 @@ test.describe.serial("Create archive", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agent2Id}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agent2Name}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", {

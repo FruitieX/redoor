@@ -24,7 +24,7 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "title-open.txt");
         await fs.writeFile(filePath, "alpha foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await expect(page.getByLabel("File editor")).toBeVisible();
@@ -109,7 +109,7 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "shortcut-open.txt");
         await fs.writeFile(filePath, "alpha foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await expect(page.getByLabel("File editor")).toBeVisible();
@@ -136,7 +136,7 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "selection-search.txt");
         await fs.writeFile(filePath, "foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         const editor = page.getByLabel("File editor");
         await expect(editor).toBeVisible();
@@ -175,7 +175,7 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "replace.txt");
         await fs.writeFile(filePath, "alpha foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await expect(page.getByLabel("File editor")).toBeVisible();
@@ -215,7 +215,7 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "tooltip.txt");
         await fs.writeFile(filePath, "content");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await expect(page.getByLabel("File editor")).toBeVisible();

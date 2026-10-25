@@ -12,6 +12,7 @@ import { useSetAtom } from "jotai";
 import { MoreHorizontal, Pencil, Play, Power, FolderOpen } from "lucide-react";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import type { Agent } from "#ui/api-client";
+import { browserRoute, deviceRoute } from "#ui/browser-route";
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { ProtocolMismatchAttempt } from "#bindings/ProtocolMismatchAttempt";
 import { ActionMenu, ActionMenuButton } from "#ui/components/action-menu";
@@ -21,6 +22,7 @@ import {
     VersionValue,
 } from "#ui/components/binary-identity";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
+import { DuplicateIdWarning } from "#ui/components/duplicate-id-warning";
 import { AgentRestartButton } from "#ui/components/agent-restart-button";
 import {
     agentsQueryOptions,
@@ -258,8 +260,10 @@ function AgentTable(props: {
                         >
                             <td className="px-4 py-3">
                                 <Link
-                                    to="/agents/$agentId"
-                                    params={{ agentId: agent.id }}
+                                    {...deviceRoute(
+                                        agent,
+                                        "/agents/$deviceName",
+                                    )}
                                     className="font-medium text-blue-400 hover:underline"
                                 >
                                     {agent.name}
@@ -289,6 +293,12 @@ function AgentTable(props: {
                                 {formatAgentRecency(agent, props.now)}
                             </td>
                             <td className="max-w-sm px-4 py-3 text-amber-300">
+                                {agent.duplicateId ? (
+                                    <DuplicateIdWarning
+                                        warning={agent.duplicateId}
+                                        compact
+                                    />
+                                ) : null}
                                 {agent.connectionIssue ? (
                                     <span
                                         role="alert"
@@ -296,7 +306,7 @@ function AgentTable(props: {
                                     >
                                         {agent.connectionIssue}
                                     </span>
-                                ) : (
+                                ) : agent.duplicateId ? null : (
                                     "—"
                                 )}
                                 {props.mutationErrors.get(agent.id) ? (
@@ -376,7 +386,7 @@ function AgentActionsMenu(props: {
                     props.agent.cwd !== null ? (
                         <ActionMenuButton asChild>
                             <Link
-                                to={props.agent.getBrowserUrl(props.agent.cwd)}
+                                {...browserRoute(props.agent, props.agent.cwd)}
                                 onClick={close}
                             >
                                 <FolderOpen className="h-4 w-4" /> Browse files
@@ -386,8 +396,10 @@ function AgentActionsMenu(props: {
                     {props.agent.configurationEditable ? (
                         <ActionMenuButton asChild>
                             <Link
-                                to="/agents/$agentId/edit"
-                                params={{ agentId: props.agent.id }}
+                                {...deviceRoute(
+                                    props.agent,
+                                    "/agents/$deviceName/edit",
+                                )}
                                 onClick={close}
                             >
                                 <Pencil className="h-4 w-4" /> Edit

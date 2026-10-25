@@ -1,19 +1,23 @@
 import * as React from "react";
-import { useRouterState } from "@tanstack/react-router";
 import { atom, useSetAtom } from "jotai";
 
 import { useBrowserLocation } from "#ui/use-browser-location";
 import { atomWithLocalStorage } from "./utils/local-storage-atom";
 
+/** Maps a device id to the filesystem path last browsed on it. */
 export type AgentTabLocations = Record<string, string>;
 
-/** Keeps every agent tab's last route available across switches and reloads. */
+/**
+ * Keeps every device's last browsed path available across switches and reloads. Entries are
+ * keyed by device id and hold a filesystem path rather than a URL, because URLs carry the
+ * device name, which a rename would leave pointing at nothing or at another device.
+ */
 export const agentTabLocationsAtom = atomWithLocalStorage<AgentTabLocations>(
-    "redoor.agent-tab-locations",
+    "redoor.device-browser-paths",
     {},
 );
 
-/** Records one route without replacing remembered locations for other agents. */
+/** Records one path without replacing remembered locations for other devices. */
 export const rememberAgentTabLocationAtom = atom(
     null,
     (
@@ -21,42 +25,34 @@ export const rememberAgentTabLocationAtom = atom(
         set,
         location: {
             agentId: string;
-            pathname: string;
+            path: string;
         },
     ) => {
         const locations = get(agentTabLocationsAtom);
 
-        if (locations[location.agentId] === location.pathname) {
+        if (locations[location.agentId] === location.path) {
             return;
         }
 
         set(agentTabLocationsAtom, {
             ...locations,
-            [location.agentId]: location.pathname,
+            [location.agentId]: location.path,
         });
     },
 );
 
 /**
- * Uses a remembered route only when it still belongs to the requested agent,
- * preventing malformed localStorage data from making one tab open another.
+ * Uses a remembered path only when it is a real absolute path, preventing malformed
+ * localStorage data from producing a broken browser route.
  */
 export function getAgentTabLocation(
     locations: AgentTabLocations,
     agentId: string,
     fallback: string,
 ): string {
-    const rememberedLocation = locations[agentId];
-    const agentPrefix = `/agents/${encodeURIComponent(agentId)}`;
+    const rememberedPath = locations[agentId];
 
-    if (
-        rememberedLocation === agentPrefix ||
-        rememberedLocation?.startsWith(`${agentPrefix}/`)
-    ) {
-        return rememberedLocation;
-    }
-
-    return fallback;
+    return rememberedPath?.startsWith("/") ? rememberedPath : fallback;
 }
 
 /**
@@ -68,22 +64,17 @@ export function useRememberAgentTabLocation() {
     const rememberAgentTabLocation = useSetAtom(rememberAgentTabLocationAtom);
     const browser = useBrowserLocation();
 
-    // The resolved location changes together with the matched routes. The live location moves
-    // first, which would pair the next page's path with the previous page's agent.
-    const pathname = useRouterState({
-        select: (state) => state.resolvedLocation?.pathname,
-    });
-
-    // The browser location comes from the same committed matches as the pathname, so the two
-    // always describe the same page. A browser route that loaded for a disconnected agent
-    // shows the lifecycle screen instead and is not worth returning to.
+    // The browser location comes from the committed matches, so its path and device always
+    // describe the same page. A browser route that loaded for a disconnected agent shows the
+    // lifecycle screen instead and is not worth returning to.
     const agentId = browser?.isConnected ? browser.agentId : null;
+    const path = browser?.path;
 
     React.useEffect(() => {
-        if (agentId === null || pathname === undefined) {
+        if (agentId === null || path === undefined) {
             return;
         }
 
-        rememberAgentTabLocation({ agentId, pathname });
-    }, [agentId, pathname, rememberAgentTabLocation]);
+        rememberAgentTabLocation({ agentId, path });
+    }, [agentId, path, rememberAgentTabLocation]);
 }

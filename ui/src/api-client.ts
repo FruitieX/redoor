@@ -12,6 +12,7 @@ import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import type { EchoRequest } from "#bindings/EchoRequest";
 import type { EchoResponse } from "#bindings/EchoResponse";
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
+import type { DuplicateIdWarning } from "#bindings/DuplicateIdWarning";
 import type { AgentConnectionStatus } from "#bindings/AgentConnectionStatus";
 import type { StartAgentResponse } from "#bindings/StartAgentResponse";
 import type { RetryAgentStartResponse } from "#bindings/RetryAgentStartResponse";
@@ -97,7 +98,7 @@ import {
 import * as apiPaths from "#ui/api-paths";
 import type { LsResponse } from "#ui/ls-response";
 
-const { appendFilesystemPath, encodeFilesystemPath, getBrowserUrl } = apiPaths;
+const { appendFilesystemPath, encodeFilesystemPath } = apiPaths;
 
 export class Agent {
     private baseUrl: string;
@@ -164,10 +165,15 @@ export class Agent {
         );
     }
 
+    /**
+     * The opaque device id that never changes, used for every request, cache key and stored
+     * reference so a rename cannot point them at another device.
+     */
     get id(): string {
         return this.info.id;
     }
 
+    /** The editable name shown to people and used in UI URLs; never stored as a reference. */
     get name(): string {
         return this.info.name;
     }
@@ -239,6 +245,14 @@ export class Agent {
     /** Returns sticky SSH start steps for the current attempt. */
     get provisioningStatus(): AgentInfoResponse["provisioning_status"] {
         return this.info.provisioning_status;
+    }
+
+    /**
+     * Set while several machines are using this device's id, so the UI can explain why one
+     * of them is refused and how to give the clone its own id.
+     */
+    get duplicateId(): DuplicateIdWarning | null {
+        return this.info.duplicate_id;
     }
 
     /** Returns binary identity from the latest registration, if any. */
@@ -550,11 +564,6 @@ export class Agent {
         }
 
         return url;
-    }
-
-    /** Returns a browser URL that keeps filesystem separators readable. */
-    getBrowserUrl(path: string): string {
-        return getBrowserUrl(this.info.id, path);
     }
 
     /** Builds the authenticated browser endpoint for one ephemeral agent log tunnel. */

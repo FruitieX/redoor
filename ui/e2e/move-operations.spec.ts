@@ -18,7 +18,7 @@ async function openMoveConflict(props: {
     destinationDirectoryName: string;
 }) {
     await props.page.goto(
-        `${WEB_BASE_URL}/agents/${props.ctx.agentId}/browser/${props.ctx.testDirUrlPath}`,
+        `${WEB_BASE_URL}/agents/${props.ctx.agentName}/browser/${props.ctx.testDirUrlPath}`,
     );
     await props.page
         .getByRole("checkbox", {
@@ -53,7 +53,7 @@ test.describe.serial("Move Operations", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
 
         let moveButton = page.getByRole("button", {
@@ -114,7 +114,7 @@ test.describe.serial("Move Operations", () => {
         await fs.writeFile(secondSourcePath, "move content b");
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: `Select file ${firstName}` })
@@ -200,7 +200,7 @@ test.describe.serial("Move Operations", () => {
         await fs.writeFile(nestedSourcePath, "moved directory child");
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: `Select directory ${sourceName}` })
@@ -254,7 +254,7 @@ test.describe.serial("Move Operations", () => {
         await fs.mkdir(sourcePath);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: `Select directory ${sourceName}` })

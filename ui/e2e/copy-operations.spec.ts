@@ -20,7 +20,7 @@ async function openCopyConflict(props: {
     destinationDirectoryName: string;
 }) {
     await props.page.goto(
-        `${WEB_BASE_URL}/agents/${props.ctx.agentId}/browser/${props.ctx.testDirUrlPath}`,
+        `${WEB_BASE_URL}/agents/${props.ctx.agentName}/browser/${props.ctx.testDirUrlPath}`,
     );
     await props.page
         .getByRole("checkbox", {
@@ -46,7 +46,7 @@ async function expectSelectionDoesNotShiftLayout(props: {
     ctx: TestContext;
 }) {
     await props.page.goto(
-        `${WEB_BASE_URL}/agents/${props.ctx.agentId}/browser/${props.ctx.testDirUrlPath}`,
+        `${WEB_BASE_URL}/agents/${props.ctx.agentName}/browser/${props.ctx.testDirUrlPath}`,
     );
     await expect(
         props.page.getByRole("checkbox", { name: "Select file file1.txt" }),
@@ -100,7 +100,7 @@ test.describe.serial("Copy Operations", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -176,7 +176,7 @@ test.describe.serial("Copy Operations", () => {
         await fs.writeFile(path.join(ctx.testDirPath, sourceName), "mobile");
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: `Select file ${sourceName}` })
@@ -270,7 +270,7 @@ test.describe.serial("Copy Operations", () => {
         await fs.mkdir(copyTargetDirPath);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await expect(
             page.getByRole("checkbox", { name: "Select file file1.txt" }),
@@ -633,7 +633,7 @@ test.describe.serial("Copy Operations", () => {
         await fs.writeFile(conflictingDestinationPath, "old conflict content");
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", {
@@ -719,7 +719,7 @@ test.describe.serial("Copy Operations", () => {
         );
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", {
@@ -790,7 +790,7 @@ test.describe.serial("Copy Operations", () => {
         await fs.rm(copiedFilePath, { force: true });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("checkbox", { name: "Select file file1.txt" })
@@ -862,12 +862,12 @@ test.describe.serial("Copy Operations", () => {
         await fs.mkdir(copyTargetDirPath);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
 
         // Wait for the source listing before changing persistent selection state.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await expect(
             page.getByRole("checkbox", { name: "Select file file1.txt" }),
@@ -907,7 +907,7 @@ test.describe.serial("Copy Operations", () => {
             .getByRole("link", { name: copyTargetDirName, exact: true })
             .click();
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(copyTargetDirPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(copyTargetDirPath)}`,
         );
 
         // The selection persists across navigation, so the destination action is enabled.
@@ -964,7 +964,7 @@ test.describe.serial("Copy Operations", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 

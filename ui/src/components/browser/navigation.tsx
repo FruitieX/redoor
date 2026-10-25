@@ -44,7 +44,7 @@ function BrowserPageHeader(props: {
                     <Tooltip content="Open device home directory">
                         <Link
                             {...browserRoute(
-                                props.agent.id,
+                                props.agent,
                                 props.agent.cwd ?? "/",
                             )}
                             aria-label="Device home"
@@ -109,14 +109,14 @@ export function ViewToggle(props: {
             variant="page"
         >
             <ViewToggleLink
-                agentId={props.agent.id}
+                agent={props.agent}
                 path={props.path}
                 label={contentLabel}
                 icon={contentIcon}
                 active={props.activeView === (isDirectory ? "files" : "view")}
             />
             <ViewToggleLink
-                agentId={props.agent.id}
+                agent={props.agent}
                 path={props.path}
                 view="details"
                 label="Details"
@@ -124,7 +124,7 @@ export function ViewToggle(props: {
                 active={props.activeView === "details"}
             />
             <ViewToggleLink
-                agentId={props.agent.id}
+                agent={props.agent}
                 path={props.path}
                 view="sync"
                 label="Sync"
@@ -133,7 +133,7 @@ export function ViewToggle(props: {
             />
             {props.gitAvailable ? (
                 <ViewToggleLink
-                    agentId={props.agent.id}
+                    agent={props.agent}
                     path={props.path}
                     view="git"
                     label="Git"
@@ -147,7 +147,7 @@ export function ViewToggle(props: {
 
 /** Applies current-page semantics to a filesystem representation link. */
 function ViewToggleLink(props: {
-    agentId: string;
+    agent: Agent;
     path: string;
     /** Leaves the default representation, the listing or content, when omitted. */
     view?: "details" | "sync" | "git";
@@ -157,7 +157,7 @@ function ViewToggleLink(props: {
 }) {
     return (
         <Link
-            {...browserRoute(props.agentId, props.path)}
+            {...browserRoute(props.agent, props.path)}
             search={{ view: props.view }}
             aria-current={props.active ? "page" : undefined}
             className={getPageViewTabClass(props.active)}
@@ -231,7 +231,7 @@ export function BrowserHeader(props: {
             !pathUnavailable
         ) {
             void navigate({
-                ...browserRoute(props.agent.id, props.path),
+                ...browserRoute(props.agent, props.path),
                 search: {},
             });
 
@@ -242,7 +242,7 @@ export function BrowserHeader(props: {
             return false;
         }
 
-        void navigate(browserRoute(props.agent.id, props.parentPath));
+        void navigate(browserRoute(props.agent, props.parentPath));
     };
 
     useShortcut({
@@ -266,7 +266,7 @@ export function BrowserHeader(props: {
                     <Tooltip content="Go to the parent directory (Backspace)">
                         <Link
                             {...browserRoute(
-                                props.agent.id,
+                                props.agent,
                                 props.parentPath ?? "/",
                             )}
                             aria-label="Go to the parent directory"
@@ -344,7 +344,7 @@ export function UnavailablePathState(props: {
                 </Button>
                 {props.parentPath ? (
                     <Link
-                        {...browserRoute(props.agent.id, props.parentPath)}
+                        {...browserRoute(props.agent, props.parentPath)}
                         className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-tint"
                     >
                         <ArrowUp className="h-4 w-4" aria-hidden="true" />
@@ -415,7 +415,7 @@ function Breadcrumbs(props: {
         }
 
         // Destination route decides whether the editor stays open (missing path).
-        await navigate(browserRoute(props.agent.id, targetPath));
+        await navigate(browserRoute(props.agent, targetPath));
     };
 
     return (
@@ -460,7 +460,7 @@ function Breadcrumbs(props: {
                             </span>
                         ) : (
                             <Link
-                                {...browserRoute(props.agent.id, "/")}
+                                {...browserRoute(props.agent, "/")}
                                 className="-my-1 shrink-0 rounded px-1.5 py-1 text-blue-400 hover:underline"
                             >
                                 /
@@ -487,7 +487,7 @@ function Breadcrumbs(props: {
                                     ) : (
                                         <Link
                                             {...browserRoute(
-                                                props.agent.id,
+                                                props.agent,
                                                 accumulatedPath,
                                             )}
                                             className={`whitespace-nowrap font-medium text-blue-400 hover:underline ${part.length < 3 ? "-my-1 rounded px-1.5 py-1" : ""}`}

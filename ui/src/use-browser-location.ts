@@ -26,7 +26,7 @@ export type BrowserLocation = {
  */
 export function useBrowserLocation(): BrowserLocation | null {
     const location = useMatch({
-        from: "/_app/agents/$agentId/browser/$",
+        from: "/_app/agents/$deviceName/browser/$",
         shouldThrow: false,
         select: (match): BrowserLocation | null => {
             const data = match.loaderData;

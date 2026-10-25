@@ -27,7 +27,7 @@ test.describe.serial("File Browser Navigation", () => {
 
         await expect(
             page.locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             ),
         ).toBeVisible();
     });
@@ -37,7 +37,7 @@ test.describe.serial("File Browser Navigation", () => {
     }) => {
         const now = Date.now();
         const hidden = ".hidden.txt";
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
 
         const modifiedAt = Math.floor(
             (now - ((3 * 24 + 2) * 60 + 3) * 60_000) / 1000,
@@ -182,12 +182,12 @@ test.describe.serial("File Browser Navigation", () => {
         page,
     }) => {
         await page.goto(ctx.agentBrowserUrl);
-        const destinationUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const destinationUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await Promise.all([
             page.waitForURL(destinationUrl),
             page
                 .locator(
-                    `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                    `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
                 )
                 .click(),
         ]);
@@ -252,7 +252,7 @@ test.describe.serial("File Browser Navigation", () => {
         page,
     }) => {
         const restrictedPath = `${ctx.testDirPath}/restricted`;
-        const restrictedUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(restrictedPath)}`;
+        const restrictedUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(restrictedPath)}`;
         const errorMessage = `Access to ${restrictedPath} was rejected`;
         await page.route(
             `**/api/v1/agents/${encodeURIComponent(ctx.agentId)}/ls/**`,
@@ -288,7 +288,7 @@ test.describe.serial("File Browser Navigation", () => {
             page.getByRole("link", { name: "Open parent directory" }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(ctx.testDirPath)}`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(ctx.testDirPath)}`,
         );
         // Technical route diagnostics must not replace expected filesystem error handling.
         await expect(page.getByText("Technical details")).not.toBeVisible();
@@ -297,7 +297,7 @@ test.describe.serial("File Browser Navigation", () => {
     test("should filter directory entries and navigate to the first match", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         let pathSearchRequests = 0;
         page.on("request", (request) => {
             if (new URL(request.url()).pathname.includes("/find/")) {
@@ -356,7 +356,7 @@ test.describe.serial("File Browser Navigation", () => {
     });
 
     test("should support file browser keyboard shortcuts", async ({ page }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const filterInput = page.getByRole("searchbox", {
@@ -429,7 +429,7 @@ test.describe.serial("File Browser Navigation", () => {
     test("should navigate filtered results and clear the filter with a second Escape", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const filterInput = page.getByRole("searchbox", {
@@ -500,7 +500,7 @@ test.describe.serial("File Browser Navigation", () => {
         }) => {
             hiddenPath = path.join(ctx.testDirPath, hiddenFileName);
             await fs.writeFile(hiddenPath, "secret");
-            const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+            const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
             await page.goto(directoryUrl);
 
             const hidePersisted = page.waitForResponse(
@@ -569,7 +569,7 @@ test.describe.serial("File Browser Navigation", () => {
     test("should show directory details from the view query", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const directoryView = page.getByLabel("Directory view");
@@ -702,7 +702,7 @@ test.describe.serial("File Browser Navigation", () => {
             },
         );
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?view=details`,
         );
 
         await page
@@ -733,7 +733,7 @@ test.describe.serial("File Browser Navigation", () => {
             path.join(destinationPath, "destination-only.txt"),
             "preserved",
         );
-        const sourceUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}`;
+        const sourceUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(sourcePath)}`;
         await page.goto(sourceUrl);
 
         await page.getByRole("link", { name: "Sync", exact: true }).click();
@@ -752,7 +752,7 @@ test.describe.serial("File Browser Navigation", () => {
             page.getByRole("link", { name: "view", exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(destinationPath)}`,
+            `/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(destinationPath)}`,
         );
         // Directory Sync must not expose on-page conflict radios before Copy is chosen.
         await expect(page.getByRole("radio", { name: "Merge" })).toHaveCount(0);
@@ -820,7 +820,7 @@ test.describe.serial("File Browser Navigation", () => {
         await fs.writeFile(path.join(currentPath, "old.txt"), "old");
         await fs.writeFile(path.join(selectedPath, "new.txt"), "new");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(currentPath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(currentPath)}?view=sync`,
         );
         await page.getByLabel("Sync path").fill(selectedPath);
 
@@ -834,7 +834,7 @@ test.describe.serial("File Browser Navigation", () => {
             page.getByRole("link", { name: "view", exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(selectedPath)}`,
+            `/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(selectedPath)}`,
         );
         await page.getByRole("button", { name: "Copy", exact: true }).click();
         await page
@@ -866,7 +866,7 @@ test.describe.serial("File Browser Navigation", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
         await page.getByRole("link", { name: "subdir2", exact: true }).click();
@@ -889,7 +889,7 @@ test.describe.serial("File Browser Navigation", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
         await page.getByRole("link", { name: "subdir2", exact: true }).click();
@@ -941,7 +941,7 @@ test.describe.serial("File Browser Navigation", () => {
         await context.grantPermissions(["clipboard-read", "clipboard-write"], {
             origin: WEB_BASE_URL,
         });
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const copyButton = page.getByRole("button", { name: "Copy file path" });
@@ -964,9 +964,9 @@ test.describe.serial("File Browser Navigation", () => {
     });
 
     test("should navigate by editing the breadcrumb path", async ({ page }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         const nestedPath = `${ctx.testDirPath}/subdir2`;
-        const nestedUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}`;
+        const nestedUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(nestedPath)}`;
         await page.goto(directoryUrl);
 
         await page.getByRole("button", { name: "Edit file path" }).click();
@@ -1002,7 +1002,7 @@ test.describe.serial("File Browser Navigation", () => {
     test("should expand the agent home in an edited breadcrumb path", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         await page.getByRole("button", { name: "Edit file path" }).click();
@@ -1023,7 +1023,7 @@ test.describe.serial("File Browser Navigation", () => {
         await page.getByRole("button", { name: "Navigate to path" }).click();
         // A pasted home-relative file path resolves against the agent's home.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.agentHome, "breadcrumb-missing-file.txt"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.agentHome, "breadcrumb-missing-file.txt"))}`,
         );
         // The missing-file creation form confirms the route looked up the expanded path.
         await expect(
@@ -1039,7 +1039,7 @@ test.describe.serial("File Browser Navigation", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
         await page.getByRole("link", { name: "subdir2", exact: true }).click();
@@ -1049,7 +1049,7 @@ test.describe.serial("File Browser Navigation", () => {
         // after the route loader has rendered the nested page rather than
         // racing with the intermediate URL change.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir2/deep`)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir2/deep`)}`,
         );
         await expect(
             page.getByRole("link", { name: "nested3.txt", exact: true }),
@@ -1064,7 +1064,7 @@ test.describe.serial("File Browser Navigation", () => {
 
         // One Up click should remove only the deepest path segment.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir2`)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir2`)}`,
         );
         // Seeing the child directory confirms we landed in the immediate parent directory.
         await expect(
@@ -1084,7 +1084,7 @@ test.describe.serial("File Browser Navigation", () => {
 
         // The second Up click should return from subdir2 to the test directory root.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         // Root directory entries confirm the browser returned to the expected directory listing.
         await expect(
@@ -1107,7 +1107,7 @@ test.describe.serial("File Browser Navigation", () => {
         await expect(page).not.toHaveURL(ctx.agentBrowserUrl);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath("/")}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath("/")}`,
         );
         // Only the filesystem root has no parent navigation target.
         await expect(upButton).toHaveAttribute("aria-disabled", "true");

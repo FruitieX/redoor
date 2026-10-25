@@ -43,7 +43,7 @@ import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { isPlainKey } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
 
-const agentRoute = getRouteApi("/_app/agents/$agentId");
+const agentRoute = getRouteApi("/_app/agents/$deviceName");
 
 /** Cycles smart → sensitive → insensitive so the control can name the next click. */
 const nextCaseSensitivity = {
@@ -266,7 +266,7 @@ export function SearchDialog(props: { agent: Agent }) {
         }
 
         await navigate({
-            ...browserRoute(props.agent.id, target.path),
+            ...browserRoute(props.agent, target.path),
             search: { line: target.line },
         });
     };
@@ -353,7 +353,7 @@ export function SearchDialog(props: { agent: Agent }) {
                               <ContentResult
                                   key={`${result.path}:${result.line_number}:${result.line}`}
                                   result={result}
-                                  agentId={props.agent.id}
+                                  agent={props.agent}
                                   target={{
                                       path: result.path,
                                       line: result.line_number,
@@ -365,7 +365,7 @@ export function SearchDialog(props: { agent: Agent }) {
                               <PathResult
                                   key={result.path}
                                   result={result}
-                                  agentId={props.agent.id}
+                                  agent={props.agent}
                                   target={{ path: result.path }}
                                   onOpen={openSelectedResult}
                               />
@@ -646,7 +646,7 @@ function SearchNumberInputs(props: {
 /** Presents one fuzzy path match with enough context to distinguish duplicate names. */
 function PathResult(props: {
     result: FileSearchEntry;
-    agentId: string;
+    agent: Agent;
     target: SearchResultTarget;
     onOpen: (target: SearchResultTarget) => void;
 }) {
@@ -654,7 +654,7 @@ function PathResult(props: {
 
     return (
         <Link
-            {...browserRoute(props.agentId, props.target.path)}
+            {...browserRoute(props.agent, props.target.path)}
             search={{ line: props.target.line }}
             className="flex w-full items-start gap-3 rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
             aria-label={`Open path ${props.result.path}`}
@@ -678,13 +678,13 @@ function PathResult(props: {
 /** Presents a grep match with its line preview and exact navigation destination. */
 function ContentResult(props: {
     result: ContentGrepMatch;
-    agentId: string;
+    agent: Agent;
     target: SearchResultTarget;
     onOpen: (target: SearchResultTarget) => void;
 }) {
     return (
         <Link
-            {...browserRoute(props.agentId, props.target.path)}
+            {...browserRoute(props.agent, props.target.path)}
             search={{ line: props.target.line }}
             className="block w-full rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
             aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}

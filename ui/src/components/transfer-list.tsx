@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ApiClient } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import { Tooltip } from "#ui/components/tooltip";
 import { IconButton } from "#ui/components/icon-button";
@@ -382,19 +383,14 @@ export function TransferList(props: {
                                 className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint align-top"
                             >
                                 <td className="whitespace-nowrap p-3">
-                                    <div className="flex flex-col">
-                                        <span className="text-sm font-medium text-slate-100">
-                                            {hasEndpoints
-                                                ? `${sourceAgent?.name ?? transfer.source?.agent} -> ${destAgent?.name ?? transfer.dest?.agent}`
-                                                : (agent?.name ??
-                                                  transfer.agent_id)}
-                                        </span>
-                                        <span className="text-xs text-slate-500">
-                                            {hasEndpoints
-                                                ? `${transfer.source?.agent} -> ${transfer.dest?.agent}`
-                                                : transfer.agent_id}
-                                        </span>
-                                    </div>
+                                    {/* Transfers record device ids; the id is only shown for a
+                                        device the inventory no longer lists. */}
+                                    <span className="text-sm font-medium text-slate-100">
+                                        {hasEndpoints
+                                            ? `${sourceAgent?.name ?? transfer.source?.agent} -> ${destAgent?.name ?? transfer.dest?.agent}`
+                                            : (agent?.name ??
+                                              transfer.agent_id)}
+                                    </span>
                                 </td>
                                 <td className="whitespace-nowrap p-3">
                                     <TransferDirectionBadge
@@ -405,11 +401,13 @@ export function TransferList(props: {
                                     {hasEndpoints ? (
                                         <div className="space-y-1 font-mono text-xs text-slate-300">
                                             <div className="truncate">
-                                                {sourceAgent ? (
+                                                {sourceAgent &&
+                                                transfer.source ? (
                                                     <Link
-                                                        to={sourceAgent.getBrowserUrl(
+                                                        {...browserRoute(
+                                                            sourceAgent,
                                                             transfer.source
-                                                                ?.path ?? "",
+                                                                .path,
                                                         )}
                                                         className="text-blue-400 hover:underline"
                                                         title={
@@ -427,11 +425,11 @@ export function TransferList(props: {
                                                 -&gt;
                                             </div>
                                             <div className="truncate">
-                                                {destAgent ? (
+                                                {destAgent && transfer.dest ? (
                                                     <Link
-                                                        to={destAgent.getBrowserUrl(
-                                                            transfer.dest
-                                                                ?.path ?? "",
+                                                        {...browserRoute(
+                                                            destAgent,
+                                                            transfer.dest.path,
                                                         )}
                                                         className="text-blue-400 hover:underline"
                                                         title={
@@ -449,7 +447,8 @@ export function TransferList(props: {
                                         <div className="truncate font-mono text-xs text-slate-300">
                                             {agent ? (
                                                 <Link
-                                                    to={agent.getBrowserUrl(
+                                                    {...browserRoute(
+                                                        agent,
                                                         transfer.path,
                                                     )}
                                                     className="text-blue-400 hover:underline"

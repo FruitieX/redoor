@@ -47,7 +47,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -121,7 +121,7 @@ test.describe.serial("File Edit View", () => {
     test("should use compact editor text on mobile", async ({ page }) => {
         await page.setViewportSize({ width: 360, height: 844 });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
         );
         // Phone-width editor type must match the 9px git diff so more of each line stays on screen.
         await expect(page.getByLabel("File editor", { exact: true })).toHaveCSS(
@@ -134,7 +134,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -174,7 +174,7 @@ test.describe.serial("File Edit View", () => {
         });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "content1");
@@ -228,7 +228,7 @@ test.describe.serial("File Edit View", () => {
 
         await fs.writeFile(filePath, lines.join("\n"));
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -274,7 +274,7 @@ test.describe.serial("File Edit View", () => {
         const filePath = path.join(ctx.testDirPath, "full-window.txt");
         await fs.writeFile(filePath, "full window content");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editorPanel = page.getByRole("article", {
@@ -350,7 +350,7 @@ test.describe.serial("File Edit View", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
         );
         await expectEditorText(
             page.getByLabel("File editor", { exact: true }),
@@ -411,7 +411,7 @@ test.describe.serial("File Edit View", () => {
         const filePath = path.join(ctx.testDirPath, "focus-refresh.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByRole("textbox", {
@@ -434,7 +434,7 @@ test.describe.serial("File Edit View", () => {
         const filePath = path.join(ctx.testDirPath, "focus-dirty.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
@@ -466,7 +466,7 @@ test.describe.serial("File Edit View", () => {
         });
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByRole("textbox", {
@@ -504,7 +504,7 @@ test.describe.serial("File Edit View", () => {
 
     test("should reload unsaved edits after confirmation", async ({ page }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -540,7 +540,7 @@ test.describe.serial("File Edit View", () => {
         const filePath = path.join(ctx.testDirPath, "manual-reload.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "original buffer");
@@ -558,7 +558,7 @@ test.describe.serial("File Edit View", () => {
     test("should save edits to disk", async ({ page }) => {
         const filePath = path.join(ctx.testDirPath, "file1.txt");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -595,7 +595,7 @@ test.describe.serial("File Edit View", () => {
         });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(linkPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(linkPath)}`,
         );
         const editor = page.getByLabel("File editor", { exact: true });
         await expectEditorText(editor, "symlink original");
@@ -633,7 +633,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -663,7 +663,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -691,7 +691,7 @@ test.describe.serial("File Edit View", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -738,7 +738,7 @@ test.describe.serial("File Edit View", () => {
         const filePath = path.join(ctx.testDirPath, "shortcut-save.txt");
         await fs.writeFile(filePath, "shortcut original");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -764,7 +764,7 @@ test.describe.serial("File Edit View", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
         );
 
         await expect(
@@ -792,7 +792,7 @@ gamma`,
             origin: WEB_BASE_URL,
         });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -838,7 +838,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "search-selection.txt");
         await fs.writeFile(filePath, "search-selection-token");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -895,7 +895,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, ".bashrc");
         await fs.writeFile(filePath, "export FOO=1");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         // Filename-based shell mapping must still produce an editable File editor.
@@ -914,7 +914,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "backspace-guard.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -938,7 +938,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "leave-cancel.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -971,7 +971,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "leave-confirm.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -1013,7 +1013,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "leave-after-restore.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -1050,7 +1050,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "reload-guard.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
@@ -1098,7 +1098,7 @@ gamma
         const filePath = path.join(ctx.testDirPath, "alt-focus.txt");
         await fs.writeFile(filePath, "content1");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });

@@ -1,11 +1,6 @@
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-    getRouteApi,
-    Link,
-    useLocation,
-    useRouter,
-} from "@tanstack/react-router";
+import { getRouteApi, Link, useRouter } from "@tanstack/react-router";
 import {
     ArrowLeftRight,
     Home,
@@ -17,7 +12,8 @@ import {
     X,
 } from "lucide-react";
 
-import { getBrowserUrl } from "#ui/api-paths";
+import type { Agent } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { IconButton } from "#ui/components/icon-button";
 import { RestartButton } from "#ui/components/restart-button";
@@ -33,6 +29,7 @@ import {
 } from "#ui/queries";
 import { useCloseSideMenu } from "#ui/side-menu-state";
 import { useAgents } from "#ui/use-agents";
+import { useBrowserLocation } from "#ui/use-browser-location";
 import {
     getPinnedFileKey,
     reorderPinnedFiles,
@@ -129,8 +126,8 @@ function ApplicationMenu() {
             {userState.pinnedFiles.length > 0 ? (
                 <PinnedFiles
                     pinnedFiles={userState.pinnedFiles}
-                    deviceNameByAgentId={
-                        new Map(agents.map((agent) => [agent.id, agent.name]))
+                    agentsById={
+                        new Map(agents.map((agent) => [agent.id, agent]))
                     }
                     onRemove={(file) => {
                         setUserState((current) => ({
@@ -249,7 +246,7 @@ function LogoutButton() {
 /** Lists pinned files under Transfers so they stay available from every route. */
 function PinnedFiles(props: {
     pinnedFiles: PinnedFile[];
-    deviceNameByAgentId: Map<string, string>;
+    agentsById: Map<string, Agent>;
     onRemove: (file: PinnedFile) => void;
     onClear: () => void;
     onMove: (move: { activeId: string; overId: string }) => void;
@@ -295,10 +292,7 @@ function PinnedFiles(props: {
                         <PinnedFileRow
                             key={getPinnedFileKey(file)}
                             file={file}
-                            deviceName={
-                                props.deviceNameByAgentId.get(file.agentId) ??
-                                file.agentName
-                            }
+                            agent={props.agentsById.get(file.agentId)}
                             onRemove={props.onRemove}
                         />
                     ))}
@@ -311,21 +305,36 @@ function PinnedFiles(props: {
 /** Lets the row sort after a deliberate drag while a normal click still opens the file. */
 function PinnedFileRow(props: {
     file: PinnedFile;
-    deviceName: string;
+    /** The pinned file's device, or undefined while it is absent from the inventory. */
+    agent: Agent | undefined;
     onRemove: (file: PinnedFile) => void;
 }) {
     const closeMenu = useCloseSideMenu();
-    const pathname = useLocation({ select: (location) => location.pathname });
-    const href = getBrowserUrl(props.file.agentId, props.file.path);
-    const isActive = pathname === href;
+    const browser = useBrowserLocation();
+    // The stored name is only a label for a device the inventory no longer lists.
+    const deviceName = props.agent?.name ?? props.file.agentName;
+
+    const isActive =
+        browser?.agentId === props.file.agentId &&
+        browser.path === props.file.path;
+
     const itemId = getPinnedFileKey(props.file);
+
+    const label = (
+        <>
+            <span className="block truncate text-sm">{props.file.name}</span>
+            <span className="block truncate text-[10px] leading-tight text-slate-500">
+                {deviceName}
+            </span>
+        </>
+    );
 
     return (
         <SortableItem id={itemId}>
             {(item) => (
                 <li
                     {...item.dragProps}
-                    aria-label={`Pinned file ${props.file.name} on ${props.deviceName}`}
+                    aria-label={`Pinned file ${props.file.name} on ${deviceName}`}
                     ref={item.setNodeRef}
                     style={item.style}
                     className={`group flex w-full min-w-0 items-start rounded ${
@@ -342,22 +351,34 @@ function PinnedFileRow(props: {
                 >
                     <Tooltip
                         className="min-w-0 flex-1"
-                        content={`Open ${props.file.path}`}
+                        content={
+                            props.agent
+                                ? `Open ${props.file.path}`
+                                : `${deviceName} is not available`
+                        }
                     >
-                        <Link
-                            to={href}
-                            aria-label={props.file.name}
-                            aria-current={isActive ? "page" : undefined}
-                            onClick={closeMenu}
-                            className="block w-full min-w-0 px-3 py-1"
-                        >
-                            <span className="block truncate text-sm">
-                                {props.file.name}
+                        {/* Links follow the device id, never the stored name, which another
+                            device may have taken since the file was pinned. */}
+                        {props.agent ? (
+                            <Link
+                                {...browserRoute(props.agent, props.file.path)}
+                                aria-label={props.file.name}
+                                aria-current={isActive ? "page" : undefined}
+                                onClick={closeMenu}
+                                className="block w-full min-w-0 px-3 py-1"
+                            >
+                                {label}
+                            </Link>
+                        ) : (
+                            <span
+                                aria-label={props.file.name}
+                                aria-disabled="true"
+                                tabIndex={0}
+                                className="block w-full min-w-0 px-3 py-1 opacity-60"
+                            >
+                                {label}
                             </span>
-                            <span className="block truncate text-[10px] leading-tight text-slate-500">
-                                {props.deviceName}
-                            </span>
-                        </Link>
+                        )}
                     </Tooltip>
                     <IconButton
                         type="button"

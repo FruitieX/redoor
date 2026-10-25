@@ -21,7 +21,7 @@ test.describe.serial("Agent home", () => {
     test("shows mount capacity and opens mount paths in the file browser", async ({
         page,
     }) => {
-        await page.goto(`${WEB_BASE_URL}/agents/${context.agentId}`);
+        await page.goto(`${WEB_BASE_URL}/agents/${context.agentName}`);
 
         const mounts = page.getByRole("region", { name: "Mount Points" });
         await expect(mounts).toBeVisible();
@@ -65,7 +65,7 @@ test.describe.serial("Agent home", () => {
         await rootMount.click();
         // Clicking the path must use the existing root browser route rather than a raw file URL.
         await expect(page).toHaveURL(
-            new RegExp(`/agents/${context.agentId}/browser/?$`),
+            new RegExp(`/agents/${context.agentName}/browser/?$`),
         );
         const filesystem = page.getByLabel("Filesystem information");
         // The browser reuses the agent mount data to identify the current filesystem.

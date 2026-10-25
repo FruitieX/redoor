@@ -97,10 +97,10 @@ test.describe.serial("Transfer Path Links", () => {
             await page.goto(ctx.agentBrowserUrl);
             await page
                 .locator(
-                    `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                    `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
                 )
                 .click();
-            const uploadDestinationUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
+            const uploadDestinationUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}`;
             await Promise.all([
                 page.waitForURL(uploadDestinationUrl),
                 page
@@ -152,7 +152,7 @@ test.describe.serial("Transfer Path Links", () => {
             // The source link disappearing proves the pending route committed instead of only updating browser history.
             await expect(page).toHaveURL(
                 new RegExp(
-                    `/agents/${ctx.agentId}/browser/.*${uploadFileName}$`,
+                    `/agents/${ctx.agentName}/browser/.*${uploadFileName}$`,
                 ),
             );
             await expect(page.getByLabel("File editor")).toBeVisible();

@@ -84,7 +84,7 @@ function groupGitStatusEntries(entries: GitStatusEntry[]) {
 function RepositoryLink(props: { agent: Agent; repositoryRoot: string }) {
     return (
         <Link
-            {...browserRoute(props.agent.id, props.repositoryRoot)}
+            {...browserRoute(props.agent, props.repositoryRoot)}
             search={{ view: "git" }}
             className="mt-3 block break-all font-mono text-sm text-blue-300 hover:underline"
         >
@@ -155,10 +155,7 @@ function GitStatusSection(props: {
                     >
                         <span className="min-w-0">
                             <Link
-                                {...browserRoute(
-                                    props.agent.id,
-                                    item.entry.path,
-                                )}
+                                {...browserRoute(props.agent, item.entry.path)}
                                 search={{ view: "git" }}
                                 className="block break-all font-mono text-xs text-blue-300 hover:underline sm:text-sm"
                             >
@@ -414,7 +411,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                                             <h2 className="break-all border-b border-slate-800 px-3 py-2 font-mono text-sm font-semibold">
                                                 <Link
                                                     {...browserRoute(
-                                                        props.agent.id,
+                                                        props.agent,
                                                         diff.path,
                                                     )}
                                                     className="text-blue-300 hover:underline"
@@ -427,7 +424,8 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                                             <GitDiffResultView
                                                 result={diff.result}
                                                 editorFile={{
-                                                    agentId: props.agent.id,
+                                                    deviceName:
+                                                        props.agent.name,
                                                     path: diff.path,
                                                 }}
                                             />
@@ -446,7 +444,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 /** Explains all non-text outcomes rather than presenting them as empty patches. */
 function GitDiffResultView(props: {
     result: GitDiffResult;
-    editorFile: { agentId: string; path: string };
+    editorFile: { deviceName: string; path: string };
 }) {
     if (props.result.type === "text") {
         return (
@@ -559,7 +557,7 @@ export function GitFileView(props: {
                             }
                         }
                         editorFile={{
-                            agentId: props.agent.id,
+                            deviceName: props.agent.name,
                             path: props.path,
                         }}
                     />

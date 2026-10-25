@@ -79,7 +79,7 @@ function RenamePathDialog(props: {
 
             await navigate({
                 ...browserRoute(
-                    props.agent.id,
+                    props.agent,
                     joinBrowserPath(parentPath, newName),
                 ),
                 search: { view: props.view },

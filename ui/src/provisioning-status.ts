@@ -33,7 +33,10 @@ export function parseProvisioningStatusStore(
     }
 }
 
-/** Reads the name-keyed history only after Zod accepts the stored JSON. */
+/**
+ * Reads the device-id-keyed history only after Zod accepts the stored JSON. Keying by id keeps
+ * the last attempt with its device across renames.
+ */
 export function readProvisioningStatusStore(): ProvisioningStatusStore {
     try {
         const raw = globalThis.localStorage.getItem(STORAGE_KEY);
@@ -67,7 +70,7 @@ export const rememberProvisioningStatusAtom = atom(
         get,
         set,
         update: {
-            agentName: string;
+            agentId: string;
             messages: ProvisioningStatusMessage[];
         },
     ) => {
@@ -77,7 +80,7 @@ export const rememberProvisioningStatusAtom = atom(
 
         const next = {
             ...get(provisioningStatusStoreAtom),
-            [update.agentName]: update.messages,
+            [update.agentId]: update.messages,
         };
 
         set(provisioningStatusStoreAtom, next);
@@ -96,17 +99,17 @@ export function useRememberProvisioningStatus(agent: Agent | undefined) {
         rememberProvisioningStatusAtom,
     );
 
-    const agentName = agent?.name;
+    const agentId = agent?.id;
     const provisioningStatus = agent?.provisioningStatus;
 
     React.useEffect(() => {
-        if (agentName === undefined || !provisioningStatus?.length) {
+        if (agentId === undefined || !provisioningStatus?.length) {
             return;
         }
 
         rememberProvisioningStatus({
-            agentName,
+            agentId,
             messages: provisioningStatus,
         });
-    }, [agentName, provisioningStatus, rememberProvisioningStatus]);
+    }, [agentId, provisioningStatus, rememberProvisioningStatus]);
 }

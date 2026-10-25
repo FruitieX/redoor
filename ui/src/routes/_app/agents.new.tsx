@@ -1,4 +1,5 @@
 import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
+import { deviceRoute } from "#ui/browser-route";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 
 import {
@@ -29,8 +30,7 @@ function NewManagedAgentPage() {
         onSuccess: async (response) => {
             await queryClient.invalidateQueries(agentsQueryOptions(api));
             await router.navigate({
-                to: "/agents/$agentId",
-                params: { agentId: response.agent.id },
+                ...deviceRoute(response.agent, "/agents/$deviceName"),
             });
         },
     });

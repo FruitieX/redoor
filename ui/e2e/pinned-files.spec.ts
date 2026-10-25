@@ -86,7 +86,7 @@ test.describe.serial("Pinned files", () => {
         });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(firstPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`,
         );
 
         const saveButton = page.getByRole("button", { name: "Save file" });
@@ -144,7 +144,7 @@ test.describe.serial("Pinned files", () => {
         expect(deviceFontSize).toBeLessThan(fileFontSize);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(secondPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
         );
         await page
             .getByRole("button", { name: "Pin file", exact: true })
@@ -196,14 +196,14 @@ test.describe.serial("Pinned files", () => {
         const backgroundTab = await backgroundTabPromise;
         // Middle-click must open the pinned destination while preserving both pins and the current page.
         await expect(backgroundTab).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(firstPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`,
         );
         await backgroundTab.close();
         await expect(
             pinnedFiles.getByRole("link", { name: firstName, exact: true }),
         ).toBeVisible();
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(secondPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
         );
         await expect
             .poll(async () => (await api.getUserState()).state)
@@ -216,7 +216,7 @@ test.describe.serial("Pinned files", () => {
             .click();
         // The sidebar entry must open that exact pinned path.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(secondPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
         );
 
         await applicationNavigation
@@ -229,8 +229,8 @@ test.describe.serial("Pinned files", () => {
     test("switches pinned files above the toolbar while keeping the editor full window", async ({
         page,
     }) => {
-        const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
-        const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
+        const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
+        const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
         await page.goto(firstUrl);
         await pinOpenFile(page);
         await page.goto(secondUrl);
@@ -300,8 +300,8 @@ test.describe.serial("Pinned files", () => {
     test("opens full-window pins in background tabs and closes them with the close button", async ({
         page,
     }) => {
-        const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
-        const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
+        const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
+        const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
         await page.goto(firstUrl);
         await pinOpenFile(page);
         await page.goto(secondUrl);
@@ -377,7 +377,7 @@ test.describe.serial("Pinned files", () => {
         });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const pinnedFiles = applicationNavigation.getByRole("list", {
@@ -485,7 +485,7 @@ test.describe.serial("Pinned files", () => {
             });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
         );
         await page
             .getByRole("button", { name: "Expand editor to full window" })
@@ -541,7 +541,7 @@ test.describe.serial("Pinned files", () => {
                 })),
             },
         });
-        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         await page.goto(fileUrl);
         const panel = page.getByRole("article", { name: "Editing panel" });
         const editor = panel.getByLabel("File editor");
@@ -675,7 +675,7 @@ test.describe.serial("Pinned files", () => {
         await expect(handle).toBeFocused();
         const editor = page.getByLabel("File editor");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
         );
         await editor.click();
         await page.keyboard.press("ArrowUp");
@@ -696,7 +696,7 @@ test.describe.serial("Pinned files", () => {
             .getByRole("list", { name: "Pinned files" });
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         await page
             .getByRole("button", { name: "Pin file", exact: true })

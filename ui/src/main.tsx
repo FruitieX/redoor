@@ -89,6 +89,14 @@ declare module "@tanstack/react-router" {
     }
 }
 
+// Links built from a device record its id, so the device route can tell a deliberate choice
+// of a device from navigation inside the page that is open (see `deviceRoute`).
+declare module "@tanstack/history" {
+    interface HistoryState {
+        deviceId?: string;
+    }
+}
+
 // Render the app
 const rootElement = document.getElementById("app");
 

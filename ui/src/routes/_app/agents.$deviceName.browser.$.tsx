@@ -54,11 +54,12 @@ import {
     gitContextQueryOptions,
     gitDiffQueryOptions,
     gitStatusQueryOptions,
-    loadAgent,
+    loadDeviceRouteAgent,
     metadataQueryOptions,
     queryKeys,
 } from "#ui/queries";
 import { useAgents, useRequiredAgent } from "#ui/use-agents";
+import { invalidateDeviceViews } from "#ui/use-active-agent";
 import { useBrowserRefreshTriggers } from "#ui/components/browser/refresh";
 import type { MetadataResponse } from "#bindings/MetadataResponse";
 import type { MountPoint } from "#bindings/MountPoint";
@@ -79,7 +80,7 @@ function lineFromLocationSearch(searchStr: string): number | undefined {
 }
 
 /** The route's own parameters, which every redirect needs to stay on the same entry. */
-type BrowserParams = { agentId: string; _splat?: string };
+type BrowserParams = { deviceName: string; _splat?: string };
 
 /** What the route knows while its agent cannot serve paths yet, so only the URL is retained. */
 function lifecycleData(agent: Agent, path: string) {
@@ -124,7 +125,7 @@ function redirectOutsideWorktree(
 ) {
     if (view === "git" && gitContext.status === "outside_worktree") {
         throw redirect({
-            to: "/agents/$agentId/browser/$",
+            to: "/agents/$deviceName/browser/$",
             params,
             search: {},
             replace: true,
@@ -132,14 +133,14 @@ function redirectOutsideWorktree(
     }
 }
 
-export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
+export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
     validateSearch: browserSearchSchema,
     loaderDeps: ({ search }) => ({
         view: search.view,
         diffMode: search.diffMode,
     }),
-    loader: async ({ context, deps, params, location }) => {
-        const agent = await loadAgent(context, params.agentId);
+    loader: async ({ context, deps, params, location, parentMatchPromise }) => {
+        const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
         const path = `/${params._splat ?? ""}`;
 
         if (agent.status !== "connected" || agent.cwd === null) {
@@ -155,7 +156,7 @@ export const Route = createFileRoute("/_app/agents/$agentId/browser/$")({
 
         if (rawSearch.has("diff")) {
             throw redirect({
-                to: "/agents/$agentId/browser/$",
+                to: "/agents/$deviceName/browser/$",
                 params,
                 search: {
                     view: deps.view,
@@ -361,7 +362,7 @@ function FileBrowser() {
         // The loader found the agent offline, so it resolved no path. Run it again now that
         // the agent can serve one, which also applies the path-dependent redirects.
         if (needsResolution) {
-            void router.invalidate();
+            void invalidateDeviceViews(router);
         }
     }, [needsResolution, router]);
 
@@ -810,7 +811,7 @@ function replaceUnsupportedFileView(
 
     if (wantsFileContentView(view) && !canShowContent) {
         throw redirect({
-            to: "/agents/$agentId/browser/$",
+            to: "/agents/$deviceName/browser/$",
             params,
             search: { view: "details" },
             replace: true,
@@ -839,7 +840,7 @@ function replaceDefaultMarkdownPreview(options: {
     }
 
     throw redirect({
-        to: "/agents/$agentId/browser/$",
+        to: "/agents/$deviceName/browser/$",
         params: options.params,
         search: { ...options.currentSearch, preview: true },
         replace: true,

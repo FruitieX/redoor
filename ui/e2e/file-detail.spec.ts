@@ -83,12 +83,12 @@ test.describe.serial("File Detail View", () => {
 
     test("should navigate to file detail view", async ({ page }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await openFileDetails(page, "file1.txt");
         await expect(page).toHaveURL(
             new RegExp(
-                `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}\\?view=details$`,
+                `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}\\?view=details$`,
             ),
         );
 
@@ -139,7 +139,7 @@ test.describe.serial("File Detail View", () => {
         const filePath = path.join(ctx.testDirPath, "file1.txt");
         await fs.chmod(filePath, 0o644);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?view=details`,
         );
 
         const ownerExecute = page.getByRole("checkbox", {
@@ -163,7 +163,7 @@ test.describe.serial("File Detail View", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}?view=details`,
         );
 
         const sizeText = await page.getByLabel("File size value").textContent();
@@ -190,7 +190,7 @@ test.describe.serial("File Detail View", () => {
         await fs.writeFile(sourcePath, `left-${wideMarker}\n`);
         await fs.writeFile(destinationPath, `right-${wideMarker}\n`);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
         );
 
         // Diffing lives inside Sync, so there is no separate Diff view link.
@@ -265,12 +265,12 @@ test.describe.serial("File Detail View", () => {
             page.getByRole("link", { name: "view", exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(destinationPath)}`,
+            `/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(destinationPath)}`,
         );
         await page.getByRole("link", { name: "view", exact: true }).click();
         // Target navigation uses the selected destination agent and leaves the source Sync view behind.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(destinationPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(destinationPath)}`,
         );
         await expect(page.getByLabel("File editor")).toBeVisible();
     });
@@ -287,7 +287,7 @@ test.describe.serial("File Detail View", () => {
         // Distinct absolute homes ensure this exercises endpoint-specific tilde expansion.
         expect(ctx.agentHome).not.toBe(ctx.agent2Home);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
         );
         // Home-directory files must start as ~ so the peer agent expands them under its own home.
         await expect(page.getByLabel("Sync path")).toHaveValue(`~/${filename}`);
@@ -334,7 +334,7 @@ test.describe.serial("File Detail View", () => {
         await fs.writeFile(selectedPath, "selected endpoint\n");
         await fs.writeFile(changedSelectedPath, "changed selected endpoint\n");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(currentPath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(currentPath)}?view=sync`,
         );
         await page.getByLabel("Sync path").fill(selectedPath);
 
@@ -344,7 +344,7 @@ test.describe.serial("File Detail View", () => {
             page.getByRole("link", { name: "view", exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(path.join(ctx.agent2Home, "file1.txt"))}`,
+            `/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(path.join(ctx.agent2Home, "file1.txt"))}`,
         );
         await page.getByLabel("Sync path").fill(selectedPath);
 
@@ -437,7 +437,7 @@ test.describe.serial("File Detail View", () => {
             page.getByRole("link", { name: "view", exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(changedSelectedPath)}`,
+            `/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(changedSelectedPath)}`,
         );
         await page.getByRole("button", { name: "Copy", exact: true }).click();
         await page
@@ -525,7 +525,7 @@ test.describe.serial("File Detail View", () => {
         await fs.writeFile(sourcePath, "renamed source\n");
         await fs.writeFile(destinationPath, "existing destination\n");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
         );
         await page.getByLabel("Sync path").fill(destinationPath);
         await page.getByRole("button", { name: "Copy", exact: true }).click();
@@ -587,7 +587,7 @@ test.describe.serial("File Detail View", () => {
         await fs.writeFile(sourcePath, "copy-missing\n");
         await fs.writeFile(moveSourcePath, "move-new\n");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(sourcePath)}?view=sync`,
         );
 
         await page.getByLabel("Sync path").fill(copyDestinationPath);
@@ -610,7 +610,7 @@ test.describe.serial("File Detail View", () => {
         );
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(moveSourcePath)}?view=sync`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(moveSourcePath)}?view=sync`,
         );
         await page.getByLabel("Sync path").fill(moveDestinationPath);
         await page.getByRole("button", { name: "Move", exact: true }).click();
@@ -640,7 +640,7 @@ test.describe.serial("File Detail View", () => {
         const renamedPath = path.join(ctx.testDirPath, renamedName);
         await fs.writeFile(originalPath, "rename content");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(originalPath)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(originalPath)}?view=details`,
         );
 
         await page.getByRole("button", { name: "More", exact: true }).click();
@@ -657,7 +657,7 @@ test.describe.serial("File Detail View", () => {
 
         // Navigation follows the renamed file so reloads do not target the stale source path.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(renamedPath)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(renamedPath)}?view=details`,
         );
         // The details heading and filesystem contents both reflect the atomic rename result.
         await expect(
@@ -670,7 +670,7 @@ test.describe.serial("File Detail View", () => {
 
     test("should select the open file from the more menu", async ({ page }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}?view=details`,
         );
         await expect(
             page.getByRole("heading", { name: "File name" }),
@@ -725,7 +725,7 @@ test.describe.serial("File Detail View", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/subdir3`)}?view=details`,
         );
         await expect(
             page.getByRole("heading", { name: "Directory name" }),
@@ -757,7 +757,7 @@ test.describe.serial("File Detail View", () => {
 
     test("should navigate back from file detail view", async ({ page }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await openFileDetails(page, "file1.txt");
 
@@ -779,7 +779,7 @@ test.describe.serial("File Detail View", () => {
 
     test("should navigate from a file with Backspace", async ({ page }) => {
         const filePath = path.join(ctx.testDirPath, "file1.txt");
-        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?view=details`;
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?view=details`;
         await page.goto(fileUrl);
         await expect(
             page.getByRole("heading", { name: "File name" }),
@@ -790,7 +790,7 @@ test.describe.serial("File Detail View", () => {
 
         // File-level Backspace returns to the containing directory rather than browser history.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await expect(
             page.getByRole("link", { name: "file1.txt", exact: true }),
@@ -801,7 +801,7 @@ test.describe.serial("File Detail View", () => {
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await openFileDetails(page, "file1.txt");
 
@@ -812,12 +812,12 @@ test.describe.serial("File Detail View", () => {
 
         await backToAgentButton.click();
 
-        await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentId}$`));
+        await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentName}$`));
     });
 
     test("should navigate to nested file detail view", async ({ page }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "subdir1"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "subdir1"))}`,
         );
 
         await openFileDetails(page, "nested1.txt");
@@ -852,7 +852,7 @@ test.describe.serial("File Detail View", () => {
         const filePath = path.join(ctx.testDirPath, fileName);
         await fs.writeFile(filePath, "shareable content");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?view=details`,
         );
 
         const shareableLinks = page.getByRole("region", {

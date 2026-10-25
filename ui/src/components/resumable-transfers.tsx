@@ -4,11 +4,17 @@ import type { PartialActionRequest } from "#bindings/PartialActionRequest";
 import { partialsQueryOptions, queryKeys } from "#ui/queries";
 import { Button } from "#ui/components/button";
 import { formatSize } from "#ui/utils/path";
+import { useAgents } from "#ui/use-agents";
 
 /** Durable inventory remains available even after transfer history or processes disappear. */
 export function ResumableTransfers(props: { api: ApiClient }) {
     const client = useQueryClient();
     const inventory = useQuery(partialsQueryOptions(props.api));
+    const agents = useAgents();
+
+    /** Partials record device ids; people recognise devices by name. */
+    const deviceName = (agentId: string) =>
+        agents.find((agent) => agent.id === agentId)?.name ?? agentId;
 
     const action = useMutation({
         mutationFn: async (request: {
@@ -46,9 +52,10 @@ export function ResumableTransfers(props: { api: ApiClient }) {
                 >
                     <div className="min-w-0 flex-1 text-sm">
                         <p>
-                            {partial.operation}: {partial.source.agent}:
-                            {partial.source.path} → {partial.dest.agent}:
-                            {partial.dest.path}
+                            {partial.operation}:{" "}
+                            {deviceName(partial.source.agent)}:
+                            {partial.source.path} →{" "}
+                            {deviceName(partial.dest.agent)}:{partial.dest.path}
                         </p>
                         <p className="text-slate-400">
                             {formatSize(partial.partial_bytes)} /{" "}

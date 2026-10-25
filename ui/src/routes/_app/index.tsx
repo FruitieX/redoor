@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { deviceRoute } from "#ui/browser-route";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useAtom } from "jotai";
 import {
@@ -108,8 +109,7 @@ function AgentNameGrid(props: { agents: Agent[] }) {
                             content={`Open ${agent.name} (${agentOriginTooltip(agent)})`}
                         >
                             <Link
-                                to="/agents/$agentId"
-                                params={{ agentId: agent.id }}
+                                {...deviceRoute(agent, "/agents/$deviceName")}
                                 className="inline-flex items-center gap-1.5 rounded border border-slate-800 bg-surface px-2 py-0.5 text-sm text-slate-200 hover:border-slate-600 hover:bg-tint"
                             >
                                 <AgentStatusDot agent={agent} />

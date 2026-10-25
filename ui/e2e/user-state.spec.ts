@@ -53,7 +53,7 @@ test.describe.serial("User state", () => {
         await api.login("test-user", "test-password");
         await api.updateUserState({ state: { showHiddenFiles: true } });
 
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const hiddenFile = page.getByRole("link", {
@@ -106,7 +106,7 @@ test.describe.serial("User state", () => {
             });
         });
 
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         await page.getByRole("button", { name: "Hide hidden files" }).click();
 
@@ -122,7 +122,7 @@ test.describe.serial("User state", () => {
     test("should persist recursive search settings from the shared dialog", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         await page.getByRole("button", { name: "Search device" }).click();
 
@@ -229,7 +229,7 @@ test.describe.serial("User state", () => {
             "data-theme",
             "light",
         );
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const activeFilesTab = page

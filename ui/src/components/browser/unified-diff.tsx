@@ -1,10 +1,9 @@
 import React from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouter } from "@tanstack/react-router";
 import { parse as parseDiff } from "diff2html";
 import { ColorSchemeType, LineType } from "diff2html/lib/types";
 import { Diff2HtmlUI } from "diff2html/lib/ui/js/diff2html-ui-base";
 import "diff2html/bundles/css/diff2html.min.css";
-import { getBrowserUrl } from "#ui/api-paths";
 import { browserRoute } from "#ui/browser-route";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import {
@@ -104,14 +103,18 @@ function appendEditorLineLinks(root: HTMLElement, editorHref: string) {
 export function UnifiedDiff(props: {
     unifiedDiff: string;
     emptyMessage?: string;
-    /** The current file, so trailing Open links can jump to it with ?line=. */
-    editorFile?: { agentId: string; path: string };
+    /**
+     * The current file, so trailing Open links can jump to it with ?line=. It carries the
+     * device's current name because that is what the browser URL holds.
+     */
+    editorFile?: { deviceName: string; path: string };
 }) {
-    const editorAgentId = props.editorFile?.agentId;
+    const editorDeviceName = props.editorFile?.deviceName;
     const editorPath = props.editorFile?.path;
     const targetRef = React.useRef<HTMLDivElement>(null);
     const resolvedTheme = useResolvedTheme();
     const navigate = useNavigate();
+    const router = useRouter();
 
     React.useEffect(() => {
         const target = targetRef.current;
@@ -161,12 +164,18 @@ export function UnifiedDiff(props: {
 
         diffUi.draw();
 
-        if (editorAgentId === undefined || editorPath === undefined) {
+        if (editorDeviceName === undefined || editorPath === undefined) {
             return;
         }
 
+        const editorRoute = browserRoute(
+            { name: editorDeviceName },
+            editorPath,
+        );
+
         // The anchors are plain DOM nodes, so they need a real href for new tabs and copying.
-        const editorHref = getBrowserUrl(editorAgentId, editorPath);
+        // The router builds it so the device name is encoded the same way as in links.
+        const editorHref = router.buildLocation(editorRoute).href;
 
         linkDiffFileNames(target, editorHref);
         appendEditorLineLinks(target, editorHref);
@@ -192,10 +201,7 @@ export function UnifiedDiff(props: {
                 }
 
                 event.preventDefault();
-                void navigate({
-                    ...browserRoute(editorAgentId, editorPath),
-                    search: { line },
-                });
+                void navigate({ ...editorRoute, search: { line } });
 
                 return;
             }
@@ -207,10 +213,7 @@ export function UnifiedDiff(props: {
             }
 
             event.preventDefault();
-            void navigate({
-                ...browserRoute(editorAgentId, editorPath),
-                search: {},
-            });
+            void navigate({ ...editorRoute, search: {} });
         };
 
         target.addEventListener("click", handleEditorLinkClick);
@@ -218,7 +221,14 @@ export function UnifiedDiff(props: {
         return () => {
             target.removeEventListener("click", handleEditorLinkClick);
         };
-    }, [props.unifiedDiff, editorAgentId, editorPath, resolvedTheme, navigate]);
+    }, [
+        props.unifiedDiff,
+        editorDeviceName,
+        editorPath,
+        resolvedTheme,
+        navigate,
+        router,
+    ]);
 
     if (props.unifiedDiff === "") {
         return (

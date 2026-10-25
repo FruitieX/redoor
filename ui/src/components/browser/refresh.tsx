@@ -1,12 +1,9 @@
 import React from "react";
 import { atom, useSetAtom, useStore } from "jotai";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useRouter } from "@tanstack/react-router";
+import { useRouter, type RegisteredRouter } from "@tanstack/react-router";
 import { queryKeys } from "#ui/queries";
-
-type BrowserRouter = {
-    invalidate: () => Promise<void>;
-};
+import { invalidateDeviceViews } from "#ui/use-active-agent";
 
 /** Names the open editor buffer and whether it holds unsaved text. */
 type EditorRefreshState = {
@@ -56,7 +53,7 @@ export function useEditorRefreshRegistration(state: EditorRefreshState) {
  * missing path that now exists.
  */
 async function refreshBrowserPath(options: {
-    router: BrowserRouter;
+    router: RegisteredRouter;
     queryClient: QueryClient;
     agentId: string;
     editor: EditorRefreshState | null;
@@ -96,7 +93,7 @@ async function refreshBrowserPath(options: {
             cancelRefetch: false,
         },
     );
-    await options.router.invalidate();
+    await invalidateDeviceViews(options.router);
 }
 
 /** Serializes browser reload triggers so one focus transition cannot duplicate requests. */

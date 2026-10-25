@@ -61,11 +61,11 @@ test.describe.serial("Agent logs", () => {
             }
         });
 
-        await page.goto(`${WEB_BASE_URL}/agents/${context.agentId}`);
+        await page.goto(`${WEB_BASE_URL}/agents/${context.agentName}`);
         await page.getByRole("link", { name: "View logs" }).click();
         // The visible detail action must target the selected agent's dedicated logs route.
         await expect(page).toHaveURL(
-            new RegExp(`/agents/${context.agentId}/logs$`),
+            new RegExp(`/agents/${context.agentName}/logs$`),
         );
         // The shared viewer must retain source-specific heading text.
         await expect(

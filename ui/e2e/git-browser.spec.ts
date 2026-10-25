@@ -149,7 +149,7 @@ test.describe.serial("Git browser", () => {
                 diffRequests.push(request.postData() ?? "");
             }
         });
-        const autoLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(autoLoadRepositoryPath)}?view=git`;
+        const autoLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(autoLoadRepositoryPath)}?view=git`;
         await page.goto(autoLoadUrl);
 
         const autoLoadButton = page.getByRole("button", {
@@ -177,7 +177,7 @@ test.describe.serial("Git browser", () => {
         ).toHaveCount(49);
         await expect(page).toHaveURL(autoLoadUrl);
 
-        const clickLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(clickLoadRepositoryPath)}?view=git`;
+        const clickLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(clickLoadRepositoryPath)}?view=git`;
         await page.goto(`${clickLoadUrl}&diff=true`);
         // Legacy query state is removed and cannot eagerly activate the batch.
         await expect(page).toHaveURL(clickLoadUrl);
@@ -220,7 +220,7 @@ test.describe.serial("Git browser", () => {
     test("browses status, file comparisons, refreshes, and explicit diff states", async ({
         page,
     }) => {
-        const repositoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(repositoryPath)}`;
+        const repositoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(repositoryPath)}`;
         await page.setViewportSize({ width: 360, height: 844 });
         await page.emulateMedia({ colorScheme: "light" });
         await page.goto(`${repositoryUrl}?view=git`);
@@ -284,7 +284,7 @@ test.describe.serial("Git browser", () => {
                 .getByRole("link", { name: "tracked.ts", exact: true }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(trackedPath)}`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(trackedPath)}`,
         );
         // Patches follow first appearance in the grouped status rows, with duplicate rows de-duplicated.
         expect(
@@ -385,33 +385,33 @@ test.describe.serial("Git browser", () => {
         ).toContainText("refreshed worktree version");
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(untrackedPath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(untrackedPath)}?view=git`,
         );
         // Direct untracked files use the same pure-addition rendering as directory batches.
         await expect(
             page.getByRole("region", { name: "Full Git diff" }),
         ).toContainText("untracked content");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(ignoredPath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(ignoredPath)}?view=git`,
         );
         // Ignored files retain a Git tab and expose their classification directly.
         await expect(
             page.getByText(/This file is ignored by Git/),
         ).toBeVisible();
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(binaryPath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(binaryPath)}?view=git`,
         );
         // Binary outcomes must not be mistaken for clean text files.
         await expect(page.getByText(/This is a binary file/)).toBeVisible();
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(largePath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(largePath)}?view=git`,
         );
         // Bounded API outcomes receive a useful size-specific message.
         await expect(
             page.getByText(/too large to display safely/),
         ).toBeVisible();
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(deletedPath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(deletedPath)}?view=git`,
         );
         // A deleted filesystem path must bypass creation UI and retain its HEAD deletion diff.
         await expect(
@@ -422,13 +422,13 @@ test.describe.serial("Git browser", () => {
         ).toHaveCount(0);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(repositoryPath, "clean"))}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(repositoryPath, "clean"))}?view=git`,
         );
         // Prefix-filtered clean directories report clean even when siblings are modified.
         await expect(page.getByText(/Working tree is clean/)).toBeVisible();
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(outsidePath)}?view=git`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(outsidePath)}?view=git`,
         );
         // Direct Git URLs outside a worktree return to the ordinary Files representation.
         await expect(page).not.toHaveURL(/\?view=git$/);

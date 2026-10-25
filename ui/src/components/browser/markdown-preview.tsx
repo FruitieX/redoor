@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isMap, isNode, parseDocument, stringify, type Node } from "yaml";
-import { getBrowserUrl } from "#ui/api-paths";
+import { browserRoute } from "#ui/browser-route";
 import { FoldingSection } from "#ui/components/folding-section";
 import { syntaxHighlighter } from "#ui/utils/syntax-highlighting";
 
@@ -180,19 +180,27 @@ function decodeMarkdownPath(path: string): string {
     }
 }
 
-/** Resolves a Markdown file link against its directory or the active repository root. */
+/** A Markdown file link resolved to a file-browser destination on the same device. */
+type MarkdownFileLink = { path: string; hash: string | undefined };
+
+/**
+ * Resolves a Markdown file link against its directory or the active repository root. It
+ * returns the filesystem path and the fragment rather than a URL, so the router builds the
+ * device URL and encodes the device name itself. A query string has no meaning for the file
+ * browser and is dropped.
+ */
 export function resolveMarkdownFileLink(options: {
     href: string;
-    agentId: string;
     filePath: string;
     repositoryRoot: string | null;
-}): string {
+}): MarkdownFileLink {
     const suffixIndex = options.href.search(/[?#]/);
 
     const hrefPath =
         suffixIndex === -1 ? options.href : options.href.slice(0, suffixIndex);
 
-    const suffix = suffixIndex === -1 ? "" : options.href.slice(suffixIndex);
+    const hashIndex = options.href.indexOf("#");
+    const hash = hashIndex === -1 ? "" : options.href.slice(hashIndex + 1);
     const decodedPath = decodeMarkdownPath(hrefPath);
 
     const fileDirectory = options.filePath.slice(
@@ -204,17 +212,17 @@ export function resolveMarkdownFileLink(options: {
         ? `${options.repositoryRoot ?? ""}/${decodedPath.slice(1)}`
         : `${fileDirectory}/${decodedPath}`;
 
-    return `${getBrowserUrl(
-        options.agentId,
-        normalizeFilesystemPath(destination),
-    )}${suffix}`;
+    return {
+        path: normalizeFilesystemPath(destination),
+        hash: hash === "" ? undefined : hash,
+    };
 }
 
 /** Keeps web and document links native while routing remote filesystem links in-app. */
 function MarkdownLink(
     props: ComponentProps<"a"> &
         ExtraProps & {
-            agentId: string;
+            deviceName: string;
             filePath: string;
             repositoryRoot: string | null;
         },
@@ -229,14 +237,17 @@ function MarkdownLink(
         );
     }
 
+    const link = resolveMarkdownFileLink({
+        href,
+        filePath: props.filePath,
+        repositoryRoot: props.repositoryRoot,
+    });
+
     return (
         <Link
-            to={resolveMarkdownFileLink({
-                href,
-                agentId: props.agentId,
-                filePath: props.filePath,
-                repositoryRoot: props.repositoryRoot,
-            })}
+            {...browserRoute({ name: props.deviceName }, link.path)}
+            search={{}}
+            hash={link.hash}
             title={props.title}
             className={props.className}
         >
@@ -248,7 +259,8 @@ function MarkdownLink(
 /** Renders an untrusted markdown draft without enabling raw HTML execution. */
 export function MarkdownPreview(props: {
     content: string;
-    agentId: string;
+    /** The current name of the file's device, which in-app links carry in their URL. */
+    deviceName: string;
     filePath: string;
     repositoryRoot: string | null;
 }) {
@@ -275,7 +287,7 @@ export function MarkdownPreview(props: {
                         a: (linkProps) => (
                             <MarkdownLink
                                 {...linkProps}
-                                agentId={props.agentId}
+                                deviceName={props.deviceName}
                                 filePath={props.filePath}
                                 repositoryRoot={props.repositoryRoot}
                             />

@@ -305,7 +305,7 @@ test.describe.serial("Device order", () => {
                 deviceOrder: [],
             },
         });
-        const destination = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const destination = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(destination);
 
         const realAgents = await api.listAgents();

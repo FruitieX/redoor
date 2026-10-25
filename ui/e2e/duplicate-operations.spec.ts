@@ -24,7 +24,7 @@ test.describe.serial("Duplicate Operations", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const originalName = `inline.${Date.now()}.archive.txt`;
         const duplicatedName = `inline-duplicated-${Date.now()}.txt`;
         const originalPath = path.join(directoryPath, originalName);
@@ -99,7 +99,7 @@ test.describe.serial("Duplicate Operations", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const originalName = `inline-directory-${Date.now()}`;
         const duplicatedName = `inline-duplicated-directory-${Date.now()}`;
         const originalPath = path.join(directoryPath, originalName);

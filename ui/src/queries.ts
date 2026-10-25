@@ -8,7 +8,9 @@ import {
     type QueryClient,
     type QueryKey,
 } from "@tanstack/react-query";
+import { notFound } from "@tanstack/react-router";
 
+import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import type { Agent, ApiClient } from "#ui/api-client";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
@@ -197,9 +199,10 @@ export function agentsQueryOptions(api: ApiClient) {
 }
 
 /**
- * Resolves one agent's request client from the inventory cache, fetching it when absent or
- * stale. Loaders use this instead of reading a parent route's data so every route depends
- * on the query cache alone.
+ * Resolves one agent's request client by id from the inventory cache, fetching it when absent
+ * or stale. Loaders use this instead of reading a parent route's data so every route depends
+ * on the query cache alone. A missing id throws `notFound()`, because the device page renders
+ * one "device not found" view for a deleted device and for an unknown name alike.
  */
 export async function loadAgent(
     context: QueryContext,
@@ -213,10 +216,79 @@ export async function loadAgent(
     const info = infos.find((entry) => entry.id === agentId);
 
     if (!info) {
-        throw new Error(`Agent not found: ${agentId}`);
+        throw notFound();
     }
 
     return context.api.agentFor(info);
+}
+
+/**
+ * Finds the device a device URL addresses. URLs carry the name because people read and type
+ * them, but an exact id also matches first, the same rule the REST API follows, so a link
+ * built from an id still opens the device. Names cannot look like ids, so the two never
+ * collide.
+ */
+function findDeviceInfo(
+    infos: AgentInfoResponse[],
+    nameOrId: string,
+): AgentInfoResponse | undefined {
+    return (
+        infos.find((entry) => entry.id === nameOrId) ??
+        infos.find((entry) => entry.name === nameOrId)
+    );
+}
+
+/**
+ * Resolves the device in a device URL to its request client, so the device route can pin the
+ * page to that id. A miss refetches once before giving up: the cached inventory may predate
+ * a device that was just added or renamed elsewhere, and "device not found" must not be shown
+ * for a device that exists. Throws `notFound()` when the server does not know the name either.
+ */
+export async function loadAgentByName(
+    context: QueryContext,
+    deviceName: string,
+): Promise<Agent> {
+    const cached = findDeviceInfo(
+        await fetchQueryUncancelled(
+            context.queryClient,
+            agentsQueryOptions(context.api),
+        ),
+        deviceName,
+    );
+
+    const info =
+        cached ??
+        findDeviceInfo(
+            await fetchQueryUncancelled(context.queryClient, {
+                ...agentsQueryOptions(context.api),
+                staleTime: 0,
+            }),
+            deviceName,
+        );
+
+    if (!info) {
+        throw notFound();
+    }
+
+    return context.api.agentFor(info);
+}
+
+/**
+ * Loads the device a device page was opened for, from the id its parent route resolved. Child
+ * loaders use this instead of resolving the URL name again, so a page left open across a
+ * rename keeps acting on the same device even when a child route reloads.
+ */
+export async function loadDeviceRouteAgent(
+    context: QueryContext,
+    parentMatchPromise: Promise<{ loaderData?: { deviceId: string } }>,
+): Promise<Agent> {
+    const deviceId = (await parentMatchPromise).loaderData?.deviceId;
+
+    if (deviceId === undefined) {
+        throw notFound();
+    }
+
+    return loadAgent(context, deviceId);
 }
 
 /**

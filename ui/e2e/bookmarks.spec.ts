@@ -182,7 +182,7 @@ test.describe.serial("Bookmarks", () => {
     }) => {
         const fileName = "file1.txt";
         const filePath = path.join(ctx.testDirPath, fileName);
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         await page
@@ -229,7 +229,7 @@ test.describe.serial("Bookmarks", () => {
             .click();
         // Clicking the sidebar entry must open that exact bookmarked path.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         await page.reload();
@@ -246,7 +246,7 @@ test.describe.serial("Bookmarks", () => {
         const backgroundTab = await backgroundTabPromise;
         // Middle-click must open the bookmarked destination without removing its saved entry.
         await expect(backgroundTab).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         await backgroundTab.close();
         await expect(
@@ -263,7 +263,7 @@ test.describe.serial("Bookmarks", () => {
         const fileName = "file2.txt";
         const filePath = path.join(ctx.testDirPath, fileName);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?view=details`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?view=details`,
         );
 
         await page.getByRole("button", { name: "More", exact: true }).click();
@@ -297,7 +297,7 @@ test.describe.serial("Bookmarks", () => {
         const fileName = "file1.txt";
         const filePath = path.join(ctx.testDirPath, fileName);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         // Bookmark belongs in the overflow menu so the toolbar stays focused on editing.
@@ -471,7 +471,7 @@ test.describe.serial("Bookmarks", () => {
             "file2.txt",
         ]);
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("button", {

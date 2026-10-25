@@ -1,4 +1,5 @@
 import * as React from "react";
+import { deviceRoute } from "#ui/browser-route";
 import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
@@ -14,16 +15,16 @@ import {
     agentConfigurationQueryOptions,
     agentsQueryOptions,
     fetchQueryUncancelled,
-    loadAgent,
+    loadDeviceRouteAgent,
     queryKeys,
     serverInfoQueryOptions,
 } from "#ui/queries";
-import { useAgent } from "#ui/use-agents";
+import { useRouteAgent } from "#ui/use-active-agent";
 import { getErrorMessage } from "#ui/utils/error";
 
-export const Route = createFileRoute("/_app/agents/$agentId/edit")({
-    loader: async ({ context, params }) => {
-        const agent = await loadAgent(context, params.agentId);
+export const Route = createFileRoute("/_app/agents/$deviceName/edit")({
+    loader: async ({ context, parentMatchPromise }) => {
+        const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
 
         if (!agent.configurationEditable) {
             throw redirect({ to: "/agents" });
@@ -34,11 +35,7 @@ export const Route = createFileRoute("/_app/agents/$agentId/edit")({
 
         // The form's initial values must reflect the TOML as it is now, not an earlier visit.
         await fetchQueryUncancelled(context.queryClient, {
-            ...agentConfigurationQueryOptions(
-                context.api,
-                params.agentId,
-                kind,
-            ),
+            ...agentConfigurationQueryOptions(context.api, agent.id, kind),
             staleTime: 0,
         });
 
@@ -50,52 +47,54 @@ export const Route = createFileRoute("/_app/agents/$agentId/edit")({
 /** Updates or permanently removes one stopped managed local or SSH agent. */
 function EditManagedAgentPage() {
     const { api, queryClient } = Route.useRouteContext();
-    const { agentId } = Route.useParams();
     const { kind } = Route.useLoaderData();
     const { data: serverInfo } = useSuspenseQuery(serverInfoQueryOptions(api));
+    // The id stays the same across a rename, so this page keeps editing the same device
+    // while its URL still carries the old name.
+    const agent = useRouteAgent();
 
     const { data: configuration } = useSuspenseQuery(
-        agentConfigurationQueryOptions(api, agentId, kind),
+        agentConfigurationQueryOptions(api, agent.id, kind),
     );
 
-    // Absent for a moment after a rename, until the page follows to the new id.
-    const agent = useAgent(agentId);
     const router = useRouter();
     const [isDeleteOpen, setIsDeleteOpen] = React.useState(false);
-    const isRunning = agent?.status !== "stopped";
+    const isRunning = agent.status !== "stopped";
 
     const updateMutation = useMutation({
         mutationFn: async (submission: ManagedAgentSubmitRequest) => {
             const response =
                 submission.kind === "local"
-                    ? await api.updateLocalAgent(agentId, submission.request)
-                    : await api.updateSshAgent(agentId, submission.request);
+                    ? await api.updateLocalAgent(agent.id, submission.request)
+                    : await api.updateSshAgent(agent.id, submission.request);
 
-            await queryClient.invalidateQueries(agentsQueryOptions(api));
+            await Promise.all([
+                queryClient.invalidateQueries(agentsQueryOptions(api)),
+                queryClient.invalidateQueries({
+                    queryKey: queryKeys.agentConfiguration(agent.id),
+                }),
+            ]);
 
-            // A renamed agent's settings are loaded under its new id by the navigation below.
-            if (response.agent.id === agentId) {
-                await queryClient.invalidateQueries({
-                    queryKey: queryKeys.agentConfiguration(agentId),
+            // The URL carries the name, so a rename would leave this tab on a name that no
+            // longer exists. Replacing the history entry keeps Back from returning to it.
+            if (response.agent.name !== agent.name) {
+                await router.navigate({
+                    ...deviceRoute(response.agent, "/agents/$deviceName/edit"),
+                    replace: true,
                 });
             }
-
-            // A rename drops the old id from the inventory above; this page tolerates that
-            // gap and moves to the new identity here.
-            await router.navigate({
-                to: "/agents/$agentId/edit",
-                params: { agentId: response.agent.id },
-            });
 
             return response;
         },
     });
 
     const deleteMutation = useMutation({
-        mutationFn: () => api.deleteManagedAgent(agentId, configuration.kind),
+        mutationFn: () => api.deleteManagedAgent(agent.id, configuration.kind),
         onSuccess: async () => {
-            await queryClient.invalidateQueries(agentsQueryOptions(api));
+            // Leave first: once the refreshed inventory drops the device, this page would
+            // briefly report it as not found.
             await router.navigate({ to: "/agents" });
+            await queryClient.invalidateQueries(agentsQueryOptions(api));
         },
     });
 
@@ -109,7 +108,7 @@ function EditManagedAgentPage() {
     return (
         <>
             <ManagedAgentForm
-                key={agentId}
+                key={agent.id}
                 mode="edit"
                 configuration={configuration}
                 configPath={serverInfo.config_path}
@@ -157,7 +156,7 @@ function EditManagedAgentPage() {
             </ManagedAgentForm>
             <ConfirmationDialog
                 isOpen={isDeleteOpen}
-                title={`Remove ${agentId} from Redoor?`}
+                title={`Remove ${agent.name} from Redoor?`}
                 description="Stops its agent and removes the device from the TOML configuration. Files on the device are not deleted."
                 confirmLabel="Remove device"
                 busyLabel="Removing device..."

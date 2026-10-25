@@ -221,7 +221,7 @@ export function FileList(props: {
 
         event.preventDefault();
         setFilterFocusPath(destinationPath);
-        await navigate(browserRoute(agent.id, destinationPath));
+        await navigate(browserRoute(agent, destinationPath));
     };
 
     return (
@@ -712,7 +712,7 @@ function FileEntry(props: {
             </td>
             <td className="p-1.5 sm:p-2">
                 <Link
-                    {...browserRoute(props.agent.id, fullPath)}
+                    {...browserRoute(props.agent, fullPath)}
                     data-keyboard-focus-entry="true"
                     className="block min-w-0 truncate font-medium text-blue-400 hover:underline"
                 >

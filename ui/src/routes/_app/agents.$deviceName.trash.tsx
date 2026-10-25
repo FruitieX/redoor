@@ -26,21 +26,22 @@ import {
     agentDetailsQueryOptions,
     fetchQueryUncancelled,
     invalidateAgentData,
-    loadAgent,
+    loadDeviceRouteAgent,
     trashQueryOptions,
 } from "#ui/queries";
-import { useRequiredAgent } from "#ui/use-agents";
+import { useRouteAgent } from "#ui/use-active-agent";
+import { browserRoute, deviceRoute } from "#ui/browser-route";
 
 type TrashRow = TrashItem & { locationId: string; locationPath: string };
 
-export const Route = createFileRoute("/_app/agents/$agentId/trash")({
-    loader: async ({ context, params }) => {
-        const agent = await loadAgent(context, params.agentId);
+export const Route = createFileRoute("/_app/agents/$deviceName/trash")({
+    loader: async ({ context, params, parentMatchPromise }) => {
+        const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
 
         if (agent.status !== "connected") {
             throw redirect({
-                to: "/agents/$agentId",
-                params: { agentId: params.agentId },
+                to: "/agents/$deviceName",
+                params: { deviceName: params.deviceName },
             });
         }
 
@@ -210,11 +211,10 @@ function EmptyTrashDialog(props: {
 
 /** Leaves the page when the agent disconnects, since trash can only be read from a live agent. */
 function TrashPage() {
-    const { agentId } = Route.useParams();
-    const agent = useRequiredAgent(agentId);
+    const agent = useRouteAgent();
 
     if (agent.status !== "connected") {
-        return <Navigate to="/agents/$agentId" params={{ agentId }} />;
+        return <Navigate {...deviceRoute(agent, "/agents/$deviceName")} />;
     }
 
     return <TrashAvailability agent={agent} />;
@@ -334,7 +334,8 @@ function TrashInventoryPage(props: { agent: Agent }) {
                                 className="grid gap-3 border-b border-slate-800 px-4 py-3 last:border-b-0 md:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_10rem_7rem] md:items-center md:gap-4"
                             >
                                 <Link
-                                    to={props.agent.getBrowserUrl(
+                                    {...browserRoute(
+                                        props.agent,
                                         joinBrowserPath(
                                             joinBrowserPath(
                                                 item.locationPath,

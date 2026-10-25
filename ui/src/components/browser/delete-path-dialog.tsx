@@ -52,7 +52,7 @@ export function DeletePathDialog(props: {
         // Leave before refreshing, so no mounted query refetches the path that no longer exists.
         if (props.leaveToParent === true && parentPath !== null) {
             await navigate({
-                ...browserRoute(props.agent.id, parentPath),
+                ...browserRoute(props.agent, parentPath),
                 replace: true,
             });
         }
