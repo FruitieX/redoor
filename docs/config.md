@@ -115,6 +115,15 @@ CLI values take precedence over role-specific environment variables, which take 
 
 Optional array of device connections with server-managed agents. Only the server reads this section. Each entry is either **SSH-backed** (default) or **local** (`local = true`). Agents start lazily when you connect a device from the UI or management API. The UI uses **Add device**, **Edit device**, and **Remove device** to manage these entries; removing a device stops its agent and removes its configuration, without deleting files on the device.
 
+### Device ids and names
+
+Every device has a stable **id** (`dev_` followed by 20 lowercase letters and digits) and an editable **name**. Access token scopes and everything else the server stores refer to the id, so renaming a device never changes what a token can reach. Requests (REST, MCP, `redoor remote`) accept either the name or the id; use the id in scripts that must stay on one device across renames.
+
+- The server writes `id` into entries added through the UI or API. Entries you write by hand get an `id` written back on the next server start, keeping the file's comments and formatting. Do not change or copy it: duplicate ids are rejected, so when you copy an entry, delete its `id` line and let the server assign a new one.
+- If the server cannot write the file (for example a read-only mount), startup fails and prints a ready-to-paste `id = "dev_..."` line for each entry without one.
+- Names must be unique, must not be empty, must not contain `:` or `/`, and must not look like an id.
+- A standalone `redoor agent` stores its id in `agent-id` in its data directory (`~/.local/share/redoor/agent-id` by default). Delete that file on a cloned machine to give it its own identity.
+
 ### SSH-backed agent
 
 Default when `local` is omitted or `false`. The server SSHes to the host, ensures a matching binary, and starts `redoor agent` with reverse port forwarding.
@@ -122,6 +131,7 @@ Default when `local` is omitted or `false`. The server SSHes to the host, ensure
 | Key          | Type          | Required | Description                                                                                                                                                                  |
 | ------------ | ------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `target`     | string        | yes      | SSH destination (`host` or `user@host`).                                                                                                                                     |
+| `id`         | string        | no       | Stable device id. Written by the server; see [Device ids and names](#device-ids-and-names).                                                                                  |
 | `local`      | bool          | no       | Must be absent or `false`.                                                                                                                                                   |
 | `username`   | string        | no       | SSH login via `ssh -l`. When omitted, OpenSSH config or `user@host` supplies it.                                                                                             |
 | `ssh_port`   | integer (u16) | no       | SSH port. When omitted, OpenSSH host config / default applies (not forced to 22).                                                                                            |
@@ -150,6 +160,7 @@ Runs on the same machine as the server. The server reuses its own binary (`std::
 | Key     | Type   | Required | Description                                                                                          |
 | ------- | ------ | -------- | ---------------------------------------------------------------------------------------------------- |
 | `local` | bool   | yes      | Must be `true`.                                                                                      |
+| `id`    | string | no       | Stable device id. Written by the server; see [Device ids and names](#device-ids-and-names).          |
 | `name`  | string | no       | Device name. Defaults to the system hostname.                                                        |
 | `home`  | string | no       | Home directory opened in the UI. Defaults to the spawned process user's home directory.              |
 | `log`   | string | no       | File for the spawned agent stdout/stderr (append). When omitted, stdio is inherited from the server. |
@@ -171,6 +182,7 @@ Optional named SSH relays started explicitly with `redoor agent relay start ID`.
 | Key              | Type          | Required | Description                                                                                 |
 | ---------------- | ------------- | -------- | ------------------------------------------------------------------------------------------- |
 | `id`             | string        | yes      | Unique lifecycle ID. Allowed characters: ASCII letters, numbers, `.`, `_`, `-`.             |
+| `agent_id`       | string        | no       | Stable device id of the remote agent. Written by `relay start` when missing.                |
 | `target`         | string        | yes      | SSH destination (`host` or `user@host`).                                                    |
 | `server`         | string        | yes      | Redoor server URL reached by the relay machine (`http(s)://` or `ws(s)://`).                |
 | `username`       | string        | no       | SSH login via `ssh -l`.                                                                     |

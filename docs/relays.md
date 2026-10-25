@@ -25,6 +25,8 @@ ssh_port = 2222
 
 An ID may contain ASCII letters, numbers, `.`, `_`, and `-`. It identifies local lifecycle state and remains independent from `name`, which names the remote device in the UI and remote CLI. Relay IDs must be unique.
 
+`relay start` writes an `agent_id = "dev_..."` line into the entry the first time it runs. It is the remote device's stable id, which access token scopes refer to, so do not change or copy it. If the config file is read-only, the command fails and prints the line to add.
+
 `agent_app_name` isolates the remote agent's PID and data files. When omitted, it defaults to `<local-app-name>-relay-<relay-id>`, allowing multiple relays to run concurrently on the same SSH host. Explicit values use the same validation as `--app-name`.
 
 ## Lifecycle

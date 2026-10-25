@@ -59,6 +59,8 @@ The contract between all parties, with no runtime dependencies (no tokio).
     and the credit windows. `exec`, `log` and `terminal` hold the feature-specific wire types.
   - `registration` holds `AgentIdentity` and `AgentCapabilities`, which are flattened into
     the `hello` frame.
+- `ids`: the strongly typed identifiers. `AgentId` is the stable device id (see "Device
+  identity"); `validate_device_name` holds the device name rules.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
   transfers, git, tokens, ...).
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
@@ -112,6 +114,8 @@ The agent runtime and the implementation of every command.
 - `platform/`: mounts, accounts and identity, which keeps OS-specific code out of the
   commands.
 - `terminal`, `logs`: PTY sessions and log streaming, each on one stream of the connection.
+- `device_id`: the `<data_dir>/agent-id` file a standalone agent keeps its id in. Agents
+  started with `--agent-id` (managed agents and relays) never read or write it.
 
 ### `redoor-server`
 
@@ -401,7 +405,10 @@ sequenceDiagram
             alt accepted
                 R->>A: welcome {connection_id}
                 Note over A,R: the agent is connected and available for commands
-            else duplicate name
+            else id not in the dev_ format or invalid name
+                R->>A: rejected {invalid_identity, message}
+                Note over S: the session flushes the frame and closes
+            else name used by another live or configured device
                 R->>A: rejected {duplicate_name, message}
                 Note over S: the session flushes the frame and closes
             end
@@ -423,9 +430,9 @@ sequenceDiagram
 - **Request ids are interpreted per connection.** The server allocates them from one
   router-wide counter, and the router indexes flows by agent and request id, so a frame can
   only resolve work that was sent to its own connection.
-- A reconnect of the same agent id replaces the old connection, which receives `evicted`
-  and exits. A *different* agent id that claims a live agent's name is `rejected` with
-  `duplicate_name`.
+- A reconnect of the same agent id replaces the old connection, which receives `evicted`.
+  A *different* agent id that claims the name of a live or configured device is `rejected`
+  with `duplicate_name`. See "Device identity" for the id format and cloned agents.
 - Every connection gets a **socket id**. The router only accepts frames and unregistrations
   from an agent's *current* session, so a slow-dying old connection cannot remove the agent
   that replaced it after a reconnect.
@@ -433,6 +440,121 @@ sequenceDiagram
   capability flag and no uncredited fallback.
 - On the agent side, each link has a **generation** number. Timers and tasks from a replaced
   connection carry the old generation and are ignored.
+
+## Device identity
+
+Every device has two identifiers with different jobs:
+
+- **The id** (`AgentId`, `dev_` followed by 20 random lowercase base32 characters, 100 bits)
+  never changes for the device's lifetime. Everything stored or used internally refers to
+  it: router keys, watchdog supervisors, token scopes, resume manifests, MCP operations and
+  `config.toml`. The `dev_` prefix only makes ids recognisable in logs and URLs, like
+  `redoor_at_` on access tokens.
+- **The name** is for people. It is shown in the UI and used to address a device in URLs,
+  the REST API, MCP and the CLI, but it is never stored as a reference. Renaming a device
+  changes only the name, so nothing else has to be rewritten.
+
+The name used to be the identity, which meant a token scoped to `pi` silently lost access
+when `pi` was renamed, and gained access to whichever device was later called `pi`. Keeping
+stored references on ids removes that escalation.
+
+**Who owns the id** depends on whether the server has a config entry for the device:
+
+- **Managed agents (`[[agents]]`): the server.** The id is `id = "dev_..."` in the entry,
+  generated when the device is added through the UI or API and passed to the spawned agent
+  with `--agent-id`. Hand-written entries without an id get one at startup, written back
+  with the same formatting-preserving rewrite agent edits use. If the file cannot be
+  written (read-only mount, other owner), startup fails and prints a ready-to-paste
+  `id = "dev_..."` line per entry; an id kept only in memory would change on every start.
+  The server owns these ids because several entries can target the same `user@host` (and
+  share its data dir), because it needs the id before the first connection, and because
+  wiped remote state must not change the id. The edit handlers copy the id from the stored
+  entry: a request never carries it, and dropping it would assign a new id on the next
+  start.
+- **Relays (`[[relays]]`): the relay.** The entry's `agent_id` is assigned like a managed
+  id when `redoor agent relay start` runs and passed to the remote agent with `--agent-id`.
+- **Standalone agents: the agent.** On first start it creates `<data_dir>/agent-id` (0600,
+  written to a temporary file and published with a no-replace rename) and reuses it later.
+  Deleting the file makes the agent appear as a new device, which is how a cloned machine
+  gets its own identity.
+
+Every programmatic rewrite of `config.toml` (id write-back at server or relay startup, and
+the add, edit and delete routes) holds an exclusive `flock` on `.config.toml.lock` next to it
+from read to replace. Each writer replaces the whole file, so a writer working from an older
+read would otherwise drop another's change, such as an id already in use. The id write-back
+first checks without the lock, so a read-only deployment whose entries all have ids never
+creates the lock file.
+
+Duplicate ids in `config.toml` (a copied block) fail parsing for every role and name both
+entries. `hello` carries the id and the name in separate fields; the router rejects a
+`hello` whose id is not in the id format or whose name breaks the name rules
+(`invalid_identity`).
+
+**Names** must not be empty, must not contain `:` (the CLI's `device:path` separator) or
+`/` (URL paths), and must not be in the id format, because requests accept either and an
+id-shaped name would be ambiguous. Names are unique: `[[agents]]` names are checked at
+startup and before restarts, creating or renaming a device to a taken name is refused, and
+a different id claiming the name of a live or configured device is rejected. A create or
+rename reserves the new name in the router before it stops the agent and rewrites the
+config, and `hello` treats a reserved name as taken, so a standalone agent cannot claim the
+name in that window; the reservation is dropped when the edit finishes. A new
+standalone agent may take the name of a disconnected standalone agent; the stale inventory
+row is dropped so the name still points at one device. Uniqueness is not a security
+property, since access control works on ids.
+
+**Name-or-id resolution.** Every request value that addresses a device accepts a name or an
+id: an exact id wins, otherwise the name is matched (`RouterMsg::ResolveDevice`). It happens
+once, before access control:
+
+- The access middleware resolves the `{agent}` path parameter and stores the id as the
+  `ResolvedDevice` extension; handlers take the device from there and never read the raw
+  parameter. It runs after authentication, so anonymous callers cannot probe names.
+- Handlers with devices in the body (copy, move, diff, partials) and MCP tools resolve their
+  device fields before calling `Principal::require`.
+- Token scopes are resolved when a token is created or edited and stored as ids, so a scope
+  stays tied to its devices and does not follow a name.
+
+Addressing by name is intentional: a script that uses `pi` follows whichever device is
+called `pi` now, so a device can be swapped by renaming. Scripts that must stay on one
+device use its id. An unknown value is `404 Device not found`; the CLI then lists the
+available devices with their names and ids.
+
+**Cloned standalone agents.** Copying a home directory or an image with a baked-in data dir
+copies the id file, so several machines report the same id, and since a reconnect replaces
+the old connection, the clones would evict each other forever. Hostnames cannot tell clones
+from reconnects (clones usually keep them), so the router detects the eviction loop itself
+(`router/duplicate_ids.rs`):
+
+- Each session owns a `ConnectionActivity` clock (`actors/activity.rs`) that it updates on
+  every inbound frame; the stale check reads the same clock, and the router reads it
+  directly when a `hello` arrives, so heartbeats never pass through the router mailbox. A
+  connection is healthy while its last frame is no older than `min(2 × keepalive,
+  stale_timeout)`: both ends ping every keepalive period, so a live link always delivers a
+  frame within two periods.
+- Only a `hello` that would replace a *healthy* connection of the same id counts. A real
+  reconnect replaces a dead or dying connection, once, and is never counted.
+- The third counted replacement within 60 seconds still goes through and starts the
+  conflict: while the current connection stays healthy, every newcomer for that id is
+  rejected with `duplicate_id`, and the device carries a `duplicate_id` warning with the
+  hostnames of the competing `hello` frames. If the current connection goes silent, the next
+  newcomer gets through.
+- The warning clears after 60 seconds without any competing `hello`, rejected ones included;
+  counting only replacements would clear it while a clone is still retrying and restart the
+  loop once a minute. The router's periodic tick does the clearing.
+- A rejected agent logs how to fix it (delete `<data_dir>/agent-id` on one machine, or check
+  for duplicate config ids when it was started with `--agent-id`) and retries with its normal
+  backoff, so a fixed clone, or a real reconnect after the current connection died, gets
+  through. Other rejections still make the agent exit.
+- On `evicted`, managed agents and relays exit as before, so an SSH-launched process that
+  outlived its tunnel does not linger. A standalone agent holds the single-instance lock on
+  its data dir, so being replaced means another machine has its id; it reconnects with
+  backoff instead, otherwise the loop would end before the router could detect it.
+- The agent still handles a `rejected` or `evicted` frame that arrived just before the
+  server closed the socket, even if it notices the connection loss first.
+
+Managed agents get their id from their own config entry, and duplicate config ids fail
+startup, so in practice this only affects standalone agents. Like every agent check, it
+trusts self-reported behavior.
 
 ## Managed agent lifecycle
 
@@ -470,10 +592,12 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   Without this, a `hello` that was already in flight, or a remote process that outlived its
   ssh client, would reconnect and silently undo the user's stop. Socket ids likewise filter
   out late disconnect and stale events from replaced sockets.
-- **Config edits apply at runtime.** Adding an agent creates a new dormant supervisor.
-  Editing or deleting one stops the agent, rewrites the config file (preserving its
-  formatting) and replaces the supervisor, so an edited agent comes back as `Stopped`. Changes
-  made to `config.toml` by hand take effect on the next server restart.
+- **Config edits apply at runtime.** Adding an agent generates its id and creates a new
+  dormant supervisor. Editing or deleting one stops the agent, rewrites the config file
+  (preserving its formatting, finding the entry by its id) and replaces the supervisor, so an
+  edited agent comes back as `Stopped` with the same id. Supervisors are keyed by id, so the
+  session finds its supervisor through the id in `hello` even after a rename. Changes made to
+  `config.toml` by hand take effect on the next server restart.
 - **Server restart** (`POST /api/v1/server/restart`) validates the config first. It then
   stops every managed child before re-executing, because `exec` would otherwise leave them
   orphaned. Standalone agents simply reconnect.
@@ -943,8 +1067,25 @@ The route tree separates the authenticated application from the public login for
   Because they only exist below `_app`, they cannot run while signed out. The clipboard
   import wraps the shell as a context provider, so the toolbar's Paste button calls it
   directly instead of signalling it through a window event.
+- **Device URLs carry names, everything else uses ids.** Device pages live under
+  `/agents/$deviceName`, because people read and type those URLs. The `agents.$deviceName`
+  loader resolves the name once (an exact id also matches first, like the server) from the
+  cached device list, refetching once on a miss, and returns `{ deviceId }`; an unknown name
+  shows the "device not found" page. The route never reloads that resolution
+  (`staleTime: Infinity`, and `invalidateDeviceViews` reloads only its children), so an open
+  page keeps acting on the device it was opened for even if its old name later belongs to
+  another device. Child loaders use `loadDeviceRouteAgent` and components `useRouteAgent`,
+  both by id; API calls, terminals, websockets and stored UI state (remembered browse paths,
+  provisioning history) use the id. Links built from a device (`deviceRoute`,
+  `browserRoute`) also store its id in the history state, and the device route resolves that
+  id instead of keeping its own (`shouldReload`): otherwise choosing the device that took an
+  open page's old name in the sidebar would keep acting on the previous device. Links that
+  only know a name carry no id and stay on the device the page was opened for. Renaming a
+  device on its own page replaces the history entry with the new name's URL. Links are built with `Link`/`navigate` params from the
+  device's current name, never by string concatenation, since names may contain `#`, `?`
+  or `%`.
 - **Context comes from the router, not from pathnames.** `useDisplayedAgentId` reads the
-  `agentId` param of the committed agent route, `useAgentViewContext` picks the top bar's
+  device id the committed device route resolved, `useAgentViewContext` picks the top bar's
   views from the leaf route id, and `useBrowserLocation` is the one selector over the browser
   route's loader data (requested path, whether it is a file or directory, canonical path).
   The top bar, search scope, file import and remembered tab location all use the committed
@@ -964,7 +1105,7 @@ The route tree separates the authenticated application from the public login for
   write-only atom that sets both, so revealing a pane is the state change itself; there is no
   request counter for an effect to drain.
 - **Search state is typed URL state.** `agentSearchSchema` validates the search keys on
-  `/agents/$agentId`, and `useAgentSearchNavigation` changes them with the router's typed
+  `/agents/$deviceName`, and `useAgentSearchNavigation` changes them with the router's typed
   `search` updater, so the path, hash and the child view's own keys survive.
 
 ### Browser long-lived resources and shortcuts
@@ -1057,7 +1198,7 @@ native element, so behaviour and look stay in one place.
 
 ### File browser
 
-The file browser is one route, `_app/agents/$agentId/browser/$`, whose splat is the filesystem
+The file browser is one route, `_app/agents/$deviceName/browser/$`, whose splat is the filesystem
 path. Everything that distinguishes one screen from another lives in the URL or the query
 cache, so Back, reload and shared links all land on the same screen.
 
@@ -1067,10 +1208,10 @@ cache, so Back, reload and shared links all land on the same screen.
   shows the defaults. The loader depends on `view` and `diffMode`, so it prefetches the diff
   the page is about to show; sorting and `line` stay out of the loader's dependencies and never
   reload the route.
-- **Typed links, string URLs only where a string is required.** `browserRoute(agentId, path)`
-  returns the typed `to` and `params`, so the router encodes the path and checks the search
-  keys. `Agent.getBrowserUrl` remains for real string hrefs, such as links created inside the
-  diff and markdown renderers or a copied URL.
+- **Typed links only.** `browserRoute(device, path)` takes the device object (so a bare id
+  cannot be passed by mistake) and returns the typed `to` and `params`, so the router encodes
+  the name and the path and checks the search keys. Where a real string href is required, as
+  in the diff renderer, it comes from `router.buildLocation`.
 - **The loader identifies, the cache supplies data.** The loader resolves what lives at the
   path (directory, file, missing, unreadable) and applies redirects. The page then reads the
   live listing from the query cache, so a refresh reaches it without reloading the route.
@@ -1130,13 +1271,16 @@ credential only works on its own endpoints:
     count.
   - Credit grants are clamped, and messages are capped at 32 MiB, so a peer cannot force
     unbounded buffering.
-  - An agent cannot take over the name of a live agent.
+  - An agent cannot take over the name of a live or configured device, and an id in a
+    `hello` must be in the device id format.
   - The server signs resume manifests and checks them against the agent that returned them,
     and it compares both agents' hashes itself before reusing a prefix.
   - The partial signing key, the sessions and the access token verifiers exist only on the
     server.
   - Agent ids are self-reported, so a token scoped to device X trusts that no other holder
-    of the agent token registers as X. This is the same limit every agent check has.
+    of the agent token registers as X. This is the same limit every agent check has, and
+    the duplicate-id detection only reacts to the behavior of cloned agents. Proper
+    per-agent credentials are a separate topic.
 - **Browser protections.**
   - The cookie is `HttpOnly` and `SameSite=Lax`.
   - JSON endpoints require `Content-Type: application/json`.
@@ -1160,16 +1304,18 @@ device scope:
 | `agents:manage` | start, stop, retry, restart and upgrade an agent |
 
 The device scope is `All` (every device, including devices added later) or `Only` a list of
-device ids. Listing devices needs no permission; it is filtered to the scope.
+device ids. Names in a create or edit request are resolved and stored as ids, so the scope
+never follows a name to another device. Listing devices needs no permission; it is filtered
+to the scope.
 
 - **One decision function.** `Principal::require(permissions, device)` checks the scope and
   the permissions. REST routes, REST handlers and MCP tools all call it, so REST and MCP
   cannot drift apart.
 - **One route table.** `access/routes.rs` maps each `(method, route template)` to an
   `Access`: `Public`, `SessionOnly`, `AnyPrincipal` (the handler filters by scope),
-  `Device(permissions)` (checked against the `{agent}` path parameter) or `Handler` (the
-  devices are in the body, so the handler calls `require`: copy, move, diff, partials and
-  transfer cancel or pause). The `access_control` middleware is attached with
+  `Device(permissions)` (checked against the id the `{agent}` path parameter resolves to) or
+  `Handler` (the devices are in the body, so the handler resolves them and calls `require`:
+  copy, move, diff, partials and transfer cancel or pause). The `access_control` middleware is attached with
   `Router::layer`, which runs after routing, so it sees the matched template.
 - **Default deny.** A route missing from the table is session-only, so a new route is not
   reachable with a token until someone classifies it.

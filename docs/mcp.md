@@ -140,8 +140,10 @@ tools the token's permissions allow, so a model never sees tools it cannot use.
 | `delete_path` | `files:delete` |
 | `start_managed_agent`, `stop_managed_agent` | `agents:manage` |
 
-Every filesystem request includes an explicit stable `device_id` and absolute
-path. There is no remembered device or working directory. Each call checks its
+Every filesystem request includes an explicit `device_id` and absolute path.
+`device_id` accepts the stable device id or the device's current name; the id
+keeps pointing at the same device after a rename, a name follows whichever
+device has it now. There is no remembered device or working directory. Each call checks its
 permissions on the devices it touches through the same decision function the
 REST API uses. Managed lifecycle calls reject external agents.
 
