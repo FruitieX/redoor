@@ -14,6 +14,7 @@ import {
     ALL_PERMISSIONS,
     VITEST_SERVER_PORT,
     createAccessToken,
+    waitForLogMessage,
 } from "./test-utils";
 import {
     SSH_PASSWORD_USER,
@@ -89,6 +90,35 @@ describe.skipIf(
 
             // The server's own keys do not work for this account, so the user must type one.
             expect(withoutPassword.status).toBe(400);
+            // The message says what was tried and what the user has to do next.
+            expect(withoutPassword.message).toContain(
+                "this server's own SSH keys",
+            );
+            expect(withoutPassword.message).toContain(
+                "Enter the device's login password",
+            );
+
+            const serverProcess = fixture.processManager.getProcess(
+                fixture.serverPid,
+            );
+
+            if (!serverProcess) {
+                throw new Error("Server process not found");
+            }
+
+            const rejectionLogged = waitForLogMessage(
+                serverProcess,
+                new RegExp(
+                    `rejected a credential for installing the managed SSH key: device=${deviceId}, credential=the typed password, error=SSH authentication failed`,
+                ),
+            );
+
+            const failureLogged = waitForLogMessage(
+                serverProcess,
+                new RegExp(
+                    `Setting up the managed SSH key failed: device=${deviceId}, status=502, error=The device rejected every credential`,
+                ),
+            );
 
             const wrongPassword = await apiFailure(
                 fixture.apiClient.enrollSshKey(deviceId, {
@@ -99,6 +129,25 @@ describe.skipIf(
 
             // A rejected password is the device's answer, not a bad request.
             expect(wrongPassword.status).toBe(502);
+            // The browser learns that the typed password was rejected and why, not only
+            // that the last ssh attempt failed.
+            expect(wrongPassword.message).toContain(
+                "The device rejected every credential the server tried (this server's own SSH keys, the typed password)",
+            );
+            expect(wrongPassword.message).toMatch(
+                /OpenSSH: .*permission denied/i,
+            );
+            // The server log records each rejected credential and the failed operation,
+            // so a reported failure can be traced without reproducing it.
+            await rejectionLogged;
+            await failureLogged;
+            // The typed password never reaches the browser's error or the server log.
+            expect(wrongPassword.message).not.toContain(
+                `wrong-${fixture.suffix}`,
+            );
+            expect(
+                fixture.processManager.getStdout(fixture.serverPid),
+            ).not.toContain(`wrong-${fixture.suffix}`);
             // A failed login must not leave a generated key behind.
             expect(localKeyFiles(fixture, deviceId)).toEqual([]);
 

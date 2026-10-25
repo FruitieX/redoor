@@ -31,9 +31,30 @@ pub(crate) enum ManagedKeyError {
     /// The device could not be reached, refused every credential or failed a remote step.
     #[error("{0}")]
     Remote(String),
-    /// A local file operation failed.
+    /// A local file operation or the local `ssh` process failed. The text names the step,
+    /// because a bare OS error such as "Permission denied" does not tell the user which file
+    /// or tool to look at.
     #[error("{0}")]
-    Local(#[from] std::io::Error),
+    Local(String),
+}
+
+impl ManagedKeyError {
+    /// Wraps a local I/O failure with the step that failed, for use with `map_err`.
+    fn local(context: &str) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |error| Self::Local(format!("{context}: {error}"))
+    }
+}
+
+/// Context for a failure to read the device's pin, which several steps share.
+const READ_PIN_FAILED: &str =
+    "Failed to read the device's pinned host key from the server's data directory";
+
+/// [`READ_PIN_FAILED`] for the connection path, which reports [`ProvisionError`]s.
+fn read_pin_failed(error: std::io::Error) -> ProvisionError {
+    ProvisionError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{READ_PIN_FAILED}: {error}"),
+    ))
 }
 
 /// The key a device presented to a probe, with what the server already knows about it.
@@ -115,14 +136,16 @@ impl ManagedKeyDevice {
         if !self.config.managed_ssh_key {
             let mut host = SshHost::for_config(&self.config).password(self.config.password.clone());
             // Removing a login key does not revoke the user's trust decision about the host.
-            if let Some(pinned) = self.pinned_policy().await? {
+            if let Some(pinned) = self.pinned_policy().await.map_err(read_pin_failed)? {
                 host = host.host_key(HostKeyPolicy::Pinned(pinned));
             }
             return Ok(host);
         }
-        let missing = |what: &str| {
+        // The cause is kept in the message: "missing" and "unreadable" (for example after
+        // restoring the data directory with the wrong owner) need different fixes.
+        let unusable = |what: &str, cause: &dyn std::fmt::Display| {
             ProvisionError::Configuration(format!(
-                "The {what} of device '{}' is missing from the server's data directory. Remove the SSH key and set it up again from the device page.",
+                "The {what} of device '{}' cannot be used from the server's data directory ({cause}). Remove the SSH key and set it up again from the device page.",
                 self.device
             ))
         };
@@ -130,11 +153,12 @@ impl ManagedKeyDevice {
             .keys
             .load(&self.device)
             .await
-            .map_err(|_| missing("managed SSH key"))?;
+            .map_err(|error| unusable("managed SSH key", &error))?;
         let pinned = self
             .pinned_policy()
-            .await?
-            .ok_or_else(|| missing("pinned host key"))?;
+            .await
+            .map_err(read_pin_failed)?
+            .ok_or_else(|| unusable("pinned host key", &"not found"))?;
         Ok(self.managed_key_host(&key, pinned))
     }
 
@@ -154,7 +178,13 @@ impl ManagedKeyDevice {
     /// connection, but with the global known_hosts, `KnownHostsCommand` and DNS switched off,
     /// so the key is always recorded, even when the system already trusts it.
     pub(crate) async fn probe_host_key(&self) -> Result<ProbedHostKey, ManagedKeyError> {
-        let temp = self.keys.probe_known_hosts_path(&self.device).await?;
+        let temp = self
+            .keys
+            .probe_known_hosts_path(&self.device)
+            .await
+            .map_err(ManagedKeyError::local(
+                "Failed to prepare the host key probe in the server's data directory",
+            ))?;
         let host = SshHost::for_config(&self.config)
             .host_key(HostKeyPolicy::Probe {
                 known_hosts: temp.clone(),
@@ -164,16 +194,25 @@ impl ManagedKeyDevice {
         let output = host.output("true", &[], &SshRunOptions::default()).await;
         let recorded = tokio::fs::read_to_string(&temp).await;
         let _ = tokio::fs::remove_file(&temp).await;
-        let output = output?;
+        let output = output.map_err(ManagedKeyError::local(
+            "Failed to run ssh to read the host key",
+        ))?;
         let key = recorded
             .ok()
             .and_then(|content| HostKey::from_known_hosts(&content))
             .ok_or_else(|| {
-                ManagedKeyError::Remote(host.failure_message("host key probe", &output))
+                ManagedKeyError::Remote(format!(
+                    "Could not read the device's host key. {}",
+                    host.failure_message("host key probe", &output)
+                ))
             })?;
         Ok(ProbedHostKey {
             previously_trusted: self.previously_trusted(&key).await,
-            pinned: self.keys.pinned_host_key(&self.device).await?,
+            pinned: self
+                .keys
+                .pinned_host_key(&self.device)
+                .await
+                .map_err(ManagedKeyError::local(READ_PIN_FAILED))?,
             key,
         })
     }
@@ -189,7 +228,12 @@ impl ManagedKeyDevice {
                 confirmed.trim()
             )));
         }
-        self.keys.pin_host_key(&self.device, &probed.key).await?;
+        self.keys
+            .pin_host_key(&self.device, &probed.key)
+            .await
+            .map_err(ManagedKeyError::local(
+                "Failed to save the pinned host key in the server's data directory",
+            ))?;
         log!(
             Level::Info,
             "Pinned SSH host key: device={}, fingerprint={}",
@@ -207,12 +251,17 @@ impl ManagedKeyDevice {
         &self,
         confirmed: Option<&str>,
     ) -> Result<PinnedHostKey, ManagedKeyError> {
-        if let Some(pinned) = self.pinned_policy().await? {
+        if let Some(pinned) = self
+            .pinned_policy()
+            .await
+            .map_err(ManagedKeyError::local(READ_PIN_FAILED))?
+        {
             if let Some(confirmed) = confirmed
                 && !self
                     .keys
                     .pinned_host_key(&self.device)
-                    .await?
+                    .await
+                    .map_err(ManagedKeyError::local(READ_PIN_FAILED))?
                     .is_some_and(|key| key.matches_fingerprint(confirmed))
             {
                 return Err(ManagedKeyError::HostKeyMismatch(format!(
@@ -230,9 +279,14 @@ impl ManagedKeyDevice {
             )
         })?;
         self.pin_host_key(confirmed).await?;
-        self.pinned_policy().await?.ok_or_else(|| {
-            ManagedKeyError::Local(std::io::Error::other("the pinned host key was not saved"))
-        })
+        self.pinned_policy()
+            .await
+            .map_err(ManagedKeyError::local(READ_PIN_FAILED))?
+            .ok_or_else(|| {
+                ManagedKeyError::Local(
+                    "The pinned host key was not found right after saving it".to_string(),
+                )
+            })
     }
 
     /// Enrollment steps 1 to 5: pins the host key, logs in once, stages a new key, installs
@@ -264,7 +318,13 @@ impl ManagedKeyDevice {
             .await?;
         let previous_keep: Vec<String> = current.iter().map(ManagedKey::fingerprint).collect();
 
-        let key = self.keys.stage(&self.device).await?;
+        let key = self
+            .keys
+            .stage(&self.device)
+            .await
+            .map_err(ManagedKeyError::local(
+                "Failed to create the new SSH key in the server's data directory",
+            ))?;
         log!(
             Level::Info,
             "Staged managed SSH key: device={}, fingerprint={}",
@@ -310,10 +370,10 @@ impl ManagedKeyDevice {
                 )
                 .await
             }
-            Ok(None) => Err(ManagedKeyError::Local(std::io::Error::other(
-                "the pinned host key disappeared",
-            ))),
-            Err(error) => Err(error.into()),
+            Ok(None) => Err(ManagedKeyError::Local(
+                "The pinned host key disappeared".to_string(),
+            )),
+            Err(error) => Err(ManagedKeyError::local(READ_PIN_FAILED)(error)),
         };
         if let Err(error) = removed {
             redoor_core::log_failure!(
@@ -395,34 +455,57 @@ impl ManagedKeyDevice {
     /// stored password, the server user's own keys or ssh-agent, the typed password.
     /// Rotation uses only the current managed key, so revoking it cannot silently fall back
     /// to another identity that happens to be authorized on the device.
+    ///
+    /// Every rejected credential is logged with OpenSSH's reason, because the error returned
+    /// to the browser can only carry the last attempt's details, and an administrator needs
+    /// all of them to tell a wrong password from, say, a server key the device does not know.
     async fn bootstrap_credential(
         &self,
         pinned: &PinnedHostKey,
         current: Option<&ManagedKey>,
         typed_password: Option<Zeroizing<String>>,
     ) -> Result<AuthPolicy, ManagedKeyError> {
-        let mut candidates = Vec::new();
+        // Each candidate carries the name the log and the error message use for it.
+        let mut candidates: Vec<(&'static str, AuthPolicy)> = Vec::new();
         if let Some(key) = current {
-            candidates.push(AuthPolicy::ManagedKey {
-                identity_file: key.private_key_path.clone(),
-            });
+            candidates.push((
+                "the current managed SSH key",
+                AuthPolicy::ManagedKey {
+                    identity_file: key.private_key_path.clone(),
+                },
+            ));
         }
         let typed = typed_password.is_some();
         if current.is_none() {
             if let Some(password) = &self.config.password {
-                candidates.push(AuthPolicy::Password(Zeroizing::new(password.clone())));
+                candidates.push((
+                    "the stored password",
+                    AuthPolicy::Password(Zeroizing::new(password.clone())),
+                ));
             }
-            candidates.push(AuthPolicy::Default);
+            candidates.push(("this server's own SSH keys", AuthPolicy::Default));
             if let Some(password) = typed_password {
-                candidates.push(AuthPolicy::Password(password));
+                candidates.push(("the typed password", AuthPolicy::Password(password)));
             }
         }
 
-        let mut last_failure = None;
-        for auth in candidates {
+        let mut rejected = Vec::new();
+        let mut last_failure = String::new();
+        for (credential, auth) in candidates {
             let host = self.bootstrap_host(pinned, &auth);
-            let output = host.output("true", &[], &SshRunOptions::default()).await?;
+            let output = host
+                .output("true", &[], &SshRunOptions::default())
+                .await
+                .map_err(ManagedKeyError::local(
+                    "Failed to run ssh to log in to the device",
+                ))?;
             if output.status.success() {
+                log!(
+                    Level::Info,
+                    "Logged in to install the managed SSH key: device={}, credential={}",
+                    self.device,
+                    credential
+                );
                 return Ok(auth);
             }
             let message = host.failure_message("log in to install the SSH key", &output);
@@ -435,15 +518,31 @@ impl ManagedKeyDevice {
                     ManagedKeyError::Remote(message)
                 });
             }
-            last_failure = Some(message);
+            log!(
+                Level::Info,
+                "The device rejected a credential for installing the managed SSH key: device={}, credential={}, error={}",
+                self.device,
+                credential,
+                message
+            );
+            rejected.push(credential);
+            last_failure = message;
         }
-        Err(if typed || current.is_some() {
-            ManagedKeyError::Remote(last_failure.unwrap_or_default())
+        let tried = rejected.join(", ");
+        Err(if current.is_some() {
+            ManagedKeyError::Remote(format!(
+                "The device rejected its current managed SSH key, so the key cannot be rotated. Remove the SSH key and set it up again with the device's login password.
+{last_failure}"
+            ))
+        } else if typed {
+            ManagedKeyError::Remote(format!(
+                "The device rejected every credential the server tried ({tried}). Check the password, and that the account allows password login over SSH.
+{last_failure}"
+            ))
         } else {
-            ManagedKeyError::Input(
-                "The server cannot log in to the device with a stored password or its own SSH keys. Enter the device's login password; it is used once and not saved."
-                    .to_string(),
-            )
+            ManagedKeyError::Input(format!(
+                "The server cannot log in to the device with {tried}. Enter the device's login password; it is used once and not saved."
+            ))
         })
     }
 
@@ -454,7 +553,12 @@ impl ManagedKeyDevice {
         let host = self.managed_key_host(key, pinned);
         // Remote port 0 lets the device pick a free port; the destination is never used.
         let options = SshRunOptions::default().with_reverse_forward(0, "localhost", 9);
-        let output = host.output("true", &[], &options).await?;
+        let output = host
+            .output("true", &[], &options)
+            .await
+            .map_err(ManagedKeyError::local(
+                "Failed to run ssh to verify the new SSH key",
+            ))?;
         if output.status.success() {
             log!(
                 Level::Info,
@@ -482,7 +586,10 @@ impl ManagedKeyDevice {
                 key.authorized_keys_line()
                     .map(|line| (line, key.fingerprint()))
             })
-            .transpose()?;
+            .transpose()
+            .map_err(ManagedKeyError::local(
+                "Failed to encode the new SSH public key",
+            ))?;
         let script = install_script(
             &self.device,
             keep,

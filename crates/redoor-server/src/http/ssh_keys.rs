@@ -32,14 +32,27 @@ pub(crate) async fn get_host_key_handler(
 ) -> Result<Json<SshHostKeyResponse>, ApiError> {
     // A probe writes temporary state too; edits or deletion must not race that write.
     let _operation = state.ssh_key_operations.begin(&agent_id)?;
-    let device = managed_key_device(&state, &agent_id).await?;
+    log_failure(
+        "Reading the SSH host key",
+        &agent_id,
+        probe_host_key(&state, &agent_id).await,
+    )
+    .map(Json)
+}
+
+/// The probe itself, separate from the handler so its failures are logged in one place.
+async fn probe_host_key(
+    state: &ServerState,
+    agent_id: &AgentId,
+) -> Result<SshHostKeyResponse, ApiError> {
+    let device = managed_key_device(state, agent_id).await?;
     let probed = device.probe_host_key().await?;
-    Ok(Json(SshHostKeyResponse {
+    Ok(SshHostKeyResponse {
         key_type: probed.key.key_type(),
         fingerprint: probed.key.fingerprint(),
         previously_trusted: probed.previously_trusted,
         pinned_fingerprint: probed.pinned.map(|key| key.fingerprint()),
-    }))
+    })
 }
 
 /// Route: `POST /api/v1/agents/{agent}/ssh-host-key/pin` replaces the pinned host key after
@@ -52,14 +65,24 @@ pub(crate) async fn pin_host_key_handler(
     let operation = state.ssh_key_operations.begin(&agent_id)?;
     complete_operation(async move {
         let _operation = operation;
-        let device = managed_key_device(&state, &agent_id).await?;
-        let key = device.pin_host_key(&request.host_key_fingerprint).await?;
-        Ok(Json(SshHostKeyPinResponse {
-            key_type: key.key_type(),
-            fingerprint: key.fingerprint(),
-        }))
+        let pinned = pin_host_key(&state, &agent_id, &request).await;
+        log_failure("Pinning the SSH host key", &agent_id, pinned).map(Json)
     })
     .await
+}
+
+/// The re-pin itself, kept out of the `complete_operation` closure so rustfmt formats it.
+async fn pin_host_key(
+    state: &ServerState,
+    agent_id: &AgentId,
+    request: &PinSshHostKeyRequest,
+) -> Result<SshHostKeyPinResponse, ApiError> {
+    let device = managed_key_device(state, agent_id).await?;
+    let key = device.pin_host_key(&request.host_key_fingerprint).await?;
+    Ok(SshHostKeyPinResponse {
+        key_type: key.key_type(),
+        fingerprint: key.fingerprint(),
+    })
 }
 
 /// Route: `POST /api/v1/agents/{agent}/ssh-key` sets up the device's managed key, or rotates
@@ -75,7 +98,8 @@ pub(crate) async fn enroll_handler(
     let operation = state.ssh_key_operations.begin(&agent_id)?;
     complete_operation(async move {
         let _operation = operation;
-        enroll(&state, &agent_id, request).await.map(Json)
+        let enrolled = enroll(&state, &agent_id, request).await;
+        log_failure("Setting up the managed SSH key", &agent_id, enrolled).map(Json)
     })
     .await
 }
@@ -153,7 +177,8 @@ pub(crate) async fn remove_handler(
     let operation = state.ssh_key_operations.begin(&agent_id)?;
     complete_operation(async move {
         let _operation = operation;
-        remove_key(&state, &agent_id).await.map(Json)
+        let removed = remove_key(&state, &agent_id).await;
+        log_failure("Removing the managed SSH key", &agent_id, removed).map(Json)
     })
     .await
 }
@@ -193,10 +218,51 @@ async fn remove_key(
     if let Some(error) = runtime_error {
         return Err(saved_but_not_registered("The SSH key was removed", error));
     }
+    log!(
+        Level::Info,
+        "Removed managed SSH key: device={}, removed_from_device={}",
+        agent_id,
+        device_error.is_none()
+    );
     Ok(SshKeyRemovalResponse {
         removed_from_device: device_error.is_none(),
         device_error,
     })
+}
+
+/// Logs a failed key or host key operation with the exact message the browser gets, so a
+/// failure a user reports can be traced in the server log without reproducing it.
+///
+/// Failures of the device, the network or the server are logged as errors; requests the
+/// user fixes by changing the input (a missing confirmation or password) as warnings.
+fn log_failure<T>(
+    operation: &str,
+    agent_id: &AgentId,
+    result: Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    if let Err(error) = &result {
+        let status = error.status_code();
+        if status.is_server_error() {
+            redoor_core::log_failure!(
+                Level::Error,
+                "{} failed: device={}, status={}, error={}",
+                operation,
+                agent_id,
+                status.as_u16(),
+                error
+            );
+        } else {
+            log!(
+                Level::Warning,
+                "{} failed: device={}, status={}, error={}",
+                operation,
+                agent_id,
+                status.as_u16(),
+                error
+            );
+        }
+    }
+    result
 }
 
 /// Explains a failure that happened after the config was already written, so the user does
@@ -264,7 +330,10 @@ async fn commit_key(
             if first_key.is_some() {
                 discard_uncommitted_key(state, agent_id).await;
             }
-            return Err(ApiError::internal(error.to_string()));
+            return Err(ApiError::internal(format!(
+                "Failed to save the SSH key setting to {}: {error:#}",
+                state.config_path.display()
+            )));
         }
         // Once persistence succeeds, this key must survive even if the runtime cannot
         // register it. Return that error separately so callers finish cleanup without rollback.
@@ -362,6 +431,11 @@ impl SshKeyOperations {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !busy.insert(agent_id.clone()) {
+            log!(
+                Level::Warning,
+                "Refused an SSH key operation because another one is running: device={}",
+                agent_id
+            );
             return Err(ApiError::conflict(format!(
                 "An SSH key operation is already running for device '{agent_id}'"
             )));
