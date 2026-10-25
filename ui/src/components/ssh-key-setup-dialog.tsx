@@ -298,7 +298,7 @@ function HostKeyConfirmation(props: {
             <div className="space-y-3">
                 <p
                     role="alert"
-                    className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300"
+                    className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300 whitespace-pre-line break-words"
                 >
                     {props.error ?? "Failed to fetch the host key"}
                 </p>

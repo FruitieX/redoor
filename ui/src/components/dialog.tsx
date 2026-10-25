@@ -127,7 +127,7 @@ export function Dialog(props: DialogProps) {
             {props.errorMessage ? (
                 <p
                     role="alert"
-                    className="mt-4 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300"
+                    className="mt-4 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300 whitespace-pre-line break-words"
                 >
                     {props.errorMessage}
                 </p>
