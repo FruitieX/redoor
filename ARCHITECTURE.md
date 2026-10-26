@@ -1374,9 +1374,14 @@ the Git view rather than another level of page navigation.
   that commit's changes scoped to the path. A branch or tag links to the path at
   `rev=<full ref name>`, because a short name can be ambiguous between a tag and a branch;
   the banner drops the `refs/heads/`, `refs/remotes/` and `refs/tags/` prefix for display.
-- **Caching matches revision browsing.** At a revision the history is keyed by the resolved
-  commit id; in the worktree HEAD and refs move, so the loader refetches them on navigation
-  and the refresh triggers invalidate them with the rest of the agent's Git queries.
+- **Caching matches revision browsing.** History is always keyed by a commit id: the
+  browsed commit at a revision, and in the worktree the HEAD commit from the Git context the
+  loader refetches on navigation. Every page of one history then walks the same commits even
+  if HEAD moves between pages, and a moved HEAD is simply a new query. Refs move, so the
+  loader refetches them on navigation and the refresh triggers invalidate them with the rest
+  of the agent's Git queries. Refs are listed at the repository root the page resolved, not at
+  the browsed path, so a submodule browsed at a superproject commit lists the superproject's
+  refs that its header names.
 
 ## SSH device keys
 

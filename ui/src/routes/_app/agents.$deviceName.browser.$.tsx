@@ -281,6 +281,7 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
                     agent,
                     path: lsResult.path,
                     isDirectory: isLsDirectoryResponse(lsResult),
+                    gitContext,
                     deps,
                 });
             }
@@ -309,6 +310,7 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
                     agent,
                     path,
                     isDirectory: false,
+                    gitContext,
                     deps,
                 });
 

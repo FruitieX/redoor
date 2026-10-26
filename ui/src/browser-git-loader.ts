@@ -8,6 +8,7 @@ import {
     prefetchGitList,
     type QueryContext,
 } from "#ui/queries";
+import type { GitContextResponse } from "#bindings/GitContextResponse";
 
 /**
  * Loads what the worktree Git view is about to show: a list when a Git tab is open,
@@ -19,6 +20,8 @@ export async function prefetchWorktreeGitView(options: {
     agent: Agent;
     path: string;
     isDirectory: boolean;
+    /** The path's repository and HEAD, from the Git context the view reads them from too. */
+    gitContext: Extract<GitContextResponse, { status: "inside_worktree" }>;
     deps: Pick<BrowserSearch, "gitTab" | "diffMode">;
 }) {
     const { context, agent, path, deps } = options;
@@ -28,7 +31,8 @@ export async function prefetchWorktreeGitView(options: {
             queryClient: context.queryClient,
             agent,
             path,
-            commitId: null,
+            repositoryRoot: options.gitContext.repository_root,
+            commitId: options.gitContext.head_commit_id,
             tab: deps.gitTab,
         });
     } else if (options.isDirectory) {

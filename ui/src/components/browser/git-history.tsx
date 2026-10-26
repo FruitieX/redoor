@@ -63,9 +63,17 @@ function LoadMore(props: {
     );
 }
 
-/** Groups commits by the local day they were authored, keeping the walk's order. */
+/**
+ * Groups consecutive commits by the local day they were authored, keeping the walk's order.
+ * The walk is ordered by commit time, so a rebased or cherry-picked commit can bring a day
+ * back after another one; each group is therefore identified by its first commit, not its day.
+ */
 function groupByDay(commits: GitCommitSummary[]) {
-    const groups: Array<{ day: string; commits: GitCommitSummary[] }> = [];
+    const groups: Array<{
+        id: string;
+        day: string;
+        commits: GitCommitSummary[];
+    }> = [];
 
     for (const commit of commits) {
         const day = new Date(commit.authored_at * 1000).toLocaleDateString(
@@ -78,7 +86,7 @@ function groupByDay(commits: GitCommitSummary[]) {
         if (last?.day === day) {
             last.commits.push(commit);
         } else {
-            groups.push({ day, commits: [commit] });
+            groups.push({ id: commit.id, day, commits: [commit] });
         }
     }
 
@@ -95,9 +103,18 @@ export function GitCommitList(props: {
     path: string;
     /** The browsed commit history starts at, or null for HEAD. */
     commitId: string | null;
+    /**
+     * HEAD's commit when the worktree is browsed. History is read from this id rather than
+     * from HEAD, so every page walks the same history even if HEAD moves between pages.
+     */
+    headCommitId: string | null;
 }) {
     const query = useInfiniteQuery(
-        gitLogQueryOptions(props.agent, props.path, props.commitId),
+        gitLogQueryOptions(
+            props.agent,
+            props.path,
+            props.commitId ?? props.headCommitId,
+        ),
     );
 
     if (query.isPending) {
@@ -156,7 +173,7 @@ export function GitCommitList(props: {
                     className="grid grid-cols-[minmax(0,1fr)] gap-5 px-4 py-4 sm:px-5"
                 >
                     {groupByDay(commits).map((group) => (
-                        <section key={group.day} aria-label={group.day}>
+                        <section key={group.id} aria-label={group.day}>
                             <h3 className="mb-2 text-xs font-semibold text-slate-400">
                                 {group.day}
                             </h3>
@@ -266,10 +283,12 @@ function CommitRow(props: {
 export function GitRefList(props: {
     agent: Agent;
     path: string;
+    /** The repository the page resolved, whose refs are listed. */
+    repositoryRoot: string;
     kind: GitRefListKind;
 }) {
     const query = useInfiniteQuery(
-        gitRefsQueryOptions(props.agent, props.path, props.kind),
+        gitRefsQueryOptions(props.agent, props.repositoryRoot, props.kind),
     );
 
     const isBranches = props.kind === "branches";

@@ -125,8 +125,8 @@ export const queryKeys = {
         [...queryKeys.git(agentId), "commit-diff", rev, path] as const,
     gitLog: (agentId: string, path: string, rev: string | null) =>
         [...queryKeys.git(agentId), "log", rev, path] as const,
-    gitRefs: (agentId: string, path: string, kind: GitRefListKind) =>
-        [...queryKeys.git(agentId), "refs", kind, path] as const,
+    gitRefs: (agentId: string, repositoryRoot: string, kind: GitRefListKind) =>
+        [...queryKeys.git(agentId), "refs", kind, repositoryRoot] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -577,9 +577,10 @@ export const GIT_LIST_PAGE_SIZE = 100;
 export type GitRefListKind = "branches" | "tags";
 
 /**
- * The commits that changed a path, a page at a time. `rev` is the commit id a revision page
- * resolved, never a branch name, for the same reason the commit diff is keyed by id; `null`
- * is HEAD, which a refresh refetches like the worktree status.
+ * The commits that changed a path, a page at a time. `rev` is a resolved commit id, never a
+ * branch name or HEAD, for the same reason the commit diff is keyed by id: every page then
+ * walks the same history even if a branch moves between pages, and a moved HEAD is a new
+ * query. `null` is only for a branch without commits, which has no history to page through.
  */
 export function gitLogQueryOptions(
     agent: Agent,
@@ -606,16 +607,21 @@ export function gitLogQueryOptions(
     });
 }
 
-/** The repository's branches or tags, a page at a time, most recently committed first. */
+/**
+ * The repository's branches or tags, a page at a time, most recently committed first. They
+ * are asked for at the repository root the page resolved, because a path inside a nested
+ * repository, such as a submodule browsed at a superproject commit, would list the nested
+ * repository's refs instead.
+ */
 export function gitRefsQueryOptions(
     agent: Agent,
-    path: string,
+    repositoryRoot: string,
     kind: GitRefListKind,
 ) {
     return infiniteQueryOptions({
-        queryKey: queryKeys.gitRefs(agent.id, path, kind),
+        queryKey: queryKeys.gitRefs(agent.id, repositoryRoot, kind),
         queryFn: (context) =>
-            agent.gitRefs(path, kind, {
+            agent.gitRefs(repositoryRoot, kind, {
                 skip: context.pageParam,
                 limit: GIT_LIST_PAGE_SIZE,
             }),
@@ -630,18 +636,19 @@ export function gitRefsQueryOptions(
 
 /**
  * Primes the first page of the Git list a route is about to show. Failures stay in the
- * query, so the list reports them inside its tab instead of failing the whole page. In the
- * worktree HEAD and refs move, so navigation refetches them; a revision's history is keyed
- * by commit id and never changes.
+ * query, so the list reports them inside its tab instead of failing the whole page. Refs
+ * move, so navigation refetches them; history is keyed by commit id and never changes.
  */
 export async function prefetchGitList(options: {
     queryClient: QueryClient;
     agent: Agent;
     path: string;
+    repositoryRoot: string;
+    /** The commit history starts at: the browsed commit, or HEAD in the worktree. */
     commitId: string | null;
     tab: "commits" | GitRefListKind;
 }) {
-    const { queryClient, agent, path, commitId, tab } = options;
+    const { queryClient, agent, path, repositoryRoot, commitId, tab } = options;
 
     if (tab === "commits") {
         await queryClient.prefetchInfiniteQuery({
@@ -650,7 +657,7 @@ export async function prefetchGitList(options: {
         });
     } else {
         await queryClient.prefetchInfiniteQuery({
-            ...gitRefsQueryOptions(agent, path, tab),
+            ...gitRefsQueryOptions(agent, repositoryRoot, tab),
             staleTime: 0,
         });
     }

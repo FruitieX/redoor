@@ -96,6 +96,11 @@ export function GitView(props: {
     const commitId =
         props.reference.type === "revision" ? props.reference.commit.id : null;
 
+    const headCommitId =
+        props.reference.type === "worktree"
+            ? props.reference.headCommitId
+            : null;
+
     return (
         <BrowserViewCard>
             <section
@@ -137,12 +142,14 @@ export function GitView(props: {
                     agent={props.agent}
                     path={props.path}
                     commitId={commitId}
+                    headCommitId={headCommitId}
                 />
             ) : props.tab === "branches" || props.tab === "tags" ? (
                 <GitRefList
                     key={props.tab}
                     agent={props.agent}
                     path={props.path}
+                    repositoryRoot={props.repository.root}
                     kind={props.tab}
                 />
             ) : (

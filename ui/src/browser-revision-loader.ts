@@ -98,6 +98,18 @@ export async function loadRevision(options: {
                 : null;
 
         if (deletion !== null) {
+            // A list tab refetches on navigation here too, like on any other revision page.
+            if (gitTab !== undefined) {
+                await prefetchGitList({
+                    queryClient: context.queryClient,
+                    agent,
+                    path,
+                    repositoryRoot: deletion.repository_root,
+                    commitId: deletion.commit.id,
+                    tab: gitTab,
+                });
+            }
+
             return revisionData(options, { tree: null, error: null, deletion });
         }
 
@@ -136,6 +148,7 @@ export async function loadRevision(options: {
             queryClient: context.queryClient,
             agent,
             path,
+            repositoryRoot: tree.repository_root,
             commitId: tree.commit.id,
             tab: gitTab,
         });
