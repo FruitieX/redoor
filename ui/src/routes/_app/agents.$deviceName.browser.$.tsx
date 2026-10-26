@@ -48,6 +48,7 @@ import { FileEditView, FileImageView } from "#ui/components/browser/file-views";
 import {
     GitCommitView,
     RevisionBanner,
+    RevisionListingNotice,
     revisionListingEntries,
 } from "#ui/components/browser/revision";
 import {
@@ -529,12 +530,15 @@ function RevisionFileBrowser(props: {
         ) : activeView === "details" ? (
             <RevisionDetailView agent={agent} tree={tree} />
         ) : tree.entry.type === "directory" ? (
-            <DirectoryListing
-                agent={agent}
-                directoryPath={tree.path}
-                files={revisionListingEntries(tree.entry.entries)}
-                readOnly
-            />
+            <>
+                <RevisionListingNotice entry={tree.entry} />
+                <DirectoryListing
+                    agent={agent}
+                    directoryPath={tree.path}
+                    files={revisionListingEntries(tree.entry.entries)}
+                    readOnly
+                />
+            </>
         ) : editable ? (
             <FileEditView
                 key={`${agent.id}:${tree.commit.id}:${data.path}`}

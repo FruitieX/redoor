@@ -18,6 +18,7 @@ import { gitCommitDiffQueryOptions } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
 import type { GitChangeState } from "#bindings/GitChangeState";
 import type { GitCommitSummary } from "#bindings/GitCommitSummary";
+import type { GitRevisionEntry } from "#bindings/GitRevisionEntry";
 import type { GitTreeEntry } from "#bindings/GitTreeEntry";
 import type { LsEntry } from "#bindings/LsEntry";
 
@@ -142,6 +143,44 @@ export function revisionListingEntries(entries: GitTreeEntry[]): LsEntry[] {
         gid: 0,
         modified_at: 0,
     }));
+}
+
+/**
+ * Explains a committed listing that is not complete. Without it a directory cut at the
+ * listing limit, or one with names that cannot be linked, would look like it has no more
+ * entries than are shown.
+ */
+export function RevisionListingNotice(props: {
+    entry: Extract<GitRevisionEntry, { type: "directory" }>;
+}) {
+    const omitted = props.entry.omitted_non_utf8_entries;
+
+    if (!props.entry.truncated && omitted === 0) {
+        return null;
+    }
+
+    return (
+        <div
+            role="status"
+            className="m-2 grid gap-1 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-sm text-amber-200 lg:m-4"
+        >
+            {props.entry.truncated ? (
+                <p className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                    This directory has more entries than can be listed. Only the
+                    first {props.entry.entries.length} are shown.
+                </p>
+            ) : null}
+            {omitted === 0 ? null : (
+                <p className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                    {omitted === 1
+                        ? "1 entry is hidden because its name is not valid UTF-8."
+                        : `${omitted} entries are hidden because their names are not valid UTF-8.`}
+                </p>
+            )}
+        </div>
+    );
 }
 
 /** Converts the shared change vocabulary into short labels for repeated rows. */
