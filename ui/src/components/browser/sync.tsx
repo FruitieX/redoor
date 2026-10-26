@@ -1,5 +1,6 @@
 import React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useAtomValue } from "jotai";
 import { Link } from "@tanstack/react-router";
 import {
     Copy,
@@ -22,6 +23,8 @@ import { Tooltip } from "#ui/components/tooltip";
 import { ViewCardHeader } from "#ui/components/view-card-header";
 import { DestinationConflictDialog } from "#ui/components/browser/destination-conflict";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
+import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
+import { inlineDiffChangesAtom } from "#ui/diff-preferences";
 import { getPathLoadError } from "#ui/components/browser/utils";
 import {
     WATCHED_TRANSFER_POLL_MS,
@@ -906,6 +909,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
 /** Keeps the rendered hunks under the form so Copy/Move chrome stays interactive. */
 function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     const diff = props.workspace.diff;
+    const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
 
     if (diff.errorMessage !== null) {
         return (
@@ -927,7 +931,13 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
             aria-label="File diff"
             className="w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 sm:p-5"
         >
-            <UnifiedDiff unifiedDiff={diff.unifiedDiff} />
+            <div className="mb-3 flex justify-end">
+                <DiffLayoutControl />
+            </div>
+            <UnifiedDiff
+                unifiedDiff={diff.unifiedDiff}
+                mergeModifiedLines={mergeModifiedLines}
+            />
         </section>
     );
 }

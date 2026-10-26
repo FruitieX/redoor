@@ -11,6 +11,7 @@ import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Tooltip } from "#ui/components/tooltip";
 import { GitDiffResultView } from "#ui/components/browser/git";
+import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
 import {
     GitDiffCollapseControls,
     GitDiffList,
@@ -359,10 +360,13 @@ export function GitCommitView(props: {
             </header>
             <GitPanelBar
                 actions={
-                    <GitDiffCollapseControls
-                        collapsed={collapsed}
-                        fileCount={diff.files.length}
-                    />
+                    <>
+                        {diff.files.length === 0 ? null : <DiffLayoutControl />}
+                        <GitDiffCollapseControls
+                            collapsed={collapsed}
+                            fileCount={diff.files.length}
+                        />
+                    </>
                 }
             >
                 <span className="font-medium text-slate-100">

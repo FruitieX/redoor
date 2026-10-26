@@ -129,14 +129,20 @@ export function UnifiedDiff(props: {
      * holds.
      */
     editorFile?: { deviceName: string; path: string };
+    /**
+     * Whether a similar removed and added line show as one row with inline changes. It
+     * comes from the reader's stored preference, which the diff views own.
+     */
+    mergeModifiedLines?: boolean;
 }) {
+    const mergeModifiedLines = props.mergeModifiedLines ?? true;
     const editorDeviceName = props.editorFile?.deviceName;
     const editorPath = props.editorFile?.path;
 
     // Parsing pairs similar lines with word diffs, which is too slow to redo every render.
     const files = React.useMemo(
-        () => parseDiff(props.unifiedDiff),
-        [props.unifiedDiff],
+        () => parseDiff(props.unifiedDiff, { mergeModifiedLines }),
+        [props.unifiedDiff, mergeModifiedLines],
     );
 
     // A stable route keeps the memoized rows from re-rendering when the parent does.

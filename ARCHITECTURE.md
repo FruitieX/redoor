@@ -1368,7 +1368,9 @@ the Git view rather than another level of page navigation.
   at once; others come from `@codemirror/language-data`, render plain first and colour when
   their grammar has loaded.
   File names and per-line Open links are router `Link`s, and parsing and highlighting are
-  memoized on the patch text so re-renders do not redo them.
+  memoized on the patch text so re-renders do not redo them. Whether edited lines pair into
+  inline rows or stay separate -/+ rows is one browser-wide preference
+  (`inlineDiffChangesAtom`, stored in localStorage), switched from every diff view's bar.
 
 - **History follows the browsed path.** `git/log` lists the commits that changed the path,
   newest first by commit time, starting at HEAD in the worktree or at the browsed commit

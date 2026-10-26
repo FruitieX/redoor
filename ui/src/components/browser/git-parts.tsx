@@ -161,7 +161,8 @@ export function GitPanelBar(props: {
                 {props.children}
             </div>
             {props.actions === undefined ? null : (
-                <div className="flex shrink-0 items-center gap-2">
+                // Actions wrap so several controls still fit a phone-width bar.
+                <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                     {props.actions}
                 </div>
             )}

@@ -1,5 +1,6 @@
 import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAtomValue } from "jotai";
 import {
     AlertTriangle,
     CheckCircle2,
@@ -9,6 +10,8 @@ import {
 import type { Agent } from "#ui/api-client";
 import { SegmentedControl } from "#ui/components/segmented-control";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
+import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
+import { inlineDiffChangesAtom } from "#ui/diff-preferences";
 import {
     GitDiffCollapseControls,
     GitDiffList,
@@ -240,18 +243,21 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
         <>
             <GitPanelBar
                 actions={
-                    <GitDiffCollapseControls
-                        collapsed={collapsed}
-                        fileCount={files.length}
-                        onExpandAll={() =>
-                            prefetchGitDiffs({
-                                queryClient,
-                                agent: props.agent,
-                                files: files.map((file) => file.path),
-                                mode: "full",
-                            })
-                        }
-                    />
+                    <>
+                        {files.length === 0 ? null : <DiffLayoutControl />}
+                        <GitDiffCollapseControls
+                            collapsed={collapsed}
+                            fileCount={files.length}
+                            onExpandAll={() =>
+                                prefetchGitDiffs({
+                                    queryClient,
+                                    agent: props.agent,
+                                    files: files.map((file) => file.path),
+                                    mode: "full",
+                                })
+                            }
+                        />
+                    </>
                 }
             >
                 <span className="font-medium text-slate-100">
@@ -316,12 +322,16 @@ export function GitDiffResultView(props: {
     /** Omitted when the file has no editor to open, such as a file the diff deleted. */
     editorFile?: { deviceName: string; path: string };
 }) {
+    // Every Git diff follows the one layout preference its view's bar switches.
+    const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
+
     if (props.result.type === "text") {
         return (
             <UnifiedDiff
                 unifiedDiff={props.result.unified_diff}
                 emptyMessage="No changes in this comparison."
                 editorFile={props.editorFile}
+                mergeModifiedLines={mergeModifiedLines}
             />
         );
     }
@@ -386,28 +396,31 @@ export function GitFileView(props: {
         <>
             <GitPanelBar
                 actions={
-                    <SegmentedControl
-                        label="Compared changes"
-                        className="w-64"
-                        value={props.mode}
-                        onChange={props.onModeChange}
-                        options={[
-                            {
-                                value: "full",
-                                label: "All changes",
-                                icon: FileDiff,
-                                tooltip:
-                                    "Working tree and staged changes compared with HEAD",
-                            },
-                            {
-                                value: "staged",
-                                label: "Staged only",
-                                icon: ListChecks,
-                                tooltip:
-                                    "Only the changes staged in the index, compared with HEAD",
-                            },
-                        ]}
-                    />
+                    <>
+                        <DiffLayoutControl />
+                        <SegmentedControl
+                            label="Compared changes"
+                            className="w-64"
+                            value={props.mode}
+                            onChange={props.onModeChange}
+                            options={[
+                                {
+                                    value: "full",
+                                    label: "All changes",
+                                    icon: FileDiff,
+                                    tooltip:
+                                        "Working tree and staged changes compared with HEAD",
+                                },
+                                {
+                                    value: "staged",
+                                    label: "Staged only",
+                                    icon: ListChecks,
+                                    tooltip:
+                                        "Only the changes staged in the index, compared with HEAD",
+                                },
+                            ]}
+                        />
+                    </>
                 }
             >
                 <span className="min-w-0 truncate font-mono font-medium text-slate-100">
