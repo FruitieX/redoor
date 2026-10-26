@@ -13,6 +13,7 @@ import { CopyableCodeRow } from "#ui/components/copyable-code-row";
 import { Dialog } from "#ui/components/dialog";
 import { Select } from "#ui/components/select";
 import { Toast } from "#ui/components/toast";
+import { cn } from "#ui/utils/cn";
 
 type ConnectionState = "connecting" | "connected" | "reconnecting";
 
@@ -25,6 +26,12 @@ type LoggingLevelControlConfig = {
 };
 
 const MAX_LOG_ENTRIES = 1000;
+
+/**
+ * Pins log text metrics on every row, because clickable error rows are `Button`s whose
+ * size and weight classes would otherwise make them render larger than plain rows.
+ */
+const LOG_ROW_TEXT_CLASS = "text-[11px] leading-4 font-normal";
 
 const LOGGING_LEVELS: { value: Level; label: string }[] = [
     { value: "trace", label: "Trace" },
@@ -301,7 +308,10 @@ function LogRecordRow(props: {
                 onClick={(event) =>
                     props.onOpenError(props.entry.record, event.currentTarget)
                 }
-                className="flex w-full flex-col items-start justify-start gap-x-3 gap-y-0 rounded px-2 py-1 text-left text-red-200 hover:bg-red-950/40 focus-visible:outline-2 focus-visible:outline-red-400 sm:flex-row"
+                className={cn(
+                    "flex w-full flex-col items-start justify-start gap-x-3 gap-y-0 rounded px-2 py-1 text-left text-red-200 hover:bg-red-950/40 focus-visible:outline-2 focus-visible:outline-red-400 sm:flex-row",
+                    LOG_ROW_TEXT_CLASS,
+                )}
             >
                 {content}
             </Button>
@@ -310,7 +320,11 @@ function LogRecordRow(props: {
 
     return (
         <div
-            className={`flex flex-col gap-x-3 gap-y-0 px-2 py-1 sm:flex-row ${props.entry.record.level === "warning" ? "text-amber-100" : ""}`}
+            className={cn(
+                "flex flex-col gap-x-3 gap-y-0 px-2 py-1 sm:flex-row",
+                LOG_ROW_TEXT_CLASS,
+                props.entry.record.level === "warning" && "text-amber-100",
+            )}
         >
             {content}
         </div>
@@ -541,7 +555,7 @@ export function LogViewer(props: {
                     role="log"
                     aria-label={`${props.sourceLabel} log entries`}
                     aria-live="off"
-                    className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-800 bg-surface-code p-4 font-mono text-xs leading-5 text-slate-300"
+                    className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-800 bg-surface-code p-4 font-mono text-slate-300"
                 >
                     {entries.map((entry) => (
                         <LogRecordRow
