@@ -120,7 +120,7 @@ test.describe("Application navigation", () => {
             .getByRole("button", { name: "Log out" })
             .boundingBox();
 
-        // Layout preference sits with the other chrome actions, above process restart.
+        // Layout preference sits in the menu header, above the rail's process restart.
         expect(sidebarModeBox?.y ?? 1).toBeLessThan(restartBox?.y ?? 0);
         // Process restart sits just above logout so account actions remain last.
         expect(restartBox?.y ?? 1).toBeLessThan(logoutBox?.y ?? 0);
@@ -295,7 +295,7 @@ test.describe("Application navigation", () => {
         await sidebarMode.getByRole("button", { name: "Show" }).hover();
         // The tooltip explains what the segment does before it is chosen.
         await expect(page.getByRole("tooltip")).toHaveText(
-            "Always show the sidebars",
+            "Show: always show the sidebars",
         );
         await sidebarMode.getByRole("button", { name: "Show" }).click();
         // Only the chosen segment is marked as selected.

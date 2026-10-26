@@ -1,6 +1,7 @@
 import * as React from "react";
 import { X } from "lucide-react";
 import { useAtom } from "jotai";
+import { cn } from "#ui/utils/cn";
 import { IconButton } from "#ui/components/icon-button";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import {
@@ -22,6 +23,11 @@ export function SideMenu(props: {
     menu: SideMenuId;
     placement: "left" | "right";
     label: string;
+    /**
+     * Drops the panel padding for content that draws its own edge-to-edge chrome, such as
+     * an icon rail, which would otherwise float inside a margin.
+     */
+    flush?: boolean;
     children: React.ReactNode;
 }) {
     const drawerRef = React.useRef<HTMLElement>(null);
@@ -91,7 +97,12 @@ export function SideMenu(props: {
                 id={panelId}
                 aria-label={props.label}
                 style={{ width: resize.width }}
-                className={`${isPersistent ? "flex" : "hidden"} relative min-w-0 shrink-0 flex-col ${borderClass} border-slate-800 bg-chrome p-3`}
+                className={cn(
+                    isPersistent ? "flex" : "hidden",
+                    "relative min-w-0 shrink-0 flex-col border-slate-800 bg-chrome",
+                    borderClass,
+                    !props.flush && "p-3",
+                )}
             >
                 {props.children}
                 {isPersistent ? (
@@ -131,10 +142,21 @@ export function SideMenu(props: {
                         ref={drawerRef}
                         id={drawerId}
                         tabIndex={-1}
-                        className={`absolute ${edgeClass} flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto ${borderClass} border-slate-700 bg-surface p-3 shadow-2xl shadow-black/50`}
+                        className={cn(
+                            "absolute flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-slate-700 bg-surface shadow-2xl shadow-black/50",
+                            edgeClass,
+                            borderClass,
+                            !props.flush && "p-3",
+                        )}
                     >
                         <div
-                            className={`mb-2 flex ${props.placement === "left" ? "justify-end" : "justify-start"}`}
+                            className={cn(
+                                "mb-2 flex",
+                                props.placement === "left"
+                                    ? "justify-end"
+                                    : "justify-start",
+                                props.flush && "px-3 pt-3",
+                            )}
                         >
                             <IconButton
                                 type="button"

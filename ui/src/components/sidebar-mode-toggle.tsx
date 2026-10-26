@@ -12,23 +12,27 @@ const sidebarModeOptions = [
         value: "auto",
         label: "Auto",
         icon: Columns2,
-        tooltip: "Show the sidebars when the window is wide enough",
+        tooltip: "Auto: show the sidebars when the window is wide enough",
     },
     {
         value: "show",
         label: "Show",
         icon: PanelsLeftRight,
-        tooltip: "Always show the sidebars",
+        tooltip: "Show: always show the sidebars",
     },
     {
         value: "hide",
         label: "Hide",
         icon: PanelLeftClose,
-        tooltip: "Always hide the sidebars behind menu buttons",
+        tooltip: "Hide: always hide the sidebars behind menu buttons",
     },
 ] as const satisfies ReadonlyArray<SegmentedControlOption<SidebarMode>>;
 
-/** Lets the user pick the persistent-sidebar preference directly from the application menu. */
+/**
+ * Lets the user pick the persistent-sidebar preference directly from the application menu.
+ * It is icon-only so it fits beside the menu title and leaves the column to pinned files;
+ * the tooltips start with the mode name because the icons alone do not say which is which.
+ */
 export function SidebarModeToggle() {
     const [sidebarMode, setSidebarMode] = useAtom(sidebarModeAtom);
 
@@ -38,7 +42,8 @@ export function SidebarModeToggle() {
             options={sidebarModeOptions}
             value={sidebarMode}
             onChange={setSidebarMode}
-            className="mb-1"
+            iconOnly
+            className="shrink-0"
         />
     );
 }

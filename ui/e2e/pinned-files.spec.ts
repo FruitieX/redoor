@@ -73,7 +73,7 @@ test.describe.serial("Pinned files", () => {
         await pinPersisted;
     }
 
-    test("pins editor files under Transfers and keeps newer pins at the bottom", async ({
+    test("pins editor files beside the navigation rail and keeps newer pins at the bottom", async ({
         page,
     }) => {
         const firstName = "file1.txt";
@@ -110,7 +110,7 @@ test.describe.serial("Pinned files", () => {
             hasText: firstName,
         });
 
-        // The left menu must show the pin below Transfers, not in the device sidebar.
+        // The left menu must show the pin beside the destinations, not in the device sidebar.
         await expect(
             firstItem.getByRole("link", { name: firstName, exact: true }),
         ).toBeVisible();
@@ -123,7 +123,11 @@ test.describe.serial("Pinned files", () => {
             .getByRole("link", { name: firstName, exact: true })
             .boundingBox();
 
-        expect(firstLinkBox?.y ?? 0).toBeGreaterThan(transfersBox?.y ?? 1);
+        // Pins own the column to the right of the icon rail, so they start above its last icons.
+        expect(firstLinkBox?.x ?? 0).toBeGreaterThan(
+            (transfersBox?.x ?? 1) + (transfersBox?.width ?? 0),
+        );
+        expect(firstLinkBox?.y ?? 1).toBeLessThan(transfersBox?.y ?? 0);
 
         const deviceLabel = firstItem.getByText(ctx.agentName, { exact: true });
         // Operators need the owning device under the file name.
@@ -212,6 +216,12 @@ test.describe.serial("Pinned files", () => {
             .click();
         // Clear must remove the whole list, not only the open file.
         await expect(pinnedFiles).toHaveCount(0);
+        // The emptied section stays and says how to pin again, since pins are the column's content.
+        await expect(
+            applicationNavigation.getByText(
+                "No pinned files — open a file and use Pin to keep it here",
+            ),
+        ).toBeVisible();
     });
 
     test("switches pinned files above the toolbar while keeping the editor full window", async ({
