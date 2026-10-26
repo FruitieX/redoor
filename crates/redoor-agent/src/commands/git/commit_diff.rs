@@ -15,7 +15,7 @@ use redoor_protocol::{
 
 use super::{
     GitFailure,
-    diff::{DiffSource, MAX_BATCH_DIFF_BYTES, compare_sources, read_object_blob},
+    diff::{DiffSource, MAX_BATCH_DIFF_BYTES, compare_sources, json_encoded_len, read_object_blob},
     internal_failure,
     revision::{RevisionPath, commit_summary, tree_entry},
     run_blocking,
@@ -69,10 +69,18 @@ fn commit_diff_blocking(
         })
         .transpose()?;
 
-    let mut changes = collect_changes(repo, &target.relative, old_root.as_ref(), &new_root)?;
-    changes.sort_by(|left, right| left.relative.cmp(&right.relative));
+    let mut changes = collect_changes(
+        repo,
+        &target.relative,
+        old_root.as_ref(),
+        &new_root,
+        interrupt,
+    )?;
+    // Collection stops one change past the limit, so this keeps the files the traversal met
+    // first and orders only those.
     let truncated = changes.len() > GitDiffRequest::MAX_FILES;
     changes.truncate(GitDiffRequest::MAX_FILES);
+    changes.sort_by(|left, right| left.relative.cmp(&right.relative));
 
     let mut remaining = MAX_BATCH_DIFF_BYTES;
     let mut files = Vec::with_capacity(changes.len());
@@ -94,7 +102,7 @@ fn commit_diff_blocking(
             )?
         };
         if let GitDiffResult::Text { unified_diff } = &result {
-            remaining -= unified_diff.len();
+            remaining -= json_encoded_len(unified_diff.as_bytes());
         }
         files.push(GitCommitFileChange {
             path: target.worktree_path(&change.relative).display().to_string(),
@@ -116,97 +124,134 @@ fn commit_diff_blocking(
 
 /// Finds the files that differ below `relative`, diffing only the selected subtree so a
 /// large commit elsewhere in the repository costs nothing.
+///
+/// Changes are visited one at a time and at most one more than the response can show is
+/// kept, so a commit touching millions of files neither fills memory nor outlives a
+/// canceled request.
 fn collect_changes<'repo>(
     repo: &'repo gix::Repository,
     relative: &str,
     old_root: Option<&gix::Tree<'repo>>,
     new_root: &gix::Tree<'repo>,
+    interrupt: &AtomicBool,
 ) -> Result<Vec<FileChange>, GitFailure> {
     let old_entry = match old_root {
         Some(tree) => tree_entry(tree, relative)?,
         None => None,
     };
     let new_entry = tree_entry(new_root, relative)?;
-    let is_tree = |entry: &Option<gix::objs::tree::Entry>| {
-        entry.as_ref().is_some_and(|entry| entry.mode.is_tree())
-    };
+    let old_side = non_tree_side(&old_entry);
+    let new_side = non_tree_side(&new_entry);
 
-    if !relative.is_empty() && !is_tree(&old_entry) && !is_tree(&new_entry) {
-        // A single file: compare its two committed versions directly.
-        let old = old_entry.map(|entry| (entry.mode, entry.oid));
-        let new = new_entry.map(|entry| (entry.mode, entry.oid));
-        return Ok(if old == new {
-            Vec::new()
-        } else {
-            vec![FileChange {
-                relative: relative.to_string(),
-                old,
-                new,
-            }]
+    let mut files = Vec::new();
+    if !relative.is_empty() && (old_side.is_some() || new_side.is_some()) && old_side != new_side {
+        // The path itself is a file on at least one side. When the other side is a directory,
+        // the file's deletion or addition is listed next to the directory's contents below.
+        files.push(FileChange {
+            relative: relative.to_string(),
+            old: old_side,
+            new: new_side,
         });
     }
 
     let old_tree = subtree(repo, relative, old_root, old_entry)?;
     let new_tree = subtree(repo, relative, Some(new_root), new_entry)?;
-    let changes = repo
-        .diff_tree_to_tree(
-            old_tree.as_ref(),
-            new_tree.as_ref(),
-            gix::diff::Options::default().with_rewrites(None),
-        )
-        .map_err(|error| internal_failure("diff Git trees", error))?;
+    if old_tree.is_none() && new_tree.is_none() {
+        return Ok(files);
+    }
+    let empty_tree = repo.empty_tree();
+    let old_tree = old_tree.unwrap_or_else(|| empty_tree.clone());
+    let new_tree = new_tree.unwrap_or(empty_tree);
 
     let prefix = if relative.is_empty() {
         String::new()
     } else {
         format!("{relative}/")
     };
-    let mut files = Vec::new();
-    for change in changes {
-        use gix::object::tree::diff::ChangeDetached;
-        let (location, old, new) = match change {
-            ChangeDetached::Addition {
-                location,
-                entry_mode,
-                id,
-                ..
-            } => (location, None, Some((entry_mode, id))),
-            ChangeDetached::Deletion {
-                location,
-                entry_mode,
-                id,
-                ..
-            } => (location, Some((entry_mode, id)), None),
-            ChangeDetached::Modification {
-                location,
-                previous_entry_mode,
-                previous_id,
-                entry_mode,
-                id,
-            } => (
-                location,
-                Some((previous_entry_mode, previous_id)),
-                Some((entry_mode, id)),
-            ),
-            // Rewrite tracking is disabled above, so renames arrive as deletion plus addition.
-            ChangeDetached::Rewrite { .. } => continue,
-        };
-        // Trees are reported alongside their files; only the files carry content.
-        let old = old.filter(|(mode, _)| !mode.is_tree());
-        let new = new.filter(|(mode, _)| !mode.is_tree());
-        if old.is_none() && new.is_none() {
-            continue;
-        }
-        let Ok(location) = location.to_str() else {
-            continue;
-        };
-        files.push(FileChange {
-            relative: format!("{prefix}{location}"),
-            old,
-            new,
+    let mut canceled = false;
+    let mut reached_limit = false;
+    let traversal = old_tree
+        .changes()
+        .map_err(|error| internal_failure("prepare Git tree diff", error))?
+        .options(|options| {
+            options.track_path().track_rewrites(None);
+        })
+        .for_each_to_obtain_tree(&new_tree, |change| {
+            use gix::object::tree::diff::Change;
+            if interrupt.load(Ordering::Acquire) {
+                canceled = true;
+                return Ok(std::ops::ControlFlow::Break(()));
+            }
+            let (location, old, new) = match change {
+                Change::Addition {
+                    location,
+                    entry_mode,
+                    id,
+                    ..
+                } => (location, None, Some((entry_mode, id.detach()))),
+                Change::Deletion {
+                    location,
+                    entry_mode,
+                    id,
+                    ..
+                } => (location, Some((entry_mode, id.detach())), None),
+                Change::Modification {
+                    location,
+                    previous_entry_mode,
+                    previous_id,
+                    entry_mode,
+                    id,
+                } => (
+                    location,
+                    Some((previous_entry_mode, previous_id.detach())),
+                    Some((entry_mode, id.detach())),
+                ),
+                // Rewrite tracking is disabled above, so renames arrive as deletion plus addition.
+                Change::Rewrite { .. } => return Ok(std::ops::ControlFlow::Continue(())),
+            };
+            // Trees are reported alongside their files; only the files carry content.
+            let old = old.filter(|(mode, _)| !mode.is_tree());
+            let new = new.filter(|(mode, _)| !mode.is_tree());
+            if old.is_none() && new.is_none() {
+                return Ok(std::ops::ControlFlow::Continue(()));
+            }
+            let Ok(location) = location.to_str() else {
+                return Ok(std::ops::ControlFlow::Continue(()));
+            };
+            files.push(FileChange {
+                relative: format!("{prefix}{location}"),
+                old,
+                new,
+            });
+            // One change past the limit is enough to report the response as truncated.
+            reached_limit = files.len() > GitDiffRequest::MAX_FILES;
+            Ok(if reached_limit {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            })
         });
+    if canceled {
+        return Err(GitFailure::new(
+            CommandErrorKind::Canceled,
+            "Git commit diff was canceled",
+        ));
+    }
+    // gix reports a traversal stopped by the callback as an error, which here only means the
+    // limit was reached.
+    if !reached_limit {
+        traversal.map_err(|error| internal_failure("diff Git trees", error))?;
     }
     Ok(files)
+}
+
+/// Returns one side's entry at the browsed path when it is not a directory, the only case
+/// where the path itself is a changed file rather than a tree of them.
+fn non_tree_side(entry: &Option<gix::objs::tree::Entry>) -> Side {
+    entry
+        .as_ref()
+        .filter(|entry| !entry.mode.is_tree())
+        .map(|entry| (entry.mode, entry.oid))
 }
 
 /// Selects the tree to diff on one side: the root for the repository itself, the entry's tree

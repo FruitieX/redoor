@@ -277,6 +277,160 @@ describe("Git revision REST API", () => {
         expect(binary?.result).toEqual({ type: "binary" });
     });
 
+    /** Creates a repository with a test identity, so each scenario owns its history. */
+    async function createRepository(suffix: string): Promise<string> {
+        const directory = tempFiles.tempDirectory({ suffix });
+        await $({ cwd: directory })`git init -b main`;
+        await $({
+            cwd: directory,
+        })`git config user.email redoor-tests@example.invalid`;
+        await $({ cwd: directory })`git config user.name Redoor Tests`;
+
+        return directory;
+    }
+
+    /** Commits everything in a repository and returns the new commit id. */
+    async function commitAll(directory: string, message: string) {
+        await $({ cwd: directory })`git add -A`;
+        await $({ cwd: directory })`git commit -m ${message}`;
+
+        return (await $({ cwd: directory })`git rev-parse HEAD`).stdout.trim();
+    }
+
+    it("rejects revisions that name a blob or tree instead of a commit", async () => {
+        const blobId = (
+            await $({ cwd: repo })`git rev-parse ${`${firstCommit}:readme.txt`}`
+        ).stdout.trim();
+
+        const blob = await revisionRequest("tree", repo, blobId);
+
+        // A blob id is refused from its object header, as invalid input rather than a missing path.
+        expect(blob.status).toBe(400);
+        expect(await blob.text()).toContain("does not name a commit");
+
+        const treeId = (
+            await $({ cwd: repo })`git rev-parse ${`${firstCommit}^{tree}`}`
+        ).stdout.trim();
+
+        const tree = await revisionRequest("tree", repo, treeId);
+
+        // A tree id is refused the same way, since only commits have a history to browse.
+        expect(tree.status).toBe(400);
+    });
+
+    it("lists both sides when a file and a directory replace each other", async () => {
+        const replaced = await createRepository("-git-revision-replaced");
+        await writeFile(join(replaced, "config"), "file\n");
+        await commitAll(replaced, "Config file");
+        await rm(join(replaced, "config"));
+        await mkdir(join(replaced, "config"));
+        await writeFile(join(replaced, "config", "settings"), "nested\n");
+        const toDirectory = await commitAll(replaced, "Config directory");
+
+        const fileToDirectory = await testAgent.gitCommitDiff(
+            join(replaced, "config"),
+            toDirectory,
+        );
+
+        // Scoping to the path must keep the removed file next to the directory that replaced it.
+        expect(
+            fileToDirectory.files.map((file) => [
+                file.repository_relative_path,
+                file.change,
+            ]),
+        ).toEqual([
+            ["config", "deleted"],
+            ["config/settings", "added"],
+        ]);
+
+        await rm(join(replaced, "config"), { recursive: true });
+        await writeFile(join(replaced, "config"), "file again\n");
+        const toFile = await commitAll(replaced, "Config file again");
+
+        const directoryToFile = await testAgent.gitCommitDiff(
+            join(replaced, "config"),
+            toFile,
+        );
+
+        // The reverse replacement keeps the added file next to the removed directory contents.
+        expect(
+            directoryToFile.files.map((file) => [
+                file.repository_relative_path,
+                file.change,
+            ]),
+        ).toEqual([
+            ["config", "added"],
+            ["config/settings", "deleted"],
+        ]);
+    });
+
+    it("stops collecting commit changes at the response limit", async () => {
+        const many = await createRepository("-git-revision-many");
+        await mkdir(join(many, "files"));
+        await Promise.all(
+            Array.from({ length: 140 }, (_, index) =>
+                writeFile(
+                    join(
+                        many,
+                        "files",
+                        `${String(index).padStart(3, "0")}.txt`,
+                    ),
+                    `${index}\n`,
+                ),
+            ),
+        );
+        const commit = await commitAll(many, "Many files");
+
+        const diff = await testAgent.gitCommitDiff(many, commit);
+
+        // More changes than one response carries are reported instead of silently dropped.
+        expect(diff.truncated).toBe(true);
+        // The response is capped at the per-request file limit.
+        expect(diff.files).toHaveLength(128);
+        const paths = diff.files.map((file) => file.repository_relative_path);
+        // The kept files are still shown in path order.
+        expect(paths).toEqual([...paths].sort());
+    });
+
+    it("resolves a superproject revision on a checked-out submodule path", async () => {
+        const library = await createRepository("-git-revision-library");
+        await writeFile(join(library, "lib.txt"), "library\n");
+        const libraryCommit = await commitAll(library, "Library");
+
+        const superproject = await createRepository("-git-revision-super");
+        await writeFile(join(superproject, "app.txt"), "app\n");
+        await $({
+            cwd: superproject,
+        })`git -c protocol.file.allow=always submodule add ${library} lib`;
+        const superCommit = await commitAll(superproject, "Add library");
+
+        const gitlink = await testAgent.gitRevisionTree(
+            join(superproject, "lib"),
+            superCommit,
+        );
+
+        // The submodule checkout does not know the superproject commit, so the superproject
+        // resolves it and shows the gitlink it recorded.
+        expect(gitlink.repository_root).toBe(superproject);
+        expect(gitlink.entry).toEqual({
+            type: "submodule",
+            commit_id: libraryCommit,
+        });
+
+        const inside = await testAgent.gitRevisionTree(
+            join(superproject, "lib"),
+            libraryCommit,
+        );
+
+        // The submodule's own commits are still browsed inside the submodule.
+        expect(inside.repository_root).toBe(join(superproject, "lib"));
+        expect(
+            inside.entry.type === "directory"
+                ? inside.entry.entries.map((entry) => entry.name)
+                : [],
+        ).toEqual(["lib.txt"]);
+    });
+
     it("keeps the revision route responses typed for the browser", async () => {
         const response = await revisionRequest("tree", repo, "v1");
         const body: GitRevisionTreeResponse = await response.json();

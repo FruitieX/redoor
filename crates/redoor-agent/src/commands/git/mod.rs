@@ -124,7 +124,18 @@ pub(super) fn discover_repository(
             Err(error) => return Err(io_failure("inspect Git discovery path", error)),
         }
     }
-    let repo = match gix::discover(&discovery_path) {
+    discover_repository_from(&discovery_path, requested)
+}
+
+/// Discovers the repository enclosing an existing directory and locates `requested` in it.
+///
+/// Separate from [`discover_repository`] so history browsing can search upwards from a nested
+/// repository's parent, reaching the superproject whose commits record the nested one.
+pub(super) fn discover_repository_from(
+    discovery_path: &Path,
+    requested: PathBuf,
+) -> Result<Option<RepositoryPath>, GitFailure> {
+    let repo = match gix::discover(discovery_path) {
         Ok(repo) => repo,
         // gix reports every failure as one error type, so "no repository here" is told apart
         // from real failures by the upward-search error it wraps.

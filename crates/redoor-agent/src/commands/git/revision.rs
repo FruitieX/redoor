@@ -11,9 +11,15 @@ use redoor_protocol::{
 };
 
 use super::{
-    GitFailure, RepositoryPath, discover_repository, internal_failure, utf8_relative,
-    validate_absolute_path,
+    GitFailure, RepositoryPath, discover_repository, discover_repository_from, internal_failure,
+    utf8_relative, validate_absolute_path,
 };
+
+/// Commits and annotated tags are small; anything larger is not a revision worth inflating
+/// on a memory-constrained agent.
+const MAX_REVISION_OBJECT_BYTES: u64 = 4 * 1024 * 1024;
+/// Tags can point at tags; a longer chain than this is treated as malformed.
+const MAX_TAG_DEPTH: usize = 16;
 
 /// A repository path resolved together with the commit a revision names, so history commands
 /// read one consistent commit instead of resolving the revision repeatedly.
@@ -33,14 +39,32 @@ impl RevisionPath {
         validate_revision(rev)
             .map_err(|message| GitFailure::new(CommandErrorKind::InvalidInput, message))?;
         let requested = validate_absolute_path(path)?;
-        let repository = discover_repository(requested)?.ok_or_else(|| {
+        let mut repository = discover_repository(requested.clone())?.ok_or_else(|| {
             GitFailure::new(
                 CommandErrorKind::InvalidInput,
                 "Path is not inside a non-bare Git worktree",
             )
         })?;
+        let commit_id = loop {
+            if let Some(id) = resolve_commit(&repository.repo, rev)? {
+                break id;
+            }
+            // A checked-out submodule or other nested repository shadows the repository that
+            // contains it. Opening a submodule while browsing a superproject commit must show
+            // the gitlink that commit recorded, so a revision the nested repository does not
+            // know is resolved in the enclosing one instead.
+            let enclosing = match repository.root.parent() {
+                Some(parent) => discover_repository_from(parent, requested.clone())?,
+                None => None,
+            };
+            repository = enclosing.ok_or_else(|| {
+                GitFailure::new(
+                    CommandErrorKind::InvalidInput,
+                    format!("Unknown Git revision {rev:?}"),
+                )
+            })?;
+        };
         let relative = utf8_relative(&repository.relative)?;
-        let commit_id = resolve_commit(&repository.repo, rev)?.id;
         Ok(Self {
             repository,
             relative,
@@ -67,31 +91,44 @@ impl RevisionPath {
     }
 }
 
-/// Resolves branches, tags, abbreviated ids and other revision expressions to a commit.
+/// Resolves branches, tags, abbreviated ids and other revision expressions to a commit, or
+/// `None` when the repository does not know the revision.
 ///
-/// Tags are peeled, so `v1` shows the tagged commit. Unknown revisions are invalid input
+/// Tags are peeled, so `v1` shows the tagged commit. Each object's kind and size are read
+/// from its header before it is inflated, so a revision naming a huge blob is rejected
+/// without loading it into memory. Revisions naming anything but a commit are invalid input
 /// rather than missing paths, so the browser does not offer to create them.
-fn resolve_commit<'repo>(
-    repo: &'repo gix::Repository,
-    rev: &str,
-) -> Result<gix::Commit<'repo>, GitFailure> {
-    let id = repo
-        .rev_parse_single(rev.as_bytes().as_bstr())
-        .map_err(|error| {
-            GitFailure::new(
-                CommandErrorKind::InvalidInput,
-                format!("Unknown Git revision {rev:?}: {error}"),
-            )
-        })?;
-    id.object()
-        .map_err(|error| internal_failure("read Git revision object", error))?
-        .peel_to_commit()
-        .map_err(|_| {
-            GitFailure::new(
-                CommandErrorKind::InvalidInput,
-                format!("Git revision {rev:?} does not name a commit"),
-            )
-        })
+fn resolve_commit(repo: &gix::Repository, rev: &str) -> Result<Option<gix::ObjectId>, GitFailure> {
+    let Ok(id) = repo.rev_parse_single(rev.as_bytes().as_bstr()) else {
+        return Ok(None);
+    };
+    let not_a_commit = || {
+        GitFailure::new(
+            CommandErrorKind::InvalidInput,
+            format!("Git revision {rev:?} does not name a commit"),
+        )
+    };
+    let mut id = id.detach();
+    for _ in 0..MAX_TAG_DEPTH {
+        let header = repo
+            .find_header(id)
+            .map_err(|error| internal_failure("read Git revision object header", error))?;
+        if header.size() > MAX_REVISION_OBJECT_BYTES {
+            return Err(not_a_commit());
+        }
+        match header.kind() {
+            gix::object::Kind::Commit => return Ok(Some(id)),
+            gix::object::Kind::Tag => {
+                id = repo
+                    .find_tag(id)
+                    .and_then(|tag| tag.target_id())
+                    .map_err(|error| internal_failure("read Git tag", error))?
+                    .detach();
+            }
+            gix::object::Kind::Tree | gix::object::Kind::Blob => return Err(not_a_commit()),
+        }
+    }
+    Err(not_a_commit())
 }
 
 /// Reads the summary fields the UI shows for a commit.

@@ -119,7 +119,10 @@ The agent runtime and the implementation of every command.
     resolves a user-supplied revision to a commit once per request; `tree` and
     `commit_diff` read committed history. All Git work runs in `spawn_blocking` and every
     response is bounded (entries, files, bytes per blob and per batch), because gix inflates
-    whole objects and the reply is a single control frame.
+    whole objects and the reply is a single control frame. Object kinds and sizes are read
+    from headers before inflating, commit diffs visit changes one at a time and stop at the
+    file limit, and patch budgets count JSON-encoded bytes, since escaping can grow control
+    characters sixfold inside the frame.
 - `transfers/`: shared upload and download drivers.
   - `UploadSink` covers raw files, tar directories and file edits. `ByteSource` covers file
     ranges and tar archives.
@@ -1308,6 +1311,10 @@ way of looking at the same repository location, and paths deleted since are stil
   only that subtree or file, with a link to the repository root for the whole commit, like
   the worktree Git view. A path the commit deleted has no tree at the commit, so the loader
   (`browser-revision-loader.ts`) falls back to the commit diff and shows the deletion.
+- **Nested repositories fall back outwards.** The innermost repository containing the path
+  resolves the revision first, so a submodule's own history is browsable. A revision it
+  does not know is resolved in the enclosing repository, which is how opening a checked-out
+  submodule while browsing a superproject commit shows the gitlink that commit recorded.
 - **A banner under the breadcrumbs** names the revision and commit and links back to the
   working tree, so committed content is never mistaken for the files on disk.
 - **The shell sees no worktree entry.** `useBrowserLocation` reports a revision page with a

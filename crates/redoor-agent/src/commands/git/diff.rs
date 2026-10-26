@@ -25,8 +25,11 @@ use super::{
 /// Matches the editor's existing per-file safety policy for both sides of a diff.
 pub(super) const MAX_DIFF_INPUT_BYTES: u64 = 2 * 1024 * 1024;
 /// Prevents a bounded pair of inputs from expanding into an unexpectedly large control frame.
+/// Measured as JSON-encoded bytes, like the batch budget.
 const MAX_UNIFIED_DIFF_BYTES: usize = 4 * 1024 * 1024;
-/// Caps retained patch text per batch on agents with restrained memory.
+/// Caps patch text per batch on agents with restrained memory. It is measured as JSON-encoded
+/// bytes because escaping can grow control characters sixfold, and the encoded response is
+/// what must fit in one WebSocket control frame.
 pub(super) const MAX_BATCH_DIFF_BYTES: usize = 8 * 1024 * 1024;
 
 /// Keeps size and entry-kind classifications out of the command-error channel.
@@ -37,22 +40,39 @@ pub(super) enum DiffSource {
     Unsupported,
 }
 
+/// Returns how many bytes text occupies inside a JSON string, so patch budgets bound the
+/// serialized control frame rather than the raw text.
+pub(super) fn json_encoded_len(text: &[u8]) -> usize {
+    text.iter()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            // Other control characters are written as `\u00XX`.
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
+}
+
 /// Collects formatter output without allowing a control response to exceed its hard limit.
 struct LimitedWriter {
     bytes: Vec<u8>,
+    /// The JSON-encoded size of `bytes`, which is what the limit applies to.
+    encoded: usize,
     limit: usize,
 }
 
 impl Write for LimitedWriter {
     /// Rejects a chunk before it can grow the response beyond the configured limit.
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.len().saturating_add(buffer.len()) > self.limit {
+        let encoded = self.encoded.saturating_add(json_encoded_len(buffer));
+        if encoded > self.limit {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::FileTooLarge,
                 "unified diff exceeds its output limit",
             ));
         }
         self.bytes.extend_from_slice(buffer);
+        self.encoded = encoded;
         Ok(buffer.len())
     }
 
@@ -86,7 +106,7 @@ fn diff_blocking(
     for path in request.files {
         let diff = diff_file_blocking(path, mode, interrupt.clone(), remaining)?;
         if let GitDiffResult::Text { unified_diff } = &diff.result {
-            remaining -= unified_diff.len();
+            remaining -= json_encoded_len(unified_diff.as_bytes());
         }
         diffs.push(diff);
     }
@@ -281,6 +301,7 @@ pub(super) fn compare_sources(
     unified_diff.header(&format!("a/{relative}"), &format!("b/{relative}"));
     let mut output = LimitedWriter {
         bytes: Vec::new(),
+        encoded: 0,
         limit: MAX_UNIFIED_DIFF_BYTES.min(remaining),
     };
     if unified_diff.to_writer(&mut output).is_err() {
@@ -417,6 +438,7 @@ mod tests {
     fn limited_writer_rejects_output_over_its_limit() {
         let mut writer = LimitedWriter {
             bytes: Vec::new(),
+            encoded: 0,
             limit: 3,
         };
         // Output up to the limit is retained normally.
@@ -427,5 +449,26 @@ mod tests {
             std::io::ErrorKind::FileTooLarge
         );
         assert_eq!(writer.bytes, b"abc");
+    }
+
+    /// Ensures escaped control characters count at their serialized size, so a patch full of
+    /// them cannot fit the budget yet overflow the WebSocket frame once encoded.
+    #[test]
+    fn limited_writer_counts_json_escaping() {
+        let mut writer = LimitedWriter {
+            bytes: Vec::new(),
+            encoded: 0,
+            limit: 8,
+        };
+        // A newline encodes as two bytes and U+0001 as six, filling the limit exactly.
+        assert_eq!(writer.write(b"\n\x01").unwrap(), 2);
+        // One more raw byte would exceed the encoded limit even though only two are retained.
+        assert!(writer.write(b"a").is_err());
+        // The encoded measure matches what serde_json actually writes.
+        let text = "\"\\\n\x01\x7f\u{e4}";
+        assert_eq!(
+            json_encoded_len(text.as_bytes()),
+            serde_json::to_string(text).unwrap().len() - 2
+        );
     }
 }
