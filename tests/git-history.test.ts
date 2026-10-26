@@ -10,6 +10,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { Agent } from "#ui/api-client";
+import type { GitCommitNeighborsResponse } from "#bindings/GitCommitNeighborsResponse";
 import type { GitLogResponse } from "#bindings/GitLogResponse";
 import type { GitRefListResponse } from "#bindings/GitRefListResponse";
 import {
@@ -127,7 +128,7 @@ describe("Git history, branch and tag REST API", () => {
 
     /** Fetches a Git list route with raw query values, so rejected input can be asserted. */
     async function listRequest(
-        route: "log" | "branches" | "tags",
+        route: "log" | "branches" | "tags" | "commit-neighbors",
         path: string,
         query: Record<string, string>,
     ): Promise<Response> {
@@ -262,6 +263,114 @@ describe("Git history, branch and tag REST API", () => {
         // Offsets count matching commits, not every commit walked.
         expect(scoped.commits.map((commit) => commit.id)).toEqual([commits.b]);
         expect(scoped.has_more).toBe(true);
+    });
+
+    /** Reads the ids of the commits on either side of `rev` in the history of `path`. */
+    async function neighborIds(path: string, rev: string) {
+        const neighbors = await testAgent.gitCommitNeighbors(path, rev);
+
+        return {
+            older: neighbors.older?.id ?? null,
+            newer: neighbors.newer?.id ?? null,
+        };
+    }
+
+    it("finds the commits on either side of a commit", async () => {
+        // The first commit has nothing before it, and the next change is its child.
+        expect(await neighborIds(repo, commits.a)).toEqual({
+            older: null,
+            newer: commits.b,
+        });
+        // Next follows the walk order the Commits list shows, which reaches the side branch
+        // first because it was committed earlier than main's next commit.
+        expect(await neighborIds(repo, commits.b)).toEqual({
+            older: commits.a,
+            newer: commits.d,
+        });
+        // Previous only ever steps to an ancestor, so a commit on main skips the side branch.
+        expect(await neighborIds(repo, commits.c)).toEqual({
+            older: commits.b,
+            newer: commits.merge,
+        });
+        // Main's newer commit does not contain the side branch commit, so next is the merge.
+        expect(await neighborIds(repo, commits.d)).toEqual({
+            older: commits.b,
+            newer: commits.merge,
+        });
+        // HEAD has nothing after it.
+        expect(await neighborIds(repo, commits.merge)).toEqual({
+            older: commits.c,
+            newer: null,
+        });
+        // A branch name resolves like the commit it points at.
+        expect(await neighborIds(repo, "feature")).toEqual({
+            older: commits.b,
+            newer: commits.merge,
+        });
+    });
+
+    it("steps only between commits that changed the browsed path", async () => {
+        // A commit that did not touch the file still finds the file's changes around it.
+        expect(await neighborIds(join(repo, "readme.txt"), commits.b)).toEqual({
+            older: commits.a,
+            newer: commits.c,
+        });
+        // The merge kept main's readme, so it is not a change of the file.
+        expect(await neighborIds(join(repo, "readme.txt"), commits.c)).toEqual(
+            { older: commits.a, newer: null },
+        );
+        // A directory steps over commits that changed only files outside it.
+        expect(await neighborIds(join(repo, "docs"), commits.b)).toEqual({
+            older: commits.a,
+            newer: commits.d,
+        });
+    });
+
+    it("has no next commit for a commit HEAD does not contain", async () => {
+        const tree = await revParse(`${commits.a}^{tree}`);
+
+        // A commit no ref points at, newer than HEAD, so the walk from HEAD never meets it.
+        const unreachable = (
+            await git(
+                repo,
+                5000,
+            )`git commit-tree ${tree} -p ${commits.a} -m ${"Unreachable"}`
+        ).stdout.trim();
+
+        // Previous still walks its own ancestors, but only HEAD defines what comes next.
+        expect(await neighborIds(repo, unreachable)).toEqual({
+            older: commits.a,
+            newer: null,
+        });
+    });
+
+    it("rejects unknown revisions and paths outside a repository for neighbours", async () => {
+        // An unknown revision is bad input, like everywhere else in revision browsing.
+        expect(
+            (
+                await listRequest("commit-neighbors", repo, {
+                    rev: "no-such-branch",
+                })
+            ).status,
+        ).toBe(400);
+
+        const outside = tempFiles.tempDirectory({
+            suffix: "-git-neighbors-outside",
+        });
+
+        // A path outside a repository has no history to step through.
+        expect(
+            (await listRequest("commit-neighbors", outside, { rev: "HEAD" }))
+                .status,
+        ).toBe(400);
+
+        const neighbors: GitCommitNeighborsResponse = await (
+            await listRequest("commit-neighbors", repo, { rev: commits.c })
+        ).json();
+
+        // The raw REST shape matches the generated binding the UI consumes.
+        expect(neighbors.older?.summary).toBe("Update guide");
+        expect(neighbors.newer?.summary).toBe("Merge feature");
     });
 
     it("keeps history for a path deleted from the worktree", async () => {

@@ -389,6 +389,9 @@ impl RunCommand for Command {
             Command::GitLog(request::GitLog { path, rev, page }) => {
                 Reply::of::<request::GitLog>(git::history::log(path, rev, page).await)
             }
+            Command::GitCommitNeighbors(request::GitCommitNeighbors { path, rev }) => {
+                Reply::of::<request::GitCommitNeighbors>(git::history::neighbors(path, rev).await)
+            }
             Command::GitRefList(request::GitRefList { path, kind, page }) => {
                 Reply::of::<request::GitRefList>(git::refs::list(path, kind, page).await)
             }

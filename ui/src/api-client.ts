@@ -82,6 +82,7 @@ import type { GitDiffMode } from "#bindings/GitDiffMode";
 import type { GitRevisionTreeResponse } from "#bindings/GitRevisionTreeResponse";
 import type { GitRevisionContentResponse } from "#bindings/GitRevisionContentResponse";
 import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
+import type { GitCommitNeighborsResponse } from "#bindings/GitCommitNeighborsResponse";
 import type { GitLogResponse } from "#bindings/GitLogResponse";
 import type { GitRefListResponse } from "#bindings/GitRefListResponse";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
@@ -491,6 +492,18 @@ export class Agent {
     ): Promise<GitCommitDiffResponse> {
         return apiRequest<GitCommitDiffResponse>(
             this.revisionUrl("git/commit-diff", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Finds the commits before and after the one a revision names in a path's history. */
+    async gitCommitNeighbors(
+        path: string,
+        rev: string,
+    ): Promise<GitCommitNeighborsResponse> {
+        return apiRequest<GitCommitNeighborsResponse>(
+            this.revisionUrl("git/commit-neighbors", path, rev),
             undefined,
             this.requestContext,
         );

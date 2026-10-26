@@ -47,6 +47,7 @@ pub enum Command {
     GitRevisionContent(request::GitRevisionContent),
     GitCommitDiff(request::GitCommitDiff),
     GitLog(request::GitLog),
+    GitCommitNeighbors(request::GitCommitNeighbors),
     GitRefList(request::GitRefList),
     GitRevisionStat(request::GitRevisionStat),
     GitDownload(request::GitDownload),
@@ -189,6 +190,12 @@ impl Command {
                 request.page.skip,
                 request.page.limit
             ),
+            Self::GitCommitNeighbors(request) => {
+                format!(
+                    "GitCommitNeighbors path={} rev={}",
+                    request.path, request.rev
+                )
+            }
             Self::GitRefList(request) => format!(
                 "GitRefList path={} kind={:?} skip={} limit={}",
                 request.path, request.kind, request.page.skip, request.page.limit

@@ -123,6 +123,8 @@ export const queryKeys = {
         [...queryKeys.git(agentId), "revision-content", rev, path] as const,
     gitCommitDiff: (agentId: string, path: string, rev: string) =>
         [...queryKeys.git(agentId), "commit-diff", rev, path] as const,
+    gitCommitNeighbors: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "commit-neighbors", rev, path] as const,
     gitLog: (agentId: string, path: string, rev: string | null) =>
         [...queryKeys.git(agentId), "log", rev, path] as const,
     gitRefs: (agentId: string, repositoryRoot: string, kind: GitRefListKind) =>
@@ -609,6 +611,21 @@ export function gitCommitDiffQueryOptions(
         queryKey: queryKeys.gitCommitDiff(agent.id, path, commitId),
         queryFn: () => agent.gitCommitDiff(path, commitId),
         staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * The commits before and after a commit in the path's history. Unlike the diff it is not
+ * cached for good: the newer commit is found from HEAD, which moves with every commit.
+ */
+export function gitCommitNeighborsQueryOptions(
+    agent: Agent,
+    path: string,
+    commitId: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitCommitNeighbors(agent.id, path, commitId),
+        queryFn: () => agent.gitCommitNeighbors(path, commitId),
     });
 }
 

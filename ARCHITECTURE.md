@@ -1392,6 +1392,17 @@ the Git view rather than another level of page navigation.
   walk over a DAG has no single-commit resume point, so every page walks again from the
   start like `git log --skip`; the agent stays stateless between requests and each reply
   is a small control frame.
+- **A commit steps to its neighbours.** The commit view links to the previous and next
+  commit in the same path-filtered history (`git/commit-neighbors`), so changes can be paged
+  through without returning to the list. Previous is the newest ancestor that changed the
+  path. Git records parents and never children, so "next" only means something relative to
+  a tip: the agent walks from HEAD down to the commit, remembers the matching commits it
+  passed (ids only), and returns the oldest one that contains the commit. That check skips
+  side-branch commits that are newer but not descendants. The walk gives up once it is older
+  than the commit, so a commit HEAD does not contain has no next commit, and the walk never
+  covers the whole history. Neighbours are a separate request from the diff because they
+  move with HEAD, while a commit's diff is cached for good, and because the walk from HEAD
+  grows with the commit's age, so it must not hold up the patches.
 - **Links open revisions.** A commit links to the same path at `view=git&rev=<id>`, showing
   that commit's changes scoped to the path. A branch or tag links to the path at
   `rev=<full ref name>`, because a short name can be ambiguous between a tag and a branch;

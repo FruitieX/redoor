@@ -15,7 +15,7 @@ use crate::api::files::{
 };
 use crate::api::git::GitPage;
 use crate::api::git::commit::GitCommitDiffResponse;
-use crate::api::git::history::GitLogResponse;
+use crate::api::git::history::{GitCommitNeighborsResponse, GitLogResponse};
 use crate::api::git::refs::{GitRefListKind, GitRefListResponse};
 use crate::api::git::revision::{GitRevisionContentResponse, GitRevisionTreeResponse};
 use crate::api::git::worktree::{
@@ -443,6 +443,13 @@ pub struct GitDownload {
     pub include_root: bool,
 }
 
+/// Finds the commits before and after the one a revision names in the path's history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitNeighbors {
+    pub path: String,
+    pub rev: String,
+}
+
 /// Lists one page of the commits that changed a path, starting at a revision or HEAD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLog {
@@ -608,6 +615,7 @@ agent_requests! {
     GitRevisionContent => GitRevisionContentResponse,
     GitCommitDiff => GitCommitDiffResponse,
     GitLog => GitLogResponse,
+    GitCommitNeighbors => GitCommitNeighborsResponse,
     GitRefList => GitRefListResponse,
     GitRevisionStat => GitRevisionStatResult,
     GitDownload => (),
@@ -728,6 +736,7 @@ mod tests {
             "truncated": false}));
         assert_round_trip::<GitLog>(json!({"repository_root": "/repo",
             "repository_relative_path": "a", "commits": [commit], "has_more": true}));
+        assert_round_trip::<GitCommitNeighbors>(json!({"older": commit, "newer": null}));
         assert_round_trip::<GitRefList>(json!({"repository_root": "/repo", "refs": [{
             "name": "main", "full_name": "refs/heads/main", "kind": "branch", "is_head": true,
             "commit": commit}], "total": 1, "has_more": false}));

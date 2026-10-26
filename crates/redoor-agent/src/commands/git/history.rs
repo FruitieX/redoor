@@ -1,9 +1,14 @@
-//! The commits that changed a path, newest first, one page at a time.
+//! The commits that changed a path, newest first, one page at a time, and the commits on
+//! either side of one of them.
 
-use std::{collections::HashMap, sync::atomic::AtomicBool};
+use std::{collections::HashMap, ops::ControlFlow, sync::atomic::AtomicBool};
 
 use redoor_protocol::{
-    api::git::{GitPage, commit::GitCommitSummary, history::GitLogResponse},
+    api::git::{
+        GitPage,
+        commit::GitCommitSummary,
+        history::{GitCommitNeighborsResponse, GitLogResponse},
+    },
     wire::{command::CommandErrorKind, request::CommandError},
 };
 
@@ -73,6 +78,46 @@ fn log_blocking(
     })
 }
 
+/// Finds the commits before and after the one `rev` names in the history of `path`.
+pub(crate) async fn neighbors(
+    path: String,
+    rev: String,
+) -> Result<GitCommitNeighborsResponse, CommandError> {
+    run_blocking(move |interrupt| neighbors_blocking(&path, &rev, &interrupt)).await
+}
+
+/// Resolves the commit, then walks its ancestors for the older neighbour and HEAD's history
+/// for the newer one.
+fn neighbors_blocking(
+    path: &str,
+    rev: &str,
+    interrupt: &AtomicBool,
+) -> Result<GitCommitNeighborsResponse, GitFailure> {
+    let mut target = RevisionPath::open(path, rev)?;
+    target
+        .repository
+        .repo
+        .object_cache_size_if_unset(WALK_OBJECT_CACHE_BYTES);
+    let mut walk = HistoryWalk::new(&target.repository, &target.relative);
+    let older = walk.older(target.commit_id, interrupt)?;
+    let newer = walk.newer(target.commit_id, interrupt)?;
+    let summary = |id: Option<gix::ObjectId>| {
+        id.map(|id| {
+            target
+                .repository
+                .repo
+                .find_commit(id)
+                .map_err(|error| internal_failure("read Git commit", error))
+                .and_then(|commit| commit_summary(&commit))
+        })
+        .transpose()
+    };
+    Ok(GitCommitNeighborsResponse {
+        older: summary(older)?,
+        newer: summary(newer)?,
+    })
+}
+
 /// Walks a repository's history and decides which commits changed one path.
 ///
 /// A commit counts when the path differs from every parent, the rule `git log --full-history`
@@ -110,35 +155,156 @@ impl<'a> HistoryWalk<'a> {
         interrupt: &AtomicBool,
     ) -> Result<(Vec<GitCommitSummary>, bool), GitFailure> {
         let repo = &self.repository.repo;
-        // Newest first by commit time, the order people expect from `git log`.
-        let walk = repo
-            .rev_walk([start])
-            .sorting(gix::revision::walk::Sorting::ByCommitTime(
-                gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
-            ))
-            .all()
-            .map_err(|error| internal_failure("start Git history walk", error))?;
         let mut skipped = 0;
         let mut commits = Vec::new();
-        for info in walk {
-            check_interrupt(interrupt, "Git history walk")?;
-            let info = info.map_err(|error| internal_failure("walk Git history", error))?;
-            if !self.changed_path(info.id, &info.parent_ids)? {
-                continue;
+        let full = self.walk(start, interrupt, |info, changed| {
+            if !changed {
+                return Ok(ControlFlow::Continue(()));
             }
             if skipped < page.skip {
                 skipped += 1;
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
             if commits.len() == page.limit as usize {
-                return Ok((commits, true));
+                return Ok(ControlFlow::Break(()));
             }
             let commit = repo
                 .find_commit(info.id)
                 .map_err(|error| internal_failure("read Git commit", error))?;
             commits.push(commit_summary(&commit)?);
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok((commits, full.is_some()))
+    }
+
+    /// The newest ancestor of `id` that changed the path: the change a reader of `git log`
+    /// sees right below `id`, as long as no side branch merged later interleaves with it.
+    fn older(
+        &mut self,
+        id: gix::ObjectId,
+        interrupt: &AtomicBool,
+    ) -> Result<Option<gix::ObjectId>, GitFailure> {
+        self.walk(id, interrupt, |info, changed| {
+            Ok(if changed && info.id != id {
+                ControlFlow::Break(info.id)
+            } else {
+                ControlFlow::Continue(())
+            })
+        })
+    }
+
+    /// The oldest descendant of `id` on the way to HEAD that changed the path, the inverse
+    /// of [`Self::older`].
+    ///
+    /// Git stores only parents, so the commits after `id` are found by walking from HEAD
+    /// down to it and remembering the matching ones. Commits merged in from a side branch
+    /// can be newer without descending from `id`, so the remembered commits are checked
+    /// oldest first and the first one that contains `id` wins; in a linear history that is
+    /// the very first one checked.
+    fn newer(
+        &mut self,
+        id: gix::ObjectId,
+        interrupt: &AtomicBool,
+    ) -> Result<Option<gix::ObjectId>, GitFailure> {
+        let repo = &self.repository.repo;
+        // An unborn branch has no HEAD commit, so nothing is newer.
+        let Some(head) = repo
+            .head()
+            .map_err(|error| internal_failure("read repository HEAD", error))?
+            .id()
+            .map(gix::Id::detach)
+        else {
+            return Ok(None);
+        };
+        if head == id {
+            return Ok(None);
         }
-        Ok((commits, false))
+        let time = commit_time(repo, id)?;
+        // Ids only, so even the history above an old commit costs little memory.
+        let mut later = Vec::new();
+        let found = self.walk(head, interrupt, |info, changed| {
+            if info.id == id {
+                return Ok(ControlFlow::Break(true));
+            }
+            // The walk is ordered by commit time, so once it is older than `id` it has
+            // passed the point where `id` would have been visited: HEAD does not contain it.
+            if info.commit_time.is_some_and(|visited| visited < time) {
+                return Ok(ControlFlow::Break(false));
+            }
+            if changed {
+                later.push(info.id);
+            }
+            Ok(ControlFlow::Continue(()))
+        })?;
+        if found != Some(true) {
+            return Ok(None);
+        }
+        for candidate in later.into_iter().rev() {
+            if self.contains(candidate, id, time, interrupt)? {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    /// True when `ancestor`, committed at `ancestor_time`, is in the history of `start`.
+    /// The walk gives up once it is older than the ancestor, which bounds it to the commits
+    /// in between.
+    fn contains(
+        &self,
+        start: gix::ObjectId,
+        ancestor: gix::ObjectId,
+        ancestor_time: gix::date::SecondsSinceUnixEpoch,
+        interrupt: &AtomicBool,
+    ) -> Result<bool, GitFailure> {
+        for info in self.time_ordered_walk(start)? {
+            check_interrupt(interrupt, "Git ancestry walk")?;
+            let info = info.map_err(|error| internal_failure("walk Git history", error))?;
+            if info.id == ancestor {
+                return Ok(true);
+            }
+            if info.commit_time.is_some_and(|time| time < ancestor_time) {
+                return Ok(false);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Walks every commit reachable from `start`, newest first, and hands each to `visit`
+    /// with whether it changed the path, until `visit` breaks with a value.
+    fn walk<B>(
+        &mut self,
+        start: gix::ObjectId,
+        interrupt: &AtomicBool,
+        mut visit: impl FnMut(
+            &gix::revision::walk::Info<'_>,
+            bool,
+        ) -> Result<ControlFlow<B>, GitFailure>,
+    ) -> Result<Option<B>, GitFailure> {
+        for info in self.time_ordered_walk(start)? {
+            check_interrupt(interrupt, "Git history walk")?;
+            let info = info.map_err(|error| internal_failure("walk Git history", error))?;
+            let changed = self.changed_path(info.id, &info.parent_ids)?;
+            if let ControlFlow::Break(value) = visit(&info, changed)? {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Starts a walk newest first by commit time, the order people expect from `git log`.
+    fn time_ordered_walk(
+        &self,
+        start: gix::ObjectId,
+    ) -> Result<gix::revision::Walk<'a>, GitFailure> {
+        self.repository
+            .repo
+            .rev_walk([start])
+            .sorting(gix::revision::walk::Sorting::ByCommitTime(
+                gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
+            ))
+            .all()
+            .map_err(|error| internal_failure("start Git history walk", error))
     }
 
     /// True when `id` changed the path compared with all of its parents, or added it as a
@@ -189,4 +355,15 @@ impl<'a> HistoryWalk<'a> {
             .map_err(|error| internal_failure("read Git commit tree", error))?;
         Ok(tree_entry(&tree, self.relative)?.map(|entry| (entry.mode, entry.oid)))
     }
+}
+
+/// Reads when a commit was committed, the time the history walks are ordered by.
+fn commit_time(
+    repo: &gix::Repository,
+    id: gix::ObjectId,
+) -> Result<gix::date::SecondsSinceUnixEpoch, GitFailure> {
+    repo.find_commit(id)
+        .and_then(|commit| commit.time())
+        .map(|time| time.seconds)
+        .map_err(|error| internal_failure("read Git commit time", error))
 }

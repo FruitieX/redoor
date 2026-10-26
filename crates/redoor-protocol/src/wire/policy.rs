@@ -160,6 +160,7 @@ impl Command {
             | Self::GitRevisionContent { .. }
             | Self::GitCommitDiff { .. }
             | Self::GitLog { .. }
+            | Self::GitCommitNeighbors { .. }
             | Self::GitRefList { .. }
             | Self::GitRevisionStat { .. }
             | Self::MoveMetadata { .. }
@@ -243,11 +244,12 @@ mod tests {
             Command::GitRefList(request::GitRefList { .. }) => 46,
             Command::GitRevisionStat(request::GitRevisionStat { .. }) => 47,
             Command::GitDownload(request::GitDownload { .. }) => 48,
+            Command::GitCommitNeighbors(request::GitCommitNeighbors { .. }) => 49,
         }
     }
 
     /// Number of variants covered by `variant_index`.
-    const VARIANT_COUNT: usize = 49;
+    const VARIANT_COUNT: usize = 50;
 
     /// Builds one instance of every command variant for table-wide policy checks.
     fn every_command() -> Vec<Command> {
@@ -404,6 +406,10 @@ mod tests {
                 path: path(),
                 rev: None,
                 page: GitPage { skip: 0, limit: 1 },
+            }),
+            Command::GitCommitNeighbors(request::GitCommitNeighbors {
+                path: path(),
+                rev: "HEAD".to_string(),
             }),
             Command::GitRefList(request::GitRefList {
                 path: path(),
