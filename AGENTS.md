@@ -58,6 +58,8 @@ Never call the API client from `useEffect`. Effects may coordinate browser APIs 
 
 Use Tailwind for styling.
 
+Combine and conditionally apply class names with `cn` from `ui/src/utils/cn.ts`. Do not call `twMerge` directly.
+
 Always use the rest apis using `ui/src/api-client.ts`
 
 If you need to add new apis to the client always use the generated typescript bindings

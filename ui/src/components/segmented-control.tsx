@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 
 import { ToggleButton } from "#ui/components/toggle-button";
 
@@ -26,7 +26,7 @@ export function SegmentedControl<Value extends string>(props: {
         <div
             role="group"
             aria-label={props.label}
-            className={twMerge(
+            className={cn(
                 "@container flex w-full min-w-0 gap-0.5 rounded-md border border-slate-700 bg-slate-900/60 p-0.5",
                 props.className,
             )}
