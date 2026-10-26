@@ -205,6 +205,9 @@ server = "http://redoor.internal:7666"
 
 ```bash
 redoor agent relay start production --daemon
+
+# or install and enable it at startup on Linux
+redoor agent relay systemd install production --start
 ```
 
 See [SSH relays](docs/relays.md) for lifecycle commands and configuration.

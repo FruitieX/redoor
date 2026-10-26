@@ -6,7 +6,8 @@ Redoor is a single `redoor` binary that plays several roles:
 - **agent**: connects to a server and executes filesystem, exec, git, terminal and log commands on its host
 - **remote CLI** (`redoor remote ...`): a REST client for scripting against a server, authenticated
   with an access token
-- **service management**: installs the server or agent as a systemd or launchd service
+- **service management**: installs the server, agent or a named relay as a systemd or launchd
+  service
 
 The Rust code is a cargo workspace under `crates/`. The roles live in separate crates so the
 compiler enforces that agent and server code never depend on each other.
@@ -221,7 +222,11 @@ The binary crate. `main.rs` parses the CLI with clap and dispatches to a role. E
 returns `anyhow::Result<ExitCode>`, and errors are printed once.
 
 - `service/`: a `ServiceBackend` trait with systemd and launchd backends and one shared
-  status formatter.
+  status formatter. The action set (`install`, `start`, `stop`, `restart`, ...) is one enum
+  generic over its target, so the agent and server (no target) and relays (a relay ID) cannot
+  drift apart. A relay service is `<app-name>-relay-<id>` and runs
+  `redoor agent relay start <id>` in the foreground; its systemd unit is `Type=exec` because
+  a relay retries SSH forever and never sends a readiness notification.
 - `process_control` and `process_logs`: PID files, stopping processes and reading logs.
 - The binary re-executes itself as the SSH askpass helper, so no second executable is
   shipped.

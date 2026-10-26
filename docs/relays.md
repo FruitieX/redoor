@@ -65,6 +65,33 @@ redoor agent relay ls --config /path/to/config.toml
 
 `ls` prints the configured relay IDs one per line in declaration order. `status` and `stop` use only the relay ID and its runtime file. They continue to work if the relay entry is changed or removed while its process is running. `logs` also prefers the running relay's recorded log path.
 
+## Services
+
+Install a relay as a systemd service on Linux or a LaunchAgent on macOS so it starts at boot or login and is restarted when it fails. Each relay gets its own service, named `redoor-relay-<id>` (the `redoor` prefix follows `--app-name`):
+
+```bash
+redoor agent relay systemd install production --start
+redoor agent relay launchd install production --start
+```
+
+The service runs `redoor agent relay start <id>` in the foreground with the default config path pinned. Installation fails unless that config exists and contains a `[[relays]]` entry with the given ID.
+
+The relay ID follows the action, and every action of the agent and server services is available:
+
+```bash
+redoor agent relay systemd start production
+redoor agent relay systemd stop production
+redoor agent relay systemd restart production
+redoor agent relay systemd status production
+redoor agent relay systemd enable production
+redoor agent relay systemd disable production --now
+redoor agent relay systemd uninstall production
+```
+
+Replace `systemd` with `launchd` on macOS. Restart the service after changing the relay's entry. As with the agent, running `systemd` as root installs a system unit that runs the relay as root.
+
+systemd services do not inherit a login session's environment, so an `ssh-agent` started for a terminal session (`SSH_AUTH_SOCK`) is not available to them. Use an SSH key that `ssh` can load without prompting, for example through `~/.ssh/config`.
+
 ## Runtime files
 
 Each relay holds an advisory lock on its own JSON PID file for its process lifetime:

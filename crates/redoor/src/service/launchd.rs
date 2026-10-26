@@ -18,7 +18,7 @@ use super::{ServiceBackend, ServiceRole, ServiceRuntime, ServiceState, not_insta
 pub(super) struct LaunchdBackend {
     /// Role the agent runs; selects the subcommand and label.
     role: ServiceRole,
-    /// `<app-name>-<role>`.
+    /// `<app-name>-<role>`, or `<app-name>-relay-<id>` for relays.
     label: String,
     /// Shows launchctl output instead of capturing it.
     verbose: bool,
@@ -35,8 +35,8 @@ impl LaunchdBackend {
             );
         }
         Ok(Self {
+            label: service_name(&role, paths.app_name()),
             role,
-            label: service_name(role, paths.app_name()),
             verbose,
             paths: paths.clone(),
         })
@@ -227,7 +227,7 @@ impl ServiceBackend for LaunchdBackend {
     /// Renders the plist with this label and the pinned config.
     fn render_definition(&self, binary: &Path, config_path: &Path) -> String {
         render_plist(
-            self.role,
+            &self.role,
             &self.label,
             binary,
             config_path,
@@ -298,7 +298,7 @@ impl ServiceBackend for LaunchdBackend {
         }
         Err(not_installed(
             &format!("macOS LaunchAgent '{}'", self.label),
-            self.role,
+            &self.role,
             "launchd",
         ))
     }
@@ -370,8 +370,8 @@ impl ServiceBackend for LaunchdBackend {
 }
 
 /// Derives a safe launchd label from the already validated installation identity.
-fn service_name(role: ServiceRole, app_name: &str) -> String {
-    format!("{app_name}-{}", role.cli_name())
+fn service_name(role: &ServiceRole, app_name: &str) -> String {
+    format!("{app_name}-{}", role.service_suffix())
 }
 
 /// Returns the current user's launchd GUI domain.
@@ -498,13 +498,24 @@ fn local_network_signature_temp_path(binary: &Path) -> Result<PathBuf> {
 
 /// Renders a LaunchAgent plist with separately escaped program arguments.
 fn render_plist(
-    mode: ServiceRole,
+    role: &ServiceRole,
     service: &str,
     binary: &Path,
     config_path: &Path,
     app_name: &str,
 ) -> String {
-    let subcommand = mode.cli_name();
+    // Each argument is its own element, so relay IDs need XML escaping but no shell quoting.
+    let role_arguments: String = role
+        .program_arguments()
+        .into_iter()
+        .map(|argument| {
+            format!(
+                "
+        <string>{}</string>",
+                escape_xml(argument)
+            )
+        })
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -514,8 +525,7 @@ fn render_plist(
     <string>{}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
-        <string>{subcommand}</string>
+        <string>{}</string>{role_arguments}
         <string>--config</string>
         <string>{}</string>
     </array>
@@ -620,9 +630,14 @@ mod tests {
     #[test]
     fn service_names_use_application_identity() {
         assert_eq!(
-            service_name(ServiceRole::Agent, "redoor-dev"),
+            service_name(&ServiceRole::Agent, "redoor-dev"),
             "redoor-dev-agent",
             "the agent label should use the validated application namespace"
+        );
+        assert_eq!(
+            service_name(&ServiceRole::Relay("production".into()), "redoor-dev"),
+            "redoor-dev-relay-production",
+            "each relay needs its own label so several can be installed side by side"
         );
     }
 
@@ -630,7 +645,7 @@ mod tests {
     #[test]
     fn agent_plist_pins_config_and_environment() {
         let plist = render_plist(
-            ServiceRole::Agent,
+            &ServiceRole::Agent,
             "redoor-agent",
             Path::new("/Users/test & user/bin/redoor"),
             Path::new("/Users/test & user/.config/redoor/config.toml"),
@@ -660,6 +675,33 @@ mod tests {
         assert!(
             !plist.contains("--token") && !plist.contains("--name"),
             "standalone-agent settings must come from the shared TOML: {plist}"
+        );
+    }
+
+    /// Verifies relay plists run the named relay in the foreground under launchd supervision.
+    #[test]
+    fn relay_plist_starts_named_relay() {
+        let plist = render_plist(
+            &ServiceRole::Relay("production".into()),
+            "redoor-relay-production",
+            Path::new("/Users/test/bin/redoor"),
+            Path::new("/Users/test/.config/redoor/config.toml"),
+            "redoor",
+        );
+        assert!(
+            plist.contains(
+                "<string>/Users/test/bin/redoor</string>
+        <string>agent</string>
+        <string>relay</string>
+        <string>start</string>
+        <string>production</string>
+        <string>--config</string>"
+            ),
+            "the LaunchAgent must start the selected relay as distinct arguments: {plist}"
+        );
+        assert!(
+            !plist.contains("--daemon"),
+            "launchd must supervise the relay process itself: {plist}"
         );
     }
 

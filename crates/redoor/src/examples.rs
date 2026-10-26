@@ -125,7 +125,10 @@ pub(crate) const RELAY: &str = "Examples:
 
   # Check and stop it
   redoor agent relay status production
-  redoor agent relay stop production";
+  redoor agent relay stop production
+
+  # Install it as a systemd service and start it now and on every boot
+  redoor agent relay systemd install production --start";
 
 /// Shown by `redoor agent relay ls --help`.
 pub(crate) const RELAY_LS: &str = "Examples:
@@ -161,8 +164,27 @@ pub(crate) const RELAY_LOGS: &str = "Examples:
   # Print the last 50 lines
   redoor agent relay logs production -n 50";
 
-/// Shown by `redoor agent|server systemd|launchd install --help`; the leaf commands are shared
-/// by both roles and both managers, so the examples mix them.
+/// Shown by `redoor agent relay systemd --help`.
+pub(crate) const RELAY_SYSTEMD: &str = "Examples:
+  # Install and start a user service for the relay with ID production
+  redoor agent relay systemd install production --start
+
+  # Restart it after changing its [[relays]] entry
+  redoor agent relay systemd restart production
+
+  # Check the service state
+  redoor agent relay systemd status production";
+
+/// Shown by `redoor agent relay launchd --help`.
+pub(crate) const RELAY_LAUNCHD: &str = "Examples:
+  # Install and start the relay with ID production as a LaunchAgent
+  redoor agent relay launchd install production --start
+
+  # Restart it after changing its [[relays]] entry
+  redoor agent relay launchd restart production";
+
+/// Shown by `redoor agent|server systemd|launchd install --help` and the relay equivalents;
+/// the leaf commands are shared by every role and both managers, so the examples mix them.
 pub(crate) const SERVICE_INSTALL: &str = "Examples:
   # Install and enable the server service without starting it
   redoor server systemd install
@@ -171,7 +193,10 @@ pub(crate) const SERVICE_INSTALL: &str = "Examples:
   redoor agent systemd install --start
 
   # Install the agent as a macOS LaunchAgent and start it
-  redoor agent launchd install --start";
+  redoor agent launchd install --start
+
+  # Install and start the relay with ID production
+  redoor agent relay systemd install production --start";
 
 /// Shown by `... uninstall --help`.
 pub(crate) const SERVICE_UNINSTALL: &str = "Examples:
@@ -179,7 +204,10 @@ pub(crate) const SERVICE_UNINSTALL: &str = "Examples:
   redoor server systemd uninstall
 
   # Remove the agent LaunchAgent
-  redoor agent launchd uninstall";
+  redoor agent launchd uninstall
+
+  # Remove the service of the relay with ID production
+  redoor agent relay systemd uninstall production";
 
 /// Shown by `... start --help` of the service managers.
 pub(crate) const SERVICE_START: &str = "Examples:
@@ -187,7 +215,10 @@ pub(crate) const SERVICE_START: &str = "Examples:
   redoor server systemd start
 
   # Start the installed agent LaunchAgent
-  redoor agent launchd start";
+  redoor agent launchd start
+
+  # Start the installed service of the relay with ID production
+  redoor agent relay systemd start production";
 
 /// Shown by `... stop --help` of the service managers.
 pub(crate) const SERVICE_STOP: &str = "Examples:
@@ -195,7 +226,10 @@ pub(crate) const SERVICE_STOP: &str = "Examples:
   redoor server systemd stop
 
   # Stop the agent LaunchAgent until the next login
-  redoor agent launchd stop";
+  redoor agent launchd stop
+
+  # Stop the service of the relay with ID production
+  redoor agent relay launchd stop production";
 
 /// Shown by `... restart --help` of the service managers.
 pub(crate) const SERVICE_RESTART: &str = "Examples:
@@ -203,7 +237,10 @@ pub(crate) const SERVICE_RESTART: &str = "Examples:
   redoor server systemd restart
 
   # Restart the agent LaunchAgent
-  redoor agent launchd restart";
+  redoor agent launchd restart
+
+  # Apply [[relays]] changes to the service of the relay with ID production
+  redoor agent relay systemd restart production";
 
 /// Shown by `... status --help` of the service managers.
 pub(crate) const SERVICE_STATUS: &str = "Examples:
@@ -211,7 +248,10 @@ pub(crate) const SERVICE_STATUS: &str = "Examples:
   redoor server systemd status
 
   # Show the agent LaunchAgent state
-  redoor agent launchd status";
+  redoor agent launchd status
+
+  # Show the service state of the relay with ID production
+  redoor agent relay systemd status production";
 
 /// Shown by `... enable --help` of the service managers.
 pub(crate) const SERVICE_ENABLE: &str = "Examples:
@@ -219,7 +259,10 @@ pub(crate) const SERVICE_ENABLE: &str = "Examples:
   redoor server systemd enable
 
   # Start the agent LaunchAgent automatically at login again
-  redoor agent launchd enable";
+  redoor agent launchd enable
+
+  # Start the relay with ID production automatically again
+  redoor agent relay systemd enable production";
 
 /// Shown by `... disable --help` of the service managers.
 pub(crate) const SERVICE_DISABLE: &str = "Examples:
@@ -227,7 +270,10 @@ pub(crate) const SERVICE_DISABLE: &str = "Examples:
   redoor server systemd disable
 
   # Disable automatic startup of the agent and stop it now
-  redoor agent systemd disable --now";
+  redoor agent systemd disable --now
+
+  # Same for the relay with ID production
+  redoor agent relay systemd disable production --now";
 
 /// Shown by `redoor agent|server launchd refresh-local-network-permission --help`.
 pub(crate) const REFRESH_LOCAL_NETWORK_PERMISSION: &str = "Examples:
@@ -235,4 +281,7 @@ pub(crate) const REFRESH_LOCAL_NETWORK_PERMISSION: &str = "Examples:
   redoor agent launchd refresh-local-network-permission
 
   # Same for the server, showing the launchctl output
-  redoor server launchd refresh-local-network-permission --verbose";
+  redoor server launchd refresh-local-network-permission --verbose
+
+  # Same for the LaunchAgent of the relay with ID production
+  redoor agent relay launchd refresh-local-network-permission production";
