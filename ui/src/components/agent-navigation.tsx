@@ -203,10 +203,13 @@ function AgentMenu(props: { agents: Agent[] }) {
                         });
                     }}
                 >
+                    {/* The list reaches through the panel's right padding so its scrollbar
+                        sits on the panel edge instead of beside an empty strip; its own
+                        padding keeps the rows where the panel padding put them. */}
                     <ul
                         ref={listRef}
                         aria-label="Device list"
-                        className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto"
+                        className="-mr-3 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-3"
                     >
                         {visibleAgents.map((agent) => (
                             <DeviceBlock
