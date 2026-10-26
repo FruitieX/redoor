@@ -197,8 +197,8 @@ impl Command {
                 )
             }
             Self::GitRefList(request) => format!(
-                "GitRefList path={} kind={:?} skip={} limit={}",
-                request.path, request.kind, request.page.skip, request.page.limit
+                "GitRefList path={} kind={:?} sort={:?} skip={} limit={}",
+                request.path, request.kind, request.sort, request.page.skip, request.page.limit
             ),
             Self::GitRevisionStat(request) => {
                 format!("GitRevisionStat path={} rev={}", request.path, request.rev)

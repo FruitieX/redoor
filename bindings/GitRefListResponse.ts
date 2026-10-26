@@ -6,7 +6,8 @@ import type { GitRef } from "./GitRef";
  */
 export type GitRefListResponse = { repository_root: string, 
 /**
- * Most recently committed first, so the refs people work on lead the list.
+ * In the requested order: most recently committed first by default, or by name. The
+ * default branch always comes first.
  */
 refs: Array<GitRef>, 
 /**

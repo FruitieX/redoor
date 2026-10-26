@@ -1,4 +1,4 @@
-//! Ref views: the branches and tags of a repository, most recently committed first.
+//! Ref views: the branches and tags of a repository, most recently committed first or by name.
 
 use super::commit::GitCommitSummary;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,28 @@ pub enum GitRefListKind {
     /// Local and remote-tracking branches.
     Branches,
     Tags,
+}
+
+/// Chooses the order of a ref listing. The agent sorts because pages are offsets into one
+/// order, so the browser could not reorder a partially loaded list itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum GitRefSort {
+    /// Newest commit first, so the refs people are working on lead the list.
+    #[default]
+    Recent,
+    /// By name with digit runs compared as numbers, so `v1.10` follows `v1.9` and a known
+    /// ref is easy to find in a long list.
+    Name,
+}
+
+/// Selects the order of a ref listing in the query string, apart from the page so the page
+/// query stays shared with the other Git lists.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct GitRefSortQuery {
+    pub sort: Option<GitRefSort>,
 }
 
 /// Distinguishes where a ref lives, so the browser can mark remote and tag rows.
@@ -37,6 +59,8 @@ pub struct GitRef {
     pub kind: GitRefKind,
     /// True for the branch HEAD has checked out.
     pub is_head: bool,
+    /// True for the repository's default branch, which leads the branch list in either order.
+    pub is_default: bool,
     /// The commit the ref points at, with annotated tags peeled.
     pub commit: GitCommitSummary,
 }
@@ -46,7 +70,8 @@ pub struct GitRef {
 #[ts(export)]
 pub struct GitRefListResponse {
     pub repository_root: String,
-    /// Most recently committed first, so the refs people work on lead the list.
+    /// In the requested order: most recently committed first by default, or by name. The
+    /// default branch always comes first.
     pub refs: Vec<GitRef>,
     /// Every listable ref of this kind, so the browser can tell how many remain.
     pub total: usize,

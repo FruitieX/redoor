@@ -16,7 +16,7 @@ use crate::api::files::{
 use crate::api::git::GitPage;
 use crate::api::git::commit::GitCommitDiffResponse;
 use crate::api::git::history::{GitCommitNeighborsResponse, GitLogResponse};
-use crate::api::git::refs::{GitRefListKind, GitRefListResponse};
+use crate::api::git::refs::{GitRefListKind, GitRefListResponse, GitRefSort};
 use crate::api::git::revision::{GitRevisionContentResponse, GitRevisionTreeResponse};
 use crate::api::git::worktree::{
     GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse,
@@ -463,6 +463,9 @@ pub struct GitLog {
 pub struct GitRefList {
     pub path: String,
     pub kind: GitRefListKind,
+    /// Defaults to the recent order so a server older than the option still gets a listing.
+    #[serde(default)]
+    pub sort: GitRefSort,
     pub page: GitPage,
 }
 
@@ -739,7 +742,7 @@ mod tests {
         assert_round_trip::<GitCommitNeighbors>(json!({"older": commit, "newer": null}));
         assert_round_trip::<GitRefList>(json!({"repository_root": "/repo", "refs": [{
             "name": "main", "full_name": "refs/heads/main", "kind": "branch", "is_head": true,
-            "commit": commit}], "total": 1, "has_more": false}));
+            "is_default": true, "commit": commit}], "total": 1, "has_more": false}));
         assert_round_trip::<MoveMetadata>(json!({"file_size": 3, "is_file": true,
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));

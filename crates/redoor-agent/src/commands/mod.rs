@@ -392,9 +392,12 @@ impl RunCommand for Command {
             Command::GitCommitNeighbors(request::GitCommitNeighbors { path, rev }) => {
                 Reply::of::<request::GitCommitNeighbors>(git::history::neighbors(path, rev).await)
             }
-            Command::GitRefList(request::GitRefList { path, kind, page }) => {
-                Reply::of::<request::GitRefList>(git::refs::list(path, kind, page).await)
-            }
+            Command::GitRefList(request::GitRefList {
+                path,
+                kind,
+                sort,
+                page,
+            }) => Reply::of::<request::GitRefList>(git::refs::list(path, kind, sort, page).await),
             Command::GitRevisionStat(request::GitRevisionStat {
                 path,
                 rev,

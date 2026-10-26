@@ -7,7 +7,7 @@ use axum::{
 use redoor_protocol::{
     api::git::{
         GitPageQuery,
-        refs::{GitRefListKind, GitRefListResponse},
+        refs::{GitRefListKind, GitRefListResponse, GitRefSortQuery},
     },
     ids::AgentId,
 };
@@ -18,24 +18,34 @@ use crate::http::{
     error::ApiError, state::ServerState,
 };
 
-/// Route: `GET /api/v1/agents/{agent}/git/branches[/{*path}]?skip=&limit=`.
+/// Route: `GET /api/v1/agents/{agent}/git/branches[/{*path}]?skip=&limit=&sort=recent|name`.
 pub(crate) async fn git_branches_handler(
     ResolvedDevice(agent_id): ResolvedDevice,
     Path(params): Path<AgentFilePath>,
     Query(query): Query<GitPageQuery>,
+    Query(sort): Query<GitRefSortQuery>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<GitRefListResponse>, ApiError> {
-    list_refs(&state, &agent_id, params, query, GitRefListKind::Branches).await
+    list_refs(
+        &state,
+        &agent_id,
+        params,
+        query,
+        sort,
+        GitRefListKind::Branches,
+    )
+    .await
 }
 
-/// Route: `GET /api/v1/agents/{agent}/git/tags[/{*path}]?skip=&limit=`.
+/// Route: `GET /api/v1/agents/{agent}/git/tags[/{*path}]?skip=&limit=&sort=recent|name`.
 pub(crate) async fn git_tags_handler(
     ResolvedDevice(agent_id): ResolvedDevice,
     Path(params): Path<AgentFilePath>,
     Query(query): Query<GitPageQuery>,
+    Query(sort): Query<GitRefSortQuery>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<GitRefListResponse>, ApiError> {
-    list_refs(&state, &agent_id, params, query, GitRefListKind::Tags).await
+    list_refs(&state, &agent_id, params, query, sort, GitRefListKind::Tags).await
 }
 
 /// Both listings differ only in the kind of ref, so they share the validation and the call.
@@ -44,11 +54,13 @@ async fn list_refs(
     agent_id: &AgentId,
     params: AgentFilePath,
     query: GitPageQuery,
+    sort: GitRefSortQuery,
     kind: GitRefListKind,
 ) -> Result<Json<GitRefListResponse>, ApiError> {
     let call = GitRefList {
         path: route_path(params.path)?,
         kind,
+        sort: sort.sort.unwrap_or_default(),
         page: checked_page(query)?,
     };
     Ok(Json(state.agents.call(agent_id, call).await?))

@@ -316,9 +316,10 @@ describe("Git history, branch and tag REST API", () => {
             newer: commits.c,
         });
         // The merge kept main's readme, so it is not a change of the file.
-        expect(await neighborIds(join(repo, "readme.txt"), commits.c)).toEqual(
-            { older: commits.a, newer: null },
-        );
+        expect(await neighborIds(join(repo, "readme.txt"), commits.c)).toEqual({
+            older: commits.a,
+            newer: null,
+        });
         // A directory steps over commits that changed only files outside it.
         expect(await neighborIds(join(repo, "docs"), commits.b)).toEqual({
             older: commits.a,
@@ -398,6 +399,7 @@ describe("Git history, branch and tag REST API", () => {
         expect(log.has_more).toBe(false);
 
         const branches = await testAgent.gitRefs(unborn, "branches", {
+            sort: "recent",
             skip: 0,
             limit: 100,
         });
@@ -412,6 +414,7 @@ describe("Git history, branch and tag REST API", () => {
             join(repo, "docs"),
             "branches",
             {
+                sort: "recent",
                 skip: 0,
                 limit: 100,
             },
@@ -431,6 +434,12 @@ describe("Git history, branch and tag REST API", () => {
             false,
             false,
         ]);
+        // origin/HEAD names main, so the local main is the default branch.
+        expect(branches.refs.map((ref) => ref.is_default)).toEqual([
+            true,
+            false,
+            false,
+        ]);
         // Each row carries its commit for the summary and the changes link.
         expect(branches.refs[0]?.commit.id).toBe(commits.merge);
         expect(branches.total).toBe(3);
@@ -439,6 +448,7 @@ describe("Git history, branch and tag REST API", () => {
 
     it("lists tags peeled to commits and pages them", async () => {
         const tags = await testAgent.gitRefs(repo, "tags", {
+            sort: "recent",
             skip: 0,
             limit: 100,
         });
@@ -453,6 +463,7 @@ describe("Git history, branch and tag REST API", () => {
         expect(tags.refs[0]?.kind).toBe("tag");
 
         const second = await testAgent.gitRefs(repo, "tags", {
+            sort: "recent",
             skip: 1,
             limit: 1,
         });
@@ -463,12 +474,102 @@ describe("Git history, branch and tag REST API", () => {
         expect(second.has_more).toBe(false);
 
         const first = await testAgent.gitRefs(repo, "tags", {
+            sort: "recent",
             skip: 0,
             limit: 1,
         });
 
         // A page that leaves refs behind says so.
         expect(first.has_more).toBe(true);
+    });
+
+    it("lists branches and tags by name", async () => {
+        const branches = await testAgent.gitRefs(repo, "branches", {
+            sort: "name",
+            skip: 0,
+            limit: 100,
+        });
+
+        // The default branch leads even though feature sorts before it by name, and local
+        // branches lead remote-tracking ones.
+        expect(branches.refs.map((ref) => ref.name)).toEqual([
+            "main",
+            "feature",
+            "origin/main",
+        ]);
+        // The order does not change which refs are counted.
+        expect(branches.total).toBe(3);
+
+        const tags = await testAgent.gitRefs(repo, "tags", {
+            sort: "name",
+            skip: 0,
+            limit: 100,
+        });
+
+        // The older v1 now leads, and the blob tag is still left out.
+        expect(tags.refs.map((ref) => ref.name)).toEqual(["v1", "v2"]);
+
+        const second = await testAgent.gitRefs(repo, "tags", {
+            sort: "name",
+            skip: 1,
+            limit: 1,
+        });
+
+        // Later pages continue the name order rather than the recent one.
+        expect(second.refs.map((ref) => ref.name)).toEqual(["v2"]);
+        expect(second.has_more).toBe(false);
+    });
+
+    it("keeps the default branch first in either order", async () => {
+        const branched = await createRepository("-git-history-default-branch");
+        await git(branched, 1000)`git commit --allow-empty -q -m ${"Root"}`;
+        await git(branched, 2000)`git branch alpha`;
+        await git(branched, 2000)`git checkout -q alpha`;
+        await git(branched, 2000)`git commit --allow-empty -q -m ${"Alpha"}`;
+        await git(branched, 3000)`git checkout -q -b zeta`;
+        await git(branched, 3000)`git commit --allow-empty -q -m ${"Zeta"}`;
+
+        /** Lists the branch names of the repository in an order. */
+        async function branchNames(sort: "recent" | "name") {
+            const branches = await testAgent.gitRefs(branched, "branches", {
+                sort,
+                skip: 0,
+                limit: 100,
+            });
+
+            return branches.refs.map((ref) => ref.name);
+        }
+
+        // Without a remote, main is the default and stays above the newer branches.
+        expect(await branchNames("recent")).toEqual(["main", "zeta", "alpha"]);
+        // By name, main still leads alpha.
+        expect(await branchNames("name")).toEqual(["main", "alpha", "zeta"]);
+
+        const firstPage = await testAgent.gitRefs(branched, "branches", {
+            sort: "name",
+            skip: 0,
+            limit: 1,
+        });
+
+        // The default branch is pinned in the order itself, so only the first page has it.
+        expect(firstPage.refs.map((ref) => ref.name)).toEqual(["main"]);
+        expect(firstPage.has_more).toBe(true);
+
+        await $({
+            cwd: branched,
+        })`git update-ref refs/remotes/origin/zeta zeta`;
+        await $({
+            cwd: branched,
+        })`git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/zeta`;
+
+        // The remote's HEAD names the project's default, which wins over the name main, and
+        // the local branch of that name is the one pinned.
+        expect(await branchNames("name")).toEqual([
+            "zeta",
+            "alpha",
+            "main",
+            "origin/zeta",
+        ]);
     });
 
     it("rejects invalid pages, revisions and paths", async () => {
@@ -483,6 +584,10 @@ describe("Git history, branch and tag REST API", () => {
         // Offsets are bounded so ref listings cannot hold unbounded rows.
         expect(
             (await listRequest("branches", repo, { skip: "1000001" })).status,
+        ).toBe(400);
+        // Only the known orders are accepted, so a typo does not silently fall back.
+        expect(
+            (await listRequest("tags", repo, { sort: "newest" })).status,
         ).toBe(400);
         // Unknown revisions are bad input, like in revision browsing.
         expect(
@@ -513,5 +618,7 @@ describe("Git history, branch and tag REST API", () => {
 
         // The default page size covers this small repository.
         expect(tags.refs).toHaveLength(2);
+        // Without a sort the listing is most recently committed first.
+        expect(tags.refs.map((ref) => ref.name)).toEqual(["v2", "v1"]);
     });
 });

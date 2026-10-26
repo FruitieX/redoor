@@ -1,10 +1,21 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { FolderOpen, GitBranch, History, Tag } from "lucide-react";
+import { getRouteApi, Link } from "@tanstack/react-router";
+import {
+    ArrowDownAZ,
+    Clock,
+    FolderOpen,
+    GitBranch,
+    History,
+    Tag,
+} from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { IconLinkButton } from "#ui/components/icon-button";
+import {
+    SegmentedControl,
+    type SegmentedControlOption,
+} from "#ui/components/segmented-control";
 import {
     AuthorAvatar,
     CommitAge,
@@ -20,6 +31,25 @@ import {
 import { getErrorMessage } from "#ui/utils/error";
 import type { GitCommitSummary } from "#bindings/GitCommitSummary";
 import type { GitRef } from "#bindings/GitRef";
+import type { GitRefSort } from "#bindings/GitRefSort";
+
+const browserRouteApi = getRouteApi("/_app/agents/$deviceName/browser/$");
+
+/** The orders a branch or tag list offers, recent first because it is the default. */
+const REF_SORT_OPTIONS: ReadonlyArray<SegmentedControlOption<GitRefSort>> = [
+    {
+        value: "recent",
+        label: "Recent",
+        icon: Clock,
+        tooltip: "Most recently committed first",
+    },
+    {
+        value: "name",
+        label: "Name",
+        icon: ArrowDownAZ,
+        tooltip: "By name, with version numbers in numeric order",
+    },
+];
 
 /** A short status line for the loading, error and empty states every list shares. */
 function ListMessage(props: { role: "status" | "alert"; children: string }) {
@@ -277,8 +307,10 @@ function CommitRow(props: {
 }
 
 /**
- * A repository's branches or tags, most recently committed first. A ref's name opens the
- * browsed path at that ref, and its commit id opens what the commit changed there.
+ * A repository's branches or tags, most recently committed first or by name. A ref's name
+ * opens the browsed path at that ref, and its commit id opens what the commit changed there.
+ * The order is the `refSort` search key, so it survives reload and Back and is shared by
+ * both lists.
  */
 export function GitRefList(props: {
     agent: Agent;
@@ -287,22 +319,57 @@ export function GitRefList(props: {
     repositoryRoot: string;
     kind: GitRefListKind;
 }) {
+    const navigate = browserRouteApi.useNavigate();
+    const sort = browserRouteApi.useSearch().refSort ?? "recent";
+
     const query = useInfiniteQuery(
-        gitRefsQueryOptions(props.agent, props.repositoryRoot, props.kind),
+        gitRefsQueryOptions(props.agent, props.repositoryRoot, {
+            kind: props.kind,
+            sort,
+        }),
     );
 
     const isBranches = props.kind === "branches";
     const noun = isBranches ? "branches" : "tags";
 
+    // The control stays put while a new order loads, so the user can switch straight back.
+    const sortControl = (
+        <SegmentedControl
+            label={`Sort ${noun}`}
+            options={REF_SORT_OPTIONS}
+            value={sort}
+            onChange={(value) =>
+                void navigate({
+                    search: (previous) => ({
+                        ...previous,
+                        refSort: value === "recent" ? undefined : value,
+                    }),
+                    replace: true,
+                })
+            }
+            // A fixed width, because the control is a size container that cannot grow to fit
+            // its segments, and one wide enough to show their icons.
+            className="w-60 max-w-full"
+        />
+    );
+
     if (query.isPending) {
-        return <ListMessage role="status">{`Loading ${noun}...`}</ListMessage>;
+        return (
+            <>
+                <GitPanelBar actions={sortControl}>{null}</GitPanelBar>
+                <ListMessage role="status">{`Loading ${noun}...`}</ListMessage>
+            </>
+        );
     }
 
     if (query.isError) {
         return (
-            <ListMessage role="alert">
-                {getErrorMessage(query.error, `Failed to load ${noun}`)}
-            </ListMessage>
+            <>
+                <GitPanelBar actions={sortControl}>{null}</GitPanelBar>
+                <ListMessage role="alert">
+                    {getErrorMessage(query.error, `Failed to load ${noun}`)}
+                </ListMessage>
+            </>
         );
     }
 
@@ -313,7 +380,7 @@ export function GitRefList(props: {
 
     return (
         <>
-            <GitPanelBar>
+            <GitPanelBar actions={sortControl}>
                 <span className="inline-flex items-center gap-2 font-medium text-slate-100">
                     <Icon
                         className="h-4 w-4 text-slate-400"
@@ -324,8 +391,13 @@ export function GitRefList(props: {
                         : `${total} ${noun}`}
                 </span>
                 <span className="text-slate-400">
-                    Most recently committed first
-                    {isBranches ? ", including remote-tracking branches." : "."}
+                    {sort === "name"
+                        ? isBranches
+                            ? "Default branch first, then by name, local before remote-tracking."
+                            : "By name."
+                        : isBranches
+                          ? "Default branch first, then most recently committed, including remote-tracking branches."
+                          : "Most recently committed first."}
                 </span>
             </GitPanelBar>
             {refs.length === 0 ? (
@@ -395,6 +467,11 @@ function RefRow(props: {
                     {ref.is_head ? (
                         <span className="shrink-0 rounded-full border border-emerald-400/40 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
                             HEAD
+                        </span>
+                    ) : null}
+                    {ref.is_default ? (
+                        <span className="shrink-0 rounded-full border border-blue-400/40 px-2 py-0.5 text-[11px] font-medium text-blue-300">
+                            Default
                         </span>
                     ) : null}
                     {ref.kind === "remote_branch" ? (

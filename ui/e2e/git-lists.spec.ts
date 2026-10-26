@@ -158,6 +158,81 @@ test.describe.serial("Git commit, branch and tag lists", () => {
         ).toHaveText("v1");
     });
 
+    test("sorts branches by name and keeps the order for tags", async ({
+        page,
+    }) => {
+        // A branch whose commit is newer than every other, so the two orders differ.
+        // Raw Unix seconds for 2100-01-01, a format every git version accepts.
+        const futureDate = "@4102444800 +0000";
+
+        const futureCommit = (
+            await $({
+                env: {
+                    ...process.env,
+                    GIT_AUTHOR_DATE: futureDate,
+                    GIT_COMMITTER_DATE: futureDate,
+                },
+            })`git -C ${repositoryPath} commit-tree -p HEAD -m ${"Future"} HEAD^{tree}`
+        ).stdout.trim();
+
+        // Later tests do not list this repository's branches, so it is left for teardown.
+        await $`git -C ${repositoryPath} branch zeta ${futureCommit}`;
+
+        await page.goto(
+            `${deviceBrowserUrl(ctx.agentName, repositoryPath)}?view=git&gitTab=branches`,
+        );
+
+        const branches = page.getByRole("list", { name: "Branches" });
+
+        // The default branch leads and is marked, even though zeta has a newer commit.
+        await expect(branches.getByRole("listitem").first()).toContainText(
+            "main",
+        );
+        await expect(branches.getByRole("listitem").first()).toContainText(
+            "Default",
+        );
+        // The newest of the other branches follows.
+        await expect(branches.getByRole("listitem").nth(1)).toContainText(
+            "zeta",
+        );
+
+        await page
+            .getByRole("group", { name: "Sort branches" })
+            .getByRole("button", { name: "Name" })
+            .click();
+
+        // The order is kept in the URL, main stays first and the rest follow by name.
+        await expect(page).toHaveURL(/refSort=name/);
+        await expect(branches.getByRole("listitem").nth(1)).toContainText(
+            "feature",
+        );
+        await expect(branches.getByRole("listitem").first()).toContainText(
+            "main",
+        );
+
+        await page
+            .getByLabel("Git view")
+            .getByRole("link", { name: "Tags" })
+            .click();
+
+        // Switching to tags keeps the chosen order.
+        await expect(page).toHaveURL(/gitTab=tags/);
+        await expect(page).toHaveURL(/refSort=name/);
+        await expect(
+            page
+                .getByRole("group", { name: "Sort tags" })
+                .getByRole("button", { name: "Name" }),
+        ).toHaveAttribute("aria-pressed", "true");
+
+        await page
+            .getByRole("group", { name: "Sort tags" })
+            .getByRole("button", { name: "Recent" })
+            .click();
+
+        // The default order stays out of the URL.
+        await expect(page).not.toHaveURL(/refSort=/);
+    });
+
     test("loads more commits beyond the first page", async ({ page }) => {
         await page.goto(
             `${deviceBrowserUrl(ctx.agentName, manyCommitsPath)}?view=git&gitTab=commits`,

@@ -52,6 +52,12 @@ const gitTabSchema = z
     .optional()
     .catch(undefined);
 
+/**
+ * Orders the branch and tag lists. Most recently committed first is the default and stays
+ * out of the URL, so only the name order is spelled out.
+ */
+const gitRefSortSchema = z.enum(["recent", "name"]).optional().catch(undefined);
+
 /** The columns a directory listing can be ordered by. */
 const fileSortColumnSchema = z
     .enum(["type", "name", "size", "modified", "owner", "group"])
@@ -67,7 +73,7 @@ const fileSortDirectionSchema = z
 /**
  * The file browser's own URL state: which representation of the path is open, an editor
  * line to reveal, markdown preview, the Git comparison, the browsed Git revision, the Git
- * view's list and the listing order. Keeping these
+ * view's list, the order of its branch and tag lists and the listing order. Keeping these
  * in the URL makes each of them survive a reload, work with Back, and be shareable. Every
  * field falls back to undefined, so a stale or hand-edited URL degrades to the defaults.
  */
@@ -78,6 +84,7 @@ export const browserSearchSchema = z.object({
     diffMode: gitDiffModeSchema,
     rev: gitRevisionSchema,
     gitTab: gitTabSchema,
+    refSort: gitRefSortSchema,
     sort: fileSortColumnSchema,
     order: fileSortDirectionSchema,
 });

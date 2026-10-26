@@ -20,6 +20,10 @@ full_name: string, kind: GitRefKind,
  */
 is_head: boolean, 
 /**
+ * True for the repository's default branch, which leads the branch list in either order.
+ */
+is_default: boolean, 
+/**
  * The commit the ref points at, with annotated tags peeled.
  */
 commit: GitCommitSummary, };

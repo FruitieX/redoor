@@ -15,6 +15,7 @@ import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import type { Agent, ApiClient } from "#ui/api-client";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
+import type { GitRefSort } from "#bindings/GitRefSort";
 import type {
     ManagedAgentFormConfiguration,
     ManagedAgentKind,
@@ -127,8 +128,14 @@ export const queryKeys = {
         [...queryKeys.git(agentId), "commit-neighbors", rev, path] as const,
     gitLog: (agentId: string, path: string, rev: string | null) =>
         [...queryKeys.git(agentId), "log", rev, path] as const,
-    gitRefs: (agentId: string, repositoryRoot: string, kind: GitRefListKind) =>
-        [...queryKeys.git(agentId), "refs", kind, repositoryRoot] as const,
+    gitRefs: (agentId: string, repositoryRoot: string, list: GitRefListOrder) =>
+        [
+            ...queryKeys.git(agentId),
+            "refs",
+            list.kind,
+            list.sort,
+            repositoryRoot,
+        ] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -635,6 +642,9 @@ export const GIT_LIST_PAGE_SIZE = 100;
 /** Names the two ref listings the Git view offers. */
 export type GitRefListKind = "branches" | "tags";
 
+/** Which ref listing to read and in which order, kept together because both pick the rows. */
+export type GitRefListOrder = { kind: GitRefListKind; sort: GitRefSort };
+
 /**
  * The commits that changed a path, a page at a time. `rev` is a resolved commit id, never a
  * branch name or HEAD, for the same reason the commit diff is keyed by id: every page then
@@ -667,20 +677,22 @@ export function gitLogQueryOptions(
 }
 
 /**
- * The repository's branches or tags, a page at a time, most recently committed first. They
- * are asked for at the repository root the page resolved, because a path inside a nested
- * repository, such as a submodule browsed at a superproject commit, would list the nested
- * repository's refs instead.
+ * The repository's branches or tags, a page at a time, most recently committed first or by
+ * name. The agent sorts, because pages are offsets into one order. They are asked for at
+ * the repository root the page resolved, because a path inside a nested repository, such as
+ * a submodule browsed at a superproject commit, would list the nested repository's refs
+ * instead.
  */
 export function gitRefsQueryOptions(
     agent: Agent,
     repositoryRoot: string,
-    kind: GitRefListKind,
+    list: GitRefListOrder,
 ) {
     return infiniteQueryOptions({
-        queryKey: queryKeys.gitRefs(agent.id, repositoryRoot, kind),
+        queryKey: queryKeys.gitRefs(agent.id, repositoryRoot, list),
         queryFn: (context) =>
-            agent.gitRefs(repositoryRoot, kind, {
+            agent.gitRefs(repositoryRoot, list.kind, {
+                sort: list.sort,
                 skip: context.pageParam,
                 limit: GIT_LIST_PAGE_SIZE,
             }),
@@ -706,6 +718,8 @@ export async function prefetchGitList(options: {
     /** The commit history starts at: the browsed commit, or HEAD in the worktree. */
     commitId: string | null;
     tab: "commits" | GitRefListKind;
+    /** The order of a branch or tag list; absent is the default recent order. */
+    refSort: GitRefSort | undefined;
 }) {
     const { queryClient, agent, path, repositoryRoot, commitId, tab } = options;
 
@@ -716,7 +730,10 @@ export async function prefetchGitList(options: {
         });
     } else {
         await queryClient.prefetchInfiniteQuery({
-            ...gitRefsQueryOptions(agent, repositoryRoot, tab),
+            ...gitRefsQueryOptions(agent, repositoryRoot, {
+                kind: tab,
+                sort: options.refSort ?? "recent",
+            }),
             staleTime: 0,
         });
     }

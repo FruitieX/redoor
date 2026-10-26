@@ -1381,11 +1381,18 @@ the Git view rather than another level of page navigation.
   filter of one walk. A shallow clone's boundary commits compare as roots. The walk caches
   path states only for its frontier, not for history, and stops when the request is dropped.
 - **Branches and tags are repository-wide.** `git/branches` (local and remote-tracking) and
-  `git/tags` list refs most recently committed first, peeling annotated tags with the same
-  header-checked helper as revisions, so tags naming trees or blobs and symbolic refs such as
-  `origin/HEAD` are skipped. Sorting needs every ref's commit time, but at most
+  `git/tags` list refs most recently committed first, or by name with `sort=name`, peeling
+  annotated tags with the same header-checked helper as revisions, so tags naming trees or
+  blobs and symbolic refs such as `origin/HEAD` are skipped. Names compare naturally (digit
+  runs by value, letters without case) on the full ref name, so `v1.10` follows `v1.9` and
+  local branches lead remote-tracking ones. The agent sorts because pages are offsets into
+  one order, which the browser could not rebuild from a partial list; the order is the
+  `refSort` search key, shared by both lists. The default branch leads the branches in
+  either order, marked `is_default`: the branch the default remote's `HEAD` names (its
+  local branch when one exists), else `init.defaultBranch`, `main` or `master`. It is part
+  of the heap order rather than a later insert, so offsets stay consistent. Either order visits every ref, but at most
   `skip + limit` candidates are held in a heap, so a huge tag namespace costs reading, not
-  memory.
+  memory; the name order skips reading commit times.
 - **Pages are offsets, not cursors.** Each list returns up to 100 rows (`GitPage`, at most
   500 per request and an offset of at most a million) plus `has_more`, and the UI's
   `useInfiniteQuery` asks for the next offset from a "Load more" button. A time-ordered

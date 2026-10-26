@@ -162,6 +162,7 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
         diffMode: search.diffMode,
         rev: search.rev,
         gitTab: search.gitTab,
+        refSort: search.refSort,
     }),
     loader: async ({ context, deps, params, location, parentMatchPromise }) => {
         const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
@@ -191,14 +192,14 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
         }
 
         if (deps.rev !== undefined) {
+            // The view, Git tab and ref order come along with the narrowed revision.
             return loadRevision({
                 context,
                 agent,
                 params,
                 path,
+                ...deps,
                 rev: deps.rev,
-                view: deps.view,
-                gitTab: deps.gitTab,
             });
         }
 

@@ -85,6 +85,7 @@ import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
 import type { GitCommitNeighborsResponse } from "#bindings/GitCommitNeighborsResponse";
 import type { GitLogResponse } from "#bindings/GitLogResponse";
 import type { GitRefListResponse } from "#bindings/GitRefListResponse";
+import type { GitRefSort } from "#bindings/GitRefSort";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
 import type { AgentAccountsResponse } from "#bindings/AgentAccountsResponse";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -472,11 +473,11 @@ export class Agent {
         );
     }
 
-    /** Lists one page of the repository's branches or tags, most recently committed first. */
+    /** Lists one page of the repository's branches or tags, most recently committed first or by name. */
     async gitRefs(
         path: string,
         kind: "branches" | "tags",
-        options: { skip: number; limit: number },
+        options: { sort: GitRefSort; skip: number; limit: number },
     ): Promise<GitRefListResponse> {
         return apiRequest<GitRefListResponse>(
             this.filesystemQueryUrl(`git/${kind}`, path, options),
