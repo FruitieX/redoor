@@ -1059,31 +1059,38 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await page.keyboard.press("Enter");
         await expect.poll(() => terminalOutput).toContain("select-me");
 
-        /** Drags across the printed marker the way a user selects text to copy. */
+        /**
+         * Drags across the printed marker the way a user selects text to copy. The shell keeps
+         * drawing its prompt after the marker arrives, and a slow or multi-line prompt scrolls
+         * the marker row away between measuring it and pressing the mouse, so the whole drag is
+         * retried from a fresh measurement until the screen has settled under it.
+         */
         const selectMarker = async () => {
-            const box = await terminalHost
-                .getByText("select-me", { exact: true })
-                .first()
-                .boundingBox();
+            await expect(async () => {
+                const box = await terminalHost
+                    .getByText("select-me", { exact: true })
+                    .first()
+                    .boundingBox();
 
-            if (!box) {
-                throw new Error("selected terminal row is not rendered");
-            }
+                if (!box) {
+                    throw new Error("selected terminal row is not rendered");
+                }
 
-            await page.mouse.move(box.x + 1, box.y + box.height / 2);
-            await page.mouse.down();
-            await page.mouse.move(
-                box.x + box.width - 1,
-                box.y + box.height / 2,
-                { steps: 5 },
-            );
-            await page.mouse.up();
-            // The drag must produce a real native selection for the browser's Copy action.
-            await expect
-                .poll(() =>
-                    page.evaluate(() => window.getSelection()?.toString()),
-                )
-                .toContain("select");
+                await page.mouse.move(box.x + 1, box.y + box.height / 2);
+                await page.mouse.down();
+                await page.mouse.move(
+                    box.x + box.width - 1,
+                    box.y + box.height / 2,
+                    { steps: 5 },
+                );
+                await page.mouse.up();
+                // The drag must produce a real native selection for the browser's Copy action.
+                expect(
+                    await page.evaluate(() =>
+                        window.getSelection()?.toString(),
+                    ),
+                ).toContain("select");
+            }).toPass({ timeout: 15_000 });
             // Selecting releases wterm's input, but focus must stay on the terminal host.
             await expectTerminalFocused(terminalInput);
         };
