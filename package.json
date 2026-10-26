@@ -83,7 +83,7 @@
         "@wterm/dom": "0.5.4",
         "@wterm/ghostty": "0.5.4",
         "clsx": "^2.1.1",
-        "diff2html": "^3.4.56",
+        "diff": "^9.0.0",
         "highlight.js": "^11.11.1",
         "jotai": "^2.20.2",
         "lucide-react": "^1.29.0",

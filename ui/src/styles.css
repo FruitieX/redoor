@@ -52,6 +52,17 @@
         rgb(15 23 42 / 0.1),
         rgb(255 255 255 / 0.1)
     );
+    /*
+     * Diff rows are opaque, unlike tinted overlays, because the sticky line-number gutter
+     * paints over code scrolling under it. Dark values are GitHub's tints blended onto the
+     * dark surface.
+     */
+    --app-diff-insert: light-dark(#e6ffec, #152921);
+    --app-diff-insert-strong: light-dark(#abf2bc, #1d4c2b);
+    --app-diff-insert-marker: light-dark(#1a7f37, #3fb950);
+    --app-diff-delete: light-dark(#ffebe9, #341d22);
+    --app-diff-delete-strong: light-dark(#ffcecb, #6d2c2d);
+    --app-diff-delete-marker: light-dark(#cf222e, #f85149);
     --breakpoint-sm: theme(--breakpoint-sm);
     --breakpoint-md: theme(--breakpoint-md);
     --breakpoint-lg: theme(--breakpoint-lg);
@@ -76,6 +87,12 @@
     --color-error-tint: var(--app-error-tint);
     --color-tint: var(--app-subtle-overlay);
     --color-tint-strong: var(--app-hover-overlay);
+    --color-diff-insert: var(--app-diff-insert);
+    --color-diff-insert-strong: var(--app-diff-insert-strong);
+    --color-diff-insert-marker: var(--app-diff-insert-marker);
+    --color-diff-delete: var(--app-diff-delete);
+    --color-diff-delete-strong: var(--app-diff-delete-strong);
+    --color-diff-delete-marker: var(--app-diff-delete-marker);
 }
 
 :root.light {
@@ -307,71 +324,6 @@ code {
     animation: copy-success-flash 0.7s ease-out forwards;
 }
 
-/* Sync diffs grow with their longest line and scroll within their labeled host. */
-.file-diff-host .d2h-wrapper,
-.file-diff-host .d2h-file-wrapper,
-.file-diff-host .d2h-file-diff,
-.file-diff-host .d2h-diff-table {
-    width: max-content;
-    min-width: 100%;
-    max-width: none;
-}
-
-.file-diff-host .d2h-file-diff,
-.file-diff-host .d2h-code-wrapper {
-    overflow: visible;
-}
-
-.file-diff-host .d2h-code-linenumber {
-    z-index: 1;
-}
-
-.file-diff-host .d2h-code-line-ctn {
-    white-space: pre;
-}
-
-/* Filename chrome is the only path label, so it must read as a real destination. */
-.file-diff-html .d2h-file-name-link {
-    color: var(--color-blue-300);
-    text-decoration: none;
-}
-
-.file-diff-html .d2h-file-name-link:hover,
-.file-diff-html .d2h-file-name-link:focus-visible {
-    text-decoration: underline;
-}
-
-/* The inner code wrapper is content-sized, so anchor the action to the full cell. */
-.file-diff-html .d2h-editor-line-cell {
-    position: relative;
-    padding-inline-end: 5em;
-}
-
-/* Trailing control matches Button secondary so it reads as an action, not code. */
-.file-diff-html .d2h-editor-line-link {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    position: absolute;
-    inset-block-start: 50%;
-    inset-inline-end: 0.5em;
-    transform: translateY(-50%);
-    padding: 0.05em 0.45em;
-    border: 1px solid var(--color-slate-700);
-    border-radius: 0.25rem;
-    font-family: var(--font-sans);
-    font-weight: 500;
-    color: var(--color-slate-200);
-    text-decoration: none;
-    vertical-align: middle;
-}
-
-.file-diff-html .d2h-editor-line-link:hover,
-.file-diff-html .d2h-editor-line-link:focus-visible {
-    background-color: rgb(255 255 255 / 0.05);
-    text-decoration: none;
-}
-
 /* Highlight tokens inherit their host background while adapting to app theme. */
 .syntax-highlight .hljs-keyword,
 .syntax-highlight .hljs-type,
@@ -450,41 +402,7 @@ code {
     top: calc(-1 * var(--top-chrome-height, 0px));
 }
 
-/* The diff list names each file in its own sticky header, so the generated one would repeat it. */
-.git-diff-list-body .d2h-file-header {
+/* The diff list names each file in its own sticky header, so the diff's own would repeat it. */
+.git-diff-list-body [data-diff-file-header] {
     display: none;
-}
-
-.git-file-diff .d2h-file-wrapper {
-    margin-bottom: 0;
-    border: 0;
-    border-radius: 0;
-}
-
-/* Git keeps file chrome fixed while only wide diff rows scroll sideways. */
-.git-file-diff .file-diff-html,
-.git-file-diff .d2h-wrapper,
-.git-file-diff .d2h-file-wrapper {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-}
-
-.git-file-diff .d2h-file-diff {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    overflow-x: auto;
-    overflow-y: hidden;
-}
-
-.git-file-diff .d2h-diff-table {
-    width: max-content;
-    min-width: 100%;
-}
-
-@media (max-width: 639px) {
-    .git-file-diff .d2h-diff-table {
-        font-size: 9px;
-    }
 }

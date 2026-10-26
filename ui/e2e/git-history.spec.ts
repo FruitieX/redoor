@@ -203,9 +203,12 @@ test.describe.serial("Git history browsing", () => {
             name: "Commit diff for src/app.ts",
         });
 
-        // The commit's own patch is shown against its parent.
-        await expect(modified).toContainText('version = "first"');
-        await expect(modified).toContainText('version = "second"');
+        const modifiedRow = modified.locator('tr[data-line-kind="modified"]');
+
+        // The commit's own patch is shown against its parent, as one edited line.
+        await expect(modifiedRow).toContainText("export const version");
+        await expect(modifiedRow.getByRole("deletion")).toHaveText("first");
+        await expect(modifiedRow.getByRole("insertion")).toHaveText("second");
         // The deleted file is listed with its removed lines.
         await expect(
             page.getByRole("region", {
@@ -233,8 +236,10 @@ test.describe.serial("Git history browsing", () => {
 
         // The file's own change is shown.
         await expect(
-            page.getByRole("region", { name: "Commit diff for src/app.ts" }),
-        ).toContainText('version = "second"');
+            page
+                .getByRole("region", { name: "Commit diff for src/app.ts" })
+                .getByRole("insertion"),
+        ).toHaveText("second");
         // Changes to other files in the same commit are left out.
         await expect(
             page.getByRole("region", { name: /Commit diff for/ }),

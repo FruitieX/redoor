@@ -125,9 +125,9 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
-      diff2html:
-        specifier: ^3.4.56
-        version: 3.4.56
+      diff:
+        specifier: ^9.0.0
+        version: 9.0.0
       highlight.js:
         specifier: ^11.11.1
         version: 11.11.1
@@ -1021,10 +1021,6 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
-  '@profoundlogic/hogan@3.0.4':
-    resolution: {integrity: sha512-pmNVGuooS30Mm7YbZd5T7E5zYVO6D5Ct91sn4T39mUvMUc3sCGridcnhAufL1/Bz2QzAtzEn0agNrdk3+5yWzw==}
-    hasBin: true
-
   '@replit/codemirror-vim-core@0.1.0':
     resolution: {integrity: sha512-1i6EBKpcNfDKvTmTh6N6g9lL6udD5t+uFNh4JCqozRnVlvUGOps7h/QzS2ne4zcvPUjvApKpmcP7Grc3fNbZiQ==}
 
@@ -1817,9 +1813,6 @@ packages:
   '@wterm/ghostty@0.5.4':
     resolution: {integrity: sha512-W6wlGhHiGf/2tF/uZo8qHtaYqA3Ebf+6VhdPidiWuqEU37Kj+YSkuXCXP/qORSD0roec/5Z16qYRyF5HsC9XJg==}
 
-  abbrev@1.1.1:
-    resolution: {integrity: sha512-nne9/IiQ/hzIhY6pdDnbBtz7DjPTKrY00P/zvPSm5pOFkl6xuGrGnXn/VtTNNfNtAfZ9/1RtehkszU9qcTii0Q==}
-
   ansi-regex@5.0.1:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
     engines: {node: '>=8'}
@@ -1951,12 +1944,12 @@ packages:
   devlop@1.1.0:
     resolution: {integrity: sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==}
 
-  diff2html@3.4.56:
-    resolution: {integrity: sha512-u9gfn+BlbHcyO7vItCIC4z49LJDUt31tODzOfAuJ5R1E7IdlRL6KjugcB9zOpejD+XiR+dDZbsnHSQ3g6A/u8A==}
-    engines: {node: '>=12'}
-
   diff@8.0.4:
     resolution: {integrity: sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw==}
+    engines: {node: '>=0.3.1'}
+
+  diff@9.0.0:
+    resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
     engines: {node: '>=0.3.1'}
 
   dom-accessibility-api@0.5.16:
@@ -2561,10 +2554,6 @@ packages:
               os: linux
               libc: musl
     version: 26.7.0
-    hasBin: true
-
-  nopt@1.0.10:
-    resolution: {integrity: sha512-NWmpvLSqUrgrAC9HCuxEvb+PSloHpqVu+FqcO4eeF2h5qYRhA7ev6KvelyQAKtegUbC6RypJnlEOhd8vloNKYg==}
     hasBin: true
 
   obug@2.1.4:
@@ -3876,10 +3865,6 @@ snapshots:
     dependencies:
       playwright: 1.62.1
 
-  '@profoundlogic/hogan@3.0.4':
-    dependencies:
-      nopt: 1.0.10
-
   '@replit/codemirror-vim-core@0.1.0(patch_hash=f2369b4dfcec51c74f78d8372a149891a40d01fdb80da0ac1cda1c4c2f2a0583)': {}
 
   '@replit/codemirror-vim@6.4.0(@codemirror/commands@6.11.0)(@codemirror/language@6.12.4)(@codemirror/search@6.7.1)(@codemirror/state@6.7.1)(@codemirror/view@6.43.9)':
@@ -4550,8 +4535,6 @@ snapshots:
     dependencies:
       '@wterm/core': 0.5.4
 
-  abbrev@1.1.1: {}
-
   ansi-regex@5.0.1: {}
 
   ansi-styles@5.2.0: {}
@@ -4665,14 +4648,9 @@ snapshots:
     dependencies:
       dequal: 2.0.3
 
-  diff2html@3.4.56:
-    dependencies:
-      '@profoundlogic/hogan': 3.0.4
-      diff: 8.0.4
-    optionalDependencies:
-      highlight.js: 11.11.1
-
   diff@8.0.4: {}
+
+  diff@9.0.0: {}
 
   dom-accessibility-api@0.5.16: {}
 
@@ -5324,10 +5302,6 @@ snapshots:
   node-releases@2.0.27: {}
 
   node@runtime:26.7.0: {}
-
-  nopt@1.0.10:
-    dependencies:
-      abbrev: 1.1.1
 
   obug@2.1.4: {}
 

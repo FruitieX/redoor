@@ -925,7 +925,7 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     return (
         <section
             aria-label="File diff"
-            className="file-diff-host w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 sm:p-5"
+            className="w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 sm:p-5"
         >
             <UnifiedDiff unifiedDiff={diff.unifiedDiff} />
         </section>

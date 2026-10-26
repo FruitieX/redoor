@@ -335,26 +335,37 @@ test.describe.serial("Git browser", () => {
         // The default comparison must show current worktree content.
         await expect(fullDiff).toContainText("worktree version");
         // Source diffs use the same filename-based language support as the editor.
-        await expect(fullDiff.locator(".hljs-keyword").first()).toHaveText(
-            "const",
-        );
-        // Diff backgrounds must follow the resolved app theme rather than a fixed dark palette.
-        await expect(fullDiff.locator(".d2h-wrapper")).toHaveClass(
-            /d2h-light-color-scheme/,
+        await expect(
+            fullDiff.locator('[data-token="keyword"]').first(),
+        ).toHaveText("const");
+
+        const modifiedRow = fullDiff.locator('tr[data-line-kind="modified"]');
+
+        // A similar edited line shows as one row, so the change reads within the line.
+        await expect(modifiedRow).toHaveCount(1);
+        // Only the changed word is marked, as removed old text and inserted new text.
+        await expect(modifiedRow.getByRole("deletion")).toHaveText("committed");
+        await expect(modifiedRow.getByRole("insertion")).toHaveText("worktree");
+        // The modified row exists in the current file, so it can still open the editor.
+        await expect(
+            modifiedRow.getByRole("link", { name: "Open line 1 in editor" }),
+        ).toBeVisible();
+        // Diff colours must follow the resolved app theme rather than a fixed dark palette.
+        await expect(modifiedRow.getByRole("insertion")).toHaveCSS(
+            "background-color",
+            "rgb(171, 242, 188)",
         );
         await page.emulateMedia({ colorScheme: "dark" });
-        // An already rendered diff redraws when system mode resolves to a new theme.
-        await expect(fullDiff.locator(".d2h-wrapper")).toHaveClass(
-            /d2h-dark-color-scheme/,
+        // An already rendered diff recolours when system mode resolves to a new theme.
+        await expect(modifiedRow.getByRole("insertion")).toHaveCSS(
+            "background-color",
+            "rgb(29, 76, 43)",
         );
         const fullDiffBox = await fullDiff.boundingBox();
         // The diff should use nearly all phone width instead of retaining desktop card padding.
         expect(fullDiffBox?.width).toBeGreaterThan(330);
         // Mobile diff text stays compact enough to expose useful code beside its gutter.
-        await expect(fullDiff.locator(".d2h-diff-table")).toHaveCSS(
-            "font-size",
-            "9px",
-        );
+        await expect(fullDiff.getByRole("table")).toHaveCSS("font-size", "9px");
         // File comparisons keep the repository root one click away in the repository path.
         await expect(
             page

@@ -421,7 +421,7 @@ export function GitFileView(props: {
             </GitPanelBar>
             <section
                 aria-label={`${props.mode === "full" ? "Full" : "Staged"} Git diff`}
-                className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden bg-slate-950/30 [&>p]:p-4 sm:[&>p]:p-5"
+                className="w-full min-w-0 overflow-x-hidden bg-slate-950/30 [&>p]:p-4 sm:[&>p]:p-5"
             >
                 {diffQuery.isPending ? (
                     <p role="status" className="p-4 text-sm text-slate-400">

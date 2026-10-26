@@ -243,17 +243,31 @@ test.describe.serial("File Detail View", () => {
         await page.getByRole("button", { name: "Diff", exact: true }).click();
 
         const diff = page.getByRole("region", { name: "File diff" });
+        const modifiedRow = diff.locator('tr[data-line-kind="modified"]');
         // Signed fragments prove both endpoints reached the unified-diff API through Sync.
-        await expect(diff.getByText(/left-/)).toBeVisible();
-        await expect(diff.getByText(/right-/)).toBeVisible();
+        await expect(modifiedRow.getByRole("deletion")).toHaveText("left");
+        await expect(modifiedRow.getByRole("insertion")).toHaveText("right");
 
-        const overflow = await diff.evaluate((element) => ({
-            scrollWidth: element.scrollWidth,
-            clientWidth: element.clientWidth,
-        }));
+        const overflow = await diff.getByRole("table").evaluate((table) => {
+            const scroller = table.parentElement;
 
-        // A wide hunk must scroll inside the labeled region instead of clipping the page.
-        expect(overflow.scrollWidth).toBeGreaterThan(overflow.clientWidth);
+            return {
+                tableWidth: table.scrollWidth,
+                scrollerWidth: scroller?.clientWidth ?? 0,
+                scrollerOverflow:
+                    scroller === null
+                        ? ""
+                        : getComputedStyle(scroller).overflowX,
+                pageOverflows:
+                    document.documentElement.scrollWidth >
+                    document.documentElement.clientWidth,
+            };
+        });
+
+        // A wide hunk must scroll inside the diff instead of clipping or widening the page.
+        expect(overflow.tableWidth).toBeGreaterThan(overflow.scrollerWidth);
+        expect(overflow.scrollerOverflow).toBe("auto");
+        expect(overflow.pageOverflows).toBe(false);
         await expect(
             page
                 .getByLabel("File view")

@@ -210,7 +210,7 @@ function GitDiffSection(props: {
             {props.collapsed ? null : (
                 <div
                     id={bodyId}
-                    className="file-diff-host git-file-diff git-diff-list-body w-full min-w-0 overflow-x-hidden [&>p]:p-3"
+                    className="git-diff-list-body w-full min-w-0 overflow-x-hidden [&>p]:p-3"
                 >
                     {file.body}
                 </div>

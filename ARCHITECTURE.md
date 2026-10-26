@@ -1267,8 +1267,8 @@ cache, so Back, reload and shared links all land on the same screen.
   reload the route.
 - **Typed links only.** `browserRoute(device, path)` takes the device object (so a bare id
   cannot be passed by mistake) and returns the typed `to` and `params`, so the router encodes
-  the name and the path and checks the search keys. Where a real string href is required, as
-  in the diff renderer, it comes from `router.buildLocation`.
+  the name and the path and checks the search keys. Where a real string href is required,
+  such as a copied link, it comes from `router.buildLocation`.
 - **The loader identifies, the cache supplies data.** The loader resolves what lives at the
   path (directory, file, missing, unreadable) and applies redirects. The page then reads the
   live listing from the query cache, so a refresh reaches it without reloading the route.
@@ -1355,6 +1355,15 @@ the Git view rather than another level of page navigation.
 - **Panels share one vocabulary.** Changed files carry the `git status --short` letter as a
   colored badge (`git-parts.tsx`), whether they come from worktree status or a commit, and
   every panel opens with the same summary bar instead of a second card header.
+- **Diffs render as React rows.** Every patch (worktree, staged, commit and Sync diffs) goes
+  through `UnifiedDiff`. `utils/diff-parse.ts` reads the unified diff text the agent and
+  server write with the `similar` crate (bare `---`/`+++` headers, no `diff --git`) and pairs
+  similar deleted and inserted lines into one modified row with inline word and character
+  changes, ported from Fredrika Lindh's MIT-licensed shadcn diff viewer. `diff-view.tsx`
+  renders the rows, highlighting each hunk side as one block so multi-line strings and
+  comments keep their colours, then cutting the highlighted line at the inline segments.
+  File names and per-line Open links are router `Link`s, and parsing and highlighting are
+  memoized on the patch text so re-renders do not redo them.
 
 - **History follows the browsed path.** `git/log` lists the commits that changed the path,
   newest first by commit time, starting at HEAD in the worktree or at the browsed commit
