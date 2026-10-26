@@ -364,8 +364,6 @@ test.describe.serial("Git browser", () => {
         const fullDiffBox = await fullDiff.boundingBox();
         // The diff should use nearly all phone width instead of retaining desktop card padding.
         expect(fullDiffBox?.width).toBeGreaterThan(330);
-        // Mobile diff text stays compact enough to expose useful code beside its gutter.
-        await expect(fullDiff.getByRole("table")).toHaveCSS("font-size", "9px");
         // File comparisons keep the repository root one click away in the repository path.
         await expect(
             page

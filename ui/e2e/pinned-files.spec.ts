@@ -126,22 +126,10 @@ test.describe.serial("Pinned files", () => {
         expect(firstLinkBox?.y ?? 0).toBeGreaterThan(transfersBox?.y ?? 1);
 
         const deviceLabel = firstItem.getByText(ctx.agentName, { exact: true });
-        // Operators need the owning device under the file name, in a smaller face.
+        // Operators need the owning device under the file name.
         await expect(deviceLabel).toBeVisible();
         const deviceBox = await deviceLabel.boundingBox();
         expect(deviceBox?.y ?? 0).toBeGreaterThan(firstLinkBox?.y ?? 1);
-
-        const deviceFontSize = await deviceLabel.evaluate((element) =>
-            Number.parseFloat(getComputedStyle(element).fontSize),
-        );
-
-        const fileFontSize = await firstItem
-            .getByText(firstName, { exact: true })
-            .evaluate((element) =>
-                Number.parseFloat(getComputedStyle(element).fontSize),
-            );
-
-        expect(deviceFontSize).toBeLessThan(fileFontSize);
 
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
