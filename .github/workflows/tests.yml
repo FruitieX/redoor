@@ -52,6 +52,9 @@ jobs:
             - name: Run Cargo tests
               run: cargo test --locked
 
+            - name: Run UI unit tests
+              run: pnpm run test:unit
+
             - name: Run Vitest integration tests
               run: pnpm run integration-test
 
