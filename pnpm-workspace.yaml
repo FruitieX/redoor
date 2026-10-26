@@ -1,4 +1,8 @@
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@wterm/core@0.5.6'
+  - '@wterm/dom@0.5.6'
+  - '@wterm/ghostty@0.5.6'
 patchedDependencies:
   '@replit/codemirror-vim-core@0.1.0': patches/@replit__codemirror-vim-core@0.1.0.patch
