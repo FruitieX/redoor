@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { $ } from "zx";
+import { z } from "zod";
 import {
     encodeFilesystemPath,
     setupTestDir,
@@ -11,6 +12,9 @@ import {
     WEB_BASE_URL,
     type TestContext,
 } from "./helpers";
+
+/** The part of a diff request the tests inspect: which files it asked for. */
+const gitDiffRequestSchema = z.object({ files: z.array(z.string()) });
 
 test.describe.serial("Git browser", () => {
     let ctx: TestContext;
@@ -22,8 +26,7 @@ test.describe.serial("Git browser", () => {
     let largePath: string;
     let deletedPath: string;
     let outsidePath: string;
-    let autoLoadRepositoryPath: string;
-    let clickLoadRepositoryPath: string;
+    let manyChangesRepositoryPath: string;
 
     test.beforeAll(async () => {
         ctx = await setupTestDir("git-browser");
@@ -38,13 +41,9 @@ test.describe.serial("Git browser", () => {
             os.tmpdir(),
             `redoor-git-browser-outside-${process.pid}`,
         );
-        autoLoadRepositoryPath = path.join(
+        manyChangesRepositoryPath = path.join(
             ctx.testDirPath,
-            "auto-load-repository",
-        );
-        clickLoadRepositoryPath = path.join(
-            ctx.testDirPath,
-            "click-load-repository",
+            "many-changes-repository",
         );
 
         await fs.mkdir(path.join(repositoryPath, "clean"), { recursive: true });
@@ -80,53 +79,37 @@ test.describe.serial("Git browser", () => {
         await fs.writeFile(binaryPath, Buffer.from([0, 1, 2, 3]));
         await fs.writeFile(largePath, "L".repeat(2 * 1024 * 1024 + 1));
         await fs.rm(deletedPath);
-        await fs.mkdir(autoLoadRepositoryPath, { recursive: true });
+        await fs.mkdir(manyChangesRepositoryPath, { recursive: true });
 
-        for (let index = 0; index < 49; index += 1) {
+        // One more file than a single diff request may name, so the view must batch.
+        for (let index = 0; index < 129; index += 1) {
             await fs.writeFile(
-                path.join(autoLoadRepositoryPath, `changed-${index}.txt`),
+                path.join(manyChangesRepositoryPath, `changed-${index}.txt`),
                 `baseline
 `,
             );
         }
 
-        await $`git -C ${autoLoadRepositoryPath} init`;
-        await $`git -C ${autoLoadRepositoryPath} config user.email playwright@redoor.test`;
-        await $`git -C ${autoLoadRepositoryPath} config user.name Playwright`;
-        await $`git -C ${autoLoadRepositoryPath} add .`;
-        await $`git -C ${autoLoadRepositoryPath} commit -m baseline`;
+        await $`git -C ${manyChangesRepositoryPath} init`;
+        await $`git -C ${manyChangesRepositoryPath} config user.email playwright@redoor.test`;
+        await $`git -C ${manyChangesRepositoryPath} config user.name Playwright`;
+        await $`git -C ${manyChangesRepositoryPath} add .`;
+        await $`git -C ${manyChangesRepositoryPath} commit -m baseline`;
 
-        for (let index = 0; index < 49; index += 1) {
+        for (let index = 0; index < 129; index += 1) {
             await fs.writeFile(
-                path.join(autoLoadRepositoryPath, `changed-${index}.txt`),
+                path.join(manyChangesRepositoryPath, `changed-${index}.txt`),
                 `changed
 `,
             );
         }
 
-        await fs.mkdir(clickLoadRepositoryPath, { recursive: true });
-
-        for (let index = 0; index < 50; index += 1) {
-            await fs.writeFile(
-                path.join(clickLoadRepositoryPath, `changed-${index}.txt`),
-                `baseline
-`,
-            );
-        }
-
-        await $`git -C ${clickLoadRepositoryPath} init`;
-        await $`git -C ${clickLoadRepositoryPath} config user.email playwright@redoor.test`;
-        await $`git -C ${clickLoadRepositoryPath} config user.name Playwright`;
-        await $`git -C ${clickLoadRepositoryPath} add .`;
-        await $`git -C ${clickLoadRepositoryPath} commit -m baseline`;
-
-        for (let index = 0; index < 50; index += 1) {
-            await fs.writeFile(
-                path.join(clickLoadRepositoryPath, `changed-${index}.txt`),
-                `changed
-`,
-            );
-        }
+        // A patch much taller than the viewport, to scroll past its header.
+        await fs.writeFile(
+            path.join(manyChangesRepositoryPath, "changed-0.txt"),
+            Array.from({ length: 200 }, (_, line) => `long line ${line}`).join(`
+`),
+        );
 
         await fs.mkdir(outsidePath, { recursive: true });
     });
@@ -136,85 +119,117 @@ test.describe.serial("Git browser", () => {
         await fs.rm(outsidePath, { force: true, recursive: true });
     });
 
-    test("automatically loads fewer than 50 diffs but requires a click at 50", async ({
+    test("loads diffs on expansion with sticky, collapsible file headers", async ({
         page,
     }) => {
-        await page.setViewportSize({ width: 360, height: 300 });
-        const diffRequests: string[] = [];
+        await page.setViewportSize({ width: 360, height: 600 });
+        const diffRequests: string[][] = [];
         page.on("request", (request) => {
             if (
                 request.method() === "POST" &&
                 new URL(request.url()).pathname.endsWith("/git/diff")
             ) {
-                diffRequests.push(request.postData() ?? "");
+                const body = gitDiffRequestSchema.parse(request.postDataJSON());
+
+                diffRequests.push(body.files);
             }
         });
-        const autoLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(autoLoadRepositoryPath)}?view=git`;
-        await page.goto(autoLoadUrl);
+        const repositoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(manyChangesRepositoryPath)}?view=git`;
+        await page.goto(repositoryUrl);
 
-        const autoLoadButton = page.getByRole("button", {
-            name: "Load all diffs",
+        const diffRegions = page.getByRole("region", { name: /Git diff for/ });
+
+        // Every changed file is listed by its header.
+        await expect(diffRegions).toHaveCount(129);
+        // The page opens collapsed, so every file offers to expand.
+        await expect(
+            page.getByRole("button", { name: /^Expand diff for/ }),
+        ).toHaveCount(129);
+        // Collapsed files fetch nothing, so opening a large change set costs no diffs.
+        expect(diffRequests).toEqual([]);
+        // The diffs replace the separate file list, so no status group headings remain.
+        await expect(
+            page.getByRole("heading", { name: /Unstaged changes/ }),
+        ).toHaveCount(0);
+
+        const longDiffPath = path.join(
+            manyChangesRepositoryPath,
+            "changed-0.txt",
+        );
+
+        const longDiff = page.getByRole("region", {
+            name: `Git diff for ${longDiffPath}`,
         });
 
-        // The batch must not load until its control reaches the viewport.
-        await expect(autoLoadButton).not.toBeInViewport();
-        expect(
-            diffRequests.some((body) => body.includes(autoLoadRepositoryPath)),
-        ).toBe(false);
-
-        const autoDiffRequest = page.waitForRequest(
-            (request) =>
-                request.method() === "POST" &&
-                request.url().endsWith("/git/diff") &&
-                request.postData()?.includes(autoLoadRepositoryPath) === true,
-        );
-
-        await autoLoadButton.scrollIntoViewIfNeeded();
-        await autoDiffRequest;
-        // Forty-nine files activate from intersection without changing route state.
-        await expect(
-            page.getByRole("region", { name: /Git diff for/ }),
-        ).toHaveCount(49);
-        await expect(page).toHaveURL(autoLoadUrl);
-
-        const clickLoadUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(clickLoadRepositoryPath)}?view=git`;
-        await page.goto(`${clickLoadUrl}&diff=true`);
-        // Legacy query state is removed and cannot eagerly activate the batch.
-        await expect(page).toHaveURL(clickLoadUrl);
-
-        const clickLoadButton = page.getByRole("button", {
-            name: "Load all diffs",
+        const longDiffName = longDiff.getByRole("link", {
+            name: "changed-0.txt",
+            exact: true,
         });
 
-        await clickLoadButton.scrollIntoViewIfNeeded();
-        await expect(clickLoadButton).toBeInViewport();
-        await page.evaluate(
-            () =>
-                new Promise<void>((resolve) =>
-                    requestAnimationFrame(() =>
-                        requestAnimationFrame(() => resolve()),
-                    ),
-                ),
-        );
-        // Exactly 50 files remain idle after intersection.
-        expect(
-            diffRequests.some((body) => body.includes(clickLoadRepositoryPath)),
-        ).toBe(false);
+        await longDiff
+            .getByRole("button", { name: "Expand diff for changed-0.txt" })
+            .click();
+        // Expanding one file loads its patch.
+        await expect(longDiff).toContainText("long line 150");
+        // Only the expanded file was requested.
+        expect(diffRequests).toEqual([[longDiffPath]]);
 
-        const clickDiffRequest = page.waitForRequest(
-            (request) =>
-                request.method() === "POST" &&
-                request.url().endsWith("/git/diff") &&
-                request.postData()?.includes(clickLoadRepositoryPath) === true,
-        );
+        await longDiff.getByText("long line 150").scrollIntoViewIfNeeded();
+        // The header sticks while its patch scrolls, so the file being read stays named.
+        await expect(longDiffName).toBeInViewport();
 
-        await clickLoadButton.click();
-        await clickDiffRequest;
-        // Explicit activation loads all 50 while preserving the URL.
+        // The scroll area's top padding is the overlay top bar's height, where content starts.
+        const contentTop = await page
+            .getByRole("main")
+            .evaluate(
+                (main) =>
+                    main.getBoundingClientRect().top +
+                    Number.parseFloat(getComputedStyle(main).paddingTop),
+            );
+
+        const stuckNameBox = await longDiffName.boundingBox();
+
+        // The header sticks flush below the top bar, without a gap that shows patch lines above it.
+        expect(stuckNameBox?.y).toBeGreaterThanOrEqual(contentTop);
+        expect(stuckNameBox?.y).toBeLessThan(contentTop + 24);
+
+        await page.getByRole("button", { name: "Expand all" }).click();
+        // Expand all opens every file.
         await expect(
-            page.getByRole("region", { name: /Git diff for/ }),
-        ).toHaveCount(50);
-        await expect(page).toHaveURL(clickLoadUrl);
+            page.getByRole("button", { name: /^Collapse diff for/ }),
+        ).toHaveCount(129);
+        // The last file's patch proves the remaining diffs loaded.
+        await expect(diffRegions.last()).toContainText("baseline");
+        // The 128 missing diffs came in one request that skipped the cached file.
+        expect(diffRequests).toHaveLength(2);
+        expect(diffRequests[1]).toHaveLength(128);
+        expect(diffRequests[1]).not.toContain(longDiffPath);
+
+        await page.getByRole("button", { name: "Collapse all" }).click();
+        // Collapse all folds every file down to its header.
+        await expect(
+            page.getByRole("button", { name: /^Expand diff for/ }),
+        ).toHaveCount(129);
+        await expect(longDiff).not.toContainText("long line 150");
+
+        await longDiff
+            .getByRole("button", { name: "Expand diff for changed-0.txt" })
+            .click();
+        // Expanding again shows the cached patch.
+        await expect(longDiff).toContainText("long line 150");
+        await expect(
+            longDiff.getByRole("button", {
+                name: "Collapse diff for changed-0.txt",
+            }),
+        ).toHaveAttribute("aria-expanded", "true");
+        // Diffs already loaded are not requested again.
+        expect(diffRequests).toHaveLength(2);
+
+        await longDiffName.click();
+        // The header names the file itself, so it opens the file rather than its diff.
+        await expect(page).toHaveURL(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(longDiffPath)}`,
+        );
     });
 
     test("browses status, file comparisons, refreshes, and explicit diff states", async ({
@@ -252,39 +267,30 @@ test.describe.serial("Git browser", () => {
         ).toHaveAttribute("aria-current", "page");
         // The header always shows where the repository lives.
         await expect(repositoryHeader).toContainText(repositoryPath);
-        // Structured status must expose staged, unstaged, and untracked groups.
-        await expect(
-            page.getByRole("heading", { name: /Staged changes/ }),
-        ).toBeVisible();
-        await expect(
-            page.getByRole("heading", { name: /Unstaged changes/ }),
-        ).toBeVisible();
-        await expect(
-            page.getByRole("heading", { name: /Untracked files/ }),
-        ).toBeVisible();
+        // The summary counts each status group the diffs below come from.
+        await expect(page.getByText("1 staged")).toBeVisible();
+        await expect(page.getByText("4 unstaged")).toBeVisible();
+        await expect(page.getByText("1 untracked")).toBeVisible();
         // Ignored paths stay out of directory status even though direct browsing supports them.
         await expect(
             page.getByRole("link", { name: "ignored.txt", exact: true }),
         ).toHaveCount(0);
 
         const directoryUrl = page.url();
-        await page
-            .getByRole("heading", { name: /Untracked files/ })
-            .scrollIntoViewIfNeeded();
 
         const directoryDiffs = page.getByRole("region", {
             name: /Git diff for/,
         });
 
         await expect(directoryDiffs).toHaveCount(5);
-        // Small batches activate in place without adding route search state.
+        // Diffs load in place without adding route search state.
         await expect(page).toHaveURL(directoryUrl);
-        // The remaining filename chrome opens the file edit view without a duplicate heading.
+        // Each patch is named by one header, not again by the generated diff chrome.
         await expect(
             page
                 .getByRole("region", { name: `Git diff for ${trackedPath}` })
                 .getByRole("heading"),
-        ).toHaveCount(0);
+        ).toHaveCount(1);
         await expect(
             page
                 .getByRole("region", { name: `Git diff for ${trackedPath}` })
@@ -293,7 +299,7 @@ test.describe.serial("Git browser", () => {
             "href",
             `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(trackedPath)}`,
         );
-        // Patches follow first appearance in the grouped status rows, with duplicate rows de-duplicated.
+        // Patches follow the status groups, with a file in several groups shown once.
         expect(
             await directoryDiffs.evaluateAll((regions) =>
                 regions.map((region) => region.getAttribute("aria-label")),
@@ -310,21 +316,21 @@ test.describe.serial("Git browser", () => {
             name: `Git diff for ${untrackedPath}`,
         });
 
+        await untrackedSection
+            .getByRole("button", { name: "Expand diff for untracked.txt" })
+            .click();
         // Untracked content is a real empty-to-worktree patch and uses the shared diff table.
         await expect(untrackedSection).toContainText("untracked content");
-        await page
-            .getByRole("heading", { name: /Untracked files/ })
-            .locator("..")
-            .getByRole("link", { name: "Diff" })
-            .click();
-        // File-list anchors target the matching rendered patch without another navigation.
-        await expect(page).toHaveURL(/#git-diff-4$/);
-        await expect(untrackedSection).toBeInViewport();
+        // A file deleted from the worktree opens as it is at HEAD, where it still exists.
+        await expect(
+            page
+                .getByRole("region", { name: `Git diff for ${deletedPath}` })
+                .getByRole("link", { name: "deleted.txt", exact: true }),
+        ).toHaveAttribute("href", /\?rev=HEAD$/);
 
-        await page
-            .getByRole("link", { name: "tracked.ts", exact: true })
-            .first()
-            .click();
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(trackedPath)}?view=git`,
+        );
         const fullDiff = page.getByRole("region", { name: "Full Git diff" });
         // The default comparison must show current worktree content.
         await expect(fullDiff).toContainText("worktree version");

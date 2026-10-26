@@ -437,6 +437,24 @@ code {
     padding: 0;
 }
 
+/*
+ * Sticky offsets start inside the scroll area's padding, which already reserves the overlay
+ * top bar's height, so zero sticks the diff list header right below the bar.
+ */
+.git-diff-sticky-header {
+    top: 0;
+}
+
+/* Touch scrolling slides the top bar away, so the header moves up into its place. */
+[data-touch-scrolling] .git-diff-sticky-header {
+    top: calc(-1 * var(--top-chrome-height, 0px));
+}
+
+/* The diff list names each file in its own sticky header, so the generated one would repeat it. */
+.git-diff-list-body .d2h-file-header {
+    display: none;
+}
+
 .git-file-diff .d2h-file-wrapper {
     margin-bottom: 0;
     border: 0;
