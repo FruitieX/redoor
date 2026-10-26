@@ -79,6 +79,9 @@ import type { GitStatusResponse } from "#bindings/GitStatusResponse";
 import type { GitDiffResponse } from "#bindings/GitDiffResponse";
 import type { GitDiffRequest } from "#bindings/GitDiffRequest";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
+import type { GitRevisionTreeResponse } from "#bindings/GitRevisionTreeResponse";
+import type { GitRevisionContentResponse } from "#bindings/GitRevisionContentResponse";
+import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
 import type { AgentAccountsResponse } from "#bindings/AgentAccountsResponse";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -127,6 +130,11 @@ export class Agent {
             `/api/v1/agents/${encodeURIComponent(this.info.id)}/${route}`,
             path,
         )}`;
+    }
+
+    /** Builds a filesystem route URL that also names the Git revision it reads. */
+    private revisionUrl(route: string, path: string, rev: string): string {
+        return `${this.filesystemUrl(route, path)}?${new URLSearchParams({ rev }).toString()}`;
     }
 
     /** Posts JSON to an agent route without repeating content-type boilerplate. */
@@ -401,6 +409,42 @@ export class Agent {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(request),
             },
+            this.requestContext,
+        );
+    }
+
+    /** Describes a path as committed at a revision: a tree listing or a file's facts. */
+    async gitRevisionTree(
+        path: string,
+        rev: string,
+    ): Promise<GitRevisionTreeResponse> {
+        return apiRequest<GitRevisionTreeResponse>(
+            this.revisionUrl("git/tree", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Reads a committed text file for the read-only editor. */
+    async gitRevisionContent(
+        path: string,
+        rev: string,
+    ): Promise<GitRevisionContentResponse> {
+        return apiRequest<GitRevisionContentResponse>(
+            this.revisionUrl("git/blob", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Shows what the commit a revision names changed below a path. */
+    async gitCommitDiff(
+        path: string,
+        rev: string,
+    ): Promise<GitCommitDiffResponse> {
+        return apiRequest<GitCommitDiffResponse>(
+            this.revisionUrl("git/commit-diff", path, rev),
+            undefined,
             this.requestContext,
         );
     }

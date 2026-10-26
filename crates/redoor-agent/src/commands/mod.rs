@@ -367,13 +367,22 @@ impl RunCommand for Command {
                 fs::directory_size(path, timeout_seconds, &ctx.cancel).await,
             ),
             Command::GitContext(request::GitContext { path }) => {
-                Reply::of::<request::GitContext>(git::context(path).await)
+                Reply::of::<request::GitContext>(git::status::context(path).await)
             }
             Command::GitStatus(request::GitStatus { path }) => {
-                Reply::of::<request::GitStatus>(git::status(path).await)
+                Reply::of::<request::GitStatus>(git::status::status(path).await)
             }
             Command::GitDiff(request::GitDiff { files, mode }) => {
-                Reply::of::<request::GitDiff>(git::diff(files, mode).await)
+                Reply::of::<request::GitDiff>(git::diff::diff(files, mode).await)
+            }
+            Command::GitRevisionTree(request::GitRevisionTree { path, rev }) => {
+                Reply::of::<request::GitRevisionTree>(git::tree::tree(path, rev).await)
+            }
+            Command::GitRevisionContent(request::GitRevisionContent { path, rev }) => {
+                Reply::of::<request::GitRevisionContent>(git::tree::content(path, rev).await)
+            }
+            Command::GitCommitDiff(request::GitCommitDiff { path, rev }) => {
+                Reply::of::<request::GitCommitDiff>(git::commit_diff::commit_diff(path, rev).await)
             }
             Command::MoveMetadata(request::MoveMetadata { path }) => {
                 Reply::of::<request::MoveMetadata>(fs::move_metadata(path).await)

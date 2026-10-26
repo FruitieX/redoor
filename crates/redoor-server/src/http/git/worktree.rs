@@ -1,17 +1,18 @@
-//! REST endpoints for git context, status and diffs in agent repositories.
+//! REST endpoints for the worktree: git context, status and diffs of uncommitted changes.
 
 use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     extract::{Path, State as AxumState},
 };
-use redoor_protocol::api::git::{
+use redoor_protocol::api::git::worktree::{
     GitContextResponse, GitDiffRequest, GitDiffResponse, GitStatusResponse,
 };
 
-use super::{
+use super::route_path;
+use crate::http::{
     agent_client::{GitContext, GitDiff, GitStatus},
-    agent_helpers::{AgentFilePath, absolute_path_from_url, require_absolute_path},
+    agent_helpers::AgentFilePath,
     error::ApiError,
     state::ServerState,
 };
@@ -54,27 +55,4 @@ pub(crate) async fn git_diff_handler(
         mode: request.mode,
     };
     Ok(Json(state.agents.call(&agent_id, call).await?))
-}
-
-/// Restores the implicit root and applies the shared absolute-path policy.
-fn route_path(path: Option<String>) -> Result<String, ApiError> {
-    let path = absolute_path_from_url(path.unwrap_or_default());
-    require_absolute_path(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Keeps both exact and wildcard routes on the same absolute filesystem convention.
-    #[test]
-    fn route_paths_restore_the_implicit_root() {
-        // The exact route addresses filesystem root rather than an agent cwd.
-        assert_eq!(route_path(None).unwrap(), "/");
-        // Wildcard segments preserve their hierarchy behind a single route slash.
-        assert_eq!(
-            route_path(Some("tmp/repo".to_string())).unwrap(),
-            "/tmp/repo"
-        );
-    }
 }

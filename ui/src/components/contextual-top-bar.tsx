@@ -149,6 +149,9 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
                 ) : (
                     <ViewSwitchLink
                         {...browserRoute(agent, browseHome)}
+                        // The device home is rarely inside the browsed repository, so this
+                        // entry point leaves Git history instead of keeping its revision.
+                        search={{ rev: undefined }}
                         active={isFilesystemContext}
                     >
                         {filesIcon}

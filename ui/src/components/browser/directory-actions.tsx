@@ -35,7 +35,11 @@ import { useRefreshBrowserPath } from "#ui/components/browser/refresh";
  * Sends file and directory selections through the same conflict check and bounded global
  * queue as dropped files, which also report their errors.
  */
-function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
+function UploadFilesAction(props: {
+    agent: Agent;
+    directoryPath: string;
+    disabled: boolean;
+}) {
     const uploadFilesTo = useFileUpload();
     const fileInputRef = React.useRef<FileInputHandle>(null);
     const directoryInputRef = React.useRef<FileInputHandle>(null);
@@ -68,6 +72,7 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
                 label="Upload"
                 icon={<Upload className="h-4 w-4" />}
                 hideLabelOnMobile
+                disabled={props.disabled}
             >
                 {(close) => (
                     <>
@@ -202,7 +207,11 @@ function CreateFileDialog(props: {
 }
 
 /** Groups file and directory creation without mixing their modal workflows. */
-function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
+function DirectoryNewAction(props: {
+    agent: Agent;
+    directoryPath: string;
+    disabled: boolean;
+}) {
     const [dialogType, setDialogType] = React.useState<
         "file" | "directory" | null
     >(null);
@@ -217,7 +226,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
             match: (event) => isPlainKey(event, "n", { allowShift: true }),
             run: () => setDialogType("file"),
         },
-        dialogType === null,
+        dialogType === null && !props.disabled,
     );
 
     useShortcut(
@@ -229,7 +238,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
             match: (event) => isPlainKey(event, "d", { allowShift: true }),
             run: () => setDialogType("directory"),
         },
-        dialogType === null,
+        dialogType === null && !props.disabled,
     );
 
     return (
@@ -238,6 +247,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
                 label="New"
                 icon={<Plus className="h-4 w-4" />}
                 hideLabelOnMobile
+                disabled={props.disabled}
             >
                 {(close) => (
                     <>
@@ -296,7 +306,13 @@ export function DirectoryFilesActions(props: {
     directoryPath: string;
     showHiddenFiles: boolean;
     onToggleHiddenFiles: () => void;
+    /**
+     * Shows the toolbar of a committed Git revision: everything that writes into the
+     * directory (paste, new, upload, file operations) is disabled.
+     */
+    readOnly?: boolean;
 }) {
+    const readOnly = props.readOnly === true;
     const refreshBrowser = useRefreshBrowserPath(props.agent.id);
     const importFromClipboard = useClipboardImport();
     const [isReloading, setIsReloading] = React.useState(false);
@@ -355,6 +371,7 @@ export function DirectoryFilesActions(props: {
                     variant="ghost"
                     size="sm"
                     onClick={importFromClipboard}
+                    disabled={readOnly}
                     aria-label="Paste files or text"
                     className="rounded-md"
                 >
@@ -364,10 +381,12 @@ export function DirectoryFilesActions(props: {
                 <DirectoryNewAction
                     agent={props.agent}
                     directoryPath={props.directoryPath}
+                    disabled={readOnly}
                 />
                 <UploadFilesAction
                     agent={props.agent}
                     directoryPath={props.directoryPath}
+                    disabled={readOnly}
                 />
                 <PersistentPathActions
                     agent={props.agent}
@@ -380,6 +399,7 @@ export function DirectoryFilesActions(props: {
                     downloadName={getDirectoryArchiveName(directoryName)}
                     downloadTooltip="Downloads this directory as a .tar.gz archive."
                     secondaryDownload
+                    readOnly={readOnly}
                     afterDownload={
                         <Button
                             tooltip="Reload directory listing from the device"

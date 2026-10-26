@@ -315,14 +315,21 @@ function PathActionMenuItems(props: {
     onCreateArchive?: () => void;
     onDelete?: () => void;
     deleteDisabled?: boolean;
+    /**
+     * Shows every verb disabled, for a committed Git revision: they would all act on the
+     * working file instead of the revision shown. Bookmarks only remember the path.
+     */
+    readOnly?: boolean;
 }) {
+    const readOnly = props.readOnly === true;
+
     return (
         <>
             {props.showOpenNatively &&
             props.agent.supportsNativeOpen &&
             props.onOpenNatively ? (
                 <ActionMenuButton
-                    disabled={props.openNativelyPending}
+                    disabled={readOnly || props.openNativelyPending}
                     onClick={() => {
                         props.close();
                         props.onOpenNatively?.();
@@ -337,7 +344,7 @@ function PathActionMenuItems(props: {
                 </ActionMenuButton>
             ) : null}
             <ActionMenuButton
-                disabled={props.renameDisabled}
+                disabled={readOnly || props.renameDisabled}
                 onClick={() => {
                     props.close();
                     props.onRename();
@@ -347,7 +354,7 @@ function PathActionMenuItems(props: {
                 Rename
             </ActionMenuButton>
             <ActionMenuButton
-                disabled={props.duplicateDisabled}
+                disabled={readOnly || props.duplicateDisabled}
                 onClick={() => {
                     props.close();
                     props.onDuplicate();
@@ -357,8 +364,9 @@ function PathActionMenuItems(props: {
                 Duplicate
             </ActionMenuButton>
             {props.showDownload ? (
-                props.entryType === "directory" ? (
+                props.entryType === "directory" || readOnly ? (
                     <ActionMenuButton
+                        disabled={readOnly}
                         onClick={() => {
                             props.close();
                             props.onDownloadDirectory?.();
@@ -382,6 +390,7 @@ function PathActionMenuItems(props: {
             ) : null}
             {props.showUnarchive && props.onUnarchive ? (
                 <ActionMenuButton
+                    disabled={readOnly}
                     onClick={() => {
                         props.close();
                         props.onUnarchive?.();
@@ -393,6 +402,7 @@ function PathActionMenuItems(props: {
             ) : null}
             {props.onCreateArchive ? (
                 <ActionMenuButton
+                    disabled={readOnly}
                     onClick={() => {
                         props.close();
                         props.onCreateArchive?.();
@@ -409,6 +419,7 @@ function PathActionMenuItems(props: {
                     fileName={props.currentName}
                     entryType={props.entryType}
                     close={props.close}
+                    disabled={readOnly}
                 />
             ) : null}
             <BookmarkMenuButton
@@ -425,7 +436,7 @@ function PathActionMenuItems(props: {
                     <div className="my-1 border-t border-slate-800" />
                     <ActionMenuButton
                         tone="danger"
-                        disabled={props.deleteDisabled}
+                        disabled={readOnly || props.deleteDisabled}
                         onClick={() => {
                             props.close();
                             props.onDelete?.();
@@ -459,6 +470,8 @@ export function PathActionMenu(props: {
     onUnarchive?: () => void;
     onCreateArchive?: () => void;
     onDelete?: () => void;
+    /** Keeps the menu's look for a Git revision with every write verb disabled. */
+    readOnly?: boolean;
 }) {
     const canModify = getImmediateParentPath(props.path) !== null;
 
@@ -538,6 +551,7 @@ export function PathActionMenu(props: {
                                                 }
                                                 onDelete={props.onDelete}
                                                 deleteDisabled={!canModify}
+                                                readOnly={props.readOnly}
                                             />
                                         )}
                                     </ActionMenu>
@@ -561,6 +575,8 @@ export function SelectPathMenuButton(props: {
     fileName: string;
     entryType: "file" | "directory";
     close: () => void;
+    /** Selection feeds copies and moves, which a Git revision cannot be a source of. */
+    disabled?: boolean;
 }) {
     const selectedFileKeys = useAtomValue(selectedFileKeysAtom);
     const toggleSelectedFile = useSetAtom(toggleSelectedFileAtom);
@@ -573,6 +589,7 @@ export function SelectPathMenuButton(props: {
             checked={isSelected}
             label={label}
             title={false}
+            disabled={props.disabled}
             className="w-full px-3 py-2"
             onCheckedChange={() => {
                 props.close();
@@ -609,21 +626,37 @@ export function PersistentPathActions(props: {
     secondaryDownload?: boolean;
     /** Lets a view keep Reload next to Download without hiding it in More. */
     afterDownload?: React.ReactNode;
+    /**
+     * Keeps the actions' look for a Git revision with downloads and file operations
+     * disabled, because they would act on the working file rather than the revision.
+     */
+    readOnly?: boolean;
 }) {
     const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = React.useState(false);
 
-    const downloadLink = (
+    const downloadClassName = props.secondaryDownload
+        ? "rounded-md px-3 text-slate-200 hover:bg-tint hover:text-slate-100"
+        : "rounded-md px-3.5 font-semibold shadow-sm shadow-blue-950/30";
+
+    const downloadLink = props.readOnly ? (
+        <Button
+            type="button"
+            aria-label="Download"
+            variant={props.secondaryDownload ? "subtle" : "primary"}
+            disabled
+            className={downloadClassName}
+        >
+            <Download className="h-4 w-4" aria-hidden="true" />
+            <span className="hidden sm:inline">Download</span>
+        </Button>
+    ) : (
         <Button
             as="a"
             href={props.downloadUrl}
             download={props.downloadName}
             aria-label="Download"
             variant={props.secondaryDownload ? "subtle" : "primary"}
-            className={
-                props.secondaryDownload
-                    ? "rounded-md px-3 text-slate-200 hover:bg-tint hover:text-slate-100"
-                    : "rounded-md px-3.5 font-semibold shadow-sm shadow-blue-950/30"
-            }
+            className={downloadClassName}
         >
             <Download className="h-4 w-4" aria-hidden="true" />
             <span className="hidden sm:inline">Download</span>
@@ -633,7 +666,13 @@ export function PersistentPathActions(props: {
     return (
         <>
             <div className="flex items-center gap-2">
-                <Tooltip content={props.downloadTooltip ?? "Download"}>
+                <Tooltip
+                    content={
+                        props.readOnly
+                            ? "Downloads are not available for a Git revision"
+                            : (props.downloadTooltip ?? "Download")
+                    }
+                >
                     {downloadLink}
                 </Tooltip>
                 {props.afterDownload}
@@ -647,6 +686,7 @@ export function PersistentPathActions(props: {
                     showOpenNatively={true}
                     showSelect={true}
                     onDelete={() => setIsConfirmDeleteOpen(true)}
+                    readOnly={props.readOnly}
                 />
             </div>
             {isConfirmDeleteOpen ? (

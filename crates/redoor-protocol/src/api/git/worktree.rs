@@ -1,4 +1,6 @@
-//! Git context, status, and diff bodies.
+//! Worktree views: repository context, status and diffs of uncommitted changes.
+
+use super::{GitChangeState, GitDiffResult};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -43,21 +45,6 @@ pub enum GitContextResponse {
         repository_root: String,
         repository_relative_path: String,
     },
-}
-
-/// Normalizes index and worktree status into a stable public vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "snake_case")]
-#[ts(rename_all = "snake_case")]
-pub enum GitChangeState {
-    Unmodified,
-    Added,
-    Modified,
-    Deleted,
-    Renamed,
-    Copied,
-    TypeChanged,
 }
 
 /// Identifies entries that cannot be represented by ordinary staged/unstaged states.
@@ -147,21 +134,6 @@ impl GitDiffRequest {
         self.files = files;
         Ok(())
     }
-}
-
-/// Represents every bounded single-file diff outcome explicitly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[ts(tag = "type", rename_all = "snake_case")]
-pub enum GitDiffResult {
-    Text { unified_diff: String },
-    NoChanges,
-    Untracked,
-    Ignored,
-    Binary,
-    TooLarge,
-    UnsupportedEntry,
 }
 
 /// Carries one file's bounded comparison in the same order as the request.

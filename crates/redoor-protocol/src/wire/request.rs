@@ -13,7 +13,11 @@ use crate::api::files::{
     ChmodPathResponse, ChownPathResponse, CreationOwnershipOptions, DirectorySizeResponse,
     MetadataResponse,
 };
-use crate::api::git::{GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse};
+use crate::api::git::commit::GitCommitDiffResponse;
+use crate::api::git::revision::{GitRevisionContentResponse, GitRevisionTreeResponse};
+use crate::api::git::worktree::{
+    GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse,
+};
 use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchResponse};
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
@@ -386,6 +390,27 @@ pub struct GitDiff {
     pub mode: GitDiffMode,
 }
 
+/// Describes one path as it was committed at a revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionTree {
+    pub path: String,
+    pub rev: String,
+}
+
+/// Reads one committed text file for the read-only editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionContent {
+    pub path: String,
+    pub rev: String,
+}
+
+/// Diffs the commit a revision names against its first parent, below one path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitDiff {
+    pub path: String,
+    pub rev: String,
+}
+
 /// Reads the stable filesystem identity needed to delete only the source that was copied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveMetadata {
@@ -531,6 +556,9 @@ agent_requests! {
     GitContext => GitContextResponse,
     GitStatus => GitStatusResponse,
     GitDiff => GitDiffResponse,
+    GitRevisionTree => GitRevisionTreeResponse,
+    GitRevisionContent => GitRevisionContentResponse,
+    GitCommitDiff => GitCommitDiffResponse,
     MoveMetadata => MoveMetadataResult,
     DeleteMoveSource => (),
     OpenPath => (),
@@ -629,6 +657,17 @@ mod tests {
             "behind": null, "entries": [], "truncated": false,
             "omitted_non_utf8_entries": 0}));
         assert_round_trip::<GitDiff>(json!({"diffs": []}));
+        let commit = json!({"id": "abc", "summary": "first", "author_name": "A",
+            "author_email": "a@example.invalid", "authored_at": 1, "parent_ids": []});
+        assert_round_trip::<GitRevisionTree>(json!({"rev": "main", "commit": commit,
+            "repository_root": "/repo", "path": "/repo/a", "repository_relative_path": "a",
+            "entry": {"type": "file", "size": 3, "executable": false, "editable": true,
+            "blob_id": "def"}}));
+        assert_round_trip::<GitRevisionContent>(json!({"path": "/repo/a", "commit_id": "abc",
+            "content": "a\n"}));
+        assert_round_trip::<GitCommitDiff>(json!({"commit": commit, "parent_id": null,
+            "repository_root": "/repo", "repository_relative_path": "", "files": [],
+            "truncated": false}));
         assert_round_trip::<MoveMetadata>(json!({"file_size": 3, "is_file": true,
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));

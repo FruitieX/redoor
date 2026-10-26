@@ -116,6 +116,12 @@ export const queryKeys = {
         [...queryKeys.git(agentId), "status", path] as const,
     gitDiff: (agentId: string, files: string[], mode: GitDiffMode) =>
         [...queryKeys.git(agentId), "diff", files, mode] as const,
+    gitRevisionTree: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "revision-tree", rev, path] as const,
+    gitRevisionContent: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "revision-content", rev, path] as const,
+    gitCommitDiff: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "commit-diff", rev, path] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -502,6 +508,52 @@ export function gitDiffQueryOptions(
     return queryOptions({
         queryKey: queryKeys.gitDiff(agent.id, files, mode),
         queryFn: () => agent.gitDiff(files, mode),
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * Shares a path's committed tree entry between the route loader and revision views. A
+ * branch name can move, so a refresh still refetches it, but nothing else needs to.
+ */
+export function gitRevisionTreeQueryOptions(
+    agent: Agent,
+    path: string,
+    rev: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitRevisionTree(agent.id, path, rev),
+        queryFn: () => agent.gitRevisionTree(path, rev),
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/** Committed text for the read-only editor, primed by the loader like worktree content. */
+export function gitRevisionContentQueryOptions(
+    agent: Agent,
+    path: string,
+    rev: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitRevisionContent(agent.id, path, rev),
+        queryFn: async () => {
+            const response = await agent.gitRevisionContent(path, rev);
+
+            return response.content;
+        },
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/** The changes of the commit a revision names, scoped to the browsed path. */
+export function gitCommitDiffQueryOptions(
+    agent: Agent,
+    path: string,
+    rev: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitCommitDiff(agent.id, path, rev),
+        queryFn: () => agent.gitCommitDiff(path, rev),
         staleTime: Number.POSITIVE_INFINITY,
     });
 }

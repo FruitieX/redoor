@@ -35,6 +35,8 @@ function BrowserPageHeader(props: {
     path: string;
     startEditingPath?: boolean;
     navigation: React.ReactNode;
+    /** Page-wide context shown under the breadcrumbs, such as the browsed Git revision. */
+    banner?: React.ReactNode;
     viewToggle: React.ReactNode;
 }) {
     return (
@@ -67,6 +69,7 @@ function BrowserPageHeader(props: {
                     />
                 </div>
             </div>
+            {props.banner ? <div className="mb-3">{props.banner}</div> : null}
             {props.viewToggle ? (
                 <div className="-mx-2 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800 px-2 lg:-mx-4 lg:px-4">
                     {props.viewToggle}
@@ -85,19 +88,22 @@ export function ViewToggle(props: {
     /** Names the content tab Edit only after the agent marks the file writable. */
     editable?: boolean;
     gitAvailable: boolean;
+    /** Hides views that change files, and never names the content tab Edit. */
+    readOnly?: boolean;
 }) {
     const isDirectory = props.entryType === "directory";
+    const readOnly = props.readOnly === true;
 
     // A directory's default tab is its listing; a file's is its content, named by what it allows.
     const contentLabel = isDirectory
         ? "Files"
-        : props.editable === true
+        : props.editable === true && !readOnly
           ? "Edit"
           : "View";
 
     const contentIcon = isDirectory ? (
         <Files className="h-4 w-4" aria-hidden="true" />
-    ) : props.editable === true ? (
+    ) : props.editable === true && !readOnly ? (
         <Pencil className="h-4 w-4" aria-hidden="true" />
     ) : (
         <File className="h-4 w-4" aria-hidden="true" />
@@ -123,14 +129,16 @@ export function ViewToggle(props: {
                 icon={<Info className="h-4 w-4" aria-hidden="true" />}
                 active={props.activeView === "details"}
             />
-            <ViewToggleLink
-                agent={props.agent}
-                path={props.path}
-                view="sync"
-                label="Sync"
-                icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
-                active={props.activeView === "sync"}
-            />
+            {readOnly ? null : (
+                <ViewToggleLink
+                    agent={props.agent}
+                    path={props.path}
+                    view="sync"
+                    label="Sync"
+                    icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
+                    active={props.activeView === "sync"}
+                />
+            )}
             {props.gitAvailable ? (
                 <ViewToggleLink
                     agent={props.agent}
@@ -219,6 +227,10 @@ export function BrowserHeader(props: {
     gitAvailable: boolean;
     pathUnavailable?: boolean;
     startEditingPath?: boolean;
+    /** Shown under the breadcrumbs, such as the banner of a browsed Git revision. */
+    banner?: React.ReactNode;
+    /** Hides views that change files, for read-only history browsing. */
+    readOnly?: boolean;
 }) {
     const navigate = useNavigate();
     const pathUnavailable = props.pathUnavailable === true;
@@ -278,6 +290,7 @@ export function BrowserHeader(props: {
                     </Tooltip>
                 </>
             }
+            banner={props.banner}
             viewToggle={
                 pathUnavailable ? null : (
                     <ViewToggle
@@ -287,6 +300,7 @@ export function BrowserHeader(props: {
                         activeView={props.activeView}
                         editable={props.editable}
                         gitAvailable={props.gitAvailable}
+                        readOnly={props.readOnly}
                     />
                 )
             }

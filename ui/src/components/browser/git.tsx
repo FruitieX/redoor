@@ -81,7 +81,10 @@ function groupGitStatusEntries(entries: GitStatusEntry[]) {
 }
 
 /** Links back to the repository's own Git view, which both Git headers offer. */
-function RepositoryLink(props: { agent: Agent; repositoryRoot: string }) {
+export function RepositoryLink(props: {
+    agent: Agent;
+    repositoryRoot: string;
+}) {
     return (
         <Link
             {...browserRoute(props.agent, props.repositoryRoot)}
@@ -442,9 +445,10 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 }
 
 /** Explains all non-text outcomes rather than presenting them as empty patches. */
-function GitDiffResultView(props: {
+export function GitDiffResultView(props: {
     result: GitDiffResult;
-    editorFile: { deviceName: string; path: string };
+    /** Omitted when the file has no editor to open, such as a file the diff deleted. */
+    editorFile?: { deviceName: string; path: string };
 }) {
     if (props.result.type === "text") {
         return (

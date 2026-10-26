@@ -28,7 +28,11 @@ use super::{
     diffs::diff_files_handler,
     file_edit::file_edit_handler,
     files::{create_directory_handler, raw_agent_delete_handler, rename_path_handler},
-    git::{git_context_handler, git_diff_handler, git_status_handler},
+    git::{
+        commit::git_commit_diff_handler,
+        revision::{git_revision_content_handler, git_revision_tree_handler},
+        worktree::{git_context_handler, git_diff_handler, git_status_handler},
+    },
     logging_levels::{
         get_agent_logging_level_handler, get_server_logging_level_handler,
         update_agent_logging_level_handler, update_server_logging_level_handler,
@@ -204,6 +208,30 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
             get(git_status_handler),
         )
         .route("/api/v1/agents/{agent}/git/diff", post(git_diff_handler))
+        .route(
+            "/api/v1/agents/{agent}/git/tree",
+            get(git_revision_tree_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/tree/{*path}",
+            get(git_revision_tree_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/blob",
+            get(git_revision_content_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/blob/{*path}",
+            get(git_revision_content_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/commit-diff",
+            get(git_commit_diff_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/commit-diff/{*path}",
+            get(git_commit_diff_handler),
+        )
         .route(
             "/api/v1/agents/{agent}/one-time-token",
             post(create_one_time_token_handler),

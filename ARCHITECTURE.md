@@ -62,7 +62,9 @@ The contract between all parties, with no runtime dependencies (no tokio).
 - `ids`: the strongly typed identifiers. `AgentId` is the stable device id (see "Device
   identity"); `validate_device_name` holds the device name rules.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
-  transfers, git, tokens, ...).
+  transfers, git, tokens, ...). Git is a directory with one module per feature area
+  (`worktree`, `revision`, `commit`), plus the vocabulary they share, so later Git features
+  (history, branches, search) are added beside them rather than into one file.
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
   and the integration tests use, so REST JSON (and the wire types the browser shares, such as
   exec, log and terminal events) is checked from both sides. Agent-only wire types are
@@ -111,6 +113,13 @@ The agent runtime and the implementation of every command.
     written (for example, re-exec after a restart response), and the `ResultLedger` that
     lets each request send exactly one result.
 - `commands/`: filesystem, git, file search, content grep, metadata and host commands.
+  - `git/`: one module per Git feature area on top of shared plumbing in `git/mod.rs` (the
+    failure type, the blocking runner that interrupts gix when the request is dropped, path
+    validation and repository discovery). `status` and `diff` read the worktree; `revision`
+    resolves a user-supplied revision to a commit once per request; `tree` and
+    `commit_diff` read committed history. All Git work runs in `spawn_blocking` and every
+    response is bounded (entries, files, bytes per blob and per batch), because gix inflates
+    whole objects and the reply is a single control frame.
 - `transfers/`: shared upload and download drivers.
   - `UploadSink` covers raw files, tar directories and file edits. `ByteSource` covers file
     ranges and tar archives.
@@ -133,6 +142,8 @@ The agent runtime and the implementation of every command.
   - `agent_client`: `AgentClient::call` for any protocol request that is also an
     `AgentCall`, which adds its deadline; all deadlines are defined in one place.
   - `error.rs`: `ApiError`, which owns all HTTP status mapping.
+  - `git/`: Git REST handlers split by the same feature areas as the protocol, sharing
+    path and revision validation in `git/mod.rs`.
   - `services/`: `TransferService` (copy and move), `OutputStream` (downloads, diffs, exec)
     and `AgentUpload`. REST and MCP handlers are thin adapters over these.
 - `actors/`:
@@ -1240,9 +1251,10 @@ path. Everything that distinguishes one screen from another lives in the URL or 
 cache, so Back, reload and shared links all land on the same screen.
 
 - **URL state is a validated schema.** `browser-search.ts` defines the search keys: `view`
-  (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file) and
-  `sort` / `order` (the listing order). Each field falls back to undefined, so a stale link
-  shows the defaults. The loader depends on `view` and `diffMode`, so it prefetches the diff
+  (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file), `rev`
+  (a browsed Git revision, see "Git revision browsing") and `sort` / `order` (the listing
+  order). Each field falls back to undefined, so a stale link shows the defaults. The loader
+  depends on `view`, `diffMode` and `rev`, so it prefetches the diff
   the page is about to show; sorting and `line` stay out of the loader's dependencies and never
   reload the route.
 - **Typed links only.** `browserRoute(device, path)` takes the device object (so a bare id
@@ -1272,6 +1284,38 @@ cache, so Back, reload and shared links all land on the same screen.
   and Vim never see it. That works with focus inside or outside the editor and needs no second
   binding in CodeMirror. Whether the find panel is open belongs to the editor view, which also
   shows it on the toolbar.
+
+### Git revision browsing
+
+A `rev` search key (a branch, tag or commit id) turns the file browser into a read-only view
+of that revision. The URL path stays the worktree path, because a revision is only another
+way of looking at the same repository location, and paths deleted since are still reachable.
+
+- **The revision travels with every link.** The browser route declares
+  `retainSearchParams(["rev"])`, so breadcrumbs, listings, view tabs, diff links and even
+  links from the shell keep `rev` without each link passing it. Leaving history sets
+  `rev: undefined` explicitly, which the middleware respects.
+- **A separate loader branch and page.** With `rev` set the loader asks the agent for the
+  committed tree entry (`git/tree`) instead of `ls` and metadata, and renders
+  `RevisionFileBrowser`, which reuses the worktree's components in a read-only mode: the
+  same `FileList` and toolbar (`readOnly`), the same details card pieces
+  (`RevisionDetailView` fills them with what Git records), the editor (`FileEditView` with
+  `revision`, fed by `git/blob`) and, for `view=git`, the commit's own changes against its
+  first parent (`git/commit-diff`). Every action that would write, download or select the
+  working file is shown disabled, since it would act on the worktree rather than the
+  revision; Git records no owner, group or modification time, so those show as absent.
+- **Commit diffs follow the browsed path.** On a subdirectory or file the commit diff shows
+  only that subtree or file, with a link to the repository root for the whole commit, like
+  the worktree Git view. A path the commit deleted has no tree at the commit, so the loader
+  (`browser-revision-loader.ts`) falls back to the commit diff and shows the deletion.
+- **A banner under the breadcrumbs** names the revision and commit and links back to the
+  working tree, so committed content is never mistaken for the files on disk.
+- **The shell sees no worktree entry.** `useBrowserLocation` reports a revision page with a
+  null worktree `entry` and a separate `revision` field, so terminals and search do not treat
+  a committed path as existing on disk, while the top bar still shows the device tabs with
+  Files active. The top bar's Files tab, which opens the device home, leaves history.
+- **Content is bounded, not streamed.** gix inflates a whole object to read it, so committed
+  files are served as bounded JSON (the editor's 2 MiB limit) instead of a raw download.
 
 ## SSH device keys
 
@@ -1436,7 +1480,7 @@ device scope:
 
 | Permission | Grants |
 |---|---|
-| `files:read` | list, stat, read and download, search, directory size, git status and diff, trash listing, one-time download links |
+| `files:read` | list, stat, read and download, search, directory size, git status, diffs and revision browsing, trash listing, one-time download links |
 | `files:write` | upload, edit, mkdir, chmod and chown, trash restore, copy destination |
 | `files:delete` | trash, permanent delete, empty trash, move source removal (rename needs write and delete) |
 | `commands:execute` | exec, exec cancel, native open. High trust: commands run as the agent's OS user and bypass every file permission |

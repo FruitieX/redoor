@@ -43,6 +43,9 @@ pub enum Command {
     GitContext(request::GitContext),
     GitStatus(request::GitStatus),
     GitDiff(request::GitDiff),
+    GitRevisionTree(request::GitRevisionTree),
+    GitRevisionContent(request::GitRevisionContent),
+    GitCommitDiff(request::GitCommitDiff),
     MoveMetadata(request::MoveMetadata),
     DeleteMoveSource(request::DeleteMoveSource),
     OpenPath(request::OpenPath),
@@ -163,6 +166,18 @@ impl Command {
                 request.files.len(),
                 request.mode
             ),
+            Self::GitRevisionTree(request) => {
+                format!("GitRevisionTree path={} rev={}", request.path, request.rev)
+            }
+            Self::GitRevisionContent(request) => {
+                format!(
+                    "GitRevisionContent path={} rev={}",
+                    request.path, request.rev
+                )
+            }
+            Self::GitCommitDiff(request) => {
+                format!("GitCommitDiff path={} rev={}", request.path, request.rev)
+            }
             Self::MoveMetadata(request) => format!("MoveMetadata path={}", request.path),
             Self::DeleteMoveSource(request) => format!("DeleteMoveSource path={}", request.path),
             Self::OpenPath(request) => format!("OpenPath path={}", request.path),

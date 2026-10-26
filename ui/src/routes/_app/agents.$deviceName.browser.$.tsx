@@ -1,11 +1,17 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
+import {
+    createFileRoute,
+    redirect,
+    retainSearchParams,
+    useRouter,
+} from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import { type ApiClient, type Agent } from "#ui/api-client";
 import type { LsDirectoryResponse } from "#bindings/LsDirectoryResponse";
 import type { LsFileResponse } from "#bindings/LsFileResponse";
+import type { LsEntry } from "#bindings/LsEntry";
 import {
     isLsDirectoryResponse,
     isLsFileResponse,
@@ -35,9 +41,15 @@ import {
     DirectoryDetailView,
     FileDetailView,
 } from "#ui/components/browser/metadata";
+import { RevisionDetailView } from "#ui/components/browser/revision-details";
 import { SyncView } from "#ui/components/browser/sync";
 import { GitDirectoryView, GitFileView } from "#ui/components/browser/git";
 import { FileEditView, FileImageView } from "#ui/components/browser/file-views";
+import {
+    GitCommitView,
+    RevisionBanner,
+    revisionListingEntries,
+} from "#ui/components/browser/revision";
 import {
     getImmediateParentPath,
     getPathLoadError,
@@ -65,6 +77,10 @@ import type { MetadataResponse } from "#bindings/MetadataResponse";
 import type { MountPoint } from "#bindings/MountPoint";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
+import {
+    isEditableRevisionEntry,
+    loadRevision,
+} from "#ui/browser-revision-loader";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { getBaseName } from "#ui/utils/path";
 
@@ -135,9 +151,13 @@ function redirectOutsideWorktree(
 
 export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
     validateSearch: browserSearchSchema,
+    // Every link into the browser keeps the browsed revision, so the tree, details and diffs
+    // of history can be navigated like the worktree. Leaving history removes it explicitly.
+    search: { middlewares: [retainSearchParams(["rev"])] },
     loaderDeps: ({ search }) => ({
         view: search.view,
         diffMode: search.diffMode,
+        rev: search.rev,
     }),
     loader: async ({ context, deps, params, location, parentMatchPromise }) => {
         const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
@@ -163,6 +183,17 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
                     line: lineFromLocationSearch(location.searchStr),
                 },
                 replace: true,
+            });
+        }
+
+        if (deps.rev !== undefined) {
+            return loadRevision({
+                context,
+                agent,
+                params,
+                path,
+                rev: deps.rev,
+                view: deps.view,
             });
         }
 
@@ -312,6 +343,9 @@ function BrowserRouteShell(props: {
     fillAvailableHeight?: boolean;
     pathUnavailable?: boolean;
     startEditingPath?: boolean;
+    /** Shown under the breadcrumbs, such as the browsed Git revision. */
+    banner?: ReactNode;
+    readOnly?: boolean;
     children: ReactNode;
 }) {
     return (
@@ -332,6 +366,8 @@ function BrowserRouteShell(props: {
                 gitAvailable={props.gitAvailable}
                 pathUnavailable={props.pathUnavailable}
                 startEditingPath={props.startEditingPath}
+                banner={props.banner}
+                readOnly={props.readOnly}
             />
             <div
                 className={
@@ -378,14 +414,166 @@ function FileBrowser() {
         );
     }
 
+    if (data.kind === "revision") {
+        return <RevisionFileBrowser data={data} agent={agent} />;
+    }
+
     return <ConnectedFileBrowser data={data} agent={agent} />;
+}
+
+/**
+ * Browses a path as committed at a Git revision. Everything is read-only: the listing has
+ * no file operations, the editor cannot save, and the Git view shows the commit's changes.
+ */
+function RevisionFileBrowser(props: {
+    data: Extract<ReturnType<typeof Route.useLoaderData>, { kind: "revision" }>;
+    agent: Agent;
+}) {
+    const data = props.data;
+    const agent = props.agent;
+    const search = Route.useSearch();
+    const navigate = Route.useNavigate();
+    const [isEditorFullWindow, setIsEditorFullWindow] = useState(false);
+    useBrowserRefreshTriggers(agent.id);
+
+    const parentPath = getImmediateParentPath(data.path);
+
+    const banner = (
+        <RevisionBanner
+            agent={agent}
+            path={data.path}
+            rev={data.rev}
+            commit={data.tree?.commit ?? data.deletion?.commit ?? null}
+        />
+    );
+
+    if (data.deletion !== null) {
+        const deletesOneFile =
+            data.deletion.files.length === 1 &&
+            data.deletion.files[0]?.path === data.path;
+
+        return (
+            <BrowserRouteShell
+                agent={agent}
+                path={data.path}
+                parentPath={parentPath}
+                entryType={deletesOneFile ? "file" : "directory"}
+                activeView="git"
+                gitAvailable
+                banner={banner}
+                readOnly
+            >
+                <GitCommitView agent={agent} path={data.path} rev={data.rev} />
+            </BrowserRouteShell>
+        );
+    }
+
+    if (data.tree === null) {
+        const pathError = data.error.pathError;
+
+        return (
+            <BrowserRouteShell
+                agent={agent}
+                path={data.path}
+                parentPath={parentPath}
+                entryType="directory"
+                activeView="files"
+                gitAvailable
+                pathUnavailable
+                startEditingPath={false}
+                banner={banner}
+                readOnly
+            >
+                {pathError === null ? (
+                    <p
+                        role="alert"
+                        className="m-2 rounded-lg border border-red-900/60 bg-red-950/20 p-4 text-sm text-red-200 lg:m-4"
+                    >
+                        {data.error.message}
+                    </p>
+                ) : (
+                    <UnavailablePathState
+                        agent={agent}
+                        path={data.path}
+                        parentPath={parentPath}
+                        error={pathError}
+                    />
+                )}
+            </BrowserRouteShell>
+        );
+    }
+
+    const tree = data.tree;
+    const isDirectory = tree.entry.type === "directory";
+    const editable = isEditableRevisionEntry(tree);
+
+    const activeView: BrowserView =
+        search.view ?? (isDirectory ? "files" : "view");
+
+    const isEditView = activeView === "view" && editable;
+    const fileName = getBaseName(data.path);
+
+    const content =
+        activeView === "git" ? (
+            <GitCommitView agent={agent} path={data.path} rev={data.rev} />
+        ) : activeView === "details" ? (
+            <RevisionDetailView agent={agent} tree={tree} />
+        ) : tree.entry.type === "directory" ? (
+            <DirectoryListing
+                agent={agent}
+                directoryPath={tree.path}
+                files={revisionListingEntries(tree.entry.entries)}
+                readOnly
+            />
+        ) : editable ? (
+            <FileEditView
+                key={`${agent.id}:${data.rev}:${data.path}`}
+                isFullWindow={isEditorFullWindow}
+                onToggleFullWindow={() =>
+                    setIsEditorFullWindow((current) => !current)
+                }
+                agent={agent}
+                fileName={fileName}
+                filePath={data.path}
+                revision={data.rev}
+                repositoryRoot={tree.repository_root}
+                mimeType="text/plain"
+                downloadUrl={null}
+                scrollToLine={search.line}
+                preview={search.preview === true}
+                onPreviewChange={(preview) =>
+                    navigate({
+                        search: (previous) => ({ ...previous, preview }),
+                    })
+                }
+            />
+        ) : (
+            <RevisionDetailView agent={agent} tree={tree} />
+        );
+
+    return (
+        <BrowserRouteShell
+            agent={agent}
+            path={data.path}
+            parentPath={parentPath}
+            entryType={isDirectory ? "directory" : "file"}
+            activeView={activeView}
+            editable={editable}
+            gitAvailable
+            fillAvailableHeight={isEditView}
+            banner={banner}
+            readOnly
+        >
+            {content}
+        </BrowserRouteShell>
+    );
 }
 
 /** Mounts filesystem subscriptions only after the agent can serve the requested path. */
 function ConnectedFileBrowser(props: {
-    data: Exclude<
+    data: Extract<
         ReturnType<typeof Route.useLoaderData>,
-        { kind: "lifecycle" }
+        { kind: "connected" }
     >;
     agent: Agent;
 }) {
@@ -671,14 +859,8 @@ function DirectoryBrowserPage(props: {
     loadedListing: LsDirectoryResponse;
     gitAvailable: boolean;
 }) {
-    const [userState, setUserState] = useUserState();
     const agents = useAgents();
-    const navigate = Route.useNavigate();
     const search = Route.useSearch();
-
-    const { data: details } = useSuspenseQuery(
-        agentDetailsQueryOptions(props.agent),
-    );
 
     const lsResult = useLiveListing(
         props.agent,
@@ -686,40 +868,8 @@ function DirectoryBrowserPage(props: {
         isLsDirectoryResponse,
     );
 
-    const showHiddenFiles = userState.showHiddenFiles;
-
-    const directories = sortFileEntries(
-        lsResult.files.filter((file) => file.type === "directory"),
-    );
-
-    const regularFiles = sortFileEntries(
-        lsResult.files.filter((file) => file.type === "file"),
-    );
-
     // A directory's default representation is its listing.
     const activeView = search.view ?? "files";
-
-    const sort: FileSort | null =
-        search.sort === undefined
-            ? null
-            : { column: search.sort, direction: search.order ?? "ascending" };
-
-    /** Keeps the order in the URL so it survives a reload and can be shared. */
-    const changeSort = (column: FileSortColumn) => {
-        const direction =
-            sort?.column === column && sort.direction === "ascending"
-                ? "descending"
-                : "ascending";
-
-        void navigate({
-            search: (previous) => ({
-                ...previous,
-                sort: column,
-                order: direction === "descending" ? direction : undefined,
-            }),
-            replace: true,
-        });
-    };
 
     return (
         <BrowserRouteShell
@@ -762,36 +912,97 @@ function DirectoryBrowserPage(props: {
                         directoryPath={lsResult.path}
                         destinationEntries={lsResult.files}
                     />
-                    <FileList
-                        key={lsResult.path}
+                    <DirectoryListing
                         agent={props.agent}
                         directoryPath={lsResult.path}
-                        files={[...directories, ...regularFiles]}
-                        showHiddenFiles={showHiddenFiles}
-                        sort={sort}
-                        onSort={changeSort}
-                        mountPoint={getMountPointForPath(
-                            details.mount_points,
-                            lsResult.path,
-                        )}
-                        actions={
-                            <DirectoryFilesActions
-                                agent={props.agent}
-                                directoryPath={lsResult.path}
-                                showHiddenFiles={showHiddenFiles}
-                                onToggleHiddenFiles={() =>
-                                    setUserState((current) => ({
-                                        ...current,
-                                        showHiddenFiles:
-                                            !current.showHiddenFiles,
-                                    }))
-                                }
-                            />
-                        }
+                        files={lsResult.files}
                     />
                 </>
             )}
         </BrowserRouteShell>
+    );
+}
+
+/**
+ * The file list with its toolbar, shared by working directories and Git revisions so both
+ * look and behave the same. A revision passes `readOnly`, which disables every action that
+ * would write into the directory.
+ */
+function DirectoryListing(props: {
+    agent: Agent;
+    directoryPath: string;
+    files: LsEntry[];
+    readOnly?: boolean;
+}) {
+    const [userState, setUserState] = useUserState();
+    const navigate = Route.useNavigate();
+    const search = Route.useSearch();
+
+    const { data: details } = useSuspenseQuery(
+        agentDetailsQueryOptions(props.agent),
+    );
+
+    const showHiddenFiles = userState.showHiddenFiles;
+
+    const directories = sortFileEntries(
+        props.files.filter((file) => file.type === "directory"),
+    );
+
+    const regularFiles = sortFileEntries(
+        props.files.filter((file) => file.type === "file"),
+    );
+
+    const sort: FileSort | null =
+        search.sort === undefined
+            ? null
+            : { column: search.sort, direction: search.order ?? "ascending" };
+
+    /** Keeps the order in the URL so it survives a reload and can be shared. */
+    const changeSort = (column: FileSortColumn) => {
+        const direction =
+            sort?.column === column && sort.direction === "ascending"
+                ? "descending"
+                : "ascending";
+
+        void navigate({
+            search: (previous) => ({
+                ...previous,
+                sort: column,
+                order: direction === "descending" ? direction : undefined,
+            }),
+            replace: true,
+        });
+    };
+
+    return (
+        <FileList
+            key={props.directoryPath}
+            agent={props.agent}
+            directoryPath={props.directoryPath}
+            files={[...directories, ...regularFiles]}
+            showHiddenFiles={showHiddenFiles}
+            sort={sort}
+            onSort={changeSort}
+            readOnly={props.readOnly}
+            mountPoint={getMountPointForPath(
+                details.mount_points,
+                props.directoryPath,
+            )}
+            actions={
+                <DirectoryFilesActions
+                    agent={props.agent}
+                    directoryPath={props.directoryPath}
+                    showHiddenFiles={showHiddenFiles}
+                    readOnly={props.readOnly}
+                    onToggleHiddenFiles={() =>
+                        setUserState((current) => ({
+                            ...current,
+                            showHiddenFiles: !current.showHiddenFiles,
+                        }))
+                    }
+                />
+            }
+        />
     );
 }
 

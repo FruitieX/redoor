@@ -155,6 +155,9 @@ impl Command {
             | Self::GitContext { .. }
             | Self::GitStatus { .. }
             | Self::GitDiff { .. }
+            | Self::GitRevisionTree { .. }
+            | Self::GitRevisionContent { .. }
+            | Self::GitCommitDiff { .. }
             | Self::MoveMetadata { .. }
             | Self::DeleteMoveSource { .. }
             | Self::OpenPath { .. }
@@ -173,7 +176,7 @@ mod tests {
     use super::*;
     use crate::api::agents::EchoRequest;
     use crate::api::files::CreationOwnershipOptions;
-    use crate::api::git::GitDiffMode;
+    use crate::api::git::worktree::GitDiffMode;
     use crate::api::search::CaseSensitivity;
     use crate::api::transfers::CopyExistingMode;
     use crate::wire::command::MoveSourceIdentity;
@@ -227,11 +230,14 @@ mod tests {
             Command::SetLoggingLevel(request::SetLoggingLevel { .. }) => 33,
             Command::Restart(request::Restart {}) => 34,
             Command::SelfExec(request::SelfExec { .. }) => 35,
+            Command::GitRevisionTree(request::GitRevisionTree { .. }) => 42,
+            Command::GitRevisionContent(request::GitRevisionContent { .. }) => 43,
+            Command::GitCommitDiff(request::GitCommitDiff { .. }) => 44,
         }
     }
 
     /// Number of variants covered by `variant_index`.
-    const VARIANT_COUNT: usize = 42;
+    const VARIANT_COUNT: usize = 45;
 
     /// Builds one instance of every command variant for table-wide policy checks.
     fn every_command() -> Vec<Command> {
@@ -370,6 +376,18 @@ mod tests {
             Command::GitDiff(request::GitDiff {
                 files: Vec::new(),
                 mode: GitDiffMode::Full,
+            }),
+            Command::GitRevisionTree(request::GitRevisionTree {
+                path: path(),
+                rev: "HEAD".to_string(),
+            }),
+            Command::GitRevisionContent(request::GitRevisionContent {
+                path: path(),
+                rev: "HEAD".to_string(),
+            }),
+            Command::GitCommitDiff(request::GitCommitDiff {
+                path: path(),
+                rev: "HEAD".to_string(),
             }),
             Command::MoveMetadata(request::MoveMetadata { path: path() }),
             Command::DeleteMoveSource(request::DeleteMoveSource {

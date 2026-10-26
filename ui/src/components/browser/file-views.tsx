@@ -52,7 +52,10 @@ import { EditorPinnedFiles } from "#ui/components/browser/editor-pinned-files";
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
 import { ToggleButton } from "#ui/components/toggle-button";
-import { fileContentQueryOptions } from "#ui/queries";
+import {
+    fileContentQueryOptions,
+    gitRevisionContentQueryOptions,
+} from "#ui/queries";
 import { useAgentSearchNavigation } from "#ui/search-navigation";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
@@ -62,6 +65,8 @@ import { MarkdownPreview } from "#ui/components/browser/markdown-preview";
 
 /** Keeps save state and editor mutations inside the representation they affect. */
 function FileEditActions(props: {
+    /** A committed revision cannot be saved or pinned as a working file. */
+    readOnly: boolean;
     statusMessage: string | null;
     hasError: boolean;
     isSaved: boolean;
@@ -100,26 +105,30 @@ ${props.selection.text}
 
     return (
         <>
-            <Button
-                tooltip="Save file (Ctrl+S)"
-                type="button"
-                aria-label="Save file"
-                onClick={props.onSave}
-                disabled={!props.canEdit || !props.isDirty}
-                isLoading={props.isSaving}
-                size="sm"
-                className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
-            >
-                <Save className="h-4 w-4" aria-hidden="true" />
-            </Button>
-            <PinButton
-                file={{
-                    agentId: props.bookmark.agentId,
-                    path: props.bookmark.path,
-                    name: props.bookmark.name,
-                    agentName: props.agentName,
-                }}
-            />
+            {props.readOnly ? null : (
+                <>
+                    <Button
+                        tooltip="Save file (Ctrl+S)"
+                        type="button"
+                        aria-label="Save file"
+                        onClick={props.onSave}
+                        disabled={!props.canEdit || !props.isDirty}
+                        isLoading={props.isSaving}
+                        size="sm"
+                        className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
+                    >
+                        <Save className="h-4 w-4" aria-hidden="true" />
+                    </Button>
+                    <PinButton
+                        file={{
+                            agentId: props.bookmark.agentId,
+                            path: props.bookmark.path,
+                            name: props.bookmark.name,
+                            agentName: props.agentName,
+                        }}
+                    />
+                </>
+            )}
             {props.preview !== undefined && props.onPreviewChange ? (
                 <ToggleButton
                     pressed={props.preview}
@@ -223,10 +232,12 @@ function EditorActionsMenu(props: {
     agent: Agent;
     path: string;
     fileName: string;
+    /** Hides file operations, which would act on the working file rather than the revision. */
+    readOnly: boolean;
     canEdit: boolean;
     isReloading: boolean;
     isSaving: boolean;
-    downloadUrl: string;
+    downloadUrl: string | null;
     onReload: () => void;
     onDelete: () => void;
 }) {
@@ -243,63 +254,73 @@ function EditorActionsMenu(props: {
         >
             {(close) => (
                 <>
-                    <ActionMenuButton
-                        disabled={!props.canEdit || props.isSaving}
-                        onClick={() => {
-                            close();
-                            props.onReload();
-                        }}
-                    >
-                        {props.isReloading ? (
-                            <LoaderCircle className="h-4 w-4 animate-spin text-slate-400" />
-                        ) : (
-                            <RefreshCw className="h-4 w-4 text-slate-400" />
-                        )}
-                        {props.isReloading ? "Reloading..." : "Reload"}
-                    </ActionMenuButton>
-                    <ActionMenuButton asChild>
-                        <a
-                            href={props.downloadUrl}
-                            download={props.fileName}
-                            onClick={close}
-                        >
-                            <Download className="h-4 w-4 text-slate-400" />
-                            Download
-                        </a>
-                    </ActionMenuButton>
-                    <ActionMenuButton
-                        tone="danger"
-                        disabled={
-                            !props.canEdit ||
-                            props.isSaving ||
-                            getImmediateParentPath(props.path) === null
-                        }
-                        onClick={() => {
-                            close();
-                            props.onDelete();
-                        }}
-                    >
-                        <Trash2 className="h-4 w-4" />
-                        Delete file
-                    </ActionMenuButton>
-                    <div className="my-1 border-t border-slate-800" />
-                    <SelectPathMenuButton
-                        agent={props.agent}
-                        path={props.path}
-                        fileName={props.fileName}
-                        entryType="file"
-                        close={close}
-                    />
-                    <BookmarkMenuButton
-                        bookmark={{
-                            agentId: props.agent.id,
-                            path: props.path,
-                            name: props.fileName,
-                            entryType: "file",
-                        }}
-                        close={close}
-                    />
-                    <div className="my-1 border-t border-slate-800" />
+                    {props.readOnly ? null : (
+                        <>
+                            <ActionMenuButton
+                                disabled={!props.canEdit || props.isSaving}
+                                onClick={() => {
+                                    close();
+                                    props.onReload();
+                                }}
+                            >
+                                {props.isReloading ? (
+                                    <LoaderCircle className="h-4 w-4 animate-spin text-slate-400" />
+                                ) : (
+                                    <RefreshCw className="h-4 w-4 text-slate-400" />
+                                )}
+                                {props.isReloading ? "Reloading..." : "Reload"}
+                            </ActionMenuButton>
+                        </>
+                    )}
+                    {props.downloadUrl === null ? null : (
+                        <ActionMenuButton asChild>
+                            <a
+                                href={props.downloadUrl}
+                                download={props.fileName}
+                                onClick={close}
+                            >
+                                <Download className="h-4 w-4 text-slate-400" />
+                                Download
+                            </a>
+                        </ActionMenuButton>
+                    )}
+                    {props.readOnly ? null : (
+                        <>
+                            <ActionMenuButton
+                                tone="danger"
+                                disabled={
+                                    !props.canEdit ||
+                                    props.isSaving ||
+                                    getImmediateParentPath(props.path) === null
+                                }
+                                onClick={() => {
+                                    close();
+                                    props.onDelete();
+                                }}
+                            >
+                                <Trash2 className="h-4 w-4" />
+                                Delete file
+                            </ActionMenuButton>
+                            <div className="my-1 border-t border-slate-800" />
+                            <SelectPathMenuButton
+                                agent={props.agent}
+                                path={props.path}
+                                fileName={props.fileName}
+                                entryType="file"
+                                close={close}
+                            />
+                            <BookmarkMenuButton
+                                bookmark={{
+                                    agentId: props.agent.id,
+                                    path: props.path,
+                                    name: props.fileName,
+                                    entryType: "file",
+                                }}
+                                close={close}
+                            />
+                            <div className="my-1 border-t border-slate-800" />
+                        </>
+                    )}
                     <Checkbox
                         checked={userState.wrapEditorLines}
                         label="Wrap lines"
@@ -356,10 +377,11 @@ function FileEditorSecondaryActions(props: {
     agent: Agent;
     path: string;
     fileName: string;
+    readOnly: boolean;
     canEdit: boolean;
     isReloading: boolean;
     isSaving: boolean;
-    downloadUrl: string;
+    downloadUrl: string | null;
     isFullWindow: boolean;
     onToggleFullWindow: () => void;
     onReload: () => void;
@@ -407,6 +429,7 @@ function FileEditorSecondaryActions(props: {
                 agent={props.agent}
                 path={props.path}
                 fileName={props.fileName}
+                readOnly={props.readOnly}
                 canEdit={props.canEdit}
                 isReloading={props.isReloading}
                 isSaving={props.isSaving}
@@ -521,6 +544,7 @@ function FileEditorSurface(props: {
 
 /** Chooses the single editor status announced beside file actions. */
 function getFileEditorStatus(props: {
+    readOnly: boolean;
     isLoading: boolean;
     loadError?: Error;
     isSaving: boolean;
@@ -541,6 +565,8 @@ function getFileEditorStatus(props: {
     if (props.saveError) {
         return getErrorMessage(props.saveError, "Failed to save file");
     }
+
+    if (props.readOnly) return "Read-only revision";
 
     return props.isDirty ? "Unsaved changes" : null;
 }
@@ -611,9 +637,15 @@ type FileEditViewProps = {
     agent: Agent;
     fileName: string;
     filePath: string;
+    /**
+     * Shows the file as committed at this Git revision instead of the working file. The
+     * editor is then read-only and offers no save, reload or file operations.
+     */
+    revision?: string;
     repositoryRoot: string | null;
     mimeType: string;
-    downloadUrl: string;
+    /** Absent when the shown content has no raw download, such as a Git revision. */
+    downloadUrl: string | null;
     scrollToLine?: number;
     preview: boolean;
     onPreviewChange: (preview: boolean) => void;
@@ -623,6 +655,7 @@ type FileEditViewProps = {
 
 /** Groups editor toolbar actions so the edit view can stay focused on buffer state. */
 function FileEditHeader(props: {
+    readOnly: boolean;
     fileName: string;
     statusMessage: string | null;
     hasError: boolean;
@@ -636,7 +669,7 @@ function FileEditHeader(props: {
     preview: boolean | undefined;
     isSearchOpen: boolean;
     isReloading: boolean;
-    downloadUrl: string;
+    downloadUrl: string | null;
     isFullWindow: boolean;
     onSave: () => void;
     onToggleSearch: () => void;
@@ -653,6 +686,7 @@ function FileEditHeader(props: {
             <div className="flex flex-wrap items-center justify-between gap-1">
                 <div className="flex flex-wrap items-center justify-start gap-2">
                     <FileEditActions
+                        readOnly={props.readOnly}
                         statusMessage={props.statusMessage}
                         hasError={props.hasError}
                         isSaved={props.isSaved}
@@ -678,6 +712,7 @@ function FileEditHeader(props: {
                     agent={props.agent}
                     path={props.filePath}
                     fileName={props.fileName}
+                    readOnly={props.readOnly}
                     canEdit={props.canEdit}
                     isReloading={props.isReloading}
                     isSaving={props.isSaving}
@@ -704,8 +739,9 @@ export function FileEditView(props: FileEditViewProps) {
 
     const isDeletedRef = React.useRef(false);
     const [userState] = useUserState();
+    const readOnly = props.revision !== undefined;
     const fileQuery = fileContentQueryOptions(props.agent, props.filePath);
-    const contentQuery = useQuery(fileQuery);
+    const contentQuery = useEditorContentQuery(props);
     const [draft, setDraft] = React.useState<string | null>(null);
 
     const [selection, setSelection] = React.useState<EditorSelection | null>(
@@ -751,7 +787,7 @@ export function FileEditView(props: FileEditViewProps) {
     });
 
     // Saving must not flip CodeMirror read-only, or Mod-s and :w steal editor focus.
-    const canEdit = contentQuery.isSuccess;
+    const canEdit = contentQuery.isSuccess && !readOnly;
 
     const isMarkdown =
         syntaxLanguageFromFileName(props.fileName) === "markdown";
@@ -784,15 +820,9 @@ export function FileEditView(props: FileEditViewProps) {
         reloadPromiseRef.current = reloadPromise;
     }, [canEdit, contentQuery, saveMutation]);
 
-    const handleReload = () => {
-        if (isDirty) {
-            setReloadConfirmationOpen(true);
-
-            return;
-        }
-
-        reloadFile();
-    };
+    // A dirty buffer asks before its edits are replaced.
+    const handleReload = () =>
+        isDirty ? setReloadConfirmationOpen(true) : reloadFile();
 
     const handleSave = React.useCallback(() => {
         if (!canEdit || saveMutation.isPending || !isDirty) {
@@ -805,6 +835,7 @@ export function FileEditView(props: FileEditViewProps) {
     useFileSaveShortcut(handleSave);
 
     const statusMessage = getFileEditorStatus({
+        readOnly,
         isLoading: contentQuery.isPending,
         loadError: contentQuery.isError ? contentQuery.error : undefined,
         isSaving: saveMutation.isPending,
@@ -829,6 +860,7 @@ export function FileEditView(props: FileEditViewProps) {
                     />
                 ) : null}
                 <FileEditHeader
+                    readOnly={readOnly}
                     fileName={props.fileName}
                     statusMessage={statusMessage}
                     hasError={contentQuery.isError || saveMutation.isError}
@@ -927,6 +959,35 @@ export function FileEditView(props: FileEditViewProps) {
             />
         </div>
     );
+}
+
+/**
+ * Reads the text the editor shows: the working file, or the committed file when a revision
+ * is browsed. A revision has its own query key, so it never shares a buffer with the
+ * working file, and only the query for the shown source runs.
+ */
+function useEditorContentQuery(props: {
+    agent: Agent;
+    filePath: string;
+    revision?: string;
+}) {
+    const readOnly = props.revision !== undefined;
+
+    const worktreeContentQuery = useQuery({
+        ...fileContentQueryOptions(props.agent, props.filePath),
+        enabled: !readOnly,
+    });
+
+    const revisionContentQuery = useQuery({
+        ...gitRevisionContentQueryOptions(
+            props.agent,
+            props.filePath,
+            props.revision ?? "",
+        ),
+        enabled: readOnly,
+    });
+
+    return readOnly ? revisionContentQuery : worktreeContentQuery;
 }
 
 /**

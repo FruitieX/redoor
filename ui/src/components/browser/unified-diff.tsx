@@ -90,7 +90,10 @@ function appendEditorLineLinks(root: HTMLElement, editorHref: string) {
 
         codeCell.classList.add("d2h-editor-line-cell");
         const link = document.createElement("a");
-        link.href = `${editorHref}?line=${String(line)}`;
+        // The editor URL may already carry a query, such as the browsed Git revision.
+        const lineUrl = new URL(editorHref, window.location.origin);
+        lineUrl.searchParams.set("line", String(line));
+        link.href = `${lineUrl.pathname}${lineUrl.search}`;
         link.dataset.editorLine = String(line);
         link.className = "d2h-editor-line-link";
         link.setAttribute("aria-label", `Open line ${String(line)} in editor`);

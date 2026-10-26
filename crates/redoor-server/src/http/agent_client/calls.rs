@@ -10,9 +10,10 @@ use super::AgentCall;
 use redoor_protocol::api::search::{FindRequest, GrepRequest};
 pub(crate) use redoor_protocol::wire::request::{
     ChmodPath, ChownPath, ContentGrep, CreateDirectory, DeletePartial, DirectorySize, Echo,
-    EmptyTrash, FileSearch, GetAgentDetails, GetLoggingLevel, GitContext, GitDiff, GitStatus,
-    ListAccounts, ListPartials, ListTrash, Ls, Metadata, MoveMetadata, OpenPath, ProbePartial,
-    RawDelete, ReadPartial, RenamePath, Restart, RestoreTrash, SelfExec, SetLoggingLevel, Trash,
+    EmptyTrash, FileSearch, GetAgentDetails, GetLoggingLevel, GitCommitDiff, GitContext, GitDiff,
+    GitRevisionContent, GitRevisionTree, GitStatus, ListAccounts, ListPartials, ListTrash, Ls,
+    Metadata, MoveMetadata, OpenPath, ProbePartial, RawDelete, ReadPartial, RenamePath, Restart,
+    RestoreTrash, SelfExec, SetLoggingLevel, Trash,
 };
 use std::time::Duration;
 
@@ -62,6 +63,9 @@ standard_calls! {
     GitContext => "reading git context",
     GitStatus => "reading git status",
     GitDiff => "reading git diff",
+    GitRevisionTree => "reading a git revision tree",
+    GitRevisionContent => "reading a file at a git revision",
+    GitCommitDiff => "reading a git commit diff",
     GetAgentDetails => "fetching agent details",
     SelfExec => "starting the upgraded agent",
 }
