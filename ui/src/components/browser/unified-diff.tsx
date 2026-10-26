@@ -134,6 +134,11 @@ export function UnifiedDiff(props: {
      * comes from the reader's stored preference, which the diff views own.
      */
     mergeModifiedLines?: boolean;
+    /**
+     * Whether long lines wrap inside the view instead of scrolling it sideways. It comes from
+     * the reader's stored preference, which the diff views own.
+     */
+    wrapLines?: boolean;
 }) {
     const mergeModifiedLines = props.mergeModifiedLines ?? true;
     const editorDeviceName = props.editorFile?.deviceName;
@@ -189,6 +194,7 @@ export function UnifiedDiff(props: {
                                         : `Changes in ${name}`
                                 }
                                 editorRoute={editorRoute}
+                                wrapLines={props.wrapLines ?? false}
                             />
                         ) : (
                             <p className="px-3 py-2 text-sm text-slate-400">

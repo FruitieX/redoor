@@ -12,6 +12,7 @@ import { SegmentedControl } from "#ui/components/segmented-control";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
 import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
+import { useUserState } from "#ui/user-state";
 import {
     GitDiffCollapseControls,
     GitDiffList,
@@ -324,6 +325,7 @@ export function GitDiffResultView(props: {
 }) {
     // Every Git diff follows the one layout preference its view's bar switches.
     const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
+    const [userState] = useUserState();
 
     if (props.result.type === "text") {
         return (
@@ -332,6 +334,7 @@ export function GitDiffResultView(props: {
                 emptyMessage="No changes in this comparison."
                 editorFile={props.editorFile}
                 mergeModifiedLines={mergeModifiedLines}
+                wrapLines={userState.wrapDiffLines}
             />
         );
     }

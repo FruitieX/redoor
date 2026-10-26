@@ -25,6 +25,7 @@ import { DestinationConflictDialog } from "#ui/components/browser/destination-co
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
 import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
+import { useUserState } from "#ui/user-state";
 import { getPathLoadError } from "#ui/components/browser/utils";
 import {
     WATCHED_TRANSFER_POLL_MS,
@@ -910,6 +911,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
 function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     const diff = props.workspace.diff;
     const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
+    const [userState] = useUserState();
 
     if (diff.errorMessage !== null) {
         return (
@@ -937,6 +939,7 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
             <UnifiedDiff
                 unifiedDiff={diff.unifiedDiff}
                 mergeModifiedLines={mergeModifiedLines}
+                wrapLines={userState.wrapDiffLines}
             />
         </section>
     );

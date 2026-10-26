@@ -339,6 +339,7 @@ const Line = React.memo(function Line(props: {
     newTokens: HighlightToken[] | undefined;
     editorRoute: DiffEditorRoute | null;
     numberWidth: number;
+    wrapLines: boolean;
 }) {
     const line = props.line;
     const parts = rowParts(line, props.oldTokens, props.newTokens);
@@ -358,7 +359,12 @@ const Line = React.memo(function Line(props: {
                 data-line-kind={line.kind}
                 data-line-old={line.oldLineNumber ?? undefined}
                 data-line-new={line.newLineNumber ?? undefined}
-                className={ROW_CLASSES[line.kind]}
+                // A wrapped line spans several visual rows, so its number and Open link
+                // stay beside its first one.
+                className={cn(
+                    ROW_CLASSES[line.kind],
+                    props.wrapLines && "align-top",
+                )}
             >
                 <Gutter
                     kind={line.kind}
@@ -366,7 +372,14 @@ const Line = React.memo(function Line(props: {
                     newLineNumber={line.newLineNumber}
                     numberWidth={props.numberWidth}
                 />
-                <td className="w-full whitespace-pre pl-2 pr-4">
+                <td
+                    className={cn(
+                        "w-full pl-2 pr-4",
+                        props.wrapLines
+                            ? "whitespace-pre-wrap wrap-anywhere"
+                            : "whitespace-pre",
+                    )}
+                >
                     <Tag className="no-underline">
                         {parts.map((part, index) =>
                             part.type === "insert" ? (
@@ -392,7 +405,12 @@ const Line = React.memo(function Line(props: {
                         )}
                     </Tag>
                 </td>
-                <td className="select-none whitespace-nowrap py-px pr-2 text-right align-middle">
+                <td
+                    className={cn(
+                        "select-none whitespace-nowrap py-px pr-2 text-right",
+                        !props.wrapLines && "align-middle",
+                    )}
+                >
                     {props.editorRoute === null || openLine === null ? null : (
                         // Only new-side lines exist in the current file, so only they open.
                         <LinkButton
@@ -457,6 +475,7 @@ export function Hunk(props: {
     highlight: FileHighlight | null;
     editorRoute: DiffEditorRoute | null;
     numberWidth: number;
+    wrapLines: boolean;
 }) {
     return props.hunk.lines.map((line, index) => (
         <Line
@@ -474,6 +493,7 @@ export function Hunk(props: {
             }
             editorRoute={props.editorRoute}
             numberWidth={props.numberWidth}
+            wrapLines={props.wrapLines}
         />
     ));
 }
@@ -497,13 +517,15 @@ function lineNumberWidth(file: DiffFile): number {
 
 /**
  * One file's rows as a table. It scrolls sideways inside its own box, so wide lines never
- * widen the page or the file header above them. Highlighting is memoized on the parsed file,
- * so re-rendering a large diff does not highlight it again.
+ * widen the page or the file header above them, unless `wrapLines` fits them to the box
+ * for readers who would rather not scroll. Highlighting is memoized on the parsed file, so
+ * re-rendering a large diff does not highlight it again.
  */
 export function Diff(props: {
     file: DiffFile;
     label: string;
     editorRoute: DiffEditorRoute | null;
+    wrapLines: boolean;
 }) {
     const file = props.file;
     // A grammar that loads lazily renders plain rows first and colours them once loaded.
@@ -521,7 +543,10 @@ export function Diff(props: {
         <div className="w-full min-w-0 overflow-x-auto overflow-y-hidden">
             <table
                 aria-label={props.label}
-                className="syntax-highlight w-max min-w-full border-separate border-spacing-0 bg-surface font-mono text-code leading-5 text-slate-200 max-sm:leading-4"
+                className={cn(
+                    "syntax-highlight border-separate border-spacing-0 bg-surface font-mono text-code leading-5 text-slate-200 max-sm:leading-4",
+                    props.wrapLines ? "w-full" : "w-max min-w-full",
+                )}
             >
                 <tbody>
                     {file.hunks.map((hunk, index) =>
@@ -532,6 +557,7 @@ export function Diff(props: {
                                 highlight={highlight}
                                 editorRoute={props.editorRoute}
                                 numberWidth={numberWidth}
+                                wrapLines={props.wrapLines}
                             />
                         ) : (
                             <SkipBlockRow

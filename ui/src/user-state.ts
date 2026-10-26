@@ -41,6 +41,7 @@ export const userStateSchema = z.object({
     pinnedFiles: z.array(pinnedFileSchema).catch([]),
     vimMode: z.boolean().catch(false),
     wrapEditorLines: z.boolean().catch(false),
+    wrapDiffLines: z.boolean().catch(false),
     recursiveSearchTimeoutSeconds: z.number().int().min(1).max(60).catch(5),
     recursiveSearchIncludeHidden: z.boolean().catch(false),
     recursiveSearchRespectGitignore: z.boolean().catch(true),
