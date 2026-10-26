@@ -116,6 +116,7 @@ impl RouterState {
             return;
         }
         let remote = target.source_agent_id != target.dest_agent_id;
+        let streamed = remote || target.source_rev.is_some();
         let then = match (target.operation, target.source_identity.clone()) {
             (CopyOperation::Copy, _) => None,
             (CopyOperation::Move, Some(identity)) => Some(DeleteSource {
@@ -132,7 +133,7 @@ impl RouterState {
             }
         };
 
-        if remote
+        if streamed
             && self.flows.uploads_into(&target.dest_agent_id)
                 >= super::upload::MAX_UPLOADS_PER_CONNECTION
         {
@@ -186,7 +187,7 @@ impl RouterState {
             Some(verification) if remote && target.partial.is_some() && verification.end > 0 => {
                 self.start_prefix_verification(flow_id, target, then, verification)
             }
-            _ if remote => self.start_remote_copy(flow_id, &target, then),
+            _ if streamed => self.start_remote_copy(flow_id, &target, then),
             _ => self.start_local_copy(flow_id, &target, then),
         };
         if !queued {
@@ -557,7 +558,8 @@ impl RouterState {
     }
 
     /// Opens both streams and the forwarder, then starts the destination upload; the source
-    /// download waits for the destination's readiness.
+    /// download waits for the destination's readiness. Copies from Git history take this path
+    /// on one agent too, with the agent as both source and destination.
     fn start_remote_copy(
         &mut self,
         flow_id: FlowId,
@@ -602,6 +604,7 @@ impl RouterState {
             .upload_command(target.dest_path.clone(), target.on_existing);
         if let Command::RawUpload(raw) = &mut upload {
             raw.partial = target.partial.clone();
+            raw.executable = target.executable;
         }
         let queued = dest_agent.send_command(dest_id, upload);
         self.flows.insert(
@@ -618,16 +621,24 @@ impl RouterState {
                     source,
                     dest,
                     stage: RemoteStage::AwaitingDestination {
-                        source_command: {
-                            let mut command = target
-                                .content_kind
-                                .download_command(target.source_path.clone());
-                            if let Command::RawDownload(raw) = &mut command {
-                                raw.range_start =
-                                    target.partial.as_ref().map(|partial| partial.offset);
-                                raw.expected_identity = target.source_identity.clone();
+                        source_command: match &target.source_rev {
+                            // History streams a file or a plain tar, matching the upload kind.
+                            Some(rev) => Command::GitDownload(request::GitDownload {
+                                path: target.source_path.clone(),
+                                rev: rev.clone(),
+                                include_root: false,
+                            }),
+                            None => {
+                                let mut command = target
+                                    .content_kind
+                                    .download_command(target.source_path.clone());
+                                if let Command::RawDownload(raw) = &mut command {
+                                    raw.range_start =
+                                        target.partial.as_ref().map(|partial| partial.offset);
+                                    raw.expected_identity = target.source_identity.clone();
+                                }
+                                command
                             }
-                            command
                         },
                     },
                     source_finished: false,

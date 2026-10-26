@@ -129,7 +129,10 @@ impl RouterState {
         if matches!(flow.phase, OutputPhase::Canceling { .. }) {
             return;
         }
-        flow.lease.fail(CREDIT_VIOLATION.to_string());
+        flow.lease.fail(CommandError::new(
+            CommandErrorKind::Internal,
+            CREDIT_VIOLATION,
+        ));
         if let OutputKind::Download { progress_id, .. } = flow.kind {
             self.mark_transfer_errored(progress_id, CREDIT_VIOLATION.to_string());
             self.notify_transfer_refresh();
@@ -170,10 +173,6 @@ impl RouterState {
         let Some(Flow::Output(flow)) = self.flows.remove(flow_id) else {
             return;
         };
-        if let Some(connection) = self.agents.by_id.get(&flow.agent_id) {
-            // A failed stream sent no FIN; this ends its consumer after the queued frames.
-            connection.streams.close_inbound(flow.request_id);
-        }
         let canceling = matches!(flow.phase, OutputPhase::Canceling { .. });
         match &flow.kind {
             OutputKind::Execution { terminal } => {
@@ -185,14 +184,19 @@ impl RouterState {
             OutputKind::Download { progress_id, .. } => {
                 let progress_id = *progress_id;
                 match response.result {
-                    CommandOutcome::Error(CommandError { message, .. }) => {
-                        self.mark_transfer_errored(progress_id, message.clone());
-                        flow.lease.fail(message);
+                    CommandOutcome::Error(error) => {
+                        self.mark_transfer_errored(progress_id, error.message.clone());
+                        flow.lease.fail(error);
                     }
                     _ => self.complete_download(&flow, progress_id),
                 }
                 self.notify_transfer_refresh();
             }
+        }
+        if let Some(connection) = self.agents.by_id.get(&flow.agent_id) {
+            // Store a typed failure before closing the queue, or a concurrent consumer
+            // could observe EOF before the error explaining why no FIN arrived.
+            connection.streams.close_inbound(flow.request_id);
         }
     }
 
@@ -599,7 +603,13 @@ mod tests {
         );
         assert_eq!(output.recv().await.unwrap().unwrap().data, b"partial");
         // The failure arrives after the data, as on the wire.
-        assert_eq!(output.recv().await, Some(Err("disk gone".to_string())));
+        assert_eq!(
+            output.recv().await,
+            Some(Err(CommandError::new(
+                CommandErrorKind::Internal,
+                "disk gone"
+            )))
+        );
         let entry = &fixture.state.progress.entries[&id.as_transfer_id()];
         // The history row carries the agent's reason.
         assert!(matches!(entry.state, TransferProgressState::Errored));

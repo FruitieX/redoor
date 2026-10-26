@@ -39,6 +39,12 @@ pub struct CopyFileRequest {
     /// Auto reuses verified partials; restart deliberately begins from zero.
     #[serde(default)]
     pub resume: ResumeMode,
+    /// Reads the source as committed at this Git revision (a commit id, branch or tag)
+    /// instead of from the working tree, so an older version can be restored in place or
+    /// copied to another device. Only copies accept it: a revision cannot be deleted, so
+    /// there is nothing to move.
+    #[serde(default)]
+    pub source_rev: Option<String>,
 }
 
 /// Returns the public id used to follow asynchronous copy progress.

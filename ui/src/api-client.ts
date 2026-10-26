@@ -663,6 +663,15 @@ export class Agent {
         return url;
     }
 
+    /**
+     * Builds the download URL of a path as committed at a revision: a file's bytes, or a
+     * directory as a .tar.gz. Pass the resolved commit id so the download cannot follow a
+     * branch that moved after the page loaded.
+     */
+    getGitDownloadUrl(path: string, rev: string): string {
+        return this.revisionUrl("git/download", path, rev);
+    }
+
     /** Builds the authenticated browser endpoint for one ephemeral agent log tunnel. */
     getLogsWebSocketUrl(): string {
         const url = new URL(
@@ -824,6 +833,8 @@ export class Agent {
         options?: {
             on_existing?: CopyExistingMode;
             resume?: ResumeMode;
+            /** Copies the source as committed at this Git revision instead of the worktree. */
+            sourceRev?: string;
         },
     ): Promise<CopyFileResponse> {
         encodeFilesystemPath(sourcePath);
@@ -837,6 +848,7 @@ export class Agent {
             dest: destination,
             on_existing: options?.on_existing ?? "error",
             resume: options?.resume ?? "auto",
+            source_rev: options?.sourceRev ?? null,
         };
 
         return apiRequest<CopyFileResponse>(

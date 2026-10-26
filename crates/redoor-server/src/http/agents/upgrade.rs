@@ -98,6 +98,7 @@ async fn upload_upgrade_binary(
         path: destination_path.to_string(),
         on_existing: redoor_protocol::api::transfers::CopyExistingMode::Override,
         ownership: redoor_protocol::api::files::CreationOwnershipOptions::default(),
+        executable: false,
     });
     let upload = AgentUpload::start(
         &state.router_ref,

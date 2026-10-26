@@ -9,10 +9,13 @@ import { IconButton } from "#ui/components/icon-button";
 import { useAgents } from "#ui/use-agents";
 import {
     clearSelectedFilesAtom,
+    getSelectedFileKey,
     selectedFilesAtom,
     unselectFileAtom,
     type SelectedPath,
+    type SelectedPathIdentity,
 } from "#ui/selected-files";
+import { RevisionBadge } from "#ui/components/browser/git-parts";
 
 /** Keeps the drawer tab's count in a leaf so selection changes never rerender the drawer. */
 export function SelectedFilesBadge() {
@@ -50,6 +53,8 @@ function findAgent(
 /**
  * Opens a selected path on its device. The link carries the device's current name, so it
  * follows a rename; while the device is absent from the inventory there is nothing to open.
+ * A path selected in Git history opens at its commit, and a worktree path always leaves
+ * history, so neither inherits the revision currently browsed.
  */
 function SelectedFileLink(props: {
     agent: Agent | undefined;
@@ -60,17 +65,26 @@ function SelectedFileLink(props: {
         return (
             <span className={`${props.className} text-slate-400`}>
                 {props.file.fileName}
+                {props.file.rev === undefined ? null : (
+                    <RevisionBadge commitId={props.file.rev} />
+                )}
             </span>
         );
     }
 
     return (
-        <Link
-            {...browserRoute(props.agent, props.file.path)}
-            className={`${props.className} text-blue-400 hover:underline`}
-        >
-            {props.file.fileName}
-        </Link>
+        <span className={props.className}>
+            <Link
+                {...browserRoute(props.agent, props.file.path)}
+                search={{ rev: props.file.rev }}
+                className="text-blue-400 hover:underline"
+            >
+                {props.file.fileName}
+            </Link>
+            {props.file.rev === undefined ? null : (
+                <RevisionBadge commitId={props.file.rev} />
+            )}
+        </span>
     );
 }
 
@@ -78,14 +92,14 @@ function SelectedFileLink(props: {
 function SelectedFilesTable(props: {
     agents: Agent[];
     selectedFiles: SelectedPath[];
-    onUnselectFile: (file: Pick<SelectedPath, "agentId" | "path">) => void;
+    onUnselectFile: (file: SelectedPathIdentity) => void;
 }) {
     return (
         <div className="h-full overflow-auto bg-surface">
             <ul className="divide-y divide-slate-800/70 md:hidden">
                 {props.selectedFiles.map((file) => (
                     <li
-                        key={`${file.agentId}:${file.path}`}
+                        key={getSelectedFileKey(file)}
                         className="flex min-w-0 items-start gap-3 p-3"
                     >
                         <div className="min-w-0 flex-1">
@@ -106,12 +120,7 @@ function SelectedFilesTable(props: {
                             type="button"
                             label={`Unselect ${file.fileName}`}
                             tooltipClassName="shrink-0"
-                            onClick={() =>
-                                props.onUnselectFile({
-                                    agentId: file.agentId,
-                                    path: file.path,
-                                })
-                            }
+                            onClick={() => props.onUnselectFile(file)}
                             variant="outline"
                             size="lg"
                             className="shrink-0"
@@ -141,7 +150,7 @@ function SelectedFilesTable(props: {
                 <tbody>
                     {props.selectedFiles.map((file) => (
                         <tr
-                            key={`${file.agentId}:${file.path}`}
+                            key={getSelectedFileKey(file)}
                             className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint align-top"
                         >
                             <td className="p-3">
@@ -167,12 +176,7 @@ function SelectedFilesTable(props: {
                                     type="button"
                                     variant="secondary"
                                     aria-label={`Unselect ${file.fileName}`}
-                                    onClick={() =>
-                                        props.onUnselectFile({
-                                            agentId: file.agentId,
-                                            path: file.path,
-                                        })
-                                    }
+                                    onClick={() => props.onUnselectFile(file)}
                                     size="sm"
                                     className="py-1.5 text-xs"
                                 >

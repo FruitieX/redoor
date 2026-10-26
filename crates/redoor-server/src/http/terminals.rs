@@ -309,7 +309,7 @@ async fn forward_browser_frame(frame: WsMessage, input: &TerminalInput) -> Resul
 /// One thing the agent side produced for the browser.
 enum AgentOutput {
     Event(Option<TerminalServerMessage>),
-    Output(Option<Result<StreamChunk, String>>),
+    Output(Option<Result<StreamChunk, redoor_protocol::wire::request::CommandError>>),
     Keepalive,
 }
 
@@ -332,8 +332,14 @@ async fn forward_agent_to_browser(
             _ = keepalive.tick() => AgentOutput::Keepalive,
         };
         match next {
-            AgentOutput::Output(Some(Err(message))) => {
-                return finish(&mut browser, &TerminalServerMessage::Error { message }).await;
+            AgentOutput::Output(Some(Err(error))) => {
+                return finish(
+                    &mut browser,
+                    &TerminalServerMessage::Error {
+                        message: error.message,
+                    },
+                )
+                .await;
             }
             AgentOutput::Output(Some(Ok(chunk))) if chunk.is_last => {
                 send_output(&mut browser, chunk).await?;

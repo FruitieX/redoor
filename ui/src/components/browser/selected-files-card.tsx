@@ -34,6 +34,7 @@ import {
     selectedFilesAtom,
     clearSelectedFilesAtom,
     getSelectedFileKey,
+    hasRevisionSelection,
     unselectFileAtom,
     type SelectedPath,
 } from "#ui/selected-files";
@@ -173,9 +174,13 @@ async function waitForPendingTransfers(props: {
 
 /**
  * Hides Copy/Move when every item would land on itself or a selected
- * directory would be nested inside its own tree.
+ * directory would be nested inside its own tree. Items selected in Git history are read
+ * from a commit, so they never land on themselves (copying one over its working file is a
+ * restore) and cannot recurse into their own copy; they hide Move, which cannot delete a
+ * commit.
  */
 function canTransferSelectedFiles(props: {
+    operation: SelectedFilesTransferOperation;
     selectedFiles: SelectedPath[];
     destinationAgentId: string;
     directoryPath: string;
@@ -187,22 +192,31 @@ function canTransferSelectedFiles(props: {
         props.selectedFiles.length === 0 ||
         props.isTransferring ||
         props.isSiblingTransferring ||
-        props.isRoutePending
+        props.isRoutePending ||
+        (props.operation === "move" &&
+            hasRevisionSelection(props.selectedFiles))
     ) {
         return false;
     }
 
-    const allLandOnThemselves = props.selectedFiles.every(
-        (file) =>
-            file.agentId === props.destinationAgentId &&
-            file.path === joinBrowserPath(props.directoryPath, file.fileName),
+    const worktreeFiles = props.selectedFiles.filter(
+        (file) => file.rev === undefined,
     );
+
+    const allLandOnThemselves =
+        worktreeFiles.length === props.selectedFiles.length &&
+        worktreeFiles.every(
+            (file) =>
+                file.agentId === props.destinationAgentId &&
+                file.path ===
+                    joinBrowserPath(props.directoryPath, file.fileName),
+        );
 
     if (allLandOnThemselves) {
         return false;
     }
 
-    return !props.selectedFiles.some(
+    return !worktreeFiles.some(
         (file) =>
             file.entryType === "directory" &&
             file.agentId === props.destinationAgentId &&
@@ -257,7 +271,7 @@ function useTransferStarts(props: {
                             const response = await sourceAgent.copyTo(
                                 destination,
                                 file.path,
-                                options,
+                                { ...options, sourceRev: file.rev },
                             );
 
                             return response.copy_request_id;
@@ -326,6 +340,7 @@ function TransferSelectedFilesAction(props: {
     const isTransferring = transferState.type === "transferring";
 
     const canTransfer = canTransferSelectedFiles({
+        operation: props.operation,
         selectedFiles,
         destinationAgentId: props.destinationAgent.id,
         directoryPath: props.directoryPath,
@@ -409,10 +424,7 @@ function TransferSelectedFilesAction(props: {
             activeTransferRef.current = null;
 
             completedFiles.forEach((file) => {
-                unselectFile({
-                    agentId: file.agentId,
-                    path: file.path,
-                });
+                unselectFile(file);
             });
 
             if (failures.length > 0) {
@@ -663,7 +675,9 @@ export function SelectedFilesCard(props: {
     const directoryCount = selectedFiles.length - fileCount;
     const isMobile = useIsBelowBreakpoint("sm");
     const hasSelection = selectedFiles.length > 0;
-    const canDelete = hasSelection;
+    // A commit cannot be deleted or archived by a shell in this directory, only copied.
+    const selectsHistory = hasRevisionSelection(selectedFiles);
+    const canDelete = hasSelection && !selectsHistory;
     const selectionSummary = `${fileCount} ${fileCount === 1 ? "file" : "files"}, ${directoryCount} ${directoryCount === 1 ? "directory" : "directories"} selected`;
 
     // Clearing the selection dismisses the delete prompt. Resetting while rendering keeps it from
@@ -688,11 +702,13 @@ export function SelectedFilesCard(props: {
         path: file.path,
     }));
 
-    const createArchiveError = getCreateArchiveSelectionError({
-        sources: archiveSources,
-        agentId: props.destinationAgent.id,
-        directoryPath: props.directoryPath,
-    });
+    const createArchiveError = selectsHistory
+        ? "Archives can only be created from working files. Copy items from Git history first."
+        : getCreateArchiveSelectionError({
+              sources: archiveSources,
+              agentId: props.destinationAgent.id,
+              directoryPath: props.directoryPath,
+          });
 
     const deleteTargets: DeletePathTarget[] = selectedFiles.map((file) => ({
         agent: agentsById.get(file.agentId) ?? null,
@@ -812,15 +828,13 @@ export function SelectedFilesCard(props: {
                         targets.forEach((target) => {
                             const selected = selectedFiles.find(
                                 (file) =>
+                                    file.rev === undefined &&
                                     file.path === target.path &&
                                     file.agentId === target.agent?.id,
                             );
 
                             if (selected) {
-                                unselectFile({
-                                    agentId: selected.agentId,
-                                    path: selected.path,
-                                });
+                                unselectFile(selected);
                             }
                         });
 
@@ -840,12 +854,7 @@ export function SelectedFilesCard(props: {
                 >
                     <AffectedPathsList
                         paths={selectedFiles}
-                        onDeselect={(path) =>
-                            unselectFile({
-                                agentId: path.agentId,
-                                path: path.path,
-                            })
-                        }
+                        onDeselect={(path) => unselectFile(path)}
                     />
                 </DeletePathsDialog>
             ) : null}

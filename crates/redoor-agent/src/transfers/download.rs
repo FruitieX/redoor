@@ -21,6 +21,10 @@ use redoor_protocol::{
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt},
@@ -31,10 +35,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Producer of one download's payload bytes.
 pub(crate) trait ByteSource: Send {
-    /// Returns the next block of payload, `None` at end of stream, or a terminal error message.
+    /// Returns the next block of payload, `None` at end of stream, or a typed terminal failure.
     ///
     /// Must be cancellation safe: the driver drops it when cancellation wins.
-    fn next_block(&mut self) -> impl Future<Output = Result<Option<Vec<u8>>, String>> + Send;
+    fn next_block(&mut self) -> impl Future<Output = Result<Option<Vec<u8>>, CommandError>> + Send;
 
     /// Stops background producers and waits for them so nothing outlives the stream.
     fn finish(self) -> impl Future<Output = ()> + Send;
@@ -44,7 +48,7 @@ pub(crate) trait ByteSource: Send {
 enum DownloadEnd {
     Complete,
     Canceled,
-    Failed(String),
+    Failed(CommandError),
     Disconnected,
 }
 
@@ -85,7 +89,10 @@ impl DownloadDriver {
     /// order is: stop reading, shut the producer down, unregister the request, then report.
     /// A successful stream keeps its registration until `FIN` is written so a late cancel
     /// still reaches it.
-    pub(crate) async fn run<S: ByteSource>(mut self, opened: Result<S, String>) -> DownloadOutcome {
+    pub(crate) async fn run<S: ByteSource>(
+        mut self,
+        opened: Result<S, CommandError>,
+    ) -> DownloadOutcome {
         let mut source = match opened {
             Ok(source) => source,
             Err(message) => return self.fail(message),
@@ -121,7 +128,10 @@ impl DownloadDriver {
                     "Connection closed, aborting {}",
                     self.label.to_lowercase()
                 );
-                self.fail("Connection closed".to_string())
+                self.fail(CommandError::new(
+                    CommandErrorKind::Internal,
+                    "Connection closed",
+                ))
             }
         }
     }
@@ -180,8 +190,8 @@ impl DownloadDriver {
     }
 
     /// Unregisters and reports the failure; the stream ends without `FIN`.
-    fn fail(self, message: String) -> DownloadOutcome {
-        self.finish_with(Err(CommandError::new(CommandErrorKind::Internal, message)))
+    fn fail(self, error: CommandError) -> DownloadOutcome {
+        self.finish_with(Err(error))
     }
 
     /// Unregisters before the result can go out, so a late cancel finds nothing to stop.
@@ -266,6 +276,36 @@ pub(crate) async fn download_directory(path: String, include_root: bool, ctx: Co
     Reply::stream::<request::TarDownload>(outcome.stream, outcome.result)
 }
 
+/// Runs the `GitDownload` command for one committed file or directory archive.
+pub(crate) async fn download_git_revision(
+    path: String,
+    rev: String,
+    include_root: bool,
+    ctx: CommandCtx,
+) -> Reply {
+    log!(
+        Level::Info,
+        "Started Git revision download: request_id={}, path={}, rev={}",
+        ctx.responder.request_id(),
+        path,
+        rev
+    );
+    let output = match ctx.into_output() {
+        Ok(output) => output,
+        Err(error) => return Reply::failure(error),
+    };
+    let source = GitRevisionSource::open(path.clone(), rev, include_root);
+    let outcome = DownloadDriver::new(
+        "Git revision download",
+        path,
+        output.stream,
+        output.registration,
+    )
+    .run(Ok(source))
+    .await;
+    Reply::stream::<request::GitDownload>(outcome.stream, outcome.result)
+}
+
 /// Byte range of one regular file.
 pub(crate) struct FileRangeSource {
     file: File,
@@ -280,11 +320,11 @@ impl FileRangeSource {
         path: &str,
         range_start: Option<u64>,
         range_end: Option<u64>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CommandError> {
         let mut file = File::open(path).await.map_err(|error| {
             let message = format!("Failed to open file: {error:#}");
-            log_error!(anyhow::Error::new(error), "Failed to open file");
-            message
+            log_error!(anyhow::anyhow!("{error}"), "Failed to open file");
+            CommandError::new(CommandErrorKind::from_io_error(&error), message)
         })?;
         let mut remaining = None;
         if let Some(start) = range_start {
@@ -292,8 +332,8 @@ impl FileRangeSource {
                 .await
                 .map_err(|error| {
                     let message = format!("Failed to seek file: {error:#}");
-                    log_error!(anyhow::Error::new(error), "Failed to seek file");
-                    message
+                    log_error!(anyhow::anyhow!("{error}"), "Failed to seek file");
+                    CommandError::new(CommandErrorKind::from_io_error(&error), message)
                 })?;
             remaining = range_end.map(|end| end.saturating_sub(start));
         }
@@ -307,7 +347,7 @@ impl FileRangeSource {
 
 impl ByteSource for FileRangeSource {
     /// Reads at most one chunk, never past the requested range end.
-    async fn next_block(&mut self) -> Result<Option<Vec<u8>>, String> {
+    async fn next_block(&mut self) -> Result<Option<Vec<u8>>, CommandError> {
         let read_size = match self.remaining {
             Some(0) => return Ok(None),
             Some(remaining) => {
@@ -321,8 +361,8 @@ impl ByteSource for FileRangeSource {
             .await
             .map_err(|error| {
                 let message = format!("Failed to read file: {error:#}");
-                log_error!(anyhow::Error::new(error), "Failed to read file");
-                message
+                log_error!(anyhow::anyhow!("{error}"), "Failed to read file");
+                CommandError::new(CommandErrorKind::from_io_error(&error), message)
             })?;
         if read == 0 {
             return Ok(None);
@@ -414,27 +454,26 @@ fn write_directory_tar<W: Write>(writer: W, source_path: &Path, include_root: bo
         .context("Failed to unwrap finished tar writer")
 }
 
-/// Bridges synchronous `tar::Builder` writes into the async websocket sender.
+/// Bridges a synchronous writer (`tar::Builder`, a Git export) into the async stream.
 ///
-/// The tar crate exposes a blocking `std::io::Write` API, so directory archive
-/// creation runs in a blocking task and pushes produced tar chunks through this
-/// adapter into an async channel.
-struct ChannelTarWriter {
+/// The tar crate and gix expose blocking APIs, so archives and committed content are
+/// produced in a blocking task that pushes chunks through this adapter into an async
+/// channel. Each write sends at most one stream chunk, so the channel's bound is a bound on
+/// memory however large the producer's own writes are.
+struct ChannelWriter {
     sender: mpsc::Sender<Vec<u8>>,
     runtime: tokio::runtime::Handle,
 }
 
-impl std::io::Write for ChannelTarWriter {
+impl std::io::Write for ChannelWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let chunk = &buf[..buf.len().min(stream::CHUNK_SIZE)];
         self.runtime
-            .block_on(self.sender.send(buf.to_vec()))
+            .block_on(self.sender.send(chunk.to_vec()))
             .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Tar stream receiver dropped",
-                )
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Stream receiver dropped")
             })?;
-        Ok(buf.len())
+        Ok(chunk.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -442,12 +481,68 @@ impl std::io::Write for ChannelTarWriter {
     }
 }
 
+/// Payload produced by a blocking writer task; shared by directory archives and Git exports.
+struct BlockingWriterSource {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    /// The blocking writer; its result is the only way to tell a finished stream from one
+    /// that stopped half-way (both just drop the block sender). `None` once joined.
+    producer: Option<JoinHandle<Result<(), CommandError>>>,
+}
+
+impl BlockingWriterSource {
+    /// Runs `produce` on a blocking thread with a writer that feeds this source.
+    fn spawn(
+        produce: impl FnOnce(ChannelWriter) -> Result<(), CommandError> + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel::<Vec<u8>>(8);
+        let producer = tokio::task::spawn_blocking(move || {
+            produce(ChannelWriter {
+                sender,
+                runtime: tokio::runtime::Handle::current(),
+            })
+        });
+        Self {
+            receiver,
+            producer: Some(producer),
+        }
+    }
+}
+
+impl ByteSource for BlockingWriterSource {
+    /// Yields the next block the writer produced, and at the end of the blocks the writer's
+    /// outcome, so a truncated stream ends with an error instead of `FIN`.
+    async fn next_block(&mut self) -> Result<Option<Vec<u8>>, CommandError> {
+        if let Some(block) = self.receiver.recv().await {
+            return Ok(Some(block));
+        }
+        let Some(producer) = self.producer.as_mut() else {
+            return Ok(None);
+        };
+        // Awaiting by reference keeps this cancellation safe: `finish` joins it otherwise.
+        let outcome = producer.await;
+        self.producer = None;
+        match outcome {
+            Ok(Ok(())) => Ok(None),
+            Ok(Err(message)) => Err(message),
+            Err(error) => Err(CommandError::new(
+                CommandErrorKind::Internal,
+                format!("Stream producer task failed: {error}"),
+            )),
+        }
+    }
+
+    /// Closes the pipe so a still-running writer fails fast, then joins it.
+    async fn finish(self) {
+        drop(self.receiver);
+        if let Some(producer) = self.producer {
+            let _ = producer.await;
+        }
+    }
+}
+
 /// Directory archive produced by a blocking tar writer, plus an optional size walk.
 pub(crate) struct TarDirectorySource {
-    receiver: mpsc::Receiver<Vec<u8>>,
-    /// The blocking tar writer; its result is the only way to tell a finished archive from
-    /// one that stopped half-way (both just drop the block sender). `None` once joined.
-    archive: Option<JoinHandle<Result<(), String>>>,
+    archive: BlockingWriterSource,
     size_measure: Option<JoinHandle<()>>,
 }
 
@@ -458,7 +553,7 @@ impl TarDirectorySource {
         include_root: bool,
         responder: Responder,
         cancel: CancellationToken,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CommandError> {
         let source_path = PathBuf::from(path);
         let request_id = responder.request_id();
         let metadata = tokio::fs::metadata(&source_path).await.map_err(|error| {
@@ -469,7 +564,7 @@ impl TarDirectorySource {
                 path,
                 error
             );
-            format!("Failed to open directory: {error}")
+            CommandError::io("Failed to open directory", error)
         })?;
         if !metadata.is_dir() {
             redoor_core::log_failure!(
@@ -478,7 +573,10 @@ impl TarDirectorySource {
                 request_id,
                 path
             );
-            return Err(format!("Source path is not a directory: {path}"));
+            return Err(CommandError::new(
+                CommandErrorKind::NotADirectory,
+                format!("Source path is not a directory: {path}"),
+            ));
         }
         // REST directory downloads include the root; remote copies do not and already ignore
         // the total, so they skip the extra metadata walk.
@@ -490,12 +588,7 @@ impl TarDirectorySource {
                 cancel,
             ))
         });
-        let (sender, receiver) = mpsc::channel::<Vec<u8>>(8);
-        let archive = tokio::task::spawn_blocking(move || {
-            let writer = ChannelTarWriter {
-                sender,
-                runtime: tokio::runtime::Handle::current(),
-            };
+        let archive = BlockingWriterSource::spawn(move |writer| {
             write_directory_tar(writer, &source_path, include_root)
                 .map(drop)
                 .map_err(|error| {
@@ -505,46 +598,70 @@ impl TarDirectorySource {
                         source_path.display(),
                         error
                     );
-                    format!("Failed to archive directory: {error:#}")
+                    CommandError::new(
+                        CommandErrorKind::Internal,
+                        format!("Failed to archive directory: {error:#}"),
+                    )
                 })
         });
         Ok(Self {
-            receiver,
-            archive: Some(archive),
+            archive,
             size_measure,
         })
     }
 }
 
 impl ByteSource for TarDirectorySource {
-    /// Yields the next block the archive writer produced, and at the end of the blocks the
-    /// writer's outcome, so a truncated archive ends with an error frame instead of `is_last`.
-    async fn next_block(&mut self) -> Result<Option<Vec<u8>>, String> {
-        if let Some(block) = self.receiver.recv().await {
-            return Ok(Some(block));
-        }
-        let Some(archive) = self.archive.as_mut() else {
-            return Ok(None);
-        };
-        // Awaiting by reference keeps this cancellation safe: `finish` joins it otherwise.
-        let outcome = archive.await;
-        self.archive = None;
-        match outcome {
-            Ok(Ok(())) => Ok(None),
-            Ok(Err(message)) => Err(message),
-            Err(error) => Err(format!("Directory archive task failed: {error}")),
-        }
+    /// Yields the archive writer's blocks and finally its outcome.
+    async fn next_block(&mut self) -> Result<Option<Vec<u8>>, CommandError> {
+        self.archive.next_block().await
     }
 
-    /// Closes the pipe so a still-running writer fails fast, then joins both producers.
+    /// Joins the archive writer and the size walk so nothing outlives the stream.
     async fn finish(self) {
-        drop(self.receiver);
-        if let Some(archive) = self.archive {
-            let _ = archive.await;
-        }
+        self.archive.finish().await;
         if let Some(size_measure) = self.size_measure {
             let _ = size_measure.await;
         }
+    }
+}
+
+/// A committed file or directory archive read from Git history.
+pub(crate) struct GitRevisionSource {
+    export: BlockingWriterSource,
+    /// Stops the export at its next entry; dropping the receiver alone would only stop it at
+    /// its next write, which a large directory of skipped entries may never reach.
+    interrupt: Arc<AtomicBool>,
+}
+
+impl GitRevisionSource {
+    /// Starts exporting `path` at `rev` on a blocking thread.
+    ///
+    /// Each write is buffered up to one stream chunk, so tar headers and small files do not
+    /// each become a frame of their own.
+    pub(crate) fn open(path: String, rev: String, include_root: bool) -> Self {
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let export = BlockingWriterSource::spawn({
+            let interrupt = interrupt.clone();
+            move |writer| {
+                let writer = std::io::BufWriter::with_capacity(stream::CHUNK_SIZE, writer);
+                crate::commands::git::export::export(&path, &rev, include_root, writer, &interrupt)
+            }
+        });
+        Self { export, interrupt }
+    }
+}
+
+impl ByteSource for GitRevisionSource {
+    /// Yields the export's blocks and finally its outcome.
+    async fn next_block(&mut self) -> Result<Option<Vec<u8>>, CommandError> {
+        self.export.next_block().await
+    }
+
+    /// Interrupts a still-running export and joins it.
+    async fn finish(self) {
+        self.interrupt.store(true, Ordering::Release);
+        self.export.finish().await;
     }
 }
 
@@ -683,7 +800,7 @@ mod tests {
 
     /// Source that yields scripted blocks and records when it was finished.
     struct ScriptedSource {
-        blocks: Vec<Result<Option<Vec<u8>>, String>>,
+        blocks: Vec<Result<Option<Vec<u8>>, CommandError>>,
         finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
         registry: CancelRegistry<RequestId>,
         registered_at_finish: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -691,7 +808,7 @@ mod tests {
 
     impl ByteSource for ScriptedSource {
         /// Yields the next scripted block, then waits forever like an idle producer.
-        async fn next_block(&mut self) -> Result<Option<Vec<u8>>, String> {
+        async fn next_block(&mut self) -> Result<Option<Vec<u8>>, CommandError> {
             if self.blocks.is_empty() {
                 return std::future::pending().await;
             }
@@ -719,7 +836,10 @@ mod tests {
     }
 
     /// Runs a driver over scripted blocks and returns the decoded frames plus lifecycle flags.
-    async fn drive(blocks: Vec<Result<Option<Vec<u8>>, String>>, cancel_first: bool) -> Driven {
+    async fn drive(
+        blocks: Vec<Result<Option<Vec<u8>>, CommandError>>,
+        cancel_first: bool,
+    ) -> Driven {
         let registry = CancelRegistry::new(None);
         let registration = registry.register(RequestId::new(9)).unwrap();
         if cancel_first {
@@ -811,7 +931,10 @@ mod tests {
         let driven = drive(
             vec![
                 Ok(Some(b"a".to_vec())),
-                Err("Failed to read file: boom".to_string()),
+                Err(CommandError::new(
+                    CommandErrorKind::InvalidInput,
+                    "Failed to read file: boom",
+                )),
             ],
             false,
         )
@@ -824,7 +947,7 @@ mod tests {
         // The source's own message becomes the error result.
         assert!(matches!(
             driven.result,
-            Err(CommandError { message, .. }) if message == "Failed to read file: boom"
+            Err(CommandError { kind: CommandErrorKind::InvalidInput, message }) if message == "Failed to read file: boom"
         ));
     }
 
@@ -862,7 +985,7 @@ mod tests {
         let Err(message) = outcome else {
             panic!("a truncated archive must not end successfully: {outcome:?}");
         };
-        assert!(message.contains("z.sock"), "{message}");
+        assert!(message.message.contains("z.sock"), "{message:?}");
         source.finish().await;
     }
 

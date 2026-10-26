@@ -339,6 +339,13 @@ pub struct CopyTarget {
     pub source_identity: Option<redoor_protocol::wire::command::MoveSourceIdentity>,
     /// Signed durable staging, used only for regular file copies and moves.
     pub partial: Option<Box<redoor_protocol::wire::partials::PartialTransfer>>,
+    /// The commit the source is read at when it comes from Git history. Such copies always
+    /// stream through the server, even on one agent, because the agent-local copy commands
+    /// read the filesystem rather than the object database.
+    pub source_rev: Option<String>,
+    /// Creates a new destination file executable, for sources whose mode the destination
+    /// cannot otherwise learn, like a Git `100755` entry.
+    pub executable: bool,
 }
 
 /// A destination partial whose prefix must match the source before a remote copy appends.

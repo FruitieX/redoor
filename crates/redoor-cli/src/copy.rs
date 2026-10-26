@@ -456,6 +456,7 @@ impl Transfer {
             source: source.clone(),
             dest: dest.clone(),
             on_existing,
+            source_rev: None,
         };
         let admission_client = client.clone();
         self.admission = Some(tokio::spawn(async move {

@@ -307,12 +307,14 @@ export function DirectoryFilesActions(props: {
     showHiddenFiles: boolean;
     onToggleHiddenFiles: () => void;
     /**
-     * Shows the toolbar of a committed Git revision: everything that writes into the
-     * directory (paste, new, upload, file operations) is disabled.
+     * The commit id of a committed Git revision this toolbar shows: everything that writes
+     * into the directory (paste, new, upload, file operations) is disabled, and Download
+     * archives the directory as committed.
      */
-    readOnly?: boolean;
+    revision?: string;
 }) {
-    const readOnly = props.readOnly === true;
+    const revision = props.revision;
+    const readOnly = revision !== undefined;
     const refreshBrowser = useRefreshBrowserPath(props.agent.id);
     const importFromClipboard = useClipboardImport();
     const [isReloading, setIsReloading] = React.useState(false);
@@ -393,13 +395,28 @@ export function DirectoryFilesActions(props: {
                     path={props.directoryPath}
                     currentName={directoryName}
                     entryType="directory"
-                    downloadUrl={props.agent.getRawUrl(props.directoryPath, {
-                        download: true,
-                    })}
+                    downloadUrl={
+                        revision === undefined
+                            ? props.agent.getRawUrl(props.directoryPath, {
+                                  download: true,
+                              })
+                            : props.agent.getGitDownloadUrl(
+                                  props.directoryPath,
+                                  revision,
+                              )
+                    }
                     downloadName={getDirectoryArchiveName(directoryName)}
-                    downloadTooltip="Downloads this directory as a .tar.gz archive."
+                    downloadTooltip={
+                        revision === undefined
+                            ? "Downloads this directory as a .tar.gz archive."
+                            : "Downloads this directory as committed at this revision, as a .tar.gz archive."
+                    }
                     secondaryDownload
-                    readOnly={readOnly}
+                    revision={
+                        revision === undefined
+                            ? undefined
+                            : { commitId: revision, transferable: true }
+                    }
                     afterDownload={
                         <Button
                             tooltip="Reload directory listing from the device"

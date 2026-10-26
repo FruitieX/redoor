@@ -10,6 +10,7 @@ anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
 fastrand.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 gix.workspace = true
 gix-dir.workspace = true

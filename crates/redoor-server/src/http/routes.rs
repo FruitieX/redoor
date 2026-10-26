@@ -30,6 +30,7 @@ use super::{
     files::{create_directory_handler, raw_agent_delete_handler, rename_path_handler},
     git::{
         commit::git_commit_diff_handler,
+        download::git_download_handler,
         history::git_log_handler,
         refs::{git_branches_handler, git_tags_handler},
         revision::{git_revision_content_handler, git_revision_tree_handler},
@@ -225,6 +226,14 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route(
             "/api/v1/agents/{agent}/git/blob/{*path}",
             get(git_revision_content_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/download",
+            get(git_download_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/download/{*path}",
+            get(git_download_handler),
         )
         .route(
             "/api/v1/agents/{agent}/git/commit-diff",

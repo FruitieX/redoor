@@ -25,8 +25,8 @@ use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchRespons
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
 use crate::wire::command::{
-    Command, CommandErrorKind, EchoResult, LsDirectoryResult, LsFileResult, MoveMetadataResult,
-    MoveSourceIdentity,
+    Command, CommandErrorKind, EchoResult, GitRevisionStatResult, LsDirectoryResult, LsFileResult,
+    MoveMetadataResult, MoveSourceIdentity,
 };
 use crate::wire::exec::{ExecEvent, ExecRequest};
 use crate::wire::log::Level;
@@ -245,6 +245,10 @@ pub struct RawUpload {
     /// Present only for agent-to-agent file copies, which stage into a resumable partial.
     #[serde(default)]
     pub partial: Option<Box<crate::wire::partials::PartialTransfer>>,
+    /// Makes a newly created file executable, for sources that record the bit apart from the
+    /// filesystem, like Git history. A replaced file keeps its own permissions either way.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// Rewrites one existing regular-file inode after staging the complete body.
@@ -414,6 +418,31 @@ pub struct GitCommitDiff {
     pub rev: String,
 }
 
+/// Describes what a path is at a revision and the commit the revision resolved to, so a copy
+/// or download from history can pick its transport and then read exactly that commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionStat {
+    pub path: String,
+    pub rev: String,
+    /// A destination on this agent that a copy of the revision would replace. Only the agent
+    /// can resolve symlinks and `..` in it, which a lexical check on the server would miss.
+    #[serde(default)]
+    pub replace_target: Option<String>,
+}
+
+/// Streams a file's committed content, or a committed directory as a tar archive, so history
+/// can be downloaded and copied without loading whole objects into memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitDownload {
+    pub path: String,
+    /// Normally the commit id [`GitRevisionStat`] resolved, so a moving branch cannot change
+    /// what is streamed between the inspection and the transfer.
+    pub rev: String,
+    /// Includes the directory itself for archives intended for user extraction, like
+    /// [`TarDownload`].
+    pub include_root: bool,
+}
+
 /// Lists one page of the commits that changed a path, starting at a revision or HEAD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLog {
@@ -580,6 +609,8 @@ agent_requests! {
     GitCommitDiff => GitCommitDiffResponse,
     GitLog => GitLogResponse,
     GitRefList => GitRefListResponse,
+    GitRevisionStat => GitRevisionStatResult,
+    GitDownload => (),
     MoveMetadata => MoveMetadataResult,
     DeleteMoveSource => (),
     OpenPath => (),
@@ -642,6 +673,7 @@ mod tests {
         for unit in [
             through_result_frame::<RawDownload>(Value::Null),
             through_result_frame::<TarDownload>(Value::Null),
+            through_result_frame::<GitDownload>(Value::Null),
             through_result_frame::<RawUpload>(Value::Null),
             through_result_frame::<EditFile>(Value::Null),
             through_result_frame::<TarUpload>(Value::Null),
@@ -660,6 +692,11 @@ mod tests {
             assert_eq!(unit, Value::Null);
         }
         assert_round_trip::<LocalMove>(json!({"atomic": true}));
+        assert_round_trip::<GitRevisionStat>(json!({"commit_id": "abc",
+            "kind": {"type": "file", "size": 3, "executable": true},
+            "replaces_repository": false}));
+        assert_round_trip::<GitRevisionStat>(json!({"commit_id": "abc",
+            "kind": {"type": "directory"}, "replaces_repository": true}));
         assert_round_trip::<ListTrash>(json!({"locations": []}));
         assert_round_trip::<EmptyTrash>(json!({"deleted_items": 3}));
         assert_round_trip::<RestoreTrash>(json!({"path": "/tmp/restored"}));

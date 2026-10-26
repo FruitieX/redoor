@@ -119,7 +119,9 @@ The agent runtime and the implementation of every command.
     validation and repository discovery). `status` and `diff` read the worktree; `revision`
     resolves a user-supplied revision to a commit once per request; `tree` and
     `commit_diff` read committed history; `history` lists the commits that changed a path
-    and `refs` lists branches and tags (see "Git history, branch and tag lists"). All Git work runs in `spawn_blocking` and every
+    and `refs` lists branches and tags (see "Git history, branch and tag lists"); `export`
+    streams committed files and directory archives for downloads and copies (see "Git
+    history downloads and copies"). All Git work runs in `spawn_blocking` and every
     response is bounded (entries, files, bytes per blob and per batch), because gix inflates
     whole objects and the reply is a single control frame. Object kinds and sizes are read
     from headers before inflating, commit diffs visit changes one at a time and stop at the
@@ -928,7 +930,8 @@ sequenceDiagram
   was copied. Once the source is being deleted, a destination disconnect no longer affects
   the result.
 - A copy or move on a single agent runs entirely on that agent as a local worker. The server
-  only follows its progress and can cancel it.
+  only follows its progress and can cancel it. Copies from Git history are the exception:
+  they always stream through the server (see "Git history downloads and copies").
 
 ## Resuming copies and moves
 
@@ -1306,9 +1309,10 @@ way of looking at the same repository location, and paths deleted since are stil
   same `FileList` and toolbar (`readOnly`), the same details card pieces
   (`RevisionDetailView` fills them with what Git records), the editor (`FileEditView` with
   `revision`, fed by `git/blob`) and, for `view=git`, the commit's own changes against its
-  first parent (`git/commit-diff`). Every action that would write, download or select the
-  working file is shown disabled, since it would act on the worktree rather than the
-  revision; Git records no owner, group or modification time, so those show as absent.
+  first parent (`git/commit-diff`). Every action that would write is shown disabled, since
+  it would act on the worktree rather than the revision; selecting and downloading read the
+  commit instead (see "Git history downloads and copies"). Git records no owner, group or
+  modification time, so those show as absent.
 - **Commit diffs follow the browsed path.** On a subdirectory or file the commit diff shows
   only that subtree or file, with a link to the repository root for the whole commit, like
   the worktree Git view. A path the commit deleted has no tree at the commit, so the loader
@@ -1328,8 +1332,10 @@ way of looking at the same repository location, and paths deleted since are stil
   null worktree `entry` and a separate `revision` field, so terminals and search do not treat
   a committed path as existing on disk, while the top bar still shows the device tabs with
   Files active. The top bar's Files tab, which opens the device home, leaves history.
-- **Content is bounded, not streamed.** gix inflates a whole object to read it, so committed
-  files are served as bounded JSON (the editor's 2 MiB limit) instead of a raw download.
+- **Viewed content is bounded, downloaded content is streamed.** The editor reads committed
+  text as bounded JSON (its 2 MiB limit), because gix inflates a whole object to read it.
+  Downloads and copies use a separate streaming reader instead (see "Git history
+  downloads and copies").
 
 ### Git history, branch and tag lists
 
@@ -1382,6 +1388,79 @@ the Git view rather than another level of page navigation.
   of the agent's Git queries. Refs are listed at the repository root the page resolved, not at
   the browsed path, so a submodule browsed at a superproject commit lists the superproject's
   refs that its header names.
+
+### Git history downloads and copies
+
+A file or directory seen while browsing history can be downloaded, and selected and copied
+like a working file: back onto its own working path to restore it, elsewhere on the same
+device, or to another device.
+
+- **Two agent commands.** `GitRevisionStat` resolves a path at a revision to the commit id
+  and the entry kind (file with its header size and executable bit, directory, symlink,
+  submodule), without inflating anything. Given a same-agent `replace_target`, it also
+  reports whether replacing that path would remove the repository's worktree. `GitDownload` is an output stream like
+  `RawDownload`: a file's bytes, or a plain tar of a directory. The server stats first and
+  then streams the commit id it got, so a branch that moves between the two cannot mix
+  versions, and it refuses symlinks and submodules, which have no content to write.
+- **Blobs stream from the object store.** gix only reads whole objects, which would put a
+  large committed file into memory at once. `commands/git/export.rs` therefore inflates
+  loose objects and undeltified pack entries itself, incrementally with `flate2`, after
+  locating them in the object directory, its alternates and the pack indexes (opened once
+  per export). Git stores files above `core.bigFileThreshold` undeltified, so large files
+  take this path. A deltified blob needs its base in memory to apply the delta anyway, so it
+  is read through gix, and refused above 64 MiB with an explanation. Its bases and
+  intermediates can be far larger than the blob itself, so the repository is reopened for
+  these reads with gix's `gitoxide.objects.allocLimit`, which caps every allocation of the
+  rebuild instead of only the result. The reopened handle preserves trust settings and
+  disables object environment overrides, so an inherited `GIT_ALLOC_LIMIT` cannot raise the
+  export's ceiling. Every blob reader
+  checks that it yields exactly the header's size, so a truncated object fails the stream
+  instead of misaligning the tar members after it.
+- **Directory archives are deterministic and copy-safe.** The tree is walked depth first in
+  Git's stored order, one blob at a time, with the commit time on every member (Git records
+  no others). Symlinks are left out because copy destinations only extract files and
+  directories, a submodule becomes an empty directory as in a fresh clone, and names that
+  could escape the archive (`..`, separators) are skipped. The export runs on a blocking
+  thread behind the same channel writer as worktree tar downloads, buffered to one stream
+  chunk per frame, and stops at the next entry when the download is canceled.
+- **Downloads.** `GET /api/v1/agents/{agent}/git/download/{*path}?rev=` streams a file as
+  an attachment named after it (with an RFC 6266 `filename*`, shared with worktree
+  downloads, since names may hold quotes, newlines or non-ASCII), or a directory as `<name>.tar.gz` rooted at the directory,
+  gzipped at the REST edge exactly like worktree directory downloads. Both are always
+  attachments, so committed content is never shown inline as if it were the working file,
+  and offer no ranges, since there is no source identity to resume against.
+  Download producers, router stream leases and HTTP consumers preserve `CommandError`
+  kinds through the shared stream path. Before a body starts, `ApiError` maps them to HTTP
+  statuses; afterward a failure aborts the body. Allocation-limit refusals are invalid input,
+  while corrupt or missing Git objects remain internal failures.
+- **Copies.** `POST /api/v1/copy` takes `source_rev`. `TransferService::start_revision_copy`
+  stats the source and starts a copy whose source command is `GitDownload` (without the
+  root, so the destination is the directory itself). It always takes the streamed copy
+  path, even when source and destination are the same agent, because the agent-local copy
+  commands read the filesystem; the agent is then both ends of one forwarder. History has
+  no inode, so these copies have no partials, resume or pause, and they are never moves.
+  Copying a revision onto its own working path is allowed, since that is how a file is
+  restored, and `on_existing` still decides whether it may replace the working file.
+  Replacing a directory that contains the repository root is refused: a committed tree has
+  no `.git`, so it would delete the repository. Merge is the way to restore a whole tree.
+  The agent decides this in `GitRevisionStat`, resolving the destination through its
+  filesystem, because a symlinked parent or `..` names the same directory under a path a
+  lexical check on the server would not recognize. A final symlink can be replaced safely:
+  publication renames the link entry itself and leaves its target intact. Missing components
+  are not normalized away, since uploads require existing parents. A file Git records as
+  `100755` is uploaded with `RawUpload::executable`. New files request execute permissions
+  when staging is created, letting the OS apply umask and inherited ACLs; a replaced file
+  keeps its own permissions as with any upload.
+- **Selections remember the commit.** A selected history item stores the resolved commit id
+  (never the typed branch or tag) next to its path, and its key
+  (`<agent>@<commit>:<path>`) keeps it apart from the working file and other versions of
+  it. While the selection holds one, Move and Delete are hidden and Create archive is
+  disabled, the copy preflight is skipped for it (there is no partial to find), and it
+  never counts as landing on itself. Links in the selected items pane set `rev` explicitly,
+  so a history item opens at its commit and a working item leaves history.
+  Because one file can be selected at several commits, the transfer dialog also renames
+  every selected item whose name repeats an earlier one, so two versions never land on one
+  destination path.
 
 ## SSH device keys
 

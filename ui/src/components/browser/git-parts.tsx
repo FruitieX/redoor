@@ -168,3 +168,19 @@ export function GitPanelBar(props: {
         </div>
     );
 }
+
+/**
+ * Marks an item that comes from Git history rather than the working tree, wherever the
+ * selection is listed, so copying it is never mistaken for copying the current file.
+ */
+export function RevisionBadge(props: { commitId: string }) {
+    return (
+        <span
+            aria-label={`At commit ${shortCommitId(props.commitId)}`}
+            title={props.commitId}
+            className="ml-1.5 inline-flex shrink-0 items-center rounded border border-amber-600/60 bg-amber-900/30 px-1 font-mono text-xs font-normal text-amber-200"
+        >
+            @{shortCommitId(props.commitId)}
+        </span>
+    );
+}

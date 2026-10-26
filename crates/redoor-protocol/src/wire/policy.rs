@@ -120,9 +120,10 @@ impl Command {
     /// Returns the single authoritative execution policy for this command.
     pub fn policy(&self) -> CommandPolicy {
         match self {
-            Self::Exec { .. } | Self::RawDownload { .. } | Self::TarDownload { .. } => {
-                CommandPolicy::OUTPUT
-            }
+            Self::Exec { .. }
+            | Self::RawDownload { .. }
+            | Self::TarDownload { .. }
+            | Self::GitDownload { .. } => CommandPolicy::OUTPUT,
             Self::RawUpload { .. } => CommandPolicy::upload(UploadKind::RawUpload),
             Self::TarUpload { .. } => CommandPolicy::upload(UploadKind::TarUpload),
             Self::EditFile { .. } => CommandPolicy::upload(UploadKind::EditFile),
@@ -160,6 +161,7 @@ impl Command {
             | Self::GitCommitDiff { .. }
             | Self::GitLog { .. }
             | Self::GitRefList { .. }
+            | Self::GitRevisionStat { .. }
             | Self::MoveMetadata { .. }
             | Self::DeleteMoveSource { .. }
             | Self::OpenPath { .. }
@@ -239,11 +241,13 @@ mod tests {
             Command::GitCommitDiff(request::GitCommitDiff { .. }) => 44,
             Command::GitLog(request::GitLog { .. }) => 45,
             Command::GitRefList(request::GitRefList { .. }) => 46,
+            Command::GitRevisionStat(request::GitRevisionStat { .. }) => 47,
+            Command::GitDownload(request::GitDownload { .. }) => 48,
         }
     }
 
     /// Number of variants covered by `variant_index`.
-    const VARIANT_COUNT: usize = 47;
+    const VARIANT_COUNT: usize = 49;
 
     /// Builds one instance of every command variant for table-wide policy checks.
     fn every_command() -> Vec<Command> {
@@ -319,6 +323,7 @@ mod tests {
                 path: path(),
                 on_existing: CopyExistingMode::Override,
                 ownership: CreationOwnershipOptions::default(),
+                executable: false,
             }),
             Command::EditFile(request::EditFile { path: path() }),
             Command::TarUpload(request::TarUpload {
@@ -404,6 +409,16 @@ mod tests {
                 path: path(),
                 kind: GitRefListKind::Tags,
                 page: GitPage { skip: 0, limit: 1 },
+            }),
+            Command::GitRevisionStat(request::GitRevisionStat {
+                path: path(),
+                rev: "HEAD".to_string(),
+                replace_target: None,
+            }),
+            Command::GitDownload(request::GitDownload {
+                path: path(),
+                rev: "HEAD".to_string(),
+                include_root: false,
             }),
             Command::MoveMetadata(request::MoveMetadata { path: path() }),
             Command::DeleteMoveSource(request::DeleteMoveSource {

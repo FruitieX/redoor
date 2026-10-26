@@ -71,7 +71,7 @@ fn execution_body(
             match item {
                 Ok(chunk) => yield Ok(bytes::Bytes::from(chunk.data)),
                 Err(error) => {
-                    yield Err(std::io::Error::other(error.0));
+                    yield Err(std::io::Error::other(error.0.message));
                     return;
                 }
             }

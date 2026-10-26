@@ -50,7 +50,9 @@ import {
     GitCommitView,
     RevisionBanner,
     RevisionListingNotice,
+    revisionListing,
     revisionListingEntries,
+    type RevisionListing,
 } from "#ui/components/browser/revision";
 import {
     getImmediateParentPath,
@@ -563,7 +565,7 @@ function RevisionFileBrowser(props: {
                     agent={agent}
                     directoryPath={tree.path}
                     files={revisionListingEntries(tree.entry.entries)}
-                    readOnly
+                    revision={revisionListing(tree.commit.id, tree.entry)}
                 />
             </>
         ) : editable ? (
@@ -579,7 +581,7 @@ function RevisionFileBrowser(props: {
                 revision={tree.commit.id}
                 repositoryRoot={tree.repository_root}
                 mimeType="text/plain"
-                downloadUrl={null}
+                downloadUrl={agent.getGitDownloadUrl(data.path, tree.commit.id)}
                 scrollToLine={search.line}
                 preview={search.preview === true}
                 onPreviewChange={(preview) =>
@@ -993,14 +995,14 @@ function DirectoryBrowserPage(props: {
 
 /**
  * The file list with its toolbar, shared by working directories and Git revisions so both
- * look and behave the same. A revision passes `readOnly`, which disables every action that
- * would write into the directory.
+ * look and behave the same. A revision passes `revision`, which disables every action that
+ * would write into the directory while selection and downloads read the commit.
  */
 function DirectoryListing(props: {
     agent: Agent;
     directoryPath: string;
     files: LsEntry[];
-    readOnly?: boolean;
+    revision?: RevisionListing;
 }) {
     const [userState, setUserState] = useUserState();
     const navigate = Route.useNavigate();
@@ -1051,7 +1053,7 @@ function DirectoryListing(props: {
             showHiddenFiles={showHiddenFiles}
             sort={sort}
             onSort={changeSort}
-            readOnly={props.readOnly}
+            revision={props.revision}
             mountPoint={getMountPointForPath(
                 details.mount_points,
                 props.directoryPath,
@@ -1061,7 +1063,7 @@ function DirectoryListing(props: {
                     agent={props.agent}
                     directoryPath={props.directoryPath}
                     showHiddenFiles={showHiddenFiles}
-                    readOnly={props.readOnly}
+                    revision={props.revision?.commitId}
                     onToggleHiddenFiles={() =>
                         setUserState((current) => ({
                             ...current,

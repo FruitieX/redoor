@@ -1,6 +1,7 @@
 import { File, Folder, X } from "lucide-react";
-import type { SelectedPath } from "#ui/selected-files";
+import { getSelectedFileKey, type SelectedPath } from "#ui/selected-files";
 import { IconButton } from "#ui/components/icon-button";
+import { RevisionBadge } from "#ui/components/browser/git-parts";
 
 /**
  * Makes the exact selected paths visible before a bulk filesystem operation. Deselecting is
@@ -20,7 +21,7 @@ export function AffectedPathsList(props: {
             <ul className="mt-2 max-h-52 space-y-1 overflow-y-auto rounded-md border border-slate-800 bg-slate-950/50 p-2">
                 {props.paths.map((path) => (
                     <li
-                        key={`${path.agentId}:${path.path}`}
+                        key={getSelectedFileKey(path)}
                         className="flex min-w-0 items-start gap-2 rounded px-2 py-1.5 text-sm text-slate-300"
                     >
                         {path.entryType === "directory" ? (
@@ -35,7 +36,12 @@ export function AffectedPathsList(props: {
                             />
                         )}
                         <span className="min-w-0 flex-1">
-                            <span className="block break-all">{path.path}</span>
+                            <span className="block break-all">
+                                {path.path}
+                                {path.rev === undefined ? null : (
+                                    <RevisionBadge commitId={path.rev} />
+                                )}
+                            </span>
                             <span className="block truncate text-xs text-slate-500">
                                 {path.agentName}
                             </span>

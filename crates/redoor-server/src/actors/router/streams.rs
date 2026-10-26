@@ -14,6 +14,8 @@ use redoor_protocol::{
     ids::{AgentId, RequestId},
     wire::{
         ServerToAgent,
+        command::CommandErrorKind,
+        request::CommandError,
         stream::{StreamChunk, receive_queue_frames},
         terminal::TerminalServerMessage,
     },
@@ -80,7 +82,7 @@ pub struct StreamLease {
     /// yet; the result follows the data, so this is the stream's full size when it arrives.
     received: Arc<AtomicU64>,
     /// Reason reported to the consumer when the router failed the stream.
-    fault: Arc<OnceLock<String>>,
+    fault: Arc<OnceLock<CommandError>>,
 }
 
 impl StreamLease {
@@ -102,7 +104,7 @@ impl StreamLease {
     }
 
     /// Stops the data path and makes the consumer observe `reason` as a stream error.
-    pub(crate) fn fail(&self, reason: String) {
+    pub(crate) fn fail(&self, reason: CommandError) {
         let _ = self.fault.set(reason);
         self.cancel.cancel();
     }
@@ -118,8 +120,8 @@ impl StreamLease {
     }
 
     /// Failure reason set by [`StreamLease::fail`].
-    fn fault(&self) -> Option<&str> {
-        self.fault.get().map(String::as_str)
+    fn fault(&self) -> Option<&CommandError> {
+        self.fault.get()
     }
 }
 
@@ -142,7 +144,7 @@ struct InboundSlot {
     received: Arc<AtomicU64>,
     /// The lease's failure reason, set here on a credit violation so the consumer reports it
     /// even if it drains the closed queue before the router hears about the violation.
-    fault: Arc<OnceLock<String>>,
+    fault: Arc<OnceLock<CommandError>>,
 }
 
 /// The stream tables of one connection, shared by the router and the connection's session.
@@ -359,7 +361,10 @@ impl ConnectionStreams {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Closing the queue lets the consumer reach its end, so the fault must already
                 // be set: the router fails the lease only after it receives the violation.
-                let _ = fault.set(CREDIT_VIOLATION.to_string());
+                let _ = fault.set(CommandError::new(
+                    CommandErrorKind::Internal,
+                    CREDIT_VIOLATION,
+                ));
                 self.close_inbound(request_id);
                 Some(CreditViolation {
                     agent_id: self.tables.agent_id.clone(),
@@ -400,7 +405,7 @@ impl OutputReceiver {
     /// Cancel safe: credit owed for drained frames is returned before waiting for the next
     /// frame, and nothing is awaited after a frame was dequeued, so dropping this future (for
     /// example in a `select!`) never loses a frame or a grant.
-    pub async fn recv(&mut self) -> Option<Result<StreamChunk, String>> {
+    pub async fn recv(&mut self) -> Option<Result<StreamChunk, CommandError>> {
         if self.owed_credit > 0 {
             self.lease.link.grant(self.lease.id, self.owed_credit).await;
             self.owed_credit = 0;
@@ -423,11 +428,11 @@ impl OutputReceiver {
     }
 
     /// Returns a router-reported failure once, after the queued frames were drained.
-    fn take_fault(&mut self) -> Option<String> {
+    fn take_fault(&mut self) -> Option<CommandError> {
         if self.fault_reported {
             return None;
         }
-        let message = self.lease.fault()?.to_string();
+        let message = self.lease.fault()?.clone();
         self.fault_reported = true;
         Some(message)
     }
@@ -614,7 +619,13 @@ mod tests {
             last = Some(item);
         }
         // The violation is reported after the queued frames without any router involvement.
-        assert_eq!(last, Some(Err(CREDIT_VIOLATION.to_string())));
+        assert_eq!(
+            last,
+            Some(Err(CommandError::new(
+                CommandErrorKind::Internal,
+                CREDIT_VIOLATION
+            )))
+        );
     }
 
     /// Nothing may follow FIN, so a stream stops being routed once FIN was delivered, and the
@@ -679,11 +690,17 @@ mod tests {
         let (streams, link, _grants) = session();
         let lease = StreamLease::new(RequestId::new(5), link, 0);
         let mut receiver = streams.open_inbound(lease.clone(), STREAM_CREDIT_WINDOW_FRAMES);
-        lease.fail("Agent disconnected".to_string());
+        lease.fail(CommandError::new(
+            CommandErrorKind::Internal,
+            "Agent disconnected",
+        ));
         // Consumers need a real error, not a silently truncated body.
         assert_eq!(
             receiver.recv().await,
-            Some(Err("Agent disconnected".to_string()))
+            Some(Err(CommandError::new(
+                CommandErrorKind::Internal,
+                "Agent disconnected"
+            )))
         );
         assert!(receiver.recv().await.is_none());
     }

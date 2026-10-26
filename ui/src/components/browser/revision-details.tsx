@@ -11,6 +11,7 @@ import {
 } from "#ui/components/browser/metadata";
 import { PersistentPathActions } from "#ui/components/browser/path-actions";
 import { getBaseName } from "#ui/utils/path";
+import { getDirectoryArchiveName } from "#ui/utils/archive";
 import type { GitRevisionEntry } from "#bindings/GitRevisionEntry";
 import type { GitRevisionTreeResponse } from "#bindings/GitRevisionTreeResponse";
 
@@ -45,7 +46,7 @@ function revisionMode(entry: GitRevisionEntry): string {
  * Presents a path at a Git revision with the same header, metadata grid, permissions and
  * shareable links as the worktree details, filled with what Git records. Ownership and
  * permissions are not editable and every action that would touch the working file is
- * disabled.
+ * disabled; Download and Select read the commit instead.
  */
 export function RevisionDetailView(props: {
     agent: Agent;
@@ -74,9 +75,20 @@ export function RevisionDetailView(props: {
                         currentName={name}
                         entryType={entryType}
                         view="details"
-                        downloadUrl=""
-                        downloadName={name}
-                        readOnly
+                        downloadUrl={props.agent.getGitDownloadUrl(
+                            props.tree.path,
+                            props.tree.commit.id,
+                        )}
+                        downloadName={
+                            isDirectory ? getDirectoryArchiveName(name) : name
+                        }
+                        revision={{
+                            commitId: props.tree.commit.id,
+                            // Git records no content a copy or download could write for these.
+                            transferable:
+                                entry.type === "file" ||
+                                entry.type === "directory",
+                        }}
                     />
                 }
             />

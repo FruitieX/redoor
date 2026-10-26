@@ -185,7 +185,7 @@ fn list_directory(
 }
 
 /// Reads an object's size from its header, without inflating the object.
-fn object_size(repo: &gix::Repository, id: gix::ObjectId) -> Result<u64, GitFailure> {
+pub(super) fn object_size(repo: &gix::Repository, id: gix::ObjectId) -> Result<u64, GitFailure> {
     repo.find_header(id)
         .map(|header| header.size())
         .map_err(|error| internal_failure("read Git object header", error))
@@ -203,7 +203,7 @@ fn symlink_target(repo: &gix::Repository, id: gix::ObjectId) -> Result<String, G
 }
 
 /// Reports a path that the revision does not contain as missing, like the worktree browser.
-fn missing_at_revision(relative: &str, rev: &str) -> GitFailure {
+pub(super) fn missing_at_revision(relative: &str, rev: &str) -> GitFailure {
     GitFailure::new(
         CommandErrorKind::NotFound,
         format!("{relative} does not exist at Git revision {rev:?}"),

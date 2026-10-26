@@ -99,12 +99,12 @@ test.describe.serial("Git history browsing", () => {
 
         // The deleted file is still part of the tagged tree, in the same file list.
         await expect(retiredRow).toBeVisible();
-        // A committed entry cannot be selected as a copy source.
+        // A committed entry can be selected as a copy source of its committed content.
         await expect(
             retiredRow.getByRole("checkbox", {
                 name: "Select file retired.ts",
             }),
-        ).toBeDisabled();
+        ).toBeEnabled();
         // Writing into a committed directory is disabled in the shared toolbar.
         await expect(
             page.getByRole("button", { name: "Upload", exact: true }),
@@ -179,10 +179,14 @@ test.describe.serial("Git history browsing", () => {
         await expect(page.getByText("Not in Git").first()).toBeVisible();
         // The committed mode drives the read-only permissions grid.
         await expect(page.getByText("rw-r--r--")).toBeVisible();
-        // Downloads and shareable links would serve the working file, so they are disabled.
+        // Download serves the committed blob, pinned to the commit the tag resolved to.
         await expect(
-            page.getByRole("button", { name: "Download" }),
-        ).toBeDisabled();
+            page.getByRole("link", { name: "Download" }),
+        ).toHaveAttribute(
+            "href",
+            new RegExp(`/git/download/.*app\\.ts\\?rev=${firstCommit}$`),
+        );
+        // Shareable links are one-time tokens for working files, so they stay disabled.
         await expect(
             page.getByRole("button", { name: "Create shareable link" }),
         ).toBeDisabled();

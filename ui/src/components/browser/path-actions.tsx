@@ -32,9 +32,20 @@ import { getErrorMessage } from "#ui/utils/error";
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
 import { invalidateAgentData } from "#ui/queries";
 import {
+    getSelectedFileKey,
     selectedFileKeysAtom,
     toggleSelectedFileAtom,
 } from "#ui/selected-files";
+
+/**
+ * The Git revision a path menu acts on. Write verbs stay disabled; selecting and downloading
+ * read the commit, unless Git records the path as a symlink or submodule (`transferable`
+ * false), which have no content to copy or download.
+ */
+export type PathRevision = {
+    commitId: string;
+    transferable: boolean;
+};
 
 const rootRouteApi = getRouteApi("__root__");
 
@@ -316,12 +327,14 @@ function PathActionMenuItems(props: {
     onDelete?: () => void;
     deleteDisabled?: boolean;
     /**
-     * Shows every verb disabled, for a committed Git revision: they would all act on the
-     * working file instead of the revision shown. Bookmarks only remember the path.
+     * Disables every write verb for a committed Git revision, since they would act on the
+     * working file instead of the revision shown. Selecting and downloading read the commit.
+     * Bookmarks only remember the path.
      */
-    readOnly?: boolean;
+    revision?: PathRevision;
 }) {
-    const readOnly = props.readOnly === true;
+    const readOnly = props.revision !== undefined;
+    const transferDisabled = props.revision?.transferable === false;
 
     return (
         <>
@@ -364,9 +377,9 @@ function PathActionMenuItems(props: {
                 Duplicate
             </ActionMenuButton>
             {props.showDownload ? (
-                props.entryType === "directory" || readOnly ? (
+                props.entryType === "directory" || transferDisabled ? (
                     <ActionMenuButton
-                        disabled={readOnly}
+                        disabled={transferDisabled}
                         onClick={() => {
                             props.close();
                             props.onDownloadDirectory?.();
@@ -419,7 +432,8 @@ function PathActionMenuItems(props: {
                     fileName={props.currentName}
                     entryType={props.entryType}
                     close={props.close}
-                    disabled={readOnly}
+                    rev={props.revision?.commitId}
+                    disabled={transferDisabled}
                 />
             ) : null}
             <BookmarkMenuButton
@@ -471,7 +485,7 @@ export function PathActionMenu(props: {
     onCreateArchive?: () => void;
     onDelete?: () => void;
     /** Keeps the menu's look for a Git revision with every write verb disabled. */
-    readOnly?: boolean;
+    revision?: PathRevision;
 }) {
     const canModify = getImmediateParentPath(props.path) !== null;
 
@@ -551,7 +565,7 @@ export function PathActionMenu(props: {
                                                 }
                                                 onDelete={props.onDelete}
                                                 deleteDisabled={!canModify}
-                                                readOnly={props.readOnly}
+                                                revision={props.revision}
                                             />
                                         )}
                                     </ActionMenu>
@@ -575,13 +589,20 @@ export function SelectPathMenuButton(props: {
     fileName: string;
     entryType: "file" | "directory";
     close: () => void;
-    /** Selection feeds copies and moves, which a Git revision cannot be a source of. */
+    /** The commit a path is selected at while browsing history, which makes it copy-only. */
+    rev?: string;
+    /** Symlinks and submodules at a revision have no content a copy could write. */
     disabled?: boolean;
 }) {
     const selectedFileKeys = useAtomValue(selectedFileKeysAtom);
     const toggleSelectedFile = useSetAtom(toggleSelectedFileAtom);
     const activateBottomDrawerTab = useSetAtom(activateBottomDrawerTabAtom);
-    const isSelected = selectedFileKeys.has(`${props.agent.id}:${props.path}`);
+    const rev = props.rev;
+
+    const isSelected = selectedFileKeys.has(
+        getSelectedFileKey({ agentId: props.agent.id, path: props.path, rev }),
+    );
+
     const label = isSelected ? "Unselect" : "Select";
 
     return (
@@ -599,6 +620,7 @@ export function SelectPathMenuButton(props: {
                     path: props.path,
                     fileName: props.fileName,
                     entryType: props.entryType,
+                    rev,
                 });
 
                 if (!isSelected) {
@@ -627,18 +649,20 @@ export function PersistentPathActions(props: {
     /** Lets a view keep Reload next to Download without hiding it in More. */
     afterDownload?: React.ReactNode;
     /**
-     * Keeps the actions' look for a Git revision with downloads and file operations
-     * disabled, because they would act on the working file rather than the revision.
+     * Keeps the actions' look for a Git revision with file operations disabled, because
+     * they would act on the working file rather than the revision. `downloadUrl` then names
+     * the revision's download, which symlinks and submodules do not have.
      */
-    readOnly?: boolean;
+    revision?: PathRevision;
 }) {
     const [isConfirmDeleteOpen, setIsConfirmDeleteOpen] = React.useState(false);
+    const downloadDisabled = props.revision?.transferable === false;
 
     const downloadClassName = props.secondaryDownload
         ? "rounded-md px-3 text-slate-200 hover:bg-tint hover:text-slate-100"
         : "rounded-md px-3.5 font-semibold shadow-sm shadow-blue-950/30";
 
-    const downloadLink = props.readOnly ? (
+    const downloadLink = downloadDisabled ? (
         <Button
             type="button"
             aria-label="Download"
@@ -668,9 +692,12 @@ export function PersistentPathActions(props: {
             <div className="flex items-center gap-2">
                 <Tooltip
                     content={
-                        props.readOnly
-                            ? "Downloads are not available for a Git revision"
-                            : (props.downloadTooltip ?? "Download")
+                        downloadDisabled
+                            ? "Symlinks and submodules cannot be downloaded from a Git revision"
+                            : (props.downloadTooltip ??
+                              (props.revision === undefined
+                                  ? "Download"
+                                  : "Download as committed at this revision"))
                     }
                 >
                     {downloadLink}
@@ -686,7 +713,7 @@ export function PersistentPathActions(props: {
                     showOpenNatively={true}
                     showSelect={true}
                     onDelete={() => setIsConfirmDeleteOpen(true)}
-                    readOnly={props.readOnly}
+                    revision={props.revision}
                 />
             </div>
             {isConfirmDeleteOpen ? (

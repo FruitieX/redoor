@@ -3326,6 +3326,7 @@ dependencies = [
  "bytes",
  "clap",
  "fastrand",
+ "flate2",
  "futures-util",
  "gix",
  "gix-dir",

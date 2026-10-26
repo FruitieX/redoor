@@ -214,6 +214,28 @@ export type PlannedRename = {
 };
 
 /**
+ * Returns the keys of items that share a name with an earlier item. Selections can hold one
+ * file at two revisions or same-named files from different directories, which would land on
+ * one destination path: the first keeps its name and the rest must be renamed, whatever
+ * happens to existing destination items.
+ */
+export function findNameCollisions(
+    items: ConflictCandidate[],
+): ReadonlySet<string> {
+    const seenNames = new Set<string>();
+
+    return new Set(
+        items.flatMap((item) => {
+            const isRepeat = seenNames.has(item.fileName);
+
+            seenNames.add(item.fileName);
+
+            return isRepeat ? [item.key] : [];
+        }),
+    );
+}
+
+/**
  * Prefills every conflicting item with a distinct free name and validates what the user
  * typed. Items without a conflict keep their own names, so renames must avoid those too,
  * as well as each other.

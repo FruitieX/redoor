@@ -25,6 +25,7 @@ import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { TextField } from "#ui/components/text-field";
 import { Tooltip } from "#ui/components/tooltip";
 import {
+    getSelectedFileKey,
     selectedFileKeysAtom,
     toggleSelectedFileAtom,
 } from "#ui/selected-files";
@@ -55,6 +56,7 @@ import {
     type UnarchiveDestination,
 } from "#ui/utils/archive";
 import { useTerminals } from "#ui/use-terminals";
+import type { RevisionListing } from "#ui/components/browser/revision";
 
 /**
  * One displayed row: a listed entry, or an incoming transfer whose `entry` is a stand-in so it
@@ -133,14 +135,14 @@ export function FileList(props: {
     sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
     /**
-     * Lists a committed Git revision: selection and row write actions are disabled, no
-     * uploads are pending into it, and modification times are not shown because Git does
-     * not record them.
+     * Lists a committed Git revision: row write actions are disabled, selection and
+     * downloads read the commit, no uploads are pending into it, and modification times are
+     * not shown because Git does not record them.
      */
-    readOnly?: boolean;
+    revision?: RevisionListing;
 }) {
     const navigate = useNavigate();
-    const readOnly = props.readOnly === true;
+    const readOnly = props.revision !== undefined;
     const agent = props.agent;
     const [filterFocusPath, setFilterFocusPath] = useAtom(filterFocusPathAtom);
     const filterInputRef = React.useRef<HTMLInputElement>(null);
@@ -259,7 +261,7 @@ export function FileList(props: {
                 rows={displayedRows}
                 sort={sort}
                 onSort={props.onSort}
-                readOnly={readOnly}
+                revision={props.revision}
             />
             <FilesystemFooter mountPoint={props.mountPoint} />
         </div>
@@ -307,7 +309,7 @@ function FileTable(props: {
     rows: FileListRow[];
     sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
-    readOnly: boolean;
+    revision: RevisionListing | undefined;
 }) {
     const tableRef = React.useRef<HTMLTableElement>(null);
 
@@ -383,7 +385,7 @@ function FileTable(props: {
                                 agent={props.agent}
                                 directoryPath={props.directoryPath}
                                 entry={row.entry}
-                                readOnly={props.readOnly}
+                                revision={props.revision}
                             />
                         ),
                     )}
@@ -572,7 +574,7 @@ function FileEntryActions(props: {
     fullPath: string;
     directoryPath: string;
     isDirectory: boolean;
-    readOnly: boolean;
+    revision: RevisionListing | undefined;
 }) {
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
 
@@ -587,9 +589,12 @@ function FileEntryActions(props: {
 
     const entryType = props.isDirectory ? "directory" : "file";
 
-    const downloadUrl = props.agent.getRawUrl(props.fullPath, {
-        download: true,
-    });
+    const revision = props.revision;
+
+    const downloadUrl =
+        revision === undefined
+            ? props.agent.getRawUrl(props.fullPath, { download: true })
+            : props.agent.getGitDownloadUrl(props.fullPath, revision.commitId);
 
     const downloadName = props.isDirectory
         ? getDirectoryArchiveName(props.entryName)
@@ -615,7 +620,16 @@ function FileEntryActions(props: {
                 onUnarchive={() => setIsUnarchiveDialogOpen(true)}
                 onCreateArchive={() => setIsCreateArchiveDialogOpen(true)}
                 onDelete={() => setIsDeleteDialogOpen(true)}
-                readOnly={props.readOnly}
+                revision={
+                    revision === undefined
+                        ? undefined
+                        : {
+                              commitId: revision.commitId,
+                              transferable: !revision.nonTransferableNames.has(
+                                  props.entryName,
+                              ),
+                          }
+                }
             />
             {isUnarchiveDialogOpen ? (
                 <UnarchiveDialog
@@ -684,16 +698,29 @@ function FileEntry(props: {
     agent: Agent;
     directoryPath: string;
     entry: LsEntry;
-    /** A committed entry cannot be selected as a copy source and has no recorded time. */
-    readOnly: boolean;
+    /**
+     * A committed entry is selected at its commit and has no recorded time; symlinks and
+     * submodules cannot be selected at all.
+     */
+    revision: RevisionListing | undefined;
 }) {
     const toggleSelectedFile = useSetAtom(toggleSelectedFileAtom);
     const selectedFileKeys = useAtomValue(selectedFileKeysAtom);
     const entry = props.entry;
     const isDirectory = entry.type === "directory";
     const fullPath = joinBrowserPath(props.directoryPath, entry.name);
-    const isSelected = selectedFileKeys.has(`${props.agent.id}:${fullPath}`);
+    const rev = props.revision?.commitId;
+    const readOnly = props.revision !== undefined;
+
+    const isSelected = selectedFileKeys.has(
+        getSelectedFileKey({ agentId: props.agent.id, path: fullPath, rev }),
+    );
+
     const entryType = isDirectory ? "directory" : "file";
+
+    const selectable =
+        props.revision === undefined ||
+        !props.revision.nonTransferableNames.has(entry.name);
 
     return (
         <tr
@@ -709,7 +736,7 @@ function FileEntry(props: {
                             : `Select ${entryType} ${entry.name}`
                     }
                     checked={isSelected}
-                    disabled={props.readOnly}
+                    disabled={!selectable}
                     onCheckedChange={() =>
                         toggleSelectedFile({
                             agentId: props.agent.id,
@@ -717,6 +744,7 @@ function FileEntry(props: {
                             path: fullPath,
                             fileName: entry.name,
                             entryType,
+                            rev,
                         })
                     }
                 />
@@ -751,7 +779,7 @@ function FileEntry(props: {
                 className="p-1.5 text-slate-400 sm:p-2"
                 aria-label={`Modified ${entry.name}`}
             >
-                {props.readOnly ? (
+                {readOnly ? (
                     "-"
                 ) : (
                     <Tooltip
@@ -786,7 +814,7 @@ function FileEntry(props: {
                     fullPath={fullPath}
                     directoryPath={props.directoryPath}
                     isDirectory={isDirectory}
-                    readOnly={props.readOnly}
+                    revision={props.revision}
                 />
             </td>
         </tr>

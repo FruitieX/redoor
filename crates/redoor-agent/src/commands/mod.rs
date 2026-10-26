@@ -7,7 +7,7 @@ pub(crate) mod content_grep;
 pub(crate) mod ctx;
 pub(crate) mod file_search;
 mod fs;
-mod git;
+pub(crate) mod git;
 mod host;
 mod metadata;
 
@@ -231,6 +231,7 @@ impl RunCommand for Command {
                 path,
                 on_existing,
                 ownership,
+                executable,
             }) => {
                 let prepared = RawFileSink::prepare(
                     ctx.responder.request_id(),
@@ -238,6 +239,7 @@ impl RunCommand for Command {
                     on_existing,
                     ownership,
                     partial,
+                    executable,
                     &ctx.services,
                 )
                 .await
@@ -390,6 +392,18 @@ impl RunCommand for Command {
             Command::GitRefList(request::GitRefList { path, kind, page }) => {
                 Reply::of::<request::GitRefList>(git::refs::list(path, kind, page).await)
             }
+            Command::GitRevisionStat(request::GitRevisionStat {
+                path,
+                rev,
+                replace_target,
+            }) => Reply::of::<request::GitRevisionStat>(
+                git::export::stat(path, rev, replace_target).await,
+            ),
+            Command::GitDownload(request::GitDownload {
+                path,
+                rev,
+                include_root,
+            }) => download::download_git_revision(path, rev, include_root, ctx).await,
             Command::MoveMetadata(request::MoveMetadata { path }) => {
                 Reply::of::<request::MoveMetadata>(fs::move_metadata(path).await)
             }

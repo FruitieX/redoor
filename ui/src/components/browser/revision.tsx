@@ -144,6 +144,34 @@ export function revisionListingEntries(entries: GitTreeEntry[]): LsEntry[] {
 }
 
 /**
+ * The Git revision a listing shows. Its entries can be selected and downloaded at the
+ * commit, except names Git records as symlinks or submodules: Git stores a symlink as its
+ * target and a submodule as a commit id, so neither has content a copy or download could
+ * write.
+ */
+export type RevisionListing = {
+    commitId: string;
+    nonTransferableNames: ReadonlySet<string>;
+};
+
+/** Describes a committed directory listing for the shared file list. */
+export function revisionListing(
+    commitId: string,
+    entry: Extract<GitRevisionEntry, { type: "directory" }>,
+): RevisionListing {
+    return {
+        commitId,
+        nonTransferableNames: new Set(
+            entry.entries.flatMap((child) =>
+                child.kind === "symlink" || child.kind === "submodule"
+                    ? [child.name]
+                    : [],
+            ),
+        ),
+    };
+}
+
+/**
  * Explains a committed listing that is not complete. Without it a directory cut at the
  * listing limit, or one with names that cannot be linked, would look like it has no more
  * entries than are shown.

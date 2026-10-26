@@ -40,11 +40,16 @@ async fn existing_destination_metadata(
 
 /// Reserves a new sibling staging file without following a colliding symlink: `create_new`
 /// refuses any existing entry, so ownership only ever covers a file this upload created.
-async fn create_staging_file(path: &Path) -> std::io::Result<(StagingPath, File)> {
+async fn create_staging_file(
+    path: &Path,
+    executable: bool,
+) -> std::io::Result<(StagingPath, File)> {
     StagingPath::create_sibling(path, StagingKind::Upload, |candidate| async move {
         OpenOptions::new()
             .write(true)
             .create_new(true)
+            // Apply execute permissions at creation so the OS retains the umask and ACLs.
+            .mode(if executable { 0o777 } else { 0o666 })
             .open(candidate)
             .await
     })
@@ -75,6 +80,7 @@ impl RawFileSink {
         on_existing: CopyExistingMode,
         ownership: CreationOwnershipOptions,
         partial: Option<Box<redoor_protocol::wire::partials::PartialTransfer>>,
+        executable: bool,
         services: &crate::commands::ctx::AgentServices,
     ) -> Result<Self, AgentCommandError> {
         let destination = Path::new(&path);
@@ -131,12 +137,14 @@ impl RawFileSink {
                     )
                 })?,
             ),
-            None => create_staging_file(destination).await.map_err(|error| {
-                AgentCommandError::new(
-                    CommandErrorKind::from_io_error(&error),
-                    format!("Failed to create file: {error}"),
-                )
-            })?,
+            None => create_staging_file(destination, executable)
+                .await
+                .map_err(|error| {
+                    AgentCommandError::new(
+                        CommandErrorKind::from_io_error(&error),
+                        format!("Failed to create file: {error}"),
+                    )
+                })?,
         };
         log!(
             Level::Info,
@@ -243,7 +251,7 @@ impl UploadSink for RawFileSink {
             return Err(self
                 .fail(
                     kind,
-                    format!("Failed to preserve uploaded file permissions: {error}"),
+                    format!("Failed to set uploaded file permissions: {error}"),
                 )
                 .await);
         }
@@ -328,6 +336,7 @@ mod tests {
             CopyExistingMode::Override,
             CreationOwnershipOptions::default(),
             None,
+            false,
             &ctx.services,
         )
         .await;
@@ -421,12 +430,47 @@ mod tests {
         );
     }
 
+    /// A child process isolates the umask from other tests and Tokio's filesystem workers.
+    #[tokio::test]
+    async fn executable_staging_respects_umask() {
+        if std::env::var_os("REDOOR_TEST_EXECUTABLE_UMASK").is_none() {
+            let status = tokio::process::Command::new("sh")
+                .args(["-c", "umask 0111; exec \"$@\"", "sh"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "transfers::raw_upload::tests::executable_staging_respects_umask",
+                    "--nocapture",
+                ])
+                .env("REDOOR_TEST_EXECUTABLE_UMASK", "1")
+                .status()
+                .await
+                .unwrap();
+            // Only the isolated child changes the process-wide permission policy.
+            assert!(status.success());
+            return;
+        }
+        let temp = TempDir::create();
+        // The test masks directory execute bits too; make only the fixture parent usable.
+        tokio::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+            .await
+            .unwrap();
+        let (staging, file) = create_staging_file(&temp.path().join("script"), true)
+            .await
+            .unwrap();
+        let mode = file.metadata().await.unwrap().permissions().mode() & 0o777;
+        // Readability must not restore execute bits explicitly forbidden by the umask.
+        assert_eq!(mode, 0o666);
+        drop(file);
+        staging.discard().await;
+    }
+
     #[tokio::test]
     async fn staging_creation_reserves_a_new_regular_sibling() {
         let temp = TempDir::create();
         let destination = temp.path().join("destination");
 
-        let (staging, file) = create_staging_file(&destination).await.unwrap();
+        let (staging, file) = create_staging_file(&destination, false).await.unwrap();
         drop(file);
 
         // The reserved staging entry must be a newly created regular file.

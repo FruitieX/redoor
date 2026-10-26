@@ -130,7 +130,14 @@ impl LineAssembler {
 
 /// One thing the log stream produced for the browser.
 enum StreamOutput {
-    Data(Option<Result<redoor_protocol::wire::stream::StreamChunk, String>>),
+    Data(
+        Option<
+            Result<
+                redoor_protocol::wire::stream::StreamChunk,
+                redoor_protocol::wire::request::CommandError,
+            >,
+        >,
+    ),
     Keepalive,
 }
 

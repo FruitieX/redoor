@@ -9,12 +9,14 @@ use redoor_protocol::api::{
 use super::{
     access::Principal,
     error::ApiError,
-    services::transfer::{CopySpec, StartedCopy},
+    services::transfer::{CopySpec, RevisionCopySpec, StartedCopy},
     state::ServerState,
 };
 use crate::actors::router::CopyOperation;
 
 /// Route: `POST /api/v1/copy`; needs read on the source and write on the destination.
+///
+/// A `source_rev` reads the source from Git history instead of the working tree.
 pub(crate) async fn copy_file_handler(
     AxumState(state): AxumState<ServerState>,
     Extension(principal): Extension<Principal>,
@@ -26,6 +28,20 @@ pub(crate) async fn copy_file_handler(
     payload.dest.agent = state.agents.resolve(payload.dest.agent.as_str()).await?;
     principal.require(&[Permission::FilesRead], &payload.source.agent)?;
     principal.require(&[Permission::FilesWrite], &payload.dest.agent)?;
+    if let Some(rev) = payload.source_rev {
+        let transfer_id = state
+            .transfers
+            .start_revision_copy(RevisionCopySpec {
+                source: payload.source,
+                rev,
+                dest: payload.dest,
+                on_existing: payload.on_existing,
+            })
+            .await?;
+        return Ok(Json(CopyFileResponse {
+            copy_request_id: transfer_id,
+        }));
+    }
     let StartedCopy { transfer_id, .. } = state
         .transfers
         .start_copy(CopySpec {

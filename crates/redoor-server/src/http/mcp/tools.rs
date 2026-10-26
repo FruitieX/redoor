@@ -817,7 +817,7 @@ async fn read_file(
     let page = stream
         .read_bounded(limit)
         .await
-        .map_err(|error| op(error.0, id))?;
+        .map_err(|error| op(error.0.message, id))?;
     // Dropping the stream cancels the agent if it still streams the look-ahead byte.
     drop(stream);
     let (bytes, more) = (page.data, page.overflowed);
@@ -864,6 +864,7 @@ async fn write_file(
         path: path.to_string(),
         on_existing: conflict_mode(string(args, "on_existing", id)?, id)?,
         ownership: CreationOwnershipOptions::default(),
+        executable: false,
     });
     let written = write_inline(state, agent_id, path, command, &bytes)
         .await
