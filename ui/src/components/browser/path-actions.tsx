@@ -486,6 +486,8 @@ export function PathActionMenu(props: {
     onDelete?: () => void;
     /** Keeps the menu's look for a Git revision with every write verb disabled. */
     revision?: PathRevision;
+    /** Lets dense lists shrink the trigger, which otherwise sets their row height. */
+    triggerClassName?: string;
 }) {
     const canModify = getImmediateParentPath(props.path) !== null;
 
@@ -518,6 +520,7 @@ export function PathActionMenu(props: {
                                             <MoreHorizontal className="h-4 w-4" />
                                         }
                                         variant="icon"
+                                        className={props.triggerClassName}
                                     >
                                         {(close) => (
                                             <PathActionMenuItems

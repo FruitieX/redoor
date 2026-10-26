@@ -620,6 +620,7 @@ function FileEntryActions(props: {
                 onUnarchive={() => setIsUnarchiveDialogOpen(true)}
                 onCreateArchive={() => setIsCreateArchiveDialogOpen(true)}
                 onDelete={() => setIsDeleteDialogOpen(true)}
+                triggerClassName="max-sm:h-7 max-sm:w-7"
                 revision={
                     revision === undefined
                         ? undefined
@@ -724,10 +725,10 @@ function FileEntry(props: {
 
     return (
         <tr
-            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint"
+            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint max-sm:text-sm"
             aria-label={`${isDirectory ? "Directory" : "File"} entry ${entry.name}`}
         >
-            <td className="p-1.5 sm:p-2" aria-label="">
+            <td className="px-1.5 py-0.5 sm:p-2" aria-label="">
                 <Checkbox
                     role="checkbox"
                     label={
@@ -749,14 +750,14 @@ function FileEntry(props: {
                     }
                 />
             </td>
-            <td className="p-1.5 sm:p-2">
+            <td className="px-1.5 py-0.5 sm:p-2">
                 {isDirectory ? (
-                    <Folder className="h-5 w-5 text-blue-400" />
+                    <Folder className="h-4 w-4 text-blue-400 sm:h-5 sm:w-5" />
                 ) : (
-                    <File className="h-5 w-5 text-slate-500" />
+                    <File className="h-4 w-4 text-slate-500 sm:h-5 sm:w-5" />
                 )}
             </td>
-            <td className="p-1.5 sm:p-2">
+            <td className="px-1.5 py-0.5 sm:p-2">
                 <Link
                     {...browserRoute(props.agent, fullPath)}
                     data-keyboard-focus-entry="true"
@@ -768,15 +769,15 @@ function FileEntry(props: {
             <td
                 className={
                     isDirectory
-                        ? "p-1.5 text-slate-600 sm:p-2"
-                        : "p-1.5 text-slate-400 sm:p-2"
+                        ? "px-1.5 py-0.5 text-slate-600 sm:p-2"
+                        : "px-1.5 py-0.5 text-slate-400 sm:p-2"
                 }
                 aria-label={`Size for ${entry.name}`}
             >
                 {isDirectory ? "-" : formatSize(entry.size)}
             </td>
             <td
-                className="p-1.5 text-slate-400 sm:p-2"
+                className="px-1.5 py-0.5 text-slate-400 sm:p-2"
                 aria-label={`Modified ${entry.name}`}
             >
                 {readOnly ? (
@@ -801,13 +802,13 @@ function FileEntry(props: {
                     </Tooltip>
                 )}
             </td>
-            <td className="p-1.5 text-slate-400 sm:p-2">
+            <td className="px-1.5 py-0.5 text-slate-400 sm:p-2">
                 {entry.owner || "-"}
             </td>
-            <td className="p-1.5 text-slate-400 sm:p-2">
+            <td className="px-1.5 py-0.5 text-slate-400 sm:p-2">
                 {entry.group || "-"}
             </td>
-            <td className="p-1.5 text-right sm:p-2">
+            <td className="px-1.5 py-0.5 text-right sm:p-2">
                 <FileEntryActions
                     agent={props.agent}
                     entryName={entry.name}
