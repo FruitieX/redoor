@@ -111,6 +111,16 @@
     color-scheme: dark;
 }
 
+/*
+ * Chromium on Android boosts text in blocks wider than the screen, which blows up diffs,
+ * the editor and logs whose rows scroll sideways. Tailwind's preflight only sets the
+ * prefixed property, which Chromium ignores, so opt out of autosizing with the standard one.
+ * Sizes are rem-based, so the reader's browser font size still applies.
+ */
+html {
+    text-size-adjust: 100%;
+}
+
 body {
     @apply m-0 bg-canvas text-slate-200 antialiased;
     font-family:
