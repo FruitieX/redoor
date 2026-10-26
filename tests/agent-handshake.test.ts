@@ -91,7 +91,7 @@ describe("agent websocket handshake", () => {
     });
 
     it("refuses a missing or unknown protocol with 426", async () => {
-        for (const protocols of [[], ["redoor.v1"]]) {
+        for (const protocols of [[], ["redoor.v1"], ["redoor.v2"]]) {
             const outcome = await upgradeAgentSocket({
                 serverPort,
                 protocols,
@@ -113,12 +113,14 @@ describe("agent websocket handshake", () => {
         }
 
         const mismatches = await api.listProtocolMismatches();
-        // The refused agent is remembered for the UI, with its own version.
+        // The refused agent is remembered for the UI, with its own version. Retries from one
+        // host and version replace each other, so only the last offer, the previous
+        // generation, remains.
         expect(
             mismatches.attempts.some(
                 (attempt) =>
                     attempt.agent_version === "0.0.0-old-agent" &&
-                    attempt.offered_protocols.includes("redoor.v1"),
+                    attempt.offered_protocols.includes("redoor.v2"),
             ),
         ).toBe(true);
     });

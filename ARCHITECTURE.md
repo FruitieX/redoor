@@ -44,7 +44,7 @@ that cannot import each other.
 The contract between all parties, with no runtime dependencies (no tokio).
 
 - `wire/`: the agent websocket protocol.
-  - `handshake` holds the upgrade contract: the `redoor.v2` subprotocol, the agent endpoint
+  - `handshake` holds the upgrade contract: the `redoor.v3` subprotocol, the agent endpoint
     path, the `426` body and the protocol-mismatch types the UI lists.
   - `ServerToAgent` and `AgentToServer` are the JSON control envelopes, one per direction,
     so each side's `match` is exhaustive. No frame except `hello` carries an agent id: the
@@ -429,14 +429,14 @@ sequenceDiagram
     participant S as Session actor
     participant R as Router
 
-    A->>H: GET /api/v1/agent/ws<br/>Authorization: Bearer token<br/>Sec-WebSocket-Protocol: redoor.v2
+    A->>H: GET /api/v1/agent/ws<br/>Authorization: Bearer token<br/>Sec-WebSocket-Protocol: redoor.v3
     alt wrong or missing token
         H-->>A: 401 (no socket)
     else protocol not offered
         H-->>A: 426 + {server_protocol, server_version, message}
         Note over H: attempt kept in the mismatch list
     else accepted
-        H-->>A: 101, Sec-WebSocket-Protocol: redoor.v2
+        H-->>A: 101, Sec-WebSocket-Protocol: redoor.v3
         A->>S: hello {agent_id, agent_name, identity, capabilities}
         Note over S: any other first frame closes the socket
         alt managed agent the server has stopped
