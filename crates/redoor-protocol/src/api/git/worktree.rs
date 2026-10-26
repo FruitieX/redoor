@@ -44,6 +44,11 @@ pub enum GitContextResponse {
         tracking_state: Option<GitTrackingState>,
         repository_root: String,
         repository_relative_path: String,
+        /// The checked-out branch, absent for a detached HEAD, so every Git page can name it
+        /// without a full status walk.
+        branch_name: Option<String>,
+        /// The commit HEAD points at, absent while the branch has no commits yet.
+        head_commit_id: Option<String>,
     },
 }
 

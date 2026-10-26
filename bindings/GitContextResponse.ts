@@ -5,4 +5,13 @@ import type { GitTrackingState } from "./GitTrackingState";
 /**
  * Prevents repository-only context from being represented for paths outside a worktree.
  */
-export type GitContextResponse = { "status": "outside_worktree" } | { "status": "inside_worktree", entry_type: GitEntryType, tracking_state: GitTrackingState | null, repository_root: string, repository_relative_path: string, };
+export type GitContextResponse = { "status": "outside_worktree" } | { "status": "inside_worktree", entry_type: GitEntryType, tracking_state: GitTrackingState | null, repository_root: string, repository_relative_path: string, 
+/**
+ * The checked-out branch, absent for a detached HEAD, so every Git page can name it
+ * without a full status walk.
+ */
+branch_name: string | null, 
+/**
+ * The commit HEAD points at, absent while the branch has no commits yet.
+ */
+head_commit_id: string | null, };

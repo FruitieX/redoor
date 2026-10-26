@@ -127,6 +127,16 @@ describe("Git browser REST API", () => {
             status: "inside_worktree",
             repository_root: repo,
         });
+        // HEAD is reported with the context so every Git page can name the branch.
+        expect(trackedContext).toMatchObject({
+            // `git init` names the branch from the user's config, so ask Git for it.
+            branch_name: (
+                await $({ cwd: repo })`git symbolic-ref --short HEAD`
+            ).stdout.trim(),
+            head_commit_id: (
+                await $({ cwd: repo })`git rev-parse HEAD`
+            ).stdout.trim(),
+        });
         // Clean index membership must still classify a file as tracked.
         expect(trackedContext).toMatchObject({ tracking_state: "tracked" });
         // Status/exclude traversal distinguishes ordinary untracked content.

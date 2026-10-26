@@ -89,11 +89,14 @@ fn context_blocking(
             interrupt,
         )?)
     };
+    let head = HeadState::read(&repository.repo)?;
     Ok(GitContextResponse::InsideWorktree {
         entry_type,
         tracking_state,
         repository_root: repository.root.display().to_string(),
         repository_relative_path: relative,
+        branch_name: head.branch_name,
+        head_commit_id: head.commit_id,
     })
 }
 
@@ -176,26 +179,13 @@ fn status_blocking(
         });
     }
 
-    let head = repository
-        .repo
-        .head()
-        .map_err(|error| internal_failure("read repository HEAD", error))?;
-    let branch_name = head.referent_name().and_then(|name| {
-        name.shorten()
-            .to_str()
-            .ok()
-            .map(std::string::ToString::to_string)
-    });
-    let detached_head_id = head
-        .is_detached()
-        .then(|| head.id().map(|id| id.to_string()))
-        .flatten();
+    let head = HeadState::read(&repository.repo)?;
 
     Ok(GitStatusResponse {
         path: requested.display().to_string(),
         repository_root: repository.root.display().to_string(),
-        branch_name,
-        detached_head_id,
+        branch_name: head.branch_name,
+        detached_head_id: head.detached.then_some(head.commit_id).flatten(),
         // Upstream graph traversal is intentionally omitted when it isn't cheaply available locally.
         upstream: None,
         ahead: None,
@@ -204,6 +194,35 @@ fn status_blocking(
         truncated,
         omitted_non_utf8_entries,
     })
+}
+
+/// What HEAD names, read once so context and status describe it the same way.
+struct HeadState {
+    /// The short name of the checked-out branch, absent when HEAD is detached.
+    branch_name: Option<String>,
+    /// The commit HEAD resolves to, absent on an unborn branch.
+    commit_id: Option<String>,
+    detached: bool,
+}
+
+impl HeadState {
+    /// Reads HEAD without touching the index or worktree, so it is cheap on every navigation.
+    fn read(repo: &gix::Repository) -> Result<Self, GitFailure> {
+        let head = repo
+            .head()
+            .map_err(|error| internal_failure("read repository HEAD", error))?;
+        let branch_name = head.referent_name().and_then(|name| {
+            name.shorten()
+                .to_str()
+                .ok()
+                .map(std::string::ToString::to_string)
+        });
+        Ok(Self {
+            branch_name,
+            commit_id: head.id().map(|id| id.to_string()),
+            detached: head.is_detached(),
+        })
+    }
 }
 
 /// Classifies the requested filesystem node without following symlink targets.
