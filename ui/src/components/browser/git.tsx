@@ -383,7 +383,12 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
     const status = statusQuery.data;
     const { conflicts, staged, unstaged, untracked, diffEntries } = groups;
 
-    if (status.entries.length === 0) {
+    // Omitted or truncated entries are changes too, so their warnings below must stay visible.
+    if (
+        status.entries.length === 0 &&
+        status.omitted_non_utf8_entries === 0 &&
+        !status.truncated
+    ) {
         return (
             <CleanState
                 message={
