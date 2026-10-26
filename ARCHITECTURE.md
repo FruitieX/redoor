@@ -1362,6 +1362,11 @@ the Git view rather than another level of page navigation.
   changes, ported from Fredrika Lindh's MIT-licensed shadcn diff viewer. `diff-view.tsx`
   renders the rows, highlighting each hunk side as one block so multi-line strings and
   comments keep their colours, then cutting the highlighted line at the inline segments.
+  Highlighting (`utils/code-highlight.ts`, shared with Markdown fences) parses with the same
+  CodeMirror/Lezer grammars as the editor and renders React nodes with `tok-*` classes and a
+  `data-token` kind, so no highlighter HTML is injected. Grammars the editor bundles colour
+  at once; others come from `@codemirror/language-data`, render plain first and colour when
+  their grammar has loaded.
   File names and per-line Open links are router `Link`s, and parsing and highlighting are
   memoized on the patch text so re-renders do not redo them.
 

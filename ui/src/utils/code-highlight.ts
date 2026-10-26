@@ -1,8 +1,17 @@
-import type { SupportedSyntaxLanguage } from "#ui/utils/editor-language";
+import * as React from "react";
 import {
-    HIGHLIGHT_LANGUAGE_NAMES,
-    syntaxHighlighter,
-} from "#ui/utils/syntax-highlighting";
+    Language,
+    LanguageDescription,
+    LanguageSupport,
+} from "@codemirror/language";
+import { languages } from "@codemirror/language-data";
+import { highlightCode, tagHighlighter, tags } from "@lezer/highlight";
+import {
+    syntaxLanguageFromFileName,
+    syntaxLanguageFromName,
+    syntaxLanguageSupport,
+    type SupportedSyntaxLanguage,
+} from "#ui/utils/editor-language";
 
 /**
  * A run of highlighted text. Tokens are flat rather than a tree so a caller can cut them at
@@ -13,54 +22,189 @@ export interface HighlightToken {
     /** The CSS classes of the token, or null for plain text. */
     className: string | null;
     /**
-     * The token's innermost grammar kind, such as "keyword", exposed as `data-token` so tests
-     * and tools can find tokens without depending on the highlighter's class names.
+     * The token's grammar kind, such as "keyword", exposed as `data-token` so tests and tools
+     * can find tokens without depending on class names.
      */
     kind: string | null;
 }
 
-const HTML_ENTITIES = new Map([
-    ["&amp;", "&"],
-    ["&lt;", "<"],
-    ["&gt;", ">"],
-    ["&quot;", '"'],
-    ["&#x27;", "'"],
-    ["&#39;", "'"],
+/**
+ * Maps Lezer's highlight tags to `tok-*` classes. It groups tags the way the editor themes
+ * (BBEdit light, Tokyo Night dark) colour them, so read-only code looks like the editor;
+ * the built-in classHighlighter has no class for function names, which both themes colour.
+ */
+const tokenHighlighter = tagHighlighter([
+    { tag: tags.keyword, class: "tok-keyword" },
+    { tag: [tags.comment, tags.meta], class: "tok-comment" },
+    { tag: [tags.documentMeta, tags.processingInstruction], class: "tok-meta" },
+    {
+        tag: [tags.string, tags.special(tags.string), tags.inserted],
+        class: "tok-string",
+    },
+    { tag: [tags.number, tags.character], class: "tok-number" },
+    {
+        tag: [
+            tags.changed,
+            tags.annotation,
+            tags.modifier,
+            tags.self,
+            tags.namespace,
+        ],
+        class: "tok-modifier",
+    },
+    {
+        tag: [
+            tags.atom,
+            tags.bool,
+            tags.null,
+            tags.color,
+            tags.constant(tags.name),
+            tags.standard(tags.name),
+            tags.special(tags.variableName),
+        ],
+        class: "tok-constant",
+    },
+    { tag: tags.variableName, class: "tok-variable" },
+    {
+        tag: [
+            tags.function(tags.variableName),
+            tags.function(tags.propertyName),
+            tags.macroName,
+        ],
+        class: "tok-function",
+    },
+    { tag: [tags.propertyName, tags.labelName], class: "tok-property" },
+    { tag: [tags.typeName, tags.className], class: "tok-type" },
+    { tag: tags.tagName, class: "tok-tag" },
+    {
+        tag: [tags.escape, tags.regexp, tags.url, tags.link],
+        class: "tok-escape",
+    },
+    { tag: tags.operator, class: "tok-operator" },
+    { tag: tags.heading, class: "tok-heading" },
+    { tag: tags.list, class: "tok-list" },
+    { tag: tags.emphasis, class: "tok-emphasis" },
+    { tag: tags.strong, class: "tok-strong" },
+    { tag: tags.strikethrough, class: "tok-strikethrough" },
+    { tag: [tags.invalid, tags.deleted], class: "tok-invalid" },
 ]);
 
-/** Reverses the escaping highlight.js applies to source text. */
-function decodeEntities(text: string): string {
-    return text.replace(/&(?:amp|lt|gt|quot|#x27|#39);/g, (entity) => {
-        return HTML_ENTITIES.get(entity) ?? entity;
-    });
+/** What to highlight with: a ready grammar, one that still has to load, or none. */
+export type HighlightLanguageSource = Language | LanguageDescription | null;
+
+/** Grammars are built once per language, because the editor's setup recreates them per call. */
+const supportedLanguages = new Map<SupportedSyntaxLanguage, Language>();
+
+/** The grammar of a language the editor bundles, ready without loading. */
+function supportedLanguage(language: SupportedSyntaxLanguage): Language {
+    const cached = supportedLanguages.get(language);
+
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    const support = syntaxLanguageSupport(language);
+
+    const grammar =
+        support instanceof LanguageSupport ? support.language : support;
+
+    supportedLanguages.set(language, grammar);
+
+    return grammar;
 }
 
 /**
- * Flattens highlight.js HTML into tokens. Nested scopes keep all their classes, so rules
- * such as `.hljs-meta .hljs-string` still match a single span.
+ * Picks a grammar for a file the way the editor does. Files the editor does not know may
+ * still match a lazily loaded grammar, which is fine for read-only code.
  */
-function tokensFromHighlightHtml(html: string): HighlightToken[] {
-    const tokens: HighlightToken[] = [];
-    const scopes: string[] = [];
-    const pattern = /<span class="([^"]*)">|<\/span>|([^<]+)/g;
+export function languageForFileName(
+    fileName: string,
+    content: string,
+): HighlightLanguageSource {
+    const language = syntaxLanguageFromFileName(fileName, content);
 
-    for (const match of html.matchAll(pattern)) {
-        if (match[1] !== undefined) {
-            scopes.push(match[1]);
-        } else if (match[2] !== undefined) {
-            const innermost = scopes.at(-1)?.split(" ")[0];
-
-            tokens.push({
-                text: decodeEntities(match[2]),
-                className: scopes.length === 0 ? null : scopes.join(" "),
-                kind: innermost?.replace(/^hljs-/, "") ?? null,
-            });
-        } else {
-            scopes.pop();
-        }
+    if (language !== undefined) {
+        return supportedLanguage(language);
     }
 
-    return tokens;
+    return LanguageDescription.matchFilename(languages, fileName);
+}
+
+/** Picks a grammar for a name such as a Markdown fence label (`ts`, `bash`, `sql`). */
+export function languageForName(name: string): HighlightLanguageSource {
+    const language = syntaxLanguageFromName(name);
+
+    if (language !== undefined) {
+        return supportedLanguage(language);
+    }
+
+    return LanguageDescription.matchLanguageName(languages, name, false);
+}
+
+/** One load per grammar, shared by every component waiting for it. */
+const loads = new Map<LanguageDescription, Promise<void>>();
+
+/** Starts loading a grammar once; a failed load leaves the code plain rather than broken. */
+function loadDescription(description: LanguageDescription): Promise<void> {
+    const existing = loads.get(description);
+
+    if (existing !== undefined) {
+        return existing;
+    }
+
+    const load = description.load().then(
+        () => undefined,
+        () => undefined,
+    );
+
+    loads.set(description, load);
+
+    return load;
+}
+
+/** The grammar of a source if it is ready, otherwise null. */
+function readyLanguage(source: HighlightLanguageSource): Language | null {
+    if (source instanceof LanguageDescription) {
+        return source.support?.language ?? null;
+    }
+
+    return source;
+}
+
+/**
+ * Resolves a grammar for rendering. A grammar that has to load renders as plain text first
+ * and re-renders once loaded, without suspending, so the code is readable immediately.
+ */
+export function useLoadedLanguage(
+    source: HighlightLanguageSource,
+): Language | null {
+    const subscribe = React.useCallback(
+        (onLoaded: () => void) => {
+            if (
+                !(source instanceof LanguageDescription) ||
+                source.support !== undefined
+            ) {
+                return () => {};
+            }
+
+            let active = true;
+
+            void loadDescription(source).then(() => {
+                if (active) {
+                    onLoaded();
+                }
+            });
+
+            return () => {
+                active = false;
+            };
+        },
+        [source],
+    );
+
+    const snapshot = () => readyLanguage(source);
+
+    return React.useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
 /**
@@ -69,28 +213,28 @@ function tokensFromHighlightHtml(html: string): HighlightToken[] {
  */
 export function highlightLines(
     code: string,
-    language: SupportedSyntaxLanguage,
+    language: Language,
 ): HighlightToken[][] {
-    const html = syntaxHighlighter.highlight(code, {
-        language: HIGHLIGHT_LANGUAGE_NAMES[language],
-        ignoreIllegals: true,
-    }).value;
-
     const lines: HighlightToken[][] = [[]];
+    const tree = language.parser.parse(code);
 
-    for (const token of tokensFromHighlightHtml(html)) {
-        const parts = token.text.split("\n");
+    highlightCode(
+        code,
+        tree,
+        tokenHighlighter,
+        (text, classes) => {
+            const kind = classes.split(" ").at(-1)?.replace(/^tok-/, "");
 
-        parts.forEach((part, index) => {
-            if (index > 0) {
-                lines.push([]);
-            }
-
-            if (part !== "") {
-                lines.at(-1)?.push({ ...token, text: part });
-            }
-        });
-    }
+            lines.at(-1)?.push({
+                text,
+                className: classes === "" ? null : classes,
+                kind: classes === "" || kind === undefined ? null : kind,
+            });
+        },
+        () => {
+            lines.push([]);
+        },
+    );
 
     return lines;
 }

@@ -6,8 +6,10 @@
  * registry/ui/diff/index.tsx), with the app's highlighter, theme colours and editor links.
  */
 import React from "react";
+import type { Language } from "@codemirror/language";
 import { ChevronsUpDown } from "lucide-react";
 import type { browserRoute } from "#ui/browser-route";
+import { HighlightedTokens } from "#ui/components/highlighted-tokens";
 import { LinkButton } from "#ui/components/link-button";
 import {
     lineSideText,
@@ -17,11 +19,13 @@ import {
     type LineSegment,
     type SkipBlock,
 } from "#ui/utils/diff-parse";
-import { highlightLines, type HighlightToken } from "#ui/utils/code-highlight";
 import {
-    syntaxLanguageFromFileName,
-    type SupportedSyntaxLanguage,
-} from "#ui/utils/editor-language";
+    highlightLines,
+    languageForFileName,
+    useLoadedLanguage,
+    type HighlightLanguageSource,
+    type HighlightToken,
+} from "#ui/utils/code-highlight";
 import { cn } from "#ui/utils/cn";
 
 /** Where the editor opens the diffed file, as built by `browserRoute`. */
@@ -68,11 +72,9 @@ function firstFileLine(file: DiffFile): string {
     return "";
 }
 
-/** Picks the file's language the same way the editor does. */
-export function diffFileLanguage(
-    file: DiffFile,
-): SupportedSyntaxLanguage | undefined {
-    return syntaxLanguageFromFileName(diffFileName(file), firstFileLine(file));
+/** Picks the file's grammar the same way the editor does. */
+function diffFileLanguage(file: DiffFile): HighlightLanguageSource {
+    return languageForFileName(diffFileName(file), firstFileLine(file));
 }
 
 /**
@@ -82,7 +84,7 @@ export function diffFileLanguage(
 function highlightHunkSide(
     texts: Array<string | undefined>,
     start: number,
-    language: SupportedSyntaxLanguage,
+    language: Language,
 ): Array<[number, HighlightToken[]]> {
     if (texts.length === 0) {
         return [];
@@ -116,9 +118,9 @@ function highlightHunkSide(
 /** Highlights both sides of every hunk of a file. */
 function highlightFile(
     file: DiffFile,
-    language: SupportedSyntaxLanguage | undefined,
+    language: Language | null,
 ): FileHighlight | null {
-    if (language === undefined) {
+    if (language === null) {
         return null;
     }
 
@@ -256,23 +258,6 @@ function rowParts(
     });
 }
 
-/** Renders tokens as spans, leaving plain text bare to keep large diffs light. */
-function Tokens(props: { tokens: HighlightToken[] }) {
-    return props.tokens.map((token, index) =>
-        token.className === null ? (
-            <React.Fragment key={index}>{token.text}</React.Fragment>
-        ) : (
-            <span
-                key={index}
-                className={token.className}
-                data-token={token.kind ?? undefined}
-            >
-                {token.text}
-            </span>
-        ),
-    );
-}
-
 /** Row backgrounds by kind; modified rows stay neutral so their inline changes stand out. */
 const ROW_CLASSES = {
     normal: "bg-surface",
@@ -389,17 +374,20 @@ const Line = React.memo(function Line(props: {
                                     key={index}
                                     className="rounded-sm bg-diff-insert-strong no-underline"
                                 >
-                                    <Tokens tokens={part.tokens} />
+                                    <HighlightedTokens tokens={part.tokens} />
                                 </ins>
                             ) : part.type === "delete" ? (
                                 <del
                                     key={index}
                                     className="rounded-sm bg-diff-delete-strong"
                                 >
-                                    <Tokens tokens={part.tokens} />
+                                    <HighlightedTokens tokens={part.tokens} />
                                 </del>
                             ) : (
-                                <Tokens key={index} tokens={part.tokens} />
+                                <HighlightedTokens
+                                    key={index}
+                                    tokens={part.tokens}
+                                />
                             ),
                         )}
                     </Tag>
@@ -518,7 +506,9 @@ export function Diff(props: {
     editorRoute: DiffEditorRoute | null;
 }) {
     const file = props.file;
-    const language = diffFileLanguage(file);
+    // A grammar that loads lazily renders plain rows first and colours them once loaded.
+    const languageSource = React.useMemo(() => diffFileLanguage(file), [file]);
+    const language = useLoadedLanguage(languageSource);
 
     const highlight = React.useMemo(
         () => highlightFile(file, language),

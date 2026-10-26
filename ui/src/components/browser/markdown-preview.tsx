@@ -1,11 +1,16 @@
-import { useState, type ComponentProps } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import { Link } from "@tanstack/react-router";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isMap, isNode, parseDocument, stringify, type Node } from "yaml";
 import { browserRoute } from "#ui/browser-route";
 import { FoldingSection } from "#ui/components/folding-section";
-import { syntaxHighlighter } from "#ui/utils/syntax-highlighting";
+import { HighlightedLines } from "#ui/components/highlighted-tokens";
+import {
+    highlightLines,
+    languageForName,
+    useLoadedLanguage,
+} from "#ui/utils/code-highlight";
 
 /** Opening `---` must be the first line so thematic breaks later in the file stay markdown. */
 const YAML_FRONTMATTER_OPENING = /^---[ \t]*\r?\n/;
@@ -123,33 +128,37 @@ function YamlFrontmatterTable(props: { headers: string[]; values: string[] }) {
     );
 }
 
-/** Highlights only explicitly labeled fences so inline and unknown code remain predictable. */
+/**
+ * Highlights only explicitly labeled fences so inline and unknown code remain predictable.
+ * Languages the editor bundles colour at once; others load their grammar and colour the
+ * fence once it arrives, showing the plain source until then.
+ */
 function MarkdownCode(props: ComponentProps<"code"> & ExtraProps) {
-    const className = props.className ?? "";
-    const language = /(?:^|\s)language-([^\s]+)/.exec(className)?.[1];
+    const label = /(?:^|\s)language-([^\s]+)/.exec(props.className ?? "")?.[1];
 
-    if (
-        language === undefined ||
-        syntaxHighlighter.getLanguage(language) === undefined
-    ) {
-        return <code className={props.className}>{props.children}</code>;
-    }
+    const language = useLoadedLanguage(
+        label === undefined ? null : languageForName(label),
+    );
 
     const source = (props.node?.children ?? [])
         .map((child) => (child.type === "text" ? child.value : ""))
         .join("")
         .replace(/\n$/, "");
 
-    const highlighted = syntaxHighlighter.highlight(source, {
-        language,
-        ignoreIllegals: true,
-    }).value;
+    // Fences re-render with the document, so a long fence is not parsed again each time.
+    const lines = useMemo(
+        () => (language === null ? null : highlightLines(source, language)),
+        [source, language],
+    );
+
+    if (lines === null) {
+        return <code className={props.className}>{props.children}</code>;
+    }
 
     return (
-        <code
-            className={`${className} hljs`}
-            dangerouslySetInnerHTML={{ __html: highlighted }}
-        />
+        <code className={props.className}>
+            <HighlightedLines lines={lines} />
+        </code>
     );
 }
 

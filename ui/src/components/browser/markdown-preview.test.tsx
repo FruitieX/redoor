@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import { MarkdownPreview, resolveMarkdownFileLink } from "./markdown-preview";
 
@@ -24,8 +24,10 @@ const value = true;
 
     // Highlighting must preserve the complete source for readers and copying.
     expect(code?.textContent).toContain("const value = true;");
-    // A grammar token proves the configured TypeScript highlighter handled the fence.
-    expect(code?.querySelector(".hljs-keyword")?.textContent).toBe("const");
+    // A grammar token proves the editor's TypeScript grammar handled the fence.
+    expect(code?.querySelector('[data-token="keyword"]')?.textContent).toBe(
+        "const",
+    );
 });
 
 test("leaves inline code unhighlighted", () => {
@@ -43,7 +45,32 @@ test("leaves inline code unhighlighted", () => {
     // Inline snippets must retain normal Markdown code rendering without block tokens.
     expect(code?.textContent).toBe("const");
     expect(code?.querySelector("span")).toBeNull();
-    expect(code?.classList.contains("hljs")).toBe(false);
+    expect(code?.querySelector("[data-token]")).toBeNull();
+});
+
+test("highlights a fence in a language the editor does not bundle once it loads", async () => {
+    const view = render(
+        <MarkdownPreview
+            deviceName="agent"
+            filePath="/README.md"
+            repositoryRoot={null}
+            content={`\`\`\`sql
+SELECT name FROM users;
+\`\`\``}
+        />,
+    );
+
+    const code = view.container.querySelector("pre code");
+
+    // The source is readable at once, before the lazily loaded grammar arrives.
+    expect(code?.textContent).toContain("SELECT name FROM users;");
+
+    // The SQL grammar loads on demand and then colours the same fence.
+    await waitFor(() => {
+        expect(code?.querySelector('[data-token="keyword"]')?.textContent).toBe(
+            "SELECT",
+        );
+    });
 });
 
 test("leaves an unknown language fence readable", () => {
@@ -63,7 +90,7 @@ some readable source
     // Unsupported labels must fall back without hiding or rejecting their source.
     expect(code?.textContent).toContain("some readable source");
     expect(code?.querySelector("span")).toBeNull();
-    expect(code?.classList.contains("hljs")).toBe(false);
+    expect(code?.querySelector("[data-token]")).toBeNull();
 });
 
 test("escapes HTML-like source in a recognized fence", () => {

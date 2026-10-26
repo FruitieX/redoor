@@ -324,62 +324,89 @@ code {
     animation: copy-success-flash 0.7s ease-out forwards;
 }
 
-/* Highlight tokens inherit their host background while adapting to app theme. */
-.syntax-highlight .hljs-keyword,
-.syntax-highlight .hljs-type,
-.syntax-highlight .hljs-doctag,
-.syntax-highlight .hljs-template-tag,
-.syntax-highlight .hljs-template-variable,
-.syntax-highlight .hljs-variable.language_ {
-    color: light-dark(#cf222e, #ff7b72);
+/*
+ * Lezer token colours for read-only code (diffs and Markdown fences). They follow the editor
+ * themes, BBEdit in light mode and Tokyo Night in dark mode, so code looks the same in the
+ * editor and around it. Tokyo Night's editor comment colour (#444b6a) is too faint on the
+ * darker diff surface, so comments use the theme family's brighter #565f89.
+ */
+.syntax-highlight .tok-keyword {
+    color: light-dark(#0000ff, #bb9af7);
 }
 
-.syntax-highlight .hljs-title,
-.syntax-highlight .hljs-title.class_,
-.syntax-highlight .hljs-title.function_ {
-    color: light-dark(#8250df, #d2a8ff);
+.syntax-highlight .tok-comment {
+    color: light-dark(#804000, #565f89);
 }
 
-.syntax-highlight .hljs-attr,
-.syntax-highlight .hljs-attribute,
-.syntax-highlight .hljs-literal,
-.syntax-highlight .hljs-meta,
-.syntax-highlight .hljs-number,
-.syntax-highlight .hljs-operator,
-.syntax-highlight .hljs-variable,
-.syntax-highlight .hljs-selector-attr,
-.syntax-highlight .hljs-selector-class,
-.syntax-highlight .hljs-selector-id {
-    color: light-dark(#0550ae, #79c0ff);
+.syntax-highlight .tok-meta {
+    color: light-dark(#888888, #565f89);
 }
 
-.syntax-highlight .hljs-regexp,
-.syntax-highlight .hljs-string,
-.syntax-highlight .hljs-meta .hljs-string {
-    color: light-dark(#0a3069, #a5d6ff);
+.syntax-highlight .tok-string {
+    color: light-dark(#ff0080, #9ece6a);
 }
 
-.syntax-highlight .hljs-built_in,
-.syntax-highlight .hljs-symbol {
-    color: light-dark(#953800, #ffa657);
+.syntax-highlight .tok-number {
+    color: light-dark(#ff0080, #ff9e64);
 }
 
-.syntax-highlight .hljs-comment,
-.syntax-highlight .hljs-code,
-.syntax-highlight .hljs-formula {
-    color: light-dark(#6e7781, #8b949e);
+.syntax-highlight .tok-modifier {
+    color: light-dark(currentColor, #ff9e64);
 }
 
-.syntax-highlight .hljs-name,
-.syntax-highlight .hljs-quote,
-.syntax-highlight .hljs-selector-tag,
-.syntax-highlight .hljs-selector-pseudo {
-    color: light-dark(#116329, #7ee787);
+.syntax-highlight .tok-constant,
+.syntax-highlight .tok-operator {
+    color: light-dark(currentColor, #bb9af7);
 }
 
-.syntax-highlight .hljs-section,
-.syntax-highlight .hljs-bullet {
-    color: light-dark(#0550ae, #f2cc60);
+.syntax-highlight .tok-variable {
+    color: light-dark(#006600, #c0caf5);
+}
+
+.syntax-highlight .tok-function {
+    color: light-dark(#0000a2, #7aa2f7);
+}
+
+.syntax-highlight .tok-property {
+    color: light-dark(currentColor, #7aa2f7);
+}
+
+.syntax-highlight .tok-type {
+    color: light-dark(#6d79de, #0db9d7);
+}
+
+.syntax-highlight .tok-tag {
+    color: light-dark(#1c02ff, #0db9d7);
+}
+
+.syntax-highlight .tok-escape {
+    color: light-dark(#33cc33, #b4f9f8);
+}
+
+.syntax-highlight .tok-heading {
+    color: light-dark(#0c07ff, #89ddff);
+    font-weight: 700;
+}
+
+.syntax-highlight .tok-list {
+    color: light-dark(#b90690, currentColor);
+}
+
+.syntax-highlight .tok-emphasis {
+    font-style: italic;
+}
+
+.syntax-highlight .tok-strong {
+    color: light-dark(#0000ff, currentColor);
+    font-weight: 700;
+}
+
+.syntax-highlight .tok-strikethrough {
+    text-decoration: line-through;
+}
+
+.syntax-highlight .tok-invalid {
+    color: light-dark(currentColor, #ff5370);
 }
 
 /* Fenced code uses the pre surface instead of repeating inline-code boxes per line. */
