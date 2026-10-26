@@ -521,7 +521,7 @@ export function Diff(props: {
         <div className="w-full min-w-0 overflow-x-auto overflow-y-hidden">
             <table
                 aria-label={props.label}
-                className="syntax-highlight w-max min-w-full border-separate border-spacing-0 bg-surface font-mono text-xs leading-5 text-slate-200 max-sm:text-[9px] max-sm:leading-4"
+                className="syntax-highlight w-max min-w-full border-separate border-spacing-0 bg-surface font-mono text-code leading-5 text-slate-200 max-sm:leading-4"
             >
                 <tbody>
                     {file.hunks.map((hunk, index) =>
