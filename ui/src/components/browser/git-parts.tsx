@@ -119,7 +119,11 @@ export function CommitAge(props: { authoredAt: number; now: number }) {
  * A round initial standing in for an author's avatar. Git records no picture, and the hue
  * follows the name so one author's commits are recognisable down a long list.
  */
-export function AuthorAvatar(props: { name: string; size?: "sm" | "md" }) {
+export function AuthorAvatar(props: {
+    name: string;
+    /** `xs` fits inside a line of text, such as a commit's byline. */
+    size?: "xs" | "sm" | "md";
+}) {
     const initial = props.name.trim().charAt(0).toUpperCase() || "?";
 
     const hues = [
@@ -135,7 +139,11 @@ export function AuthorAvatar(props: { name: string; size?: "sm" | "md" }) {
         hash += props.name.charCodeAt(index);
     }
 
-    const size = props.size === "md" ? "h-9 w-9 text-sm" : "h-7 w-7 text-xs";
+    const size = {
+        xs: "h-5 w-5 text-xs",
+        sm: "h-7 w-7 text-xs",
+        md: "h-9 w-9 text-sm",
+    }[props.size ?? "sm"];
 
     return (
         <span

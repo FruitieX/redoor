@@ -21,6 +21,11 @@ export function SegmentedControl<Value extends string>(props: {
     value: Value;
     onChange: (value: Value) => void;
     className?: string;
+    /**
+     * Shows only the icons on phones, for a control that shares a crowded bar there. The
+     * labels still name each segment to assistive technology and in the tooltips.
+     */
+    iconOnlyOnPhones?: boolean;
 }) {
     return (
         <div
@@ -48,10 +53,20 @@ export function SegmentedControl<Value extends string>(props: {
                     >
                         {/* Icons are decorative, so they give way first when the sidebar is narrow. */}
                         <Icon
-                            className="hidden h-3.5 w-3.5 shrink-0 @[15rem]:block"
+                            className={cn(
+                                "hidden h-3.5 w-3.5 shrink-0 @[15rem]:block",
+                                props.iconOnlyOnPhones && "max-sm:block",
+                            )}
                             aria-hidden="true"
                         />
-                        <span className="truncate">{option.label}</span>
+                        <span
+                            className={cn(
+                                "truncate",
+                                props.iconOnlyOnPhones && "max-sm:hidden",
+                            )}
+                        >
+                            {option.label}
+                        </span>
                     </ToggleButton>
                 );
             })}

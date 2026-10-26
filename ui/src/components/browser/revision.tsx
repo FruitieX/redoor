@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
     AlertTriangle,
+    ChevronLeft,
+    ChevronRight,
     GitCommitHorizontal,
     History,
     Undo2,
@@ -28,7 +30,11 @@ import {
     shortCommitId,
 } from "#ui/components/browser/git-parts";
 import { formatModifiedAge } from "#ui/components/browser/utils";
-import { gitCommitDiffQueryOptions } from "#ui/queries";
+import {
+    gitCommitDiffQueryOptions,
+    gitCommitNeighborsQueryOptions,
+} from "#ui/queries";
+import { cn } from "#ui/utils/cn";
 import { getErrorMessage } from "#ui/utils/error";
 import type { GitChangeState } from "#bindings/GitChangeState";
 import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
@@ -40,7 +46,8 @@ import type { LsEntry } from "#bindings/LsEntry";
 /**
  * Marks the page as a read-only view of history, directly below the breadcrumbs, so it is
  * impossible to mistake committed content for the working files. It also offers the way
- * back to the working tree, which drops the revision from the URL.
+ * back to the working tree, which drops the revision from the URL. On phones it keeps to
+ * one row: the summary already heads the page's own views, and the links show their icons.
  */
 export function RevisionBanner(props: {
     agent: Agent;
@@ -78,7 +85,7 @@ export function RevisionBanner(props: {
                 ) : null}
             </span>
             {commit === null ? null : (
-                <span className="min-w-0 flex-1 truncate text-slate-300">
+                <span className="min-w-0 flex-1 truncate text-slate-300 max-sm:hidden">
                     <span title={commit.summary}>{commit.summary}</span>
                     <span className="text-slate-500">
                         {" "}
@@ -96,20 +103,24 @@ export function RevisionBanner(props: {
                     </span>
                 </span>
             )}
-            <span className="text-xs text-amber-200/80">Read-only</span>
+            <span className="text-xs text-amber-200/80 max-sm:hidden">
+                Read-only
+            </span>
             <div className="ml-auto flex shrink-0 items-center gap-1">
                 {commit === null ? null : (
                     <Tooltip content="Show the changes this commit made">
                         <Link
                             {...browserRoute(props.agent, props.path)}
                             search={{ view: "git", rev: props.rev }}
-                            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50"
+                            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 max-sm:p-2"
                         >
                             <GitCommitHorizontal
                                 className="h-3.5 w-3.5"
                                 aria-hidden="true"
                             />
-                            Commit changes
+                            <span className="max-sm:sr-only">
+                                Commit changes
+                            </span>
                         </Link>
                     </Tooltip>
                 )}
@@ -117,10 +128,10 @@ export function RevisionBanner(props: {
                     <Link
                         {...browserRoute(props.agent, props.path)}
                         search={{ rev: undefined }}
-                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50"
+                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 max-sm:p-2"
                     >
                         <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        Working tree
+                        <span className="max-sm:sr-only">Working tree</span>
                     </Link>
                 </Tooltip>
             </div>
@@ -235,10 +246,138 @@ function countChanges(diff: GitCommitDiffResponse) {
 }
 
 /**
+ * One side of the commit stepper. It names the neighbouring commit by its summary, because
+ * a short id says nothing about where the step leads, and stays in place as a disabled
+ * cell when there is no commit that way, so the other side never jumps across.
+ */
+function CommitStepLink(props: {
+    agent: Agent;
+    path: string;
+    direction: "previous" | "next";
+    commit: GitCommitSummary | null;
+    /** Shown instead of a commit while the neighbours load or when there is none. */
+    placeholder: string;
+}) {
+    const isPrevious = props.direction === "previous";
+    const label = isPrevious ? "Previous" : "Next";
+    const Icon = isPrevious ? ChevronLeft : ChevronRight;
+    const commit = props.commit;
+
+    const content = (
+        <>
+            <Icon
+                className={cn(
+                    "h-4 w-4 shrink-0",
+                    isPrevious ? "order-first" : "order-last",
+                )}
+                aria-hidden="true"
+            />
+            <span
+                className={cn(
+                    "min-w-0 flex-1",
+                    isPrevious ? "text-left" : "text-right",
+                )}
+            >
+                <span className="block text-xs font-medium text-slate-400">
+                    {label}
+                </span>
+                <span
+                    className={cn(
+                        "block truncate text-sm",
+                        commit === null ? "text-slate-500" : "text-slate-100",
+                    )}
+                >
+                    {commit === null
+                        ? props.placeholder
+                        : commit.summary || shortCommitId(commit.id)}
+                </span>
+            </span>
+        </>
+    );
+
+    const cell =
+        "flex w-full min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 sm:px-3";
+
+    if (commit === null) {
+        return (
+            <span
+                aria-disabled="true"
+                className={cn(cell, "border-slate-800/60 text-slate-600")}
+            >
+                {content}
+            </span>
+        );
+    }
+
+    return (
+        <Tooltip
+            content={`${isPrevious ? "Older" : "Newer"} change to this path: ${shortCommitId(commit.id)} ${commit.summary}`}
+            className="min-w-0"
+        >
+            <Link
+                {...browserRoute(props.agent, props.path)}
+                search={{ view: "git", rev: commit.id }}
+                aria-label={`${label} commit: ${commit.summary || shortCommitId(commit.id)}`}
+                className={cn(
+                    cell,
+                    "border-slate-700 bg-slate-900/40 text-slate-300 transition-colors hover:border-blue-400/50 hover:bg-tint hover:text-blue-300",
+                )}
+            >
+                {content}
+            </Link>
+        </Tooltip>
+    );
+}
+
+/**
+ * Steps to the commit before or after this one in the browsed path's history, the same
+ * history the Commits tab lists, so a reader can page through changes without going back
+ * to the list. The neighbours load apart from the diff because finding the newer one walks
+ * from HEAD, which takes longer the older the commit is.
+ */
+function CommitStepper(props: {
+    agent: Agent;
+    path: string;
+    commitId: string;
+}) {
+    const query = useQuery(
+        gitCommitNeighborsQueryOptions(props.agent, props.path, props.commitId),
+    );
+
+    const placeholder = (none: string) =>
+        query.isPending ? "Loading..." : query.isError ? "Unavailable" : none;
+
+    return (
+        <nav
+            aria-label="Commit navigation"
+            className="grid grid-cols-2 gap-2 sm:grid-cols-[minmax(0,20rem)_minmax(0,20rem)] sm:justify-between"
+        >
+            <CommitStepLink
+                agent={props.agent}
+                path={props.path}
+                direction="previous"
+                commit={query.data?.older ?? null}
+                placeholder={placeholder("First change")}
+            />
+            <CommitStepLink
+                agent={props.agent}
+                path={props.path}
+                direction="next"
+                commit={query.data?.newer ?? null}
+                placeholder={placeholder("Latest change")}
+            />
+        </nav>
+    );
+}
+
+/**
  * Shows what the revision's commit changed below the browsed path, compared with its first
- * parent: who made the commit and when, a summary of the changed files, then each file's
- * diff under a header naming it. File names link to the file at the commit, or at the parent for deleted
- * files, which no longer exist at the commit.
+ * parent: who made the commit and when, a way to step to the neighbouring commits, a
+ * summary of the changed files, then each file's diff under a header naming it. It is laid
+ * out for phones first: the header is a title over one line of facts, and the summary and
+ * diff controls share one bar, so the first patch starts high on a small screen. File names
+ * link to the file at the commit, or at the parent for deleted files, which no longer exist
+ * at the commit.
  */
 export function GitCommitView(props: {
     agent: Agent;
@@ -316,47 +455,51 @@ export function GitCommitView(props: {
 
     return (
         <>
-            <header className="flex items-start gap-3 border-b border-slate-800 px-4 py-4 sm:px-5">
-                <AuthorAvatar name={commit.author_name} size="md" />
-                <div className="min-w-0 flex-1">
-                    <h2 className="break-words text-base font-semibold text-slate-50">
+            <header className="grid gap-3 border-b border-slate-800 px-4 py-3 sm:px-5 sm:py-4">
+                <div className="min-w-0">
+                    <h2 className="break-words text-base font-semibold leading-snug text-slate-50">
                         {commit.summary || "(no message)"}
                     </h2>
-                    <p className="mt-1 text-sm text-slate-400">
+                    <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-slate-400">
+                        <AuthorAvatar name={commit.author_name} size="xs" />
                         <span
                             className="font-medium text-slate-200"
                             title={commit.author_email}
                         >
                             {commit.author_name}
-                        </span>{" "}
-                        committed{" "}
-                        <CommitAge authoredAt={commit.authored_at} now={now} />
+                        </span>
+                        <span>
+                            <span className="hidden sm:inline">committed </span>
+                            <CommitAge
+                                authoredAt={commit.authored_at}
+                                now={now}
+                            />
+                        </span>
+                        {/* The dot wraps with the id, so no line ends in a dangling separator. */}
+                        <span className="whitespace-nowrap">
+                            <span aria-hidden="true" className="text-slate-600">
+                                ·{" "}
+                            </span>
+                            <code
+                                aria-label="Commit id"
+                                title={commit.id}
+                                className="font-mono text-slate-300"
+                            >
+                                {shortCommitId(commit.id)}
+                            </code>
+                        </span>
                     </p>
-                    <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
-                        {parentId === null ? (
-                            "Root commit: every file was added."
-                        ) : (
-                            <>
-                                {commit.parent_ids.length > 1
-                                    ? "Merge, compared with first parent"
-                                    : "Parent"}
-                                <Link
-                                    {...browserRoute(props.agent, props.path)}
-                                    search={{ view: "git", rev: parentId }}
-                                    className="rounded-md border border-slate-700 bg-slate-900/60 px-1.5 py-0.5 font-mono text-blue-300 hover:border-blue-400/50 hover:underline"
-                                >
-                                    {shortCommitId(parentId)}
-                                </Link>
-                            </>
-                        )}
-                    </p>
+                    <CommitNotes
+                        agent={props.agent}
+                        path={props.path}
+                        diff={diff}
+                    />
                 </div>
-                <code
-                    title={commit.id}
-                    className="shrink-0 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 font-mono text-xs text-slate-300"
-                >
-                    {shortCommitId(commit.id)}
-                </code>
+                <CommitStepper
+                    agent={props.agent}
+                    path={props.path}
+                    commitId={props.commitId}
+                />
             </header>
             <GitPanelBar
                 actions={
@@ -370,31 +513,30 @@ export function GitCommitView(props: {
                 }
             >
                 <span className="font-medium text-slate-100">
-                    {diff.files.length === 1
-                        ? "1 changed file"
-                        : `${diff.files.length}${diff.truncated ? "+" : ""} changed files`}
+                    {diff.files.length}
+                    {diff.truncated ? "+" : ""}
+                    <span className="hidden sm:inline"> changed</span>
+                    {diff.files.length === 1 ? " file" : " files"}
                 </span>
                 {countChanges(diff).map((entry) => (
                     <span
                         key={entry.kind}
-                        className="inline-flex items-center gap-1.5 text-xs text-slate-400"
+                        className="inline-flex items-center gap-1 text-xs text-slate-400"
                     >
                         <ChangeBadge kind={entry.kind} />
-                        {entry.count} {changeLabel(entry.kind).toLowerCase()}
+                        {entry.count}
+                        <span className="hidden sm:inline">
+                            {changeLabel(entry.kind).toLowerCase()}
+                        </span>
                     </span>
                 ))}
-                {diff.repository_relative_path === "" ? null : (
-                    <span className="text-xs text-slate-500">
-                        Only changes to{" "}
-                        <code className="font-mono text-slate-300">
-                            {diff.repository_relative_path}
-                        </code>
-                    </span>
-                )}
             </GitPanelBar>
-            <div className="grid grid-cols-[minmax(0,1fr)] gap-4 px-4 py-4 sm:px-5">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-3 px-2 py-3 sm:gap-4 sm:px-5 sm:py-4">
                 {diff.files.length === 0 ? (
-                    <p role="status" className="text-sm text-slate-300">
+                    <p
+                        role="status"
+                        className="px-2 text-sm text-slate-300 sm:px-0"
+                    >
                         This commit changed nothing below this path.
                     </p>
                 ) : null}
@@ -415,5 +557,53 @@ export function GitCommitView(props: {
                 />
             </div>
         </>
+    );
+}
+
+/**
+ * The facts about a commit that only some commits have: that it is the root, a merge
+ * compared with one of its parents, or that the view leaves out changes outside the
+ * browsed path. They read as small print under the header instead of crowding its line.
+ */
+function CommitNotes(props: {
+    agent: Agent;
+    path: string;
+    diff: GitCommitDiffResponse;
+}) {
+    const diff = props.diff;
+    const parentId = diff.parent_id;
+    const isMerge = diff.commit.parent_ids.length > 1;
+    const isScoped = diff.repository_relative_path !== "";
+
+    if (parentId !== null && !isMerge && !isScoped) {
+        return null;
+    }
+
+    return (
+        <ul className="mt-1.5 grid gap-0.5 text-xs text-slate-500">
+            {parentId === null ? (
+                <li>Root commit: every file was added.</li>
+            ) : isMerge ? (
+                // The stepper follows the path's history, so the compared parent gets its own link.
+                <li>
+                    Merge, compared with first parent{" "}
+                    <Link
+                        {...browserRoute(props.agent, props.path)}
+                        search={{ view: "git", rev: parentId }}
+                        className="font-mono text-blue-300 hover:underline"
+                    >
+                        {shortCommitId(parentId)}
+                    </Link>
+                </li>
+            ) : null}
+            {isScoped ? (
+                <li>
+                    Only changes to{" "}
+                    <code className="break-all font-mono text-slate-300">
+                        {diff.repository_relative_path}
+                    </code>
+                </li>
+            ) : null}
+        </ul>
     );
 }

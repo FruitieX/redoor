@@ -215,16 +215,69 @@ test.describe.serial("Git history browsing", () => {
                 name: "Commit diff for src/retired.ts",
             }),
         ).toContainText("retired = true");
+    });
 
-        await page
-            .getByRole("link", { name: firstCommit.slice(0, 12) })
+    test("steps to the previous and next commit from a commit's changes", async ({
+        page,
+    }) => {
+        await page.goto(
+            `${deviceBrowserUrl(ctx.agentName, repositoryPath)}?view=git&rev=${secondCommit}`,
+        );
+
+        const stepper = page.getByRole("navigation", {
+            name: "Commit navigation",
+        });
+
+        // HEAD is the newest change, so there is nothing to step forward to.
+        await expect(stepper).toContainText("Latest change");
+        await expect(
+            stepper.getByRole("link", { name: /^Next commit/ }),
+        ).toHaveCount(0);
+
+        await stepper
+            .getByRole("link", { name: "Previous commit: Initial import" })
             .click();
 
-        // The parent link moves the revision to the parent commit.
-        await expect(page).toHaveURL(new RegExp(`rev=${firstCommit}`));
+        // Previous opens the older commit's changes at the same path.
+        await expect(page).toHaveURL(new RegExp(`view=git&rev=${firstCommit}`));
         await expect(
             page.getByText("Root commit: every file was added."),
         ).toBeVisible();
+        // The root commit has no older change.
+        await expect(stepper).toContainText("First change");
+
+        await stepper
+            .getByRole("link", { name: "Next commit: Bump version" })
+            .click();
+
+        // Next walks back toward HEAD.
+        await expect(page).toHaveURL(new RegExp(`rev=${secondCommit}`));
+        await expect(
+            page.getByRole("region", {
+                name: "Commit diff for src/retired.ts",
+            }),
+        ).toBeVisible();
+    });
+
+    test("steps between the changes of the browsed file only", async ({
+        page,
+    }) => {
+        await page.goto(
+            `${deviceBrowserUrl(ctx.agentName, path.join(repositoryPath, "src", "app.ts"))}?view=git&rev=${firstCommit}`,
+        );
+
+        await page
+            .getByRole("navigation", { name: "Commit navigation" })
+            .getByRole("link", { name: "Next commit: Bump version" })
+            .click();
+
+        // The step keeps the file scope, so only the file's own change is shown.
+        await expect(page).toHaveURL(
+            new RegExp(`src/app\\.ts\\?view=git&rev=${secondCommit}$`),
+        );
+        await expect(
+            page.getByRole("region", { name: /Commit diff for/ }),
+        ).toHaveCount(1);
     });
 
     test("scopes a commit diff to a file and links to the whole commit", async ({

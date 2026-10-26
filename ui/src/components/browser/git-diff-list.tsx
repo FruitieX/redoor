@@ -1,6 +1,11 @@
 import React from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import {
+    ChevronDown,
+    ChevronRight,
+    ChevronsDownUp,
+    ChevronsUpDown,
+} from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
@@ -84,7 +89,8 @@ export type CollapsedGitDiffs = ReturnType<typeof useCollapsedGitDiffs>;
 
 /**
  * Collapses or expands every diff at once, for the panel bar above a list, so a long change
- * set can be folded down to its file names and opened again without clicking each file.
+ * set can be folded down to its file names and opened again without clicking each file. On
+ * phones the buttons shrink to their icons so they share one bar with the file counts.
  */
 export function GitDiffCollapseControls(props: {
     collapsed: CollapsedGitDiffs;
@@ -105,22 +111,28 @@ export function GitDiffCollapseControls(props: {
                 type="button"
                 size="sm"
                 variant="secondary"
+                aria-label="Collapse all"
                 tooltip="Hide every patch and show only the file names"
+                className="gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2"
                 onClick={props.collapsed.collapseAll}
             >
-                Collapse all
+                <ChevronsDownUp className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Collapse all</span>
             </Button>
             <Button
                 type="button"
                 size="sm"
                 variant="secondary"
+                aria-label="Expand all"
                 tooltip="Show the patch of every file"
+                className="gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2"
                 onClick={() => {
                     props.onExpandAll?.();
                     props.collapsed.expandAll();
                 }}
             >
-                Expand all
+                <ChevronsUpDown className="h-4 w-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Expand all</span>
             </Button>
         </>
     );
