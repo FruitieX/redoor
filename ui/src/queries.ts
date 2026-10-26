@@ -1,4 +1,5 @@
 import {
+    infiniteQueryOptions,
     keepPreviousData,
     queryOptions,
     isCancelledError,
@@ -122,6 +123,10 @@ export const queryKeys = {
         [...queryKeys.git(agentId), "revision-content", rev, path] as const,
     gitCommitDiff: (agentId: string, path: string, rev: string) =>
         [...queryKeys.git(agentId), "commit-diff", rev, path] as const,
+    gitLog: (agentId: string, path: string, rev: string | null) =>
+        [...queryKeys.git(agentId), "log", rev, path] as const,
+    gitRefs: (agentId: string, path: string, kind: GitRefListKind) =>
+        [...queryKeys.git(agentId), "refs", kind, path] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -563,6 +568,92 @@ export function gitCommitDiffQueryOptions(
         queryFn: () => agent.gitCommitDiff(path, commitId),
         staleTime: Number.POSITIVE_INFINITY,
     });
+}
+
+/** Rows per page of the Git history, branch and tag lists; more load on request. */
+export const GIT_LIST_PAGE_SIZE = 100;
+
+/** Names the two ref listings the Git view offers. */
+export type GitRefListKind = "branches" | "tags";
+
+/**
+ * The commits that changed a path, a page at a time. `rev` is the commit id a revision page
+ * resolved, never a branch name, for the same reason the commit diff is keyed by id; `null`
+ * is HEAD, which a refresh refetches like the worktree status.
+ */
+export function gitLogQueryOptions(
+    agent: Agent,
+    path: string,
+    rev: string | null,
+) {
+    return infiniteQueryOptions({
+        queryKey: queryKeys.gitLog(agent.id, path, rev),
+        queryFn: (context) =>
+            agent.gitLog(path, {
+                rev,
+                skip: context.pageParam,
+                limit: GIT_LIST_PAGE_SIZE,
+            }),
+        initialPageParam: 0,
+        getNextPageParam: (lastPage, allPages) =>
+            lastPage.has_more
+                ? allPages.reduce(
+                      (count, page) => count + page.commits.length,
+                      0,
+                  )
+                : undefined,
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/** The repository's branches or tags, a page at a time, most recently committed first. */
+export function gitRefsQueryOptions(
+    agent: Agent,
+    path: string,
+    kind: GitRefListKind,
+) {
+    return infiniteQueryOptions({
+        queryKey: queryKeys.gitRefs(agent.id, path, kind),
+        queryFn: (context) =>
+            agent.gitRefs(path, kind, {
+                skip: context.pageParam,
+                limit: GIT_LIST_PAGE_SIZE,
+            }),
+        initialPageParam: 0,
+        getNextPageParam: (lastPage, allPages) =>
+            lastPage.has_more
+                ? allPages.reduce((count, page) => count + page.refs.length, 0)
+                : undefined,
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * Primes the first page of the Git list a route is about to show. Failures stay in the
+ * query, so the list reports them inside its tab instead of failing the whole page. In the
+ * worktree HEAD and refs move, so navigation refetches them; a revision's history is keyed
+ * by commit id and never changes.
+ */
+export async function prefetchGitList(options: {
+    queryClient: QueryClient;
+    agent: Agent;
+    path: string;
+    commitId: string | null;
+    tab: "commits" | GitRefListKind;
+}) {
+    const { queryClient, agent, path, commitId, tab } = options;
+
+    if (tab === "commits") {
+        await queryClient.prefetchInfiniteQuery({
+            ...gitLogQueryOptions(agent, path, commitId),
+            staleTime: commitId === null ? 0 : Number.POSITIVE_INFINITY,
+        });
+    } else {
+        await queryClient.prefetchInfiniteQuery({
+            ...gitRefsQueryOptions(agent, path, tab),
+            staleTime: 0,
+        });
+    }
 }
 
 /** Shares one agent-scoped account catalog so path changes reuse the same query. */

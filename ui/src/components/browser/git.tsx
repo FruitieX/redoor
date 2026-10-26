@@ -4,21 +4,22 @@ import { Link } from "@tanstack/react-router";
 import {
     AlertTriangle,
     CheckCircle2,
-    GitBranch,
-    MoreHorizontal,
+    FileDiff,
+    ListChecks,
 } from "lucide-react";
 import type { Agent } from "#ui/api-client";
-import { ActionMenu } from "#ui/components/action-menu";
 import { Button } from "#ui/components/button";
-import { Checkbox } from "#ui/components/checkbox";
-import { BrowserViewCard } from "#ui/components/browser-view-card";
-import { ViewCardHeader } from "#ui/components/view-card-header";
+import { SegmentedControl } from "#ui/components/segmented-control";
 import { browserRoute } from "#ui/browser-route";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
+import {
+    ChangeBadge,
+    GitPanelBar,
+    type GitChangeKind,
+} from "#ui/components/browser/git-parts";
 import { gitDiffQueryOptions, gitStatusQueryOptions } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
 import { getBaseName } from "#ui/utils/path";
-import type { GitChangeState } from "#bindings/GitChangeState";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
 import type { GitDiffResult } from "#bindings/GitDiffResult";
@@ -26,7 +27,7 @@ import type { GitStatusEntry } from "#bindings/GitStatusEntry";
 
 type GitStatusItem = {
     entry: GitStatusEntry;
-    state: GitChangeState | "conflicted" | "untracked";
+    state: GitChangeKind;
 };
 
 /** Derives status sections and one de-duplicated diff order from the rendered rows. */
@@ -80,55 +81,23 @@ function groupGitStatusEntries(entries: GitStatusEntry[]) {
     return { conflicts, staged, unstaged, untracked, diffEntries };
 }
 
-/** Links back to the repository's own Git view, which both Git headers offer. */
-export function RepositoryLink(props: {
-    agent: Agent;
-    repositoryRoot: string;
-}) {
-    return (
-        <Link
-            {...browserRoute(props.agent, props.repositoryRoot)}
-            search={{ view: "git" }}
-            className="mt-3 block break-all font-mono text-sm text-blue-300 hover:underline"
-        >
-            Repository: {props.repositoryRoot}
-        </Link>
-    );
+/** Splits a repository-relative path into its name and the directory it is in. */
+function splitRelativePath(relativePath: string) {
+    const slash = relativePath.lastIndexOf("/");
+
+    return slash === -1
+        ? { name: relativePath, directory: "" }
+        : {
+              name: relativePath.slice(slash + 1),
+              directory: relativePath.slice(0, slash),
+          };
 }
 
-/** Presents repository identity consistently above status and file comparisons. */
-function GitHeader(props: {
-    agent: Agent;
-    title: string;
-    repositoryRoot: string;
-    reference: string;
-    description: string;
-}) {
-    return (
-        <ViewCardHeader
-            icon={<GitBranch className="h-5 w-5" aria-hidden="true" />}
-            eyebrow={props.reference}
-            title={props.title}
-        >
-            <p className="mt-3 max-w-3xl text-sm text-slate-400">
-                {props.description}
-            </p>
-            <RepositoryLink
-                agent={props.agent}
-                repositoryRoot={props.repositoryRoot}
-            />
-        </ViewCardHeader>
-    );
-}
-
-/** Converts API status vocabulary into compact labels suitable for repeated rows. */
-function formatChangeState(
-    state: GitChangeState | "conflicted" | "untracked",
-): string {
-    return state.replace("_", " ");
-}
-
-/** Lists one status category while preserving real links for new-tab navigation. */
+/**
+ * Lists one status group. Each row shows its state as a `git status --short` letter, the
+ * file name as a link to the file's own Git view and its directory dimmed beside it, so a
+ * long list can be scanned by name.
+ */
 function GitStatusSection(props: {
     agent: Agent;
     title: string;
@@ -139,54 +108,105 @@ function GitStatusSection(props: {
         return null;
     }
 
+    const headingId = `git-${props.title.toLowerCase().replace(" ", "-")}`;
+
     return (
-        <section
-            aria-labelledby={`git-${props.title.toLowerCase().replace(" ", "-")}`}
-        >
+        <section aria-labelledby={headingId}>
             <h2
-                id={`git-${props.title.toLowerCase().replace(" ", "-")}`}
-                className="mb-1 text-xs font-semibold text-slate-200 sm:text-sm"
+                id={headingId}
+                className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400"
             >
-                {props.title}{" "}
-                <span className="text-slate-500">({props.entries.length})</span>
+                {props.title}
+                <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-slate-300">
+                    {props.entries.length}
+                </span>
             </h2>
-            <ul className="divide-y divide-slate-800 overflow-hidden rounded-md border border-slate-800 bg-slate-950/40">
-                {props.entries.map((item) => (
-                    <li
-                        key={`${props.title}:${item.entry.path}`}
-                        className="flex min-w-0 items-center justify-between gap-3 px-3 py-2"
-                    >
-                        <span className="min-w-0">
-                            <Link
-                                {...browserRoute(props.agent, item.entry.path)}
-                                search={{ view: "git" }}
-                                className="block break-all font-mono text-xs text-blue-300 hover:underline sm:text-sm"
-                            >
-                                {item.entry.repository_relative_path}
-                            </Link>
-                            {item.entry.original_path !== null ? (
-                                <span className="mt-1 block break-all text-[11px] text-slate-500 sm:text-xs">
-                                    from {item.entry.original_path}
-                                </span>
-                            ) : null}
-                        </span>
-                        <span className="flex shrink-0 items-center gap-2">
-                            {props.diffAnchorByPath === null ? null : (
+            <ul className="divide-y divide-slate-800 overflow-hidden rounded-lg border border-slate-800">
+                {props.entries.map((item) => {
+                    const parts = splitRelativePath(
+                        item.entry.repository_relative_path,
+                    );
+
+                    const anchor = props.diffAnchorByPath?.get(item.entry.path);
+
+                    return (
+                        <li
+                            key={`${props.title}:${item.entry.path}`}
+                            className="flex min-w-0 items-center gap-3 px-3 py-2 transition-colors hover:bg-tint"
+                        >
+                            <ChangeBadge kind={item.state} />
+                            <span className="min-w-0 flex-1 truncate text-sm">
+                                <Link
+                                    {...browserRoute(
+                                        props.agent,
+                                        item.entry.path,
+                                    )}
+                                    search={{ view: "git" }}
+                                    className="font-medium text-slate-100 hover:text-blue-300 hover:underline"
+                                >
+                                    {parts.name}
+                                </Link>
+                                {parts.directory === "" ? null : (
+                                    <span className="ml-2 font-mono text-xs text-slate-500">
+                                        {parts.directory}
+                                    </span>
+                                )}
+                                {item.entry.original_path !== null ? (
+                                    <span className="ml-2 text-xs text-slate-500">
+                                        from {item.entry.original_path}
+                                    </span>
+                                ) : null}
+                            </span>
+                            {anchor === undefined ? null : (
                                 <a
-                                    href={`#${props.diffAnchorByPath.get(item.entry.path)}`}
-                                    className="text-[11px] text-blue-300 hover:underline sm:text-xs"
+                                    href={`#${anchor}`}
+                                    className="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-blue-300 hover:bg-tint hover:underline"
                                 >
                                     Diff
                                 </a>
                             )}
-                            <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[11px] capitalize text-slate-400 sm:text-xs">
-                                {formatChangeState(item.state)}
-                            </span>
-                        </span>
-                    </li>
-                ))}
+                        </li>
+                    );
+                })}
             </ul>
         </section>
+    );
+}
+
+/** Names a status group's count with a colored dot, for the summary above the lists. */
+function StatusCount(props: {
+    kind: GitChangeKind;
+    count: number;
+    label: string;
+}) {
+    if (props.count === 0) {
+        return null;
+    }
+
+    return (
+        <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+            <ChangeBadge kind={props.kind} />
+            {props.count} {props.label}
+        </span>
+    );
+}
+
+/** Says that a path has nothing to commit, in place of empty lists. */
+function CleanState(props: { message: string }) {
+    return (
+        <div
+            role="status"
+            className="flex flex-col items-center gap-2 px-4 py-12 text-center"
+        >
+            <CheckCircle2
+                className="h-9 w-9 text-emerald-400"
+                aria-hidden="true"
+            />
+            <p className="text-sm font-semibold text-slate-100">
+                Working tree is clean
+            </p>
+            <p className="text-sm text-slate-400">{props.message}</p>
+        </div>
     );
 }
 
@@ -241,7 +261,86 @@ function useGitDiffActivation(props: {
     };
 }
 
-/** Groups directory status into the same concepts users see in a normal Git workflow. */
+/**
+ * The patches of every changed file below a directory, in the order the status lists
+ * them, each with an anchor the status rows link to.
+ */
+function GitDirectoryDiffs(props: {
+    agent: Agent;
+    diffEntries: GitStatusEntry[];
+}) {
+    const diffEntries = props.diffEntries;
+
+    const diffQuery = useQuery(
+        gitDiffQueryOptions(
+            props.agent,
+            diffEntries.map((entry) => entry.path),
+            "full",
+        ),
+    );
+
+    return (
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 border-t border-slate-800 px-4 py-4 sm:px-5">
+            {diffQuery.isPending ? (
+                <p role="status" className="text-sm text-slate-400">
+                    Loading all Git diffs...
+                </p>
+            ) : diffQuery.isError ? (
+                <p role="alert" className="text-sm text-red-300">
+                    {getErrorMessage(
+                        diffQuery.error,
+                        "Failed to load Git diffs",
+                    )}
+                </p>
+            ) : (
+                diffQuery.data.diffs.map((diff, index) => {
+                    const pathLabel =
+                        diffEntries[index]?.repository_relative_path ??
+                        diff.path;
+
+                    const isTextDiff = diff.result.type === "text";
+
+                    return (
+                        <section
+                            key={`${diff.path}:${index}`}
+                            id={`git-diff-${index}`}
+                            aria-label={`Git diff for ${diff.path}`}
+                            className="scroll-mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950/30"
+                        >
+                            {isTextDiff ? null : (
+                                <h2 className="break-all border-b border-slate-800 px-3 py-2 font-mono text-sm font-semibold">
+                                    <Link
+                                        {...browserRoute(
+                                            props.agent,
+                                            diff.path,
+                                        )}
+                                        className="text-blue-300 hover:underline"
+                                    >
+                                        {pathLabel}
+                                    </Link>
+                                </h2>
+                            )}
+                            <div className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden [&>p]:p-3">
+                                <GitDiffResultView
+                                    result={diff.result}
+                                    editorFile={{
+                                        deviceName: props.agent.name,
+                                        path: diff.path,
+                                    }}
+                                />
+                            </div>
+                        </section>
+                    );
+                })
+            )}
+        </div>
+    );
+}
+
+/**
+ * The worktree changes below a directory: a summary of what is pending, the files grouped
+ * the way a Git workflow sees them, and their diffs on demand.
+ */
 export function GitDirectoryView(props: { agent: Agent; path: string }) {
     const directoryKey = `${props.agent.id}:${props.path}`;
 
@@ -256,18 +355,12 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
         changedFileCount: groups.diffEntries.length,
     });
 
-    const diffQuery = useQuery({
-        ...gitDiffQueryOptions(
-            props.agent,
-            groups.diffEntries.map((entry) => entry.path),
-            "full",
-        ),
-        enabled: diffActivation.active && groups.diffEntries.length > 0,
-    });
-
     if (statusQuery.isPending) {
         return (
-            <p role="status" className="text-sm text-slate-400">
+            <p
+                role="status"
+                className="px-4 py-10 text-center text-sm text-slate-400"
+            >
                 Loading Git status...
             </p>
         );
@@ -275,7 +368,10 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 
     if (statusQuery.isError) {
         return (
-            <p role="alert" className="text-sm text-red-300">
+            <p
+                role="alert"
+                className="px-4 py-10 text-center text-sm text-red-300"
+            >
                 {getErrorMessage(
                     statusQuery.error,
                     "Failed to load Git status",
@@ -287,6 +383,18 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
     const status = statusQuery.data;
     const { conflicts, staged, unstaged, untracked, diffEntries } = groups;
 
+    if (status.entries.length === 0) {
+        return (
+            <CleanState
+                message={
+                    status.path === status.repository_root
+                        ? "Nothing changed compared with HEAD."
+                        : "Nothing changed below this directory compared with HEAD."
+                }
+            />
+        );
+    }
+
     const diffAnchorByPath = diffActivation.active
         ? new Map(
               diffEntries.map((entry, index) => [
@@ -296,40 +404,54 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
           )
         : null;
 
-    const reference = status.branch_name
-        ? `Branch ${status.branch_name}`
-        : status.detached_head_id
-          ? `Detached at ${status.detached_head_id.slice(0, 12)}`
-          : "Unborn HEAD";
-
-    const tracking = [
-        status.upstream ? `Tracking ${status.upstream}` : null,
-        status.ahead === null ? null : `${status.ahead} ahead`,
-        status.behind === null ? null : `${status.behind} behind`,
-    ].filter((part): part is string => part !== null);
-
     return (
-        <BrowserViewCard>
-            <GitHeader
-                agent={props.agent}
-                title={getBaseName(status.path)}
-                repositoryRoot={status.repository_root}
-                reference={reference}
-                description={
-                    tracking.length > 0
-                        ? tracking.join(" · ")
-                        : "Changes below this directory, compared with HEAD and the index."
-                }
-            />
-            <div className="grid gap-4 p-4 sm:p-5">
-                {status.entries.length === 0 ? (
-                    <div
+        <>
+            <GitPanelBar>
+                <span className="font-medium text-slate-100">
+                    {diffEntries.length === 1
+                        ? "1 changed file"
+                        : `${diffEntries.length} changed files`}
+                </span>
+                <StatusCount
+                    kind="conflicted"
+                    count={conflicts.length}
+                    label="conflicted"
+                />
+                <StatusCount
+                    kind="added"
+                    count={staged.length}
+                    label="staged"
+                />
+                <StatusCount
+                    kind="modified"
+                    count={unstaged.length}
+                    label="unstaged"
+                />
+                <StatusCount
+                    kind="untracked"
+                    count={untracked.length}
+                    label="untracked"
+                />
+            </GitPanelBar>
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-5 px-4 py-4 sm:px-5">
+                {status.truncated ? (
+                    <p
                         role="status"
-                        className="flex items-center gap-3 text-sm text-emerald-300"
+                        className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-300"
                     >
-                        <CheckCircle2 className="h-5 w-5" aria-hidden="true" />
-                        Working tree is clean for this directory.
-                    </div>
+                        <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                        Status is truncated. Narrow the directory to inspect
+                        more entries.
+                    </p>
+                ) : null}
+                {status.omitted_non_utf8_entries > 0 ? (
+                    <p
+                        role="status"
+                        className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-300"
+                    >
+                        {status.omitted_non_utf8_entries} non-UTF-8 path entries
+                        were omitted.
+                    </p>
                 ) : null}
                 <GitStatusSection
                     agent={props.agent}
@@ -355,92 +477,32 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                     entries={untracked}
                     diffAnchorByPath={diffAnchorByPath}
                 />
-                {status.entries.length > 0 && !diffActivation.active ? (
-                    <div ref={diffActivation.loadButtonRef} className="w-fit">
-                        <Button
-                            type="button"
-                            size="sm"
-                            onClick={diffActivation.activate}
-                        >
-                            Load all diffs
-                        </Button>
-                    </div>
-                ) : null}
-                {status.truncated ? (
-                    <p
-                        role="status"
-                        className="flex items-center gap-2 text-sm text-amber-300"
-                    >
-                        <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-                        Status is truncated. Narrow the directory to inspect
-                        more entries.
-                    </p>
-                ) : null}
-                {status.omitted_non_utf8_entries > 0 ? (
-                    <p role="status" className="text-sm text-amber-300">
-                        {status.omitted_non_utf8_entries} non-UTF-8 path entries
-                        were omitted.
-                    </p>
-                ) : null}
-                {diffActivation.active && diffEntries.length > 0 ? (
-                    <div className="grid gap-4">
-                        {diffQuery.isPending ? (
-                            <p role="status" className="text-sm text-slate-400">
-                                Loading all Git diffs...
-                            </p>
-                        ) : diffQuery.isError ? (
-                            <p role="alert" className="text-sm text-red-300">
-                                {getErrorMessage(
-                                    diffQuery.error,
-                                    "Failed to load Git diffs",
-                                )}
-                            </p>
-                        ) : (
-                            diffQuery.data.diffs.map((diff, index) => {
-                                const pathLabel =
-                                    diffEntries[index]
-                                        ?.repository_relative_path ?? diff.path;
-
-                                const isTextDiff = diff.result.type === "text";
-
-                                return (
-                                    <section
-                                        key={`${diff.path}:${index}`}
-                                        id={`git-diff-${index}`}
-                                        aria-label={`Git diff for ${diff.path}`}
-                                        className="scroll-mt-4 overflow-hidden rounded-md border border-slate-800 bg-slate-950/30"
-                                    >
-                                        {isTextDiff ? null : (
-                                            <h2 className="break-all border-b border-slate-800 px-3 py-2 font-mono text-sm font-semibold">
-                                                <Link
-                                                    {...browserRoute(
-                                                        props.agent,
-                                                        diff.path,
-                                                    )}
-                                                    className="text-blue-300 hover:underline"
-                                                >
-                                                    {pathLabel}
-                                                </Link>
-                                            </h2>
-                                        )}
-                                        <div className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden">
-                                            <GitDiffResultView
-                                                result={diff.result}
-                                                editorFile={{
-                                                    deviceName:
-                                                        props.agent.name,
-                                                    path: diff.path,
-                                                }}
-                                            />
-                                        </div>
-                                    </section>
-                                );
-                            })
-                        )}
-                    </div>
-                ) : null}
             </div>
-        </BrowserViewCard>
+            {diffActivation.active ? null : (
+                <div
+                    ref={diffActivation.loadButtonRef}
+                    className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 px-4 py-3 sm:px-5"
+                >
+                    <p className="text-sm text-slate-400">
+                        Diffs load when you scroll here or ask for them.
+                    </p>
+                    <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        onClick={diffActivation.activate}
+                    >
+                        Load all diffs
+                    </Button>
+                </div>
+            )}
+            {diffActivation.active && diffEntries.length > 0 ? (
+                <GitDirectoryDiffs
+                    agent={props.agent}
+                    diffEntries={diffEntries}
+                />
+            ) : null}
+        </>
     );
 }
 
@@ -478,7 +540,30 @@ export function GitDiffResultView(props: {
     );
 }
 
-/** Fetches the selected file comparison while keeping full and staged results distinct. */
+/** Names how a single file relates to the repository, for the file diff's summary bar. */
+function trackingLabel(context: GitContextResponse): string | null {
+    if (context.status !== "inside_worktree") {
+        return null;
+    }
+
+    switch (context.tracking_state) {
+        case "tracked":
+            return "Tracked";
+        case "untracked":
+            return "Untracked";
+        case "ignored":
+            return "Ignored";
+        case "deleted":
+            return "Deleted from the working tree";
+        case null:
+            return null;
+    }
+}
+
+/**
+ * One file's worktree diff against HEAD. The comparison switch sits in the panel bar,
+ * where it is visible, instead of behind an overflow menu.
+ */
 export function GitFileView(props: {
     agent: Agent;
     path: string;
@@ -491,53 +576,45 @@ export function GitFileView(props: {
         gitDiffQueryOptions(props.agent, [props.path], props.mode),
     );
 
-    const repositoryRoot =
-        props.context.status === "inside_worktree"
-            ? props.context.repository_root
-            : null;
+    const tracking = trackingLabel(props.context);
 
     return (
-        <BrowserViewCard>
-            <ViewCardHeader
-                icon={<GitBranch className="h-5 w-5" aria-hidden="true" />}
-                eyebrow={
-                    props.mode === "staged" ? "Staged changes" : "All changes"
-                }
-                title={getBaseName(props.path)}
+        <>
+            <GitPanelBar
                 actions={
-                    <ActionMenu
-                        label="Git diff options"
-                        title="Git diff options"
-                        closeAriaLabel="Close Git diff options"
-                        hideTitle={false}
-                        icon={<MoreHorizontal className="h-4 w-4" />}
-                        variant="icon"
-                    >
-                        {() => (
-                            <Checkbox
-                                checked={props.mode === "staged"}
-                                label="Staged changes only"
-                                title={false}
-                                className="w-full px-3 py-2"
-                                onCheckedChange={(stagedOnly) =>
-                                    props.onModeChange(
-                                        stagedOnly ? "staged" : "full",
-                                    )
-                                }
-                            >
-                                Staged changes only
-                            </Checkbox>
-                        )}
-                    </ActionMenu>
+                    <SegmentedControl
+                        label="Compared changes"
+                        className="w-64"
+                        value={props.mode}
+                        onChange={props.onModeChange}
+                        options={[
+                            {
+                                value: "full",
+                                label: "All changes",
+                                icon: FileDiff,
+                                tooltip:
+                                    "Working tree and staged changes compared with HEAD",
+                            },
+                            {
+                                value: "staged",
+                                label: "Staged only",
+                                icon: ListChecks,
+                                tooltip:
+                                    "Only the changes staged in the index, compared with HEAD",
+                            },
+                        ]}
+                    />
                 }
             >
-                {repositoryRoot === null ? null : (
-                    <RepositoryLink
-                        agent={props.agent}
-                        repositoryRoot={repositoryRoot}
-                    />
+                <span className="min-w-0 truncate font-mono font-medium text-slate-100">
+                    {getBaseName(props.path)}
+                </span>
+                {tracking === null ? null : (
+                    <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-400">
+                        {tracking}
+                    </span>
                 )}
-            </ViewCardHeader>
+            </GitPanelBar>
             <section
                 aria-label={`${props.mode === "full" ? "Full" : "Staged"} Git diff`}
                 className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden bg-slate-950/30 [&>p]:p-4 sm:[&>p]:p-5"
@@ -567,6 +644,6 @@ export function GitFileView(props: {
                     />
                 )}
             </section>
-        </BrowserViewCard>
+        </>
     );
 }

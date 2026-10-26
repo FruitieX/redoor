@@ -44,6 +44,7 @@ import {
 import { RevisionDetailView } from "#ui/components/browser/revision-details";
 import { SyncView } from "#ui/components/browser/sync";
 import { GitDirectoryView, GitFileView } from "#ui/components/browser/git";
+import { GitView, WorktreeGitView } from "#ui/components/browser/git-view";
 import { FileEditView, FileImageView } from "#ui/components/browser/file-views";
 import {
     GitCommitView,
@@ -65,8 +66,6 @@ import {
     fetchQueryUncancelled,
     fileContentQueryOptions,
     gitContextQueryOptions,
-    gitDiffQueryOptions,
-    gitStatusQueryOptions,
     loadDeviceRouteAgent,
     metadataQueryOptions,
     queryKeys,
@@ -82,6 +81,7 @@ import {
     isEditableRevisionEntry,
     loadRevision,
 } from "#ui/browser-revision-loader";
+import { prefetchWorktreeGitView } from "#ui/browser-git-loader";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { getBaseName } from "#ui/utils/path";
 
@@ -159,6 +159,7 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
         view: search.view,
         diffMode: search.diffMode,
         rev: search.rev,
+        gitTab: search.gitTab,
     }),
     loader: async ({ context, deps, params, location, parentMatchPromise }) => {
         const agent = await loadDeviceRouteAgent(context, parentMatchPromise);
@@ -195,6 +196,7 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
                 path,
                 rev: deps.rev,
                 view: deps.view,
+                gitTab: deps.gitTab,
             });
         }
 
@@ -274,21 +276,13 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
                 deps.view === "git" &&
                 gitContext.status === "inside_worktree"
             ) {
-                if (isLsDirectoryResponse(lsResult)) {
-                    await fetchQueryUncancelled(context.queryClient, {
-                        ...gitStatusQueryOptions(agent, lsResult.path),
-                        staleTime: 0,
-                    });
-                } else {
-                    await fetchQueryUncancelled(context.queryClient, {
-                        ...gitDiffQueryOptions(
-                            agent,
-                            [lsResult.path],
-                            deps.diffMode ?? "full",
-                        ),
-                        staleTime: 0,
-                    });
-                }
+                await prefetchWorktreeGitView({
+                    context,
+                    agent,
+                    path: lsResult.path,
+                    isDirectory: isLsDirectoryResponse(lsResult),
+                    deps,
+                });
             }
 
             return resolvedData(agent, path, lsResult);
@@ -310,13 +304,12 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
                 gitContext.entry_type === "missing" &&
                 gitContext.tracking_state === "deleted"
             ) {
-                await fetchQueryUncancelled(context.queryClient, {
-                    ...gitDiffQueryOptions(
-                        agent,
-                        [path],
-                        deps.diffMode ?? "full",
-                    ),
-                    staleTime: 0,
+                await prefetchWorktreeGitView({
+                    context,
+                    agent,
+                    path,
+                    isDirectory: false,
+                    deps,
                 });
 
                 return unresolvedData(agent, path, pathError);
@@ -464,11 +457,27 @@ function RevisionFileBrowser(props: {
                 banner={banner}
                 readOnly
             >
-                <GitCommitView
+                <GitView
                     agent={agent}
                     path={data.path}
-                    rev={data.rev}
-                    commitId={data.deletion.commit.id}
+                    tab={search.gitTab}
+                    repository={{
+                        root: data.deletion.repository_root,
+                        relativePath: data.deletion.repository_relative_path,
+                    }}
+                    reference={{
+                        type: "revision",
+                        rev: data.rev,
+                        commit: data.deletion.commit,
+                    }}
+                    changes={
+                        <GitCommitView
+                            agent={agent}
+                            path={data.path}
+                            rev={data.rev}
+                            commitId={data.deletion.commit.id}
+                        />
+                    }
                 />
             </BrowserRouteShell>
         );
@@ -521,11 +530,27 @@ function RevisionFileBrowser(props: {
 
     const content =
         activeView === "git" ? (
-            <GitCommitView
+            <GitView
                 agent={agent}
                 path={data.path}
-                rev={data.rev}
-                commitId={tree.commit.id}
+                tab={search.gitTab}
+                repository={{
+                    root: tree.repository_root,
+                    relativePath: tree.repository_relative_path,
+                }}
+                reference={{
+                    type: "revision",
+                    rev: data.rev,
+                    commit: tree.commit,
+                }}
+                changes={
+                    <GitCommitView
+                        agent={agent}
+                        path={data.path}
+                        rev={data.rev}
+                        commitId={tree.commit.id}
+                    />
+                }
             />
         ) : activeView === "details" ? (
             <RevisionDetailView agent={agent} tree={tree} />
@@ -636,12 +661,20 @@ function ConnectedFileBrowser(props: {
                 activeView="git"
                 gitAvailable
             >
-                <GitFileView
+                <WorktreeGitView
                     agent={agent}
                     path={path}
+                    tab={search.gitTab}
                     context={gitContext}
-                    mode={diffMode.mode}
-                    onModeChange={diffMode.setMode}
+                    changes={
+                        <GitFileView
+                            agent={agent}
+                            path={path}
+                            context={gitContext}
+                            mode={diffMode.mode}
+                            onModeChange={diffMode.setMode}
+                        />
+                    }
                 />
             </BrowserRouteShell>
         );
@@ -685,7 +718,7 @@ function ConnectedFileBrowser(props: {
                 path={path}
                 parentPath={parentPath}
                 loadedListing={lsResult}
-                gitAvailable={gitAvailable}
+                gitContext={gitContext}
             />
         );
     }
@@ -786,12 +819,20 @@ function FileBrowserPage(props: {
 
     const content =
         activeView === "git" ? (
-            <GitFileView
+            <WorktreeGitView
                 agent={agent}
                 path={lsResult.path}
+                tab={search.gitTab}
                 context={props.gitContext}
-                mode={diffMode.mode}
-                onModeChange={diffMode.setMode}
+                changes={
+                    <GitFileView
+                        agent={agent}
+                        path={lsResult.path}
+                        context={props.gitContext}
+                        mode={diffMode.mode}
+                        onModeChange={diffMode.setMode}
+                    />
+                }
             />
         ) : activeView === "sync" ? (
             <SyncView
@@ -871,7 +912,7 @@ function DirectoryBrowserPage(props: {
     path: string;
     parentPath: string | null;
     loadedListing: LsDirectoryResponse;
-    gitAvailable: boolean;
+    gitContext: GitContextResponse;
 }) {
     const agents = useAgents();
     const search = Route.useSearch();
@@ -892,10 +933,21 @@ function DirectoryBrowserPage(props: {
             parentPath={props.parentPath}
             entryType="directory"
             activeView={activeView}
-            gitAvailable={props.gitAvailable}
+            gitAvailable={props.gitContext.status === "inside_worktree"}
         >
             {activeView === "git" ? (
-                <GitDirectoryView agent={props.agent} path={lsResult.path} />
+                <WorktreeGitView
+                    agent={props.agent}
+                    path={lsResult.path}
+                    tab={search.gitTab}
+                    context={props.gitContext}
+                    changes={
+                        <GitDirectoryView
+                            agent={props.agent}
+                            path={lsResult.path}
+                        />
+                    }
+                />
             ) : activeView === "details" ? (
                 <DirectoryDetailView
                     key={lsResult.path}

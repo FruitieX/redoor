@@ -9,28 +9,26 @@ import {
 } from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
-import { BrowserViewCard } from "#ui/components/browser-view-card";
-import { ViewCardHeader } from "#ui/components/view-card-header";
 import { Tooltip } from "#ui/components/tooltip";
-import { GitDiffResultView, RepositoryLink } from "#ui/components/browser/git";
+import { GitDiffResultView } from "#ui/components/browser/git";
+import {
+    AuthorAvatar,
+    ChangeBadge,
+    CommitAge,
+    GitPanelBar,
+    changeLabel,
+    displayRevision,
+    shortCommitId,
+} from "#ui/components/browser/git-parts";
 import { formatModifiedAge } from "#ui/components/browser/utils";
 import { gitCommitDiffQueryOptions } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
 import type { GitChangeState } from "#bindings/GitChangeState";
+import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
 import type { GitCommitSummary } from "#bindings/GitCommitSummary";
 import type { GitRevisionEntry } from "#bindings/GitRevisionEntry";
 import type { GitTreeEntry } from "#bindings/GitTreeEntry";
 import type { LsEntry } from "#bindings/LsEntry";
-
-/** Shortens a commit id the way Git tools display it. */
-function shortCommitId(id: string): string {
-    return id.slice(0, 12);
-}
-
-/** Full commit ids are unreadable in a banner, so they are shortened; names stay as typed. */
-function displayRevision(rev: string): string {
-    return /^[0-9a-f]{40,64}$/i.test(rev) ? shortCommitId(rev) : rev;
-}
 
 /**
  * Marks the page as a read-only view of history, directly below the breadcrumbs, so it is
@@ -183,15 +181,29 @@ export function RevisionListingNotice(props: {
     );
 }
 
-/** Converts the shared change vocabulary into short labels for repeated rows. */
-function formatChange(change: GitChangeState): string {
-    return change.replace("_", " ");
+/** Counts a commit's changed files per kind, in a stable order for the summary bar. */
+function countChanges(diff: GitCommitDiffResponse) {
+    const order: GitChangeState[] = [
+        "added",
+        "modified",
+        "deleted",
+        "renamed",
+        "copied",
+        "type_changed",
+    ];
+
+    return order.flatMap((kind) => {
+        const count = diff.files.filter((file) => file.change === kind).length;
+
+        return count === 0 ? [] : [{ kind, count }];
+    });
 }
 
 /**
  * Shows what the revision's commit changed below the browsed path, compared with its first
- * parent. File names link to the file at the commit, or at the parent for deleted files,
- * which no longer exist at the commit.
+ * parent: who made the commit and when, a summary and index of the changed files, then each
+ * file's diff. File names link to the file at the commit, or at the parent for deleted
+ * files, which no longer exist at the commit.
  */
 export function GitCommitView(props: {
     agent: Agent;
@@ -207,7 +219,10 @@ export function GitCommitView(props: {
 
     if (diffQuery.isPending) {
         return (
-            <p role="status" className="p-4 text-sm text-slate-400">
+            <p
+                role="status"
+                className="px-4 py-10 text-center text-sm text-slate-400"
+            >
                 Loading commit changes...
             </p>
         );
@@ -215,7 +230,10 @@ export function GitCommitView(props: {
 
     if (diffQuery.isError) {
         return (
-            <p role="alert" className="p-4 text-sm text-red-300">
+            <p
+                role="alert"
+                className="px-4 py-10 text-center text-sm text-red-300"
+            >
                 {getErrorMessage(
                     diffQuery.error,
                     "Failed to load commit changes",
@@ -225,58 +243,83 @@ export function GitCommitView(props: {
     }
 
     const diff = diffQuery.data;
+    const commit = diff.commit;
     const parentId = diff.parent_id;
+    const now = Date.now();
+
+    /** Deleted files no longer exist at the commit, so they open at the parent. */
+    const fileRevision = (change: GitChangeState) =>
+        change === "deleted" && parentId !== null ? parentId : props.rev;
 
     return (
-        <BrowserViewCard>
-            <ViewCardHeader
-                icon={
-                    <GitCommitHorizontal
-                        className="h-5 w-5"
-                        aria-hidden="true"
-                    />
-                }
-                eyebrow={`Commit ${shortCommitId(diff.commit.id)}`}
-                title={diff.commit.summary || "(no message)"}
-            >
-                <p className="mt-2 text-sm text-slate-400">
-                    {diff.commit.author_name} ·{" "}
-                    {new Date(diff.commit.authored_at * 1000).toLocaleString()}
-                </p>
-                <p className="mt-1 text-sm text-slate-400">
-                    {parentId === null ? (
-                        "Root commit: every file was added."
-                    ) : (
-                        <>
-                            Compared with parent{" "}
-                            <Link
-                                {...browserRoute(props.agent, props.path)}
-                                search={{ view: "git", rev: parentId }}
-                                className="font-mono text-blue-300 hover:underline"
-                            >
-                                {shortCommitId(parentId)}
-                            </Link>
-                        </>
-                    )}
-                </p>
+        <>
+            <header className="flex items-start gap-3 border-b border-slate-800 px-4 py-4 sm:px-5">
+                <AuthorAvatar name={commit.author_name} size="md" />
+                <div className="min-w-0 flex-1">
+                    <h2 className="break-words text-base font-semibold text-slate-50">
+                        {commit.summary || "(no message)"}
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-400">
+                        <span
+                            className="font-medium text-slate-200"
+                            title={commit.author_email}
+                        >
+                            {commit.author_name}
+                        </span>{" "}
+                        committed{" "}
+                        <CommitAge authoredAt={commit.authored_at} now={now} />
+                    </p>
+                    <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                        {parentId === null ? (
+                            "Root commit: every file was added."
+                        ) : (
+                            <>
+                                {commit.parent_ids.length > 1
+                                    ? "Merge, compared with first parent"
+                                    : "Parent"}
+                                <Link
+                                    {...browserRoute(props.agent, props.path)}
+                                    search={{ view: "git", rev: parentId }}
+                                    className="rounded-md border border-slate-700 bg-slate-900/60 px-1.5 py-0.5 font-mono text-blue-300 hover:border-blue-400/50 hover:underline"
+                                >
+                                    {shortCommitId(parentId)}
+                                </Link>
+                            </>
+                        )}
+                    </p>
+                </div>
+                <code
+                    title={commit.id}
+                    className="shrink-0 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1 font-mono text-xs text-slate-300"
+                >
+                    {shortCommitId(commit.id)}
+                </code>
+            </header>
+            <GitPanelBar>
+                <span className="font-medium text-slate-100">
+                    {diff.files.length === 1
+                        ? "1 changed file"
+                        : `${diff.files.length}${diff.truncated ? "+" : ""} changed files`}
+                </span>
+                {countChanges(diff).map((entry) => (
+                    <span
+                        key={entry.kind}
+                        className="inline-flex items-center gap-1.5 text-xs text-slate-400"
+                    >
+                        <ChangeBadge kind={entry.kind} />
+                        {entry.count} {changeLabel(entry.kind).toLowerCase()}
+                    </span>
+                ))}
                 {diff.repository_relative_path === "" ? null : (
-                    <>
-                        <p className="mt-1 text-sm text-slate-400">
-                            Only changes to{" "}
-                            <code className="font-mono text-slate-200">
-                                {diff.repository_relative_path}
-                            </code>{" "}
-                            are shown.
-                        </p>
-                        {/* Like the worktree Git view, the whole commit is one link away. */}
-                        <RepositoryLink
-                            agent={props.agent}
-                            repositoryRoot={diff.repository_root}
-                        />
-                    </>
+                    <span className="text-xs text-slate-500">
+                        Only changes to{" "}
+                        <code className="font-mono text-slate-300">
+                            {diff.repository_relative_path}
+                        </code>
+                    </span>
                 )}
-            </ViewCardHeader>
-            <div className="grid gap-4 p-4 sm:p-5">
+            </GitPanelBar>
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-4 px-4 py-4 sm:px-5">
                 {diff.files.length === 0 ? (
                     <p role="status" className="text-sm text-slate-300">
                         This commit changed nothing below this path.
@@ -285,62 +328,77 @@ export function GitCommitView(props: {
                 {diff.truncated ? (
                     <p
                         role="status"
-                        className="flex items-center gap-2 text-sm text-amber-300"
+                        className="flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-amber-300"
                     >
                         <AlertTriangle className="h-4 w-4" aria-hidden="true" />
                         The commit changed more files than can be shown. Open a
                         subdirectory to see the rest.
                     </p>
                 ) : null}
-                {diff.files.map((file) => {
-                    const isDeleted = file.change === "deleted";
-
-                    return (
-                        <section
-                            key={file.path}
-                            aria-label={`Commit diff for ${file.repository_relative_path}`}
-                            className="overflow-hidden rounded-md border border-slate-800 bg-slate-950/30"
-                        >
-                            {/* A text patch names its file in its own header, like the worktree Git view. */}
-                            {file.result.type === "text" ? null : (
-                                <h2 className="flex min-w-0 items-center justify-between gap-3 border-b border-slate-800 px-3 py-2 font-mono text-sm font-semibold">
-                                    <Link
-                                        {...browserRoute(
-                                            props.agent,
-                                            file.path,
-                                        )}
-                                        search={{
-                                            rev:
-                                                isDeleted && parentId !== null
-                                                    ? parentId
-                                                    : props.rev,
-                                        }}
-                                        className="min-w-0 break-all text-blue-300 hover:underline"
-                                    >
-                                        {file.repository_relative_path}
-                                    </Link>
-                                    <span className="shrink-0 rounded-full border border-slate-700 px-2 py-0.5 font-sans text-[11px] font-normal capitalize text-slate-400 sm:text-xs">
-                                        {formatChange(file.change)}
-                                    </span>
-                                </h2>
-                            )}
-                            <div className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden [&>p]:p-3">
-                                <GitDiffResultView
-                                    result={file.result}
-                                    editorFile={
-                                        isDeleted
-                                            ? undefined
-                                            : {
-                                                  deviceName: props.agent.name,
-                                                  path: file.path,
-                                              }
-                                    }
-                                />
-                            </div>
-                        </section>
-                    );
-                })}
+                {diff.files.length > 1 ? (
+                    <ul
+                        aria-label="Changed files"
+                        className="divide-y divide-slate-800 overflow-hidden rounded-lg border border-slate-800"
+                    >
+                        {diff.files.map((file, index) => (
+                            <li
+                                key={file.path}
+                                className="flex min-w-0 items-center gap-3 px-3 py-1.5 transition-colors hover:bg-tint"
+                            >
+                                <ChangeBadge kind={file.change} />
+                                <Link
+                                    {...browserRoute(props.agent, file.path)}
+                                    search={{ rev: fileRevision(file.change) }}
+                                    className="min-w-0 flex-1 truncate font-mono text-sm text-slate-200 hover:text-blue-300 hover:underline"
+                                >
+                                    {file.repository_relative_path}
+                                </Link>
+                                <a
+                                    href={`#commit-diff-${index}`}
+                                    className="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-blue-300 hover:bg-tint hover:underline"
+                                >
+                                    Diff
+                                </a>
+                            </li>
+                        ))}
+                    </ul>
+                ) : null}
+                {diff.files.map((file, index) => (
+                    <section
+                        key={file.path}
+                        id={`commit-diff-${index}`}
+                        aria-label={`Commit diff for ${file.repository_relative_path}`}
+                        className="scroll-mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950/30"
+                    >
+                        {/* A text patch names its file in its own header, like the worktree Git view. */}
+                        {file.result.type === "text" ? null : (
+                            <h3 className="flex min-w-0 items-center gap-3 border-b border-slate-800 px-3 py-2 font-mono text-sm font-semibold">
+                                <ChangeBadge kind={file.change} />
+                                <Link
+                                    {...browserRoute(props.agent, file.path)}
+                                    search={{ rev: fileRevision(file.change) }}
+                                    className="min-w-0 break-all text-blue-300 hover:underline"
+                                >
+                                    {file.repository_relative_path}
+                                </Link>
+                            </h3>
+                        )}
+                        <div className="file-diff-host git-file-diff w-full min-w-0 overflow-x-hidden [&>p]:p-3">
+                            <GitDiffResultView
+                                result={file.result}
+                                editorFile={
+                                    file.change === "deleted"
+                                        ? undefined
+                                        : {
+                                              deviceName: props.agent.name,
+                                              path: file.path,
+                                          }
+                                }
+                            />
+                        </div>
+                    </section>
+                ))}
             </div>
-        </BrowserViewCard>
+        </>
     );
 }

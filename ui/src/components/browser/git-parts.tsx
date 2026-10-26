@@ -1,0 +1,170 @@
+import type { GitChangeState } from "#bindings/GitChangeState";
+import { formatModifiedAge } from "#ui/components/browser/utils";
+
+/** Shortens a commit id the way Git tools display it. */
+export function shortCommitId(id: string): string {
+    return id.slice(0, 12);
+}
+
+/**
+ * Full commit ids are unreadable in a banner, so they are shortened. Branch and tag lists
+ * link by full ref name to stay unambiguous, so the ref namespace is dropped the way
+ * `git branch -a` shows names; anything else stays as typed.
+ */
+export function displayRevision(rev: string): string {
+    if (/^[0-9a-f]{40,64}$/i.test(rev)) {
+        return shortCommitId(rev);
+    }
+
+    const namespace = ["refs/heads/", "refs/remotes/", "refs/tags/"].find(
+        (prefix) => rev.startsWith(prefix),
+    );
+
+    return namespace === undefined ? rev : rev.slice(namespace.length);
+}
+
+/** Every state a changed file can be listed in, worktree status and commits alike. */
+export type GitChangeKind = GitChangeState | "conflicted" | "untracked";
+
+/**
+ * The letter `git status --short` uses for each state, so the badges read like the tool
+ * people already know, with a color per kind of change.
+ */
+const changeStyles = {
+    unmodified: {
+        letter: "·",
+        label: "Unmodified",
+        className: "border-slate-700 text-slate-500",
+    },
+    added: {
+        letter: "A",
+        label: "Added",
+        className: "border-emerald-400/40 bg-emerald-400/10 text-emerald-300",
+    },
+    modified: {
+        letter: "M",
+        label: "Modified",
+        className: "border-amber-400/40 bg-amber-400/10 text-amber-300",
+    },
+    deleted: {
+        letter: "D",
+        label: "Deleted",
+        className: "border-red-400/40 bg-red-400/10 text-red-300",
+    },
+    renamed: {
+        letter: "R",
+        label: "Renamed",
+        className: "border-blue-400/40 bg-blue-400/10 text-blue-300",
+    },
+    copied: {
+        letter: "C",
+        label: "Copied",
+        className: "border-blue-400/40 bg-blue-400/10 text-blue-300",
+    },
+    type_changed: {
+        letter: "T",
+        label: "Type changed",
+        className: "border-blue-400/40 bg-blue-400/10 text-blue-300",
+    },
+    conflicted: {
+        letter: "U",
+        label: "Conflicted",
+        className: "border-red-400/60 bg-red-400/20 text-red-200",
+    },
+    untracked: {
+        letter: "?",
+        label: "Untracked",
+        className: "border-slate-600 bg-slate-800/60 text-slate-300",
+    },
+} satisfies Record<
+    GitChangeKind,
+    { letter: string; label: string; className: string }
+>;
+
+/** Names a change state in words, for counts and accessible text. */
+export function changeLabel(kind: GitChangeKind): string {
+    return changeStyles[kind].label;
+}
+
+/**
+ * A compact status letter for one changed file. The letter is decorative; assistive
+ * technology hears the state's name instead.
+ */
+export function ChangeBadge(props: { kind: GitChangeKind }) {
+    const style = changeStyles[props.kind];
+
+    return (
+        <span
+            title={style.label}
+            className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border font-mono text-[11px] font-bold ${style.className}`}
+        >
+            <span aria-hidden="true">{style.letter}</span>
+            <span className="sr-only">{style.label}</span>
+        </span>
+    );
+}
+
+/** Shows when a commit was authored, relative for scanning and exact on hover. */
+export function CommitAge(props: { authoredAt: number; now: number }) {
+    const date = new Date(props.authoredAt * 1000);
+
+    return (
+        <time dateTime={date.toISOString()} title={date.toLocaleString()}>
+            {formatModifiedAge(props.authoredAt, props.now)}
+        </time>
+    );
+}
+
+/**
+ * A round initial standing in for an author's avatar. Git records no picture, and the hue
+ * follows the name so one author's commits are recognisable down a long list.
+ */
+export function AuthorAvatar(props: { name: string; size?: "sm" | "md" }) {
+    const initial = props.name.trim().charAt(0).toUpperCase() || "?";
+
+    const hues = [
+        "bg-blue-400/20 text-blue-300",
+        "bg-emerald-400/20 text-emerald-300",
+        "bg-amber-400/20 text-amber-300",
+        "bg-red-400/20 text-red-300",
+    ];
+
+    let hash = 0;
+
+    for (let index = 0; index < props.name.length; index += 1) {
+        hash += props.name.charCodeAt(index);
+    }
+
+    const size = props.size === "md" ? "h-9 w-9 text-sm" : "h-7 w-7 text-xs";
+
+    return (
+        <span
+            aria-hidden="true"
+            className={`inline-flex shrink-0 items-center justify-center rounded-full font-semibold ${size} ${hues[hash % hues.length] ?? ""}`}
+        >
+            {initial}
+        </span>
+    );
+}
+
+/**
+ * The short strip that opens every Git panel: a count or title on the left and the panel's
+ * own controls on the right. It replaces a second card header under the repository header.
+ */
+export function GitPanelBar(props: {
+    children: React.ReactNode;
+    actions?: React.ReactNode;
+}) {
+    return (
+        <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-800 px-4 py-2 sm:px-5">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-300">
+                {props.children}
+            </div>
+            {props.actions === undefined ? null : (
+                <div className="flex shrink-0 items-center gap-2">
+                    {props.actions}
+                </div>
+            )}
+        </div>
+    );
+}

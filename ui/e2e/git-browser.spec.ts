@@ -239,12 +239,19 @@ test.describe.serial("Git browser", () => {
         await expect(
             directoryView.getByRole("link", { name: "Git", exact: true }),
         ).toHaveAttribute("aria-current", "page");
-        // Repository identity links directly to the root Git status view.
+
+        const repositoryHeader = page.getByRole("region", {
+            name: "Git repository",
+        });
+
+        // At the root the repository path names only the repository, as the current page.
         await expect(
-            page.getByRole("link", {
-                name: `Repository: ${repositoryPath}`,
-            }),
-        ).toBeVisible();
+            repositoryHeader
+                .getByRole("navigation", { name: "Repository path" })
+                .getByText(path.basename(repositoryPath), { exact: true }),
+        ).toHaveAttribute("aria-current", "page");
+        // The header always shows where the repository lives.
+        await expect(repositoryHeader).toContainText(repositoryPath);
         // Structured status must expose staged, unstaged, and untracked groups.
         await expect(
             page.getByRole("heading", { name: /Staged changes/ }),
@@ -342,24 +349,26 @@ test.describe.serial("Git browser", () => {
             "font-size",
             "9px",
         );
-        // File comparisons retain a compact route back to repository-level status.
+        // File comparisons keep the repository root one click away in the repository path.
         await expect(
-            page.getByRole("link", {
-                name: `Repository: ${repositoryPath}`,
-            }),
+            page
+                .getByRole("navigation", { name: "Repository path" })
+                .getByRole("link", {
+                    name: path.basename(repositoryPath),
+                    exact: true,
+                }),
         ).toBeVisible();
         const fileView = page.getByLabel("File view");
         const fileTabs = await fileView.getByRole("link").allTextContents();
         // File Git uses the same stable post-Sync tab position as directory Git.
         expect(fileTabs.slice(-2)).toEqual(["Sync", "Git"]);
 
-        await page.getByRole("button", { name: "Git diff options" }).click();
+        const stagedOnly = page.getByRole("button", {
+            name: "Staged only",
+            exact: true,
+        });
 
-        const stagedOnly = page
-            .getByRole("dialog", { name: "Git diff options" })
-            .getByRole("button", { name: "Staged changes only" });
-
-        // Staged filtering belongs to the compact overflow menu and starts disabled.
+        // The staged comparison is a visible switch that starts off.
         await expect(stagedOnly).toHaveAttribute("aria-pressed", "false");
         await stagedOnly.click();
         await expect(stagedOnly).toHaveAttribute("aria-pressed", "true");
@@ -372,7 +381,9 @@ test.describe.serial("Git browser", () => {
         await expect(stagedDiff).toContainText("staged version");
         await expect(stagedDiff).not.toContainText("worktree version");
 
-        await stagedOnly.click();
+        await page
+            .getByRole("button", { name: "All changes", exact: true })
+            .click();
         await expect(stagedOnly).toHaveAttribute("aria-pressed", "false");
         await fs.writeFile(
             trackedPath,

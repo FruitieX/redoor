@@ -43,6 +43,15 @@ const gitRevisionSchema = z
     .optional()
     .catch(undefined);
 
+/**
+ * Names the list the Git view shows instead of its changes: the history of the path, or the
+ * repository's branches or tags. The changes are the default and stay out of the URL.
+ */
+const gitTabSchema = z
+    .enum(["commits", "branches", "tags"])
+    .optional()
+    .catch(undefined);
+
 /** The columns a directory listing can be ordered by. */
 const fileSortColumnSchema = z
     .enum(["type", "name", "size", "modified", "owner", "group"])
@@ -57,8 +66,8 @@ const fileSortDirectionSchema = z
 
 /**
  * The file browser's own URL state: which representation of the path is open, an editor
- * line to reveal, markdown preview, the Git comparison, the browsed Git revision and the
- * listing order. Keeping these
+ * line to reveal, markdown preview, the Git comparison, the browsed Git revision, the Git
+ * view's list and the listing order. Keeping these
  * in the URL makes each of them survive a reload, work with Back, and be shareable. Every
  * field falls back to undefined, so a stale or hand-edited URL degrades to the defaults.
  */
@@ -68,12 +77,16 @@ export const browserSearchSchema = z.object({
     preview: optionalBooleanSchema,
     diffMode: gitDiffModeSchema,
     rev: gitRevisionSchema,
+    gitTab: gitTabSchema,
     sort: fileSortColumnSchema,
     order: fileSortDirectionSchema,
 });
 
 /** The validated browser search state, derived so the schema stays the single definition. */
 export type BrowserSearch = z.output<typeof browserSearchSchema>;
+
+/** Names a list the Git view can show besides the changes. */
+export type GitTab = NonNullable<BrowserSearch["gitTab"]>;
 
 /** Names a sortable listing column. */
 export type FileSortColumn = NonNullable<BrowserSearch["sort"]>;

@@ -240,10 +240,11 @@ test.describe.serial("Git history browsing", () => {
         );
 
         await page
-            .getByRole("link", { name: `Repository: ${repositoryPath}` })
+            .getByRole("navigation", { name: "Repository path" })
+            .getByRole("link", { name: "history-repository", exact: true })
             .click();
 
-        // The repository link opens the whole commit at the same revision.
+        // The repository root in the path opens the whole commit at the same revision.
         await expect(page).toHaveURL(
             new RegExp(`history-repository\\?view=git&rev=${secondCommit}$`),
         );

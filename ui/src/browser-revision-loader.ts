@@ -12,6 +12,7 @@ import {
     gitCommitDiffQueryOptions,
     gitRevisionContentQueryOptions,
     gitRevisionTreeQueryOptions,
+    prefetchGitList,
     type QueryContext,
 } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
@@ -61,8 +62,9 @@ export async function loadRevision(options: {
     path: string;
     rev: string;
     view: BrowserSearch["view"];
+    gitTab: BrowserSearch["gitTab"];
 }) {
-    const { context, agent, params, path, rev, view } = options;
+    const { context, agent, params, path, rev, view, gitTab } = options;
 
     if (view === "sync") {
         throw redirect({
@@ -129,7 +131,15 @@ export async function loadRevision(options: {
         );
     }
 
-    if (view === "git") {
+    if (view === "git" && gitTab !== undefined) {
+        await prefetchGitList({
+            queryClient: context.queryClient,
+            agent,
+            path,
+            commitId: tree.commit.id,
+            tab: gitTab,
+        });
+    } else if (view === "git") {
         await fetchQueryUncancelled(
             context.queryClient,
             gitCommitDiffQueryOptions(agent, path, tree.commit.id),

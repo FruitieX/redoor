@@ -63,8 +63,9 @@ The contract between all parties, with no runtime dependencies (no tokio).
   identity"); `validate_device_name` holds the device name rules.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
   transfers, git, tokens, ...). Git is a directory with one module per feature area
-  (`worktree`, `revision`, `commit`), plus the vocabulary they share, so later Git features
-  (history, branches, search) are added beside them rather than into one file.
+  (`worktree`, `revision`, `commit`, `history`, `refs`), plus the vocabulary they share
+  (including `GitPage`, the bounded offset and size every paged Git list uses), so later
+  Git features (such as search) are added beside them rather than into one file.
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
   and the integration tests use, so REST JSON (and the wire types the browser shares, such as
   exec, log and terminal events) is checked from both sides. Agent-only wire types are
@@ -117,7 +118,8 @@ The agent runtime and the implementation of every command.
     failure type, the blocking runner that interrupts gix when the request is dropped, path
     validation and repository discovery). `status` and `diff` read the worktree; `revision`
     resolves a user-supplied revision to a commit once per request; `tree` and
-    `commit_diff` read committed history. All Git work runs in `spawn_blocking` and every
+    `commit_diff` read committed history; `history` lists the commits that changed a path
+    and `refs` lists branches and tags (see "Git history, branch and tag lists"). All Git work runs in `spawn_blocking` and every
     response is bounded (entries, files, bytes per blob and per batch), because gix inflates
     whole objects and the reply is a single control frame. Object kinds and sizes are read
     from headers before inflating, commit diffs visit changes one at a time and stop at the
@@ -1255,10 +1257,10 @@ cache, so Back, reload and shared links all land on the same screen.
 
 - **URL state is a validated schema.** `browser-search.ts` defines the search keys: `view`
   (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file), `rev`
-  (a browsed Git revision, see "Git revision browsing") and `sort` / `order` (the listing
-  order). Each field falls back to undefined, so a stale link shows the defaults. The loader
-  depends on `view`, `diffMode` and `rev`, so it prefetches the diff
-  the page is about to show; sorting and `line` stay out of the loader's dependencies and never
+  (a browsed Git revision, see "Git revision browsing"), `gitTab` (the Git view's commits,
+  branches or tags list) and `sort` / `order` (the listing order). Each field falls back to
+  undefined, so a stale link shows the defaults. The loader depends on `view`, `diffMode`,
+  `rev` and `gitTab`, so it prefetches the diff or list the page is about to show; sorting and `line` stay out of the loader's dependencies and never
   reload the route.
 - **Typed links only.** `browserRoute(device, path)` takes the device object (so a bare id
   cannot be passed by mistake) and returns the typed `to` and `params`, so the router encodes
@@ -1328,6 +1330,53 @@ way of looking at the same repository location, and paths deleted since are stil
   Files active. The top bar's Files tab, which opens the device home, leaves history.
 - **Content is bounded, not streamed.** gix inflates a whole object to read it, so committed
   files are served as bounded JSON (the editor's 2 MiB limit) instead of a raw download.
+
+### Git history, branch and tag lists
+
+The Git view is one card (`GitView`) in the worktree and at a revision alike. Its header
+names the repository as a breadcrumb that starts at the repository root, so a subdirectory
+or file always shows which repository it belongs to and is one click from the whole
+repository, followed by the root's absolute path and a badge for what is checked out (the
+branch and HEAD commit, a detached HEAD, or the browsed revision). Below it a segmented
+switch picks the panel: Changes (the worktree status, file diff or commit diff), Commits,
+Branches and Tags. The switch is the `gitTab` search key, so a panel survives reload and
+Back. It is deliberately not a second row of underlined view tabs, so it reads as part of
+the Git view rather than another level of page navigation.
+
+- **HEAD comes with the context.** `git/context` reports the checked-out branch and HEAD
+  commit next to the repository root, because every worktree Git page renders the header
+  and the context is already loaded on navigation; reading HEAD costs no status walk.
+- **Panels share one vocabulary.** Changed files carry the `git status --short` letter as a
+  colored badge (`git-parts.tsx`), whether they come from worktree status or a commit, and
+  every panel opens with the same summary bar instead of a second card header.
+
+- **History follows the browsed path.** `git/log` lists the commits that changed the path,
+  newest first by commit time, starting at HEAD in the worktree or at the browsed commit
+  under `rev`. A commit counts when the path's tree entry (mode and object) differs from
+  every parent, the `--full-history` rule without merge simplification, so ordinary
+  commits that touched the path are listed and a merge only when it resolved the path into
+  something neither side had. Side branches are not pruned, which keeps every page a plain
+  filter of one walk. A shallow clone's boundary commits compare as roots. The walk caches
+  path states only for its frontier, not for history, and stops when the request is dropped.
+- **Branches and tags are repository-wide.** `git/branches` (local and remote-tracking) and
+  `git/tags` list refs most recently committed first, peeling annotated tags with the same
+  header-checked helper as revisions, so tags naming trees or blobs and symbolic refs such as
+  `origin/HEAD` are skipped. Sorting needs every ref's commit time, but at most
+  `skip + limit` candidates are held in a heap, so a huge tag namespace costs reading, not
+  memory.
+- **Pages are offsets, not cursors.** Each list returns up to 100 rows (`GitPage`, at most
+  500 per request and an offset of at most a million) plus `has_more`, and the UI's
+  `useInfiniteQuery` asks for the next offset from a "Load more" button. A time-ordered
+  walk over a DAG has no single-commit resume point, so every page walks again from the
+  start like `git log --skip`; the agent stays stateless between requests and each reply
+  is a small control frame.
+- **Links open revisions.** A commit links to the same path at `view=git&rev=<id>`, showing
+  that commit's changes scoped to the path. A branch or tag links to the path at
+  `rev=<full ref name>`, because a short name can be ambiguous between a tag and a branch;
+  the banner drops the `refs/heads/`, `refs/remotes/` and `refs/tags/` prefix for display.
+- **Caching matches revision browsing.** At a revision the history is keyed by the resolved
+  commit id; in the worktree HEAD and refs move, so the loader refetches them on navigation
+  and the refresh triggers invalidate them with the rest of the agent's Git queries.
 
 ## SSH device keys
 
