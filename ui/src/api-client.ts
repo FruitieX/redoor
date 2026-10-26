@@ -82,6 +82,8 @@ import type { GitDiffMode } from "#bindings/GitDiffMode";
 import type { GitRevisionTreeResponse } from "#bindings/GitRevisionTreeResponse";
 import type { GitRevisionContentResponse } from "#bindings/GitRevisionContentResponse";
 import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
+import type { GitLogResponse } from "#bindings/GitLogResponse";
+import type { GitRefListResponse } from "#bindings/GitRefListResponse";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
 import type { AgentAccountsResponse } from "#bindings/AgentAccountsResponse";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -135,6 +137,23 @@ export class Agent {
     /** Builds a filesystem route URL that also names the Git revision it reads. */
     private revisionUrl(route: string, path: string, rev: string): string {
         return `${this.filesystemUrl(route, path)}?${new URLSearchParams({ rev }).toString()}`;
+    }
+
+    /** Builds a filesystem route URL with optional query values, leaving unset ones out. */
+    private filesystemQueryUrl(
+        route: string,
+        path: string,
+        query: Record<string, string | number | null>,
+    ): string {
+        const params = new URLSearchParams();
+
+        for (const [key, value] of Object.entries(query)) {
+            if (value !== null) {
+                params.set(key, String(value));
+            }
+        }
+
+        return `${this.filesystemUrl(route, path)}?${params.toString()}`;
     }
 
     /** Posts JSON to an agent route without repeating content-type boilerplate. */
@@ -432,6 +451,34 @@ export class Agent {
     ): Promise<GitRevisionContentResponse> {
         return apiRequest<GitRevisionContentResponse>(
             this.revisionUrl("git/blob", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /**
+     * Lists one page of the commits that changed a path, newest first. Without a revision
+     * the history starts at HEAD.
+     */
+    async gitLog(
+        path: string,
+        options: { rev: string | null; skip: number; limit: number },
+    ): Promise<GitLogResponse> {
+        return apiRequest<GitLogResponse>(
+            this.filesystemQueryUrl("git/log", path, options),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Lists one page of the repository's branches or tags, most recently committed first. */
+    async gitRefs(
+        path: string,
+        kind: "branches" | "tags",
+        options: { skip: number; limit: number },
+    ): Promise<GitRefListResponse> {
+        return apiRequest<GitRefListResponse>(
+            this.filesystemQueryUrl(`git/${kind}`, path, options),
             undefined,
             this.requestContext,
         );

@@ -1,7 +1,9 @@
-//! Git REST endpoints, one submodule per feature area so new Git features (history,
-//! branches, search) get their own module. Path handling shared by every area lives here.
+//! Git REST endpoints, one submodule per feature area so new Git features get their own
+//! module. Path, revision and page validation shared by every area lives here.
 
 pub(crate) mod commit;
+pub(crate) mod history;
+pub(crate) mod refs;
 pub(crate) mod revision;
 pub(crate) mod worktree;
 
@@ -9,7 +11,7 @@ use super::{
     agent_helpers::{absolute_path_from_url, require_absolute_path},
     error::ApiError,
 };
-use redoor_protocol::api::git::revision::validate_revision;
+use redoor_protocol::api::git::{GitPage, GitPageQuery, revision::validate_revision};
 
 /// Restores the implicit root and applies the shared absolute-path policy.
 fn route_path(path: Option<String>) -> Result<String, ApiError> {
@@ -21,6 +23,11 @@ fn route_path(path: Option<String>) -> Result<String, ApiError> {
 fn checked_revision(rev: String) -> Result<String, ApiError> {
     validate_revision(&rev).map_err(ApiError::bad_request)?;
     Ok(rev)
+}
+
+/// Applies the page defaults and bounds before the request reaches an agent.
+fn checked_page(query: GitPageQuery) -> Result<GitPage, ApiError> {
+    GitPage::new(query.skip, query.limit).map_err(ApiError::bad_request)
 }
 
 #[cfg(test)]

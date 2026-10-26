@@ -1,9 +1,11 @@
-//! Git commands, one submodule per feature area so new Git features (history, branches,
-//! search) get their own module. This module holds the plumbing every area shares: the
-//! failure type, the blocking runner, path validation and repository discovery.
+//! Git commands, one submodule per feature area so new Git features get their own module.
+//! This module holds the plumbing every area shares: the failure type, the blocking runner,
+//! path validation and repository discovery.
 
 pub(crate) mod commit_diff;
 pub(crate) mod diff;
+pub(crate) mod history;
+pub(crate) mod refs;
 pub(crate) mod revision;
 pub(crate) mod status;
 pub(crate) mod tree;
@@ -127,6 +129,17 @@ pub(super) fn discover_repository(
     discover_repository_from(&discovery_path, requested)
 }
 
+/// Discovers the repository containing an absolute path for commands that only make sense
+/// inside one, such as history and ref listings.
+pub(super) fn discover_required_repository(path: &str) -> Result<RepositoryPath, GitFailure> {
+    discover_repository(validate_absolute_path(path)?)?.ok_or_else(|| {
+        GitFailure::new(
+            CommandErrorKind::InvalidInput,
+            "Path is not inside a non-bare Git worktree",
+        )
+    })
+}
+
 /// Discovers the repository enclosing an existing directory and locates `requested` in it.
 ///
 /// Separate from [`discover_repository`] so history browsing can search upwards from a nested
@@ -202,6 +215,17 @@ pub(super) fn head_tree(repo: &gix::Repository) -> Result<Option<gix::Tree<'_>>,
     repo.head_tree()
         .map(Some)
         .map_err(|error| internal_failure("read repository HEAD tree", error))
+}
+
+/// Stops a long repository walk once the request waiting for it is gone.
+pub(super) fn check_interrupt(interrupt: &AtomicBool, operation: &str) -> Result<(), GitFailure> {
+    if interrupt.load(Ordering::Acquire) {
+        return Err(GitFailure::new(
+            CommandErrorKind::Canceled,
+            format!("{operation} was canceled"),
+        ));
+    }
+    Ok(())
 }
 
 /// Maps filesystem failures without parsing platform-specific strings.

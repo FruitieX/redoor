@@ -30,6 +30,8 @@ use super::{
     files::{create_directory_handler, raw_agent_delete_handler, rename_path_handler},
     git::{
         commit::git_commit_diff_handler,
+        history::git_log_handler,
+        refs::{git_branches_handler, git_tags_handler},
         revision::{git_revision_content_handler, git_revision_tree_handler},
         worktree::{git_context_handler, git_diff_handler, git_status_handler},
     },
@@ -231,6 +233,24 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route(
             "/api/v1/agents/{agent}/git/commit-diff/{*path}",
             get(git_commit_diff_handler),
+        )
+        .route("/api/v1/agents/{agent}/git/log", get(git_log_handler))
+        .route(
+            "/api/v1/agents/{agent}/git/log/{*path}",
+            get(git_log_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/branches",
+            get(git_branches_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/branches/{*path}",
+            get(git_branches_handler),
+        )
+        .route("/api/v1/agents/{agent}/git/tags", get(git_tags_handler))
+        .route(
+            "/api/v1/agents/{agent}/git/tags/{*path}",
+            get(git_tags_handler),
         )
         .route(
             "/api/v1/agents/{agent}/one-time-token",

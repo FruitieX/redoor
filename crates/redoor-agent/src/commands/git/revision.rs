@@ -11,8 +11,8 @@ use redoor_protocol::{
 };
 
 use super::{
-    GitFailure, RepositoryPath, discover_repository, discover_repository_from, internal_failure,
-    utf8_relative, validate_absolute_path,
+    GitFailure, RepositoryPath, discover_repository_from, discover_required_repository,
+    internal_failure, utf8_relative,
 };
 
 /// Commits and annotated tags are small; anything larger is not a revision worth inflating
@@ -38,13 +38,8 @@ impl RevisionPath {
     pub(super) fn open(path: &str, rev: &str) -> Result<Self, GitFailure> {
         validate_revision(rev)
             .map_err(|message| GitFailure::new(CommandErrorKind::InvalidInput, message))?;
-        let requested = validate_absolute_path(path)?;
-        let mut repository = discover_repository(requested.clone())?.ok_or_else(|| {
-            GitFailure::new(
-                CommandErrorKind::InvalidInput,
-                "Path is not inside a non-bare Git worktree",
-            )
-        })?;
+        let mut repository = discover_required_repository(path)?;
+        let requested = repository.requested.clone();
         let commit_id = loop {
             if let Some(id) = resolve_commit(&repository.repo, rev)? {
                 break id;
@@ -102,19 +97,30 @@ fn resolve_commit(repo: &gix::Repository, rev: &str) -> Result<Option<gix::Objec
     let Ok(id) = repo.rev_parse_single(rev.as_bytes().as_bstr()) else {
         return Ok(None);
     };
-    let not_a_commit = || {
+    peel_to_commit(repo, id.detach())?.map(Some).ok_or_else(|| {
         GitFailure::new(
             CommandErrorKind::InvalidInput,
             format!("Git revision {rev:?} does not name a commit"),
         )
-    };
-    let mut id = id.detach();
+    })
+}
+
+/// Follows annotated tags from `id` to the commit they name, or `None` when the chain ends
+/// at a tree or blob, is oversized or is too deep.
+///
+/// Each object's kind and size are read from its header before it is inflated, so a tag
+/// naming a huge blob is rejected without loading it into memory. Shared by revisions typed
+/// by the user and by ref listings, which point at arbitrary objects too.
+pub(super) fn peel_to_commit(
+    repo: &gix::Repository,
+    mut id: gix::ObjectId,
+) -> Result<Option<gix::ObjectId>, GitFailure> {
     for _ in 0..MAX_TAG_DEPTH {
         let header = repo
             .find_header(id)
             .map_err(|error| internal_failure("read Git revision object header", error))?;
         if header.size() > MAX_REVISION_OBJECT_BYTES {
-            return Err(not_a_commit());
+            return Ok(None);
         }
         match header.kind() {
             gix::object::Kind::Commit => return Ok(Some(id)),
@@ -125,10 +131,10 @@ fn resolve_commit(repo: &gix::Repository, rev: &str) -> Result<Option<gix::Objec
                     .map_err(|error| internal_failure("read Git tag", error))?
                     .detach();
             }
-            gix::object::Kind::Tree | gix::object::Kind::Blob => return Err(not_a_commit()),
+            gix::object::Kind::Tree | gix::object::Kind::Blob => return Ok(None),
         }
     }
-    Err(not_a_commit())
+    Ok(None)
 }
 
 /// Reads the summary fields the UI shows for a commit.

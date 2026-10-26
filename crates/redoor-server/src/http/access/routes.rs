@@ -98,6 +98,9 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
             | "/api/v1/agents/{agent}/git/tree"
             | "/api/v1/agents/{agent}/git/blob"
             | "/api/v1/agents/{agent}/git/commit-diff"
+            | "/api/v1/agents/{agent}/git/log"
+            | "/api/v1/agents/{agent}/git/branches"
+            | "/api/v1/agents/{agent}/git/tags"
             | "/api/v1/agents/{agent}/raw"
             | "/api/v1/agents/{agent}/accounts"
             | "/api/v1/agents/{agent}/trash",
@@ -201,6 +204,16 @@ mod tests {
             (
                 Method::GET,
                 "/api/v1/agents/{agent}/git/commit-diff",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/log/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/tags",
                 Access::Device(&[FilesRead]),
             ),
             (

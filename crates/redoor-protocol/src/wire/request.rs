@@ -13,7 +13,10 @@ use crate::api::files::{
     ChmodPathResponse, ChownPathResponse, CreationOwnershipOptions, DirectorySizeResponse,
     MetadataResponse,
 };
+use crate::api::git::GitPage;
 use crate::api::git::commit::GitCommitDiffResponse;
+use crate::api::git::history::GitLogResponse;
+use crate::api::git::refs::{GitRefListKind, GitRefListResponse};
 use crate::api::git::revision::{GitRevisionContentResponse, GitRevisionTreeResponse};
 use crate::api::git::worktree::{
     GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse,
@@ -411,6 +414,22 @@ pub struct GitCommitDiff {
     pub rev: String,
 }
 
+/// Lists one page of the commits that changed a path, starting at a revision or HEAD.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitLog {
+    pub path: String,
+    pub rev: Option<String>,
+    pub page: GitPage,
+}
+
+/// Lists one page of the branches or tags of the repository containing a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRefList {
+    pub path: String,
+    pub kind: GitRefListKind,
+    pub page: GitPage,
+}
+
 /// Reads the stable filesystem identity needed to delete only the source that was copied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveMetadata {
@@ -559,6 +578,8 @@ agent_requests! {
     GitRevisionTree => GitRevisionTreeResponse,
     GitRevisionContent => GitRevisionContentResponse,
     GitCommitDiff => GitCommitDiffResponse,
+    GitLog => GitLogResponse,
+    GitRefList => GitRefListResponse,
     MoveMetadata => MoveMetadataResult,
     DeleteMoveSource => (),
     OpenPath => (),
@@ -668,6 +689,11 @@ mod tests {
         assert_round_trip::<GitCommitDiff>(json!({"commit": commit, "parent_id": null,
             "repository_root": "/repo", "repository_relative_path": "", "files": [],
             "truncated": false}));
+        assert_round_trip::<GitLog>(json!({"repository_root": "/repo",
+            "repository_relative_path": "a", "commits": [commit], "has_more": true}));
+        assert_round_trip::<GitRefList>(json!({"repository_root": "/repo", "refs": [{
+            "name": "main", "full_name": "refs/heads/main", "kind": "branch", "is_head": true,
+            "commit": commit}], "total": 1, "has_more": false}));
         assert_round_trip::<MoveMetadata>(json!({"file_size": 3, "is_file": true,
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));

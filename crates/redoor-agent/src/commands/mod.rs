@@ -384,6 +384,12 @@ impl RunCommand for Command {
             Command::GitCommitDiff(request::GitCommitDiff { path, rev }) => {
                 Reply::of::<request::GitCommitDiff>(git::commit_diff::commit_diff(path, rev).await)
             }
+            Command::GitLog(request::GitLog { path, rev, page }) => {
+                Reply::of::<request::GitLog>(git::history::log(path, rev, page).await)
+            }
+            Command::GitRefList(request::GitRefList { path, kind, page }) => {
+                Reply::of::<request::GitRefList>(git::refs::list(path, kind, page).await)
+            }
             Command::MoveMetadata(request::MoveMetadata { path }) => {
                 Reply::of::<request::MoveMetadata>(fs::move_metadata(path).await)
             }

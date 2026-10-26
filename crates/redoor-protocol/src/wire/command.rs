@@ -46,6 +46,8 @@ pub enum Command {
     GitRevisionTree(request::GitRevisionTree),
     GitRevisionContent(request::GitRevisionContent),
     GitCommitDiff(request::GitCommitDiff),
+    GitLog(request::GitLog),
+    GitRefList(request::GitRefList),
     MoveMetadata(request::MoveMetadata),
     DeleteMoveSource(request::DeleteMoveSource),
     OpenPath(request::OpenPath),
@@ -178,6 +180,17 @@ impl Command {
             Self::GitCommitDiff(request) => {
                 format!("GitCommitDiff path={} rev={}", request.path, request.rev)
             }
+            Self::GitLog(request) => format!(
+                "GitLog path={} rev={} skip={} limit={}",
+                request.path,
+                request.rev.as_deref().unwrap_or("HEAD"),
+                request.page.skip,
+                request.page.limit
+            ),
+            Self::GitRefList(request) => format!(
+                "GitRefList path={} kind={:?} skip={} limit={}",
+                request.path, request.kind, request.page.skip, request.page.limit
+            ),
             Self::MoveMetadata(request) => format!("MoveMetadata path={}", request.path),
             Self::DeleteMoveSource(request) => format!("DeleteMoveSource path={}", request.path),
             Self::OpenPath(request) => format!("OpenPath path={}", request.path),
