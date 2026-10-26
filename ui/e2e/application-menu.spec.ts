@@ -187,6 +187,29 @@ test.describe.serial("Application menu layout", () => {
         await expect(
             drawer.getByRole("group", { name: "Sidebar mode" }),
         ).toBeVisible();
+
+        const closeButton = drawer.getByRole("button", {
+            name: "Close application menu",
+        });
+
+        // Opening starts on the close button, as it did when the button had its own row.
+        await expect(closeButton).toBeFocused();
+
+        const closeBox = await closeButton.boundingBox();
+
+        const toggleBox = await drawer
+            .getByRole("group", { name: "Sidebar mode" })
+            .boundingBox();
+
+        // The close button shares the header row instead of spending a row above it.
+        expect(
+            Math.abs(
+                (closeBox?.y ?? 0) +
+                    (closeBox?.height ?? 0) / 2 -
+                    ((toggleBox?.y ?? 100) + (toggleBox?.height ?? 0) / 2),
+            ),
+        ).toBeLessThan(2);
+        expect(closeBox?.x ?? 0).toBeGreaterThan(toggleBox?.x ?? 1);
         // Restart and logout are not loose in the drawer, so a stray tap cannot hit them.
         await expect(
             drawer.getByRole("button", { name: "Restart server" }),

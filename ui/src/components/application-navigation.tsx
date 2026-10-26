@@ -24,7 +24,7 @@ import { Button } from "#ui/components/button";
 import { IconButton, IconLinkButton } from "#ui/components/icon-button";
 import { RestartDialog } from "#ui/components/restart-button";
 import { SidebarModeToggle } from "#ui/components/sidebar-mode-toggle";
-import { SideMenu } from "#ui/components/side-menu";
+import { SideMenu, SideMenuCloseButton } from "#ui/components/side-menu";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import { Tooltip } from "#ui/components/tooltip";
 import {
@@ -111,6 +111,7 @@ export function ApplicationNavigation() {
             placement="left"
             label="Application menu"
             flush
+            closeButtonInContent
         >
             <ApplicationMenu />
         </SideMenu>
@@ -138,14 +139,17 @@ function ApplicationMenu() {
         >
             {isCompact ? (
                 <>
-                    <div className="flex items-center justify-between gap-2 px-3 pb-2">
-                        <span className="flex min-w-0 items-center gap-2 text-slate-100">
+                    {/* The wordmark gives way in a phone-width persistent sidebar, where
+                        the logo and toggle alone fill the header. */}
+                    <div className="@container flex items-center gap-1.5 px-3 pt-3.5 pb-2">
+                        <span className="mr-auto flex min-w-0 items-center gap-2 text-slate-100">
                             <Logo className="h-8 w-8" />
-                            <span className="truncate text-lg font-semibold tracking-tight">
+                            <span className="hidden truncate text-lg font-semibold tracking-tight @[15rem]:block">
                                 Redoor
                             </span>
                         </span>
                         <SidebarModeToggle />
+                        <SideMenuCloseButton />
                     </div>
                     <PinnedFiles isCompact className="px-3" />
                     <NavigationBar onRestart={openRestart} />
@@ -153,7 +157,7 @@ function ApplicationMenu() {
             ) : (
                 <>
                     <NavigationRail onRestart={openRestart} />
-                    <div className="flex min-w-0 flex-1 flex-col py-2.5 pr-2 pl-2.5">
+                    <div className="flex min-w-0 flex-1 flex-col pt-3.5 pr-2 pb-2.5 pl-2.5">
                         {/* The wordmark gives way when a narrowed sidebar has room only
                             for the toggle, rather than shrinking to an ellipsis. */}
                         <div className="@container flex items-center justify-end gap-1.5 pb-2.5">
@@ -161,6 +165,7 @@ function ApplicationMenu() {
                                 Redoor
                             </span>
                             <SidebarModeToggle />
+                            <SideMenuCloseButton />
                         </div>
                         <PinnedFiles isCompact={false} />
                     </div>
@@ -179,7 +184,7 @@ function NavigationRail(props: { onRestart: () => void }) {
     const logout = useLogout();
 
     return (
-        <div className="flex w-[52px] shrink-0 flex-col items-center gap-1 border-r border-slate-800 bg-canvas/40 py-2.5">
+        <div className="flex w-[52px] shrink-0 flex-col items-center gap-1 border-r border-slate-800 bg-canvas/40 pt-3.5 pb-2.5">
             <Logo className="mb-2 h-8 w-8" />
             {navigationItems.map((item) => (
                 <NavigationLink key={item.to} item={item} className="h-9 w-9" />

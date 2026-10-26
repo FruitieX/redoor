@@ -16,9 +16,10 @@ test.describe("Application navigation", () => {
             name: "Device menu",
         });
 
-        for (const [panel, label, delta] of [
-            [application, "Resize application menu", 80],
-            [devices, "Resize device menu", -100],
+        // The application menu starts wider so pinned file names have room beside its rail.
+        for (const [panel, label, delta, start] of [
+            [application, "Resize application menu", 80, 260],
+            [devices, "Resize device menu", -100, 224],
         ] as const) {
             const handle = page.getByRole("separator", { name: label });
             const box = await handle.boundingBox();
@@ -41,14 +42,14 @@ test.describe("Application navigation", () => {
             // Each inner edge follows the pointer, including the mirrored right sidebar.
             await expect
                 .poll(async () => (await panel.boundingBox())?.width)
-                .toBe(224 + Math.abs(delta));
+                .toBe(start + Math.abs(delta));
         }
 
         await page.reload();
         // Reload restores both independent preferences without changing the opposite panel.
         await expect
             .poll(async () => (await application.boundingBox())?.width)
-            .toBe(304);
+            .toBe(340);
         await expect
             .poll(async () => (await devices.boundingBox())?.width)
             .toBe(324);
