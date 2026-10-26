@@ -463,7 +463,12 @@ function RevisionFileBrowser(props: {
                 banner={banner}
                 readOnly
             >
-                <GitCommitView agent={agent} path={data.path} rev={data.rev} />
+                <GitCommitView
+                    agent={agent}
+                    path={data.path}
+                    rev={data.rev}
+                    commitId={data.deletion.commit.id}
+                />
             </BrowserRouteShell>
         );
     }
@@ -515,7 +520,12 @@ function RevisionFileBrowser(props: {
 
     const content =
         activeView === "git" ? (
-            <GitCommitView agent={agent} path={data.path} rev={data.rev} />
+            <GitCommitView
+                agent={agent}
+                path={data.path}
+                rev={data.rev}
+                commitId={tree.commit.id}
+            />
         ) : activeView === "details" ? (
             <RevisionDetailView agent={agent} tree={tree} />
         ) : tree.entry.type === "directory" ? (
@@ -527,7 +537,7 @@ function RevisionFileBrowser(props: {
             />
         ) : editable ? (
             <FileEditView
-                key={`${agent.id}:${data.rev}:${data.path}`}
+                key={`${agent.id}:${tree.commit.id}:${data.path}`}
                 isFullWindow={isEditorFullWindow}
                 onToggleFullWindow={() =>
                     setIsEditorFullWindow((current) => !current)
@@ -535,7 +545,7 @@ function RevisionFileBrowser(props: {
                 agent={agent}
                 fileName={fileName}
                 filePath={data.path}
-                revision={data.rev}
+                revision={tree.commit.id}
                 repositoryRoot={tree.repository_root}
                 mimeType="text/plain"
                 downloadUrl={null}

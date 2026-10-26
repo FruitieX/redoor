@@ -1311,6 +1311,11 @@ way of looking at the same repository location, and paths deleted since are stil
   only that subtree or file, with a link to the repository root for the whole commit, like
   the worktree Git view. A path the commit deleted has no tree at the commit, so the loader
   (`browser-revision-loader.ts`) falls back to the commit diff and shows the deletion.
+- **Moving revisions are resolved once per navigation.** The tree query is refetched on
+  every navigation because a branch can move; committed content and commit diffs are then
+  fetched and cached by the commit id the tree resolved, so cached text can never belong to
+  an older commit than the banner shows. Links keep the revision as typed, so they follow
+  the branch.
 - **Nested repositories fall back outwards.** The innermost repository containing the path
   resolves the revision first, so a submodule's own history is browsable. A revision it
   does not know is resolved in the enclosing repository, which is how opening a checked-out

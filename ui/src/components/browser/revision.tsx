@@ -157,10 +157,13 @@ function formatChange(change: GitChangeState): string {
 export function GitCommitView(props: {
     agent: Agent;
     path: string;
+    /** The revision as browsed, which links keep so they follow a branch rather than pin it. */
     rev: string;
+    /** The commit `rev` resolved to, which the diff is fetched and cached by. */
+    commitId: string;
 }) {
     const diffQuery = useQuery(
-        gitCommitDiffQueryOptions(props.agent, props.path, props.rev),
+        gitCommitDiffQueryOptions(props.agent, props.path, props.commitId),
     );
 
     if (diffQuery.isPending) {

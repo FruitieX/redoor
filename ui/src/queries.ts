@@ -528,16 +528,20 @@ export function gitRevisionTreeQueryOptions(
     });
 }
 
-/** Committed text for the read-only editor, primed by the loader like worktree content. */
+/**
+ * Committed text for the read-only editor, primed by the loader like worktree content. It is
+ * keyed by the commit id the tree resolved, never by a branch name: a branch can move while
+ * this stays cached, which would show old text under the new commit's banner.
+ */
 export function gitRevisionContentQueryOptions(
     agent: Agent,
     path: string,
-    rev: string,
+    commitId: string,
 ) {
     return queryOptions({
-        queryKey: queryKeys.gitRevisionContent(agent.id, path, rev),
+        queryKey: queryKeys.gitRevisionContent(agent.id, path, commitId),
         queryFn: async () => {
-            const response = await agent.gitRevisionContent(path, rev);
+            const response = await agent.gitRevisionContent(path, commitId);
 
             return response.content;
         },
@@ -545,15 +549,18 @@ export function gitRevisionContentQueryOptions(
     });
 }
 
-/** The changes of the commit a revision names, scoped to the browsed path. */
+/**
+ * The changes of a commit, scoped to the browsed path. Keyed by commit id like the content,
+ * so the cached diff can never belong to an older commit than the banner shows.
+ */
 export function gitCommitDiffQueryOptions(
     agent: Agent,
     path: string,
-    rev: string,
+    commitId: string,
 ) {
     return queryOptions({
-        queryKey: queryKeys.gitCommitDiff(agent.id, path, rev),
-        queryFn: () => agent.gitCommitDiff(path, rev),
+        queryKey: queryKeys.gitCommitDiff(agent.id, path, commitId),
+        queryFn: () => agent.gitCommitDiff(path, commitId),
         staleTime: Number.POSITIVE_INFINITY,
     });
 }

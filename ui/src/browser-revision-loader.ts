@@ -125,15 +125,15 @@ export async function loadRevision(options: {
 
         await fetchQueryUncancelled(
             context.queryClient,
-            gitRevisionContentQueryOptions(agent, path, rev),
+            gitRevisionContentQueryOptions(agent, path, tree.commit.id),
         );
     }
 
     if (view === "git") {
-        await fetchQueryUncancelled(context.queryClient, {
-            ...gitCommitDiffQueryOptions(agent, path, rev),
-            staleTime: 0,
-        });
+        await fetchQueryUncancelled(
+            context.queryClient,
+            gitCommitDiffQueryOptions(agent, path, tree.commit.id),
+        );
     }
 
     return revisionData(options, { tree, error: null, deletion: null });
@@ -151,18 +151,27 @@ async function loadDeletion(options: {
     rev: string;
 }) {
     try {
-        const diff = await fetchQueryUncancelled(options.context.queryClient, {
-            ...gitCommitDiffQueryOptions(
+        // The revision must be resolved by the agent here because no tree named its commit.
+        const diff = await options.agent.gitCommitDiff(
+            options.path,
+            options.rev,
+        );
+
+        if (!diff.files.some((file) => file.change === "deleted")) {
+            return null;
+        }
+
+        // The view reads the diff by commit id, like every other commit diff.
+        options.context.queryClient.setQueryData(
+            gitCommitDiffQueryOptions(
                 options.agent,
                 options.path,
-                options.rev,
-            ),
-            staleTime: 0,
-        });
+                diff.commit.id,
+            ).queryKey,
+            diff,
+        );
 
-        return diff.files.some((file) => file.change === "deleted")
-            ? diff
-            : null;
+        return diff;
     } catch {
         return null;
     }
