@@ -409,6 +409,30 @@ code {
     color: light-dark(currentColor, #ff5370);
 }
 
+/*
+ * Typography's invert palette is hard-coded hex (white headings and code, pale slate body), so
+ * it ignores the light-dark slate remap above and turns faint on light surfaces. Pointing it at
+ * the remapped scale keeps Markdown readable in both themes, like the rest of the UI.
+ */
+.prose-invert {
+    --tw-prose-invert-body: var(--color-slate-300);
+    --tw-prose-invert-headings: var(--color-slate-50);
+    --tw-prose-invert-lead: var(--color-slate-400);
+    --tw-prose-invert-links: var(--color-slate-50);
+    --tw-prose-invert-bold: var(--color-slate-50);
+    --tw-prose-invert-counters: var(--color-slate-400);
+    --tw-prose-invert-bullets: var(--color-slate-600);
+    --tw-prose-invert-hr: var(--color-slate-700);
+    --tw-prose-invert-quotes: var(--color-slate-100);
+    --tw-prose-invert-quote-borders: var(--color-slate-700);
+    --tw-prose-invert-captions: var(--color-slate-400);
+    --tw-prose-invert-kbd: var(--color-slate-50);
+    --tw-prose-invert-code: var(--color-slate-50);
+    --tw-prose-invert-pre-code: var(--color-slate-300);
+    --tw-prose-invert-th-borders: var(--color-slate-600);
+    --tw-prose-invert-td-borders: var(--color-slate-700);
+}
+
 /* Fenced code uses the pre surface instead of repeating inline-code boxes per line. */
 .syntax-highlight.prose pre code {
     border-radius: 0;
