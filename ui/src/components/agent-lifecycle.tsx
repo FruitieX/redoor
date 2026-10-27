@@ -9,6 +9,7 @@ import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { Tooltip } from "#ui/components/tooltip";
 import { queryKeys } from "#ui/queries";
+import { cn } from "#ui/utils/cn";
 import { getErrorMessage } from "#ui/utils/error";
 import {
     formatAgentRecency,
@@ -121,8 +122,13 @@ export function AgentLifecycle(props: {
     };
 
     return (
-        <div className="flex h-full items-center justify-center p-8">
-            <section aria-live="polite" className="max-w-xl text-center">
+        // Margin auto centers the section only while it fits; flex centering would push
+        // tall content above the scroll origin, cutting off the spinner and the buttons.
+        <div className="flex h-full overflow-y-auto p-4 sm:p-8">
+            <section
+                aria-live="polite"
+                className="m-auto w-full min-w-0 max-w-xl text-center"
+            >
                 {shouldAppearStarting ? (
                     <LoaderCircle className="mx-auto h-12 w-12 animate-spin text-blue-400" />
                 ) : (
@@ -155,7 +161,7 @@ export function AgentLifecycle(props: {
                 {props.agent.connectionIssue ? (
                     <p
                         role="alert"
-                        className="mt-4 whitespace-pre-wrap rounded border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-300"
+                        className="mt-4 whitespace-pre-wrap wrap-anywhere rounded border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-300"
                     >
                         {props.agent.connectionIssue}
                     </p>
@@ -163,7 +169,7 @@ export function AgentLifecycle(props: {
                 {state?.error ? (
                     <p
                         role="alert"
-                        className="mt-4 rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-300"
+                        className="mt-4 wrap-anywhere rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-300"
                     >
                         {state.error}
                     </p>
@@ -223,7 +229,7 @@ export function ProvisioningStatusList(props: {
     return (
         <ol
             aria-label="Provisioning status"
-            className={`space-y-2 text-left ${props.className ?? ""}`}
+            className={cn("space-y-2 text-left", props.className)}
         >
             {props.messages.map((step, index) => {
                 const elapsed = formatElapsedSecsMs(
@@ -248,7 +254,8 @@ export function ProvisioningStatusList(props: {
                         className="rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm"
                     >
                         <div className="flex items-start gap-3">
-                            <span className="min-w-0 flex-1 break-words text-slate-200">
+                            {/* Long paths and checksums must wrap anywhere, or they widen the list past narrow screens. */}
+                            <span className="min-w-0 flex-1 wrap-anywhere text-slate-200">
                                 {step.message}
                             </span>
                             <Tooltip
@@ -261,7 +268,7 @@ export function ProvisioningStatusList(props: {
                             >
                                 <span
                                     aria-label={`${elapsed} from start`}
-                                    className="tabular-nums text-slate-500"
+                                    className="whitespace-nowrap tabular-nums text-slate-500"
                                 >
                                     {elapsed}
                                 </span>
