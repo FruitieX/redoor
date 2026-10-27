@@ -138,6 +138,8 @@ export const queryKeys = {
         ] as const,
     gitWorktrees: (agentId: string, repositoryRoot: string) =>
         [...queryKeys.git(agentId), "worktrees", repositoryRoot] as const,
+    gitWorktreeStatus: (agentId: string, worktreePath: string) =>
+        [...queryKeys.git(agentId), "worktree-status", worktreePath] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -716,6 +718,21 @@ export function gitWorktreesQueryOptions(agent: Agent, repositoryRoot: string) {
     return queryOptions({
         queryKey: queryKeys.gitWorktrees(agent.id, repositoryRoot),
         queryFn: () => agent.gitWorktrees(repositoryRoot),
+    });
+}
+
+/**
+ * The uncommitted change counts of one checkout in the worktree list. Each row asks for its
+ * own so the list shows before every checkout has been walked, and the agent queues the walks
+ * so a long list cannot run them all at once.
+ */
+export function gitWorktreeStatusQueryOptions(
+    agent: Agent,
+    worktreePath: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitWorktreeStatus(agent.id, worktreePath),
+        queryFn: () => agent.gitWorktreeStatus(worktreePath),
     });
 }
 

@@ -50,6 +50,7 @@ pub enum Command {
     GitCommitNeighbors(request::GitCommitNeighbors),
     GitRefList(request::GitRefList),
     GitWorktreeList(request::GitWorktreeList),
+    GitWorktreeStatus(request::GitWorktreeStatus),
     GitRevisionStat(request::GitRevisionStat),
     GitDownload(request::GitDownload),
     MoveMetadata(request::MoveMetadata),
@@ -202,6 +203,7 @@ impl Command {
                 request.path, request.kind, request.sort, request.page.skip, request.page.limit
             ),
             Self::GitWorktreeList(request) => format!("GitWorktreeList path={}", request.path),
+            Self::GitWorktreeStatus(request) => format!("GitWorktreeStatus path={}", request.path),
             Self::GitRevisionStat(request) => {
                 format!("GitRevisionStat path={} rev={}", request.path, request.rev)
             }

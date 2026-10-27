@@ -89,6 +89,7 @@ import type { GitLogResponse } from "#bindings/GitLogResponse";
 import type { GitRefListResponse } from "#bindings/GitRefListResponse";
 import type { GitRefSort } from "#bindings/GitRefSort";
 import type { GitWorktreeListResponse } from "#bindings/GitWorktreeListResponse";
+import type { GitWorktreeStatusResponse } from "#bindings/GitWorktreeStatusResponse";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
 import type { AgentAccountsResponse } from "#bindings/AgentAccountsResponse";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -491,11 +492,23 @@ export class Agent {
 
     /**
      * Lists the main and linked worktrees of the repository containing a path, main first
-     * and then the most recently active, with each one's branch and uncommitted changes.
+     * and then the most recently active, with each one's branch and HEAD commit.
      */
     async gitWorktrees(path: string): Promise<GitWorktreeListResponse> {
         return apiRequest<GitWorktreeListResponse>(
             this.filesystemUrl("git/worktrees", path),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /**
+     * Counts the uncommitted changes of the checkout containing a path. Separate from the
+     * worktree list because it walks every file of the checkout.
+     */
+    async gitWorktreeStatus(path: string): Promise<GitWorktreeStatusResponse> {
+        return apiRequest<GitWorktreeStatusResponse>(
+            this.filesystemUrl("git/worktree-status", path),
             undefined,
             this.requestContext,
         );

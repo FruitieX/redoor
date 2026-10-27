@@ -4,6 +4,7 @@ import { $ } from "zx";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Agent } from "#ui/api-client";
 import type { GitWorktreeListResponse } from "#bindings/GitWorktreeListResponse";
+import type { GitWorktreeStatusResponse } from "#bindings/GitWorktreeStatusResponse";
 import {
     ProcessManager,
     TempFileManager,
@@ -12,7 +13,7 @@ import {
 
 const AGENT_NAME = "git-worktrees-rest-test-agent";
 
-describe("Git worktree list REST API", () => {
+describe("Git worktree list and status REST API", () => {
     const processManager = new ProcessManager();
     const tempFiles = new TempFileManager();
     let serverPort: number;
@@ -40,17 +41,25 @@ describe("Git worktree list REST API", () => {
         return (await $({ cwd })`git rev-parse HEAD`).stdout.trim();
     }
 
-    /** Fetches the worktree route raw, so rejected paths and the JSON shape can be asserted. */
-    async function worktreesRequest(path: string): Promise<Response> {
+    /** Fetches a Git route raw, so rejected paths and the JSON shape can be asserted. */
+    async function gitRequest(
+        route: "worktrees" | "worktree-status",
+        path: string,
+    ): Promise<Response> {
         const encodedPath = path
             .split("/")
             .map((part) => encodeURIComponent(part))
             .join("/");
 
         return fetch(
-            `http://127.0.0.1:${serverPort}/api/v1/agents/${encodeURIComponent(testAgent.id)}/git/worktrees${encodedPath}`,
+            `http://127.0.0.1:${serverPort}/api/v1/agents/${encodeURIComponent(testAgent.id)}/git/${route}${encodedPath}`,
             { headers: testAgent.getAuthHeaders() },
         );
+    }
+
+    /** Sets when a checkout's index was last written, which the list reads as activity. */
+    async function setIndexTime(gitDir: string, seconds: number) {
+        await utimes(join(gitDir, "index"), seconds, seconds);
     }
 
     beforeAll(async () => {
@@ -80,26 +89,31 @@ describe("Git worktree list REST API", () => {
             missing: join(parent, "missing"),
         };
 
-        // A branch worktree with a newer commit and an older uncommitted edit, so its
-        // activity is its commit time.
+        // A branch worktree with a newer commit than its index write, so its activity is
+        // its commit time, and an uncommitted edit.
         await git(repo, 1000)`git worktree add -b feature ${worktrees.feature}`;
         await writeFile(join(worktrees.feature, "readme.txt"), "feature\n");
         await git(worktrees.feature, 3000)`git commit -am ${"Feature work"}`;
         await writeFile(join(worktrees.feature, "readme.txt"), "edited\n");
-        await utimes(join(worktrees.feature, "readme.txt"), 2000, 2000);
         await $({ cwd: repo })`git worktree lock ${worktrees.feature}`;
 
-        // A detached worktree on the old commit whose untracked file is the newest activity.
+        // A detached worktree on the old commit whose index write is the newest activity,
+        // with an untracked file.
         await git(
             repo,
             1000,
         )`git worktree add --detach ${worktrees.detached} main`;
         await writeFile(join(worktrees.detached, "notes.txt"), "notes\n");
-        await utimes(join(worktrees.detached, "notes.txt"), 5000, 5000);
 
         // A registered worktree whose directory was deleted outside Git.
         await git(repo, 1000)`git worktree add -b gone ${worktrees.missing}`;
         await rm(worktrees.missing, { recursive: true });
+
+        // Git wrote every index just now, so pin their times after the last Git command to
+        // make the activity order deterministic.
+        await setIndexTime(join(repo, ".git"), 1000);
+        await setIndexTime(join(repo, ".git", "worktrees", "feature"), 2000);
+        await setIndexTime(join(repo, ".git", "worktrees", "detached"), 5000);
 
         commits = {
             base: await head(repo),
@@ -112,10 +126,10 @@ describe("Git worktree list REST API", () => {
         tempFiles.cleanup();
     });
 
-    it("lists the main worktree first and then the most recently changed", async () => {
+    it("lists the main worktree first and then the most recently active", async () => {
         const list = await testAgent.gitWorktrees(repo);
 
-        // Main leads despite the oldest activity, the newest untracked file beats a newer
+        // Main leads despite the oldest activity, the newest index write beats a newer
         // commit, and the missing checkout trails because nobody can work in it.
         expect(list.worktrees.map((worktree) => worktree.path)).toEqual([
             repo,
@@ -128,45 +142,81 @@ describe("Git worktree list REST API", () => {
 
         const [main, detached, feature, missing] = list.worktrees;
 
-        // The main checkout is clean and marked as the one the request came from.
+        // The main checkout is marked as the one the request came from.
         expect(main).toMatchObject({
             is_main: true,
             is_current: true,
             branch_name: "main",
-            changes: { changed: 0, untracked: 0, truncated: false },
             last_activity_at: 1000,
             locked: false,
             missing: false,
         });
         expect(main?.head_commit?.id).toBe(commits.base);
 
-        // A detached HEAD has no branch, and new files count as untracked, not changed.
+        // A detached HEAD has no branch, and its index write is newer than its commit.
         expect(detached).toMatchObject({
             is_main: false,
             is_current: false,
             branch_name: null,
-            changes: { changed: 0, untracked: 1, truncated: false },
             last_activity_at: 5000,
         });
         expect(detached?.head_commit?.id).toBe(commits.base);
 
-        // A tracked edit counts as changed, the lock is reported, and the newer commit time
-        // wins over the older file modification time.
+        // The lock is reported, and the newer commit time wins over the older index write.
         expect(feature).toMatchObject({
             branch_name: "feature",
-            changes: { changed: 1, untracked: 0, truncated: false },
             last_activity_at: 3000,
             locked: true,
             missing: false,
         });
         expect(feature?.head_commit?.summary).toBe("Feature work");
 
-        // A deleted checkout keeps its branch from the registration but has no status.
+        // A deleted checkout keeps its branch from the registration.
         expect(missing).toMatchObject({
             branch_name: "gone",
-            changes: null,
             missing: true,
         });
+    });
+
+    it("counts each checkout's tracked and untracked changes", async () => {
+        // The main checkout has no uncommitted work.
+        expect(await testAgent.gitWorktreeStatus(repo)).toEqual({
+            changed: 0,
+            untracked: 0,
+            truncated: false,
+        });
+        // New files count as untracked, not changed.
+        expect(await testAgent.gitWorktreeStatus(worktrees.detached)).toEqual({
+            changed: 0,
+            untracked: 1,
+            truncated: false,
+        });
+        // A tracked edit counts as changed.
+        expect(await testAgent.gitWorktreeStatus(worktrees.feature)).toEqual({
+            changed: 1,
+            untracked: 0,
+            truncated: false,
+        });
+    });
+
+    it("answers every status of a long list that the agent queues", async () => {
+        const paths = Array.from({ length: 4 }, () => [
+            repo,
+            worktrees.detached,
+            worktrees.feature,
+        ]).flat();
+
+        const statuses = await Promise.all(
+            paths.map((path) => testAgent.gitWorktreeStatus(path)),
+        );
+
+        // More requests than the agent walks at once all finish, each with its own counts.
+        expect(statuses.map((status) => status.untracked)).toEqual(
+            paths.map((path) => (path === worktrees.detached ? 1 : 0)),
+        );
+        expect(statuses.map((status) => status.changed)).toEqual(
+            paths.map((path) => (path === worktrees.feature ? 1 : 0)),
+        );
     });
 
     it("lists the same worktrees from inside a linked worktree", async () => {
@@ -192,8 +242,8 @@ describe("Git worktree list REST API", () => {
         expect(list.repository_root).toBe(worktrees.feature);
     });
 
-    it("returns the generated JSON shape and rejects paths outside a repository", async () => {
-        const response = await worktreesRequest(repo);
+    it("returns the generated JSON shapes and rejects paths outside a repository", async () => {
+        const response = await gitRequest("worktrees", repo);
 
         // The route answers plain GETs at a filesystem path.
         expect(response.status).toBe(200);
@@ -208,6 +258,18 @@ describe("Git worktree list REST API", () => {
         });
 
         // A path outside a repository has no worktrees to list.
-        expect((await worktreesRequest(outside)).status).toBe(400);
+        expect((await gitRequest("worktrees", outside)).status).toBe(400);
+
+        const nested = join(worktrees.feature, "src");
+        await mkdir(nested, { recursive: true });
+        const statusResponse = await gitRequest("worktree-status", nested);
+
+        // A path inside a checkout counts the whole checkout, not just that directory.
+        expect(statusResponse.status).toBe(200);
+        const status: GitWorktreeStatusResponse = await statusResponse.json();
+        expect(status).toEqual({ changed: 1, untracked: 0, truncated: false });
+
+        // A path outside a repository has no checkout to count.
+        expect((await gitRequest("worktree-status", outside)).status).toBe(400);
     });
 });

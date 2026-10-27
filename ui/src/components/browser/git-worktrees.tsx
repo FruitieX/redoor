@@ -15,12 +15,15 @@ import {
     ListMessage,
     shortCommitId,
 } from "#ui/components/browser/git-parts";
-import { gitWorktreesQueryOptions } from "#ui/queries";
+import {
+    gitWorktreeStatusQueryOptions,
+    gitWorktreesQueryOptions,
+} from "#ui/queries";
 import { cn } from "#ui/utils/cn";
 import { getErrorMessage } from "#ui/utils/error";
 import { getBaseName } from "#ui/utils/path";
 import type { GitWorktree } from "#bindings/GitWorktree";
-import type { GitWorktreeChanges } from "#bindings/GitWorktreeChanges";
+import type { GitWorktreeStatusResponse } from "#bindings/GitWorktreeStatusResponse";
 
 /** The pill every worktree row uses for its flags, so they line up across rows. */
 const pill =
@@ -69,7 +72,7 @@ export function GitWorktreeList(props: {
                         : `${worktrees.length} worktrees`}
                 </span>
                 <span className="text-slate-400">
-                    Main worktree first, then the most recently changed.
+                    Main worktree first, then the most recently active.
                 </span>
             </GitPanelBar>
             {worktrees.length === 0 ? (
@@ -211,7 +214,7 @@ function WorktreeRow(props: {
                 </p>
             </div>
             <span className="flex shrink-0 flex-col items-end gap-1.5 sm:flex-row sm:items-center">
-                <ChangesSummary worktree={worktree} />
+                <ChangesSummary agent={props.agent} worktree={worktree} />
                 {worktree.missing ? null : (
                     <span className="flex items-center gap-1.5">
                         <IconLinkButton
@@ -279,11 +282,10 @@ function BranchPill(props: { worktree: GitWorktree }) {
 }
 
 /**
- * Says at a glance whether a checkout holds uncommitted work: tracked changes in amber and
- * untracked files apart from them, because `git stash` and `git worktree remove` treat
- * the two differently.
+ * Says at a glance whether a checkout holds uncommitted work. A missing checkout has nothing
+ * to walk, so it is flagged from the list alone without asking the agent.
  */
-function ChangesSummary(props: { worktree: GitWorktree }) {
+function ChangesSummary(props: { agent: Agent; worktree: GitWorktree }) {
     if (props.worktree.missing) {
         return (
             <span
@@ -295,11 +297,46 @@ function ChangesSummary(props: { worktree: GitWorktree }) {
         );
     }
 
-    const changes = props.worktree.changes;
+    return <WorktreeStatus agent={props.agent} path={props.worktree.path} />;
+}
 
-    if (changes === null) {
-        return null;
+/**
+ * The uncommitted changes of one checkout, fetched apart from the list because counting them
+ * walks every file: tracked changes in amber and untracked files apart from them, because
+ * `git stash` and `git worktree remove` treat the two differently.
+ */
+function WorktreeStatus(props: { agent: Agent; path: string }) {
+    const query = useQuery(
+        gitWorktreeStatusQueryOptions(props.agent, props.path),
+    );
+
+    if (query.isPending) {
+        return (
+            <span
+                role="status"
+                title="Counting uncommitted changes"
+                className={cn(pill, "border-slate-800 text-slate-500")}
+            >
+                Checking...
+            </span>
+        );
     }
+
+    if (query.isError) {
+        return (
+            <span
+                title={getErrorMessage(
+                    query.error,
+                    "Failed to count uncommitted changes",
+                )}
+                className={cn(pill, "border-red-400/40 text-red-300")}
+            >
+                Status unavailable
+            </span>
+        );
+    }
+
+    const changes = query.data;
 
     if (changes.changed === 0 && changes.untracked === 0) {
         return (
@@ -342,7 +379,7 @@ function ChangesSummary(props: { worktree: GitWorktree }) {
 
 /** Formats a change count, marking it as a lower bound when the agent stopped counting. */
 function countLabel(
-    changes: GitWorktreeChanges,
+    changes: GitWorktreeStatusResponse,
     count: number,
     noun: string,
 ): string {

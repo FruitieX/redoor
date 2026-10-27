@@ -22,6 +22,7 @@ use crate::api::git::worktree::{
     GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse,
 };
 use crate::api::git::worktree_list::GitWorktreeListResponse;
+use crate::api::git::worktree_status::GitWorktreeStatusResponse;
 use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchResponse};
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
@@ -476,6 +477,12 @@ pub struct GitWorktreeList {
     pub path: String,
 }
 
+/// Counts the uncommitted changes of the checkout containing a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitWorktreeStatus {
+    pub path: String,
+}
+
 /// Reads the stable filesystem identity needed to delete only the source that was copied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveMetadata {
@@ -628,6 +635,7 @@ agent_requests! {
     GitCommitNeighbors => GitCommitNeighborsResponse,
     GitRefList => GitRefListResponse,
     GitWorktreeList => GitWorktreeListResponse,
+    GitWorktreeStatus => GitWorktreeStatusResponse,
     GitRevisionStat => GitRevisionStatResult,
     GitDownload => (),
     MoveMetadata => MoveMetadataResult,
@@ -753,8 +761,10 @@ mod tests {
             "is_default": true, "commit": commit}], "total": 1, "has_more": false}));
         assert_round_trip::<GitWorktreeList>(json!({"repository_root": "/repo", "worktrees": [{
             "path": "/repo", "is_main": true, "is_current": true, "branch_name": "main",
-            "head_commit": commit, "changes": {"changed": 1, "untracked": 2, "truncated": false},
-            "last_activity_at": 1, "locked": false, "missing": false}], "truncated": false}));
+            "head_commit": commit, "last_activity_at": 1, "locked": false, "missing": false}],
+            "truncated": false}));
+        assert_round_trip::<GitWorktreeStatus>(json!({"changed": 1, "untracked": 2,
+            "truncated": false}));
         assert_round_trip::<MoveMetadata>(json!({"file_size": 3, "is_file": true,
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));

@@ -126,7 +126,8 @@ The agent runtime and the implementation of every command.
     resolves a user-supplied revision to a commit once per request; `tree` and
     `commit_diff` read committed history; `history` lists the commits that changed a path
     and `refs` lists branches and tags (see "Git history, branch and tag lists");
-    `worktree_list` lists the main and linked checkouts of a repository; `export`
+    `worktree_list` lists the main and linked checkouts of a repository and
+    `worktree_status` counts one checkout's uncommitted changes for its row; `export`
     streams committed files and directory archives for downloads and copies (see "Git
     history downloads and copies"). All Git work runs in `spawn_blocking` and every
     response is bounded (entries, files, bytes per blob and per batch), because gix inflates
@@ -1475,16 +1476,23 @@ the Git view rather than another level of page navigation.
   every linked one (`git worktree list`) from the main repository, so the list is the same
   whichever checkout the request came from, and marks the one containing the browsed path as
   current. Each row carries its branch (or a detached HEAD), its HEAD commit, the lock and a
-  `missing` flag for a registration whose directory is gone, and a status walk of the
-  checkout split into tracked changes and untracked files, since `git stash` and
-  `git worktree remove` treat the two differently. The main checkout always leads, then
-  checkouts by their latest activity: the newer of the HEAD commit's committer time and the
-  newest modification time among the changed files, so fresh uncommitted work on an old
-  branch counts as recent. Missing checkouts trail. The agent sorts and bounds the list (200
-  linked worktrees, 1000 counted changes per checkout, reported as lower bounds past that).
-  It is not paged, because every checkout's status is needed to order it anyway, and it
-  gets a longer deadline than other Git calls because it walks one status per checkout.
-  Like refs it is listed at the resolved repository root and refetched on navigation.
+  `missing` flag for a registration whose directory is gone. The main checkout always leads,
+  then checkouts by their latest activity: the newer of the HEAD commit's committer time and
+  the modification time of the checkout's index file, which Git rewrites on add, commit,
+  checkout and most status runs, so a checkout someone works in counts as recent even on an
+  old branch. Missing checkouts trail. The list reads only HEAD and the index file's time,
+  never the checkout's files, so it answers quickly; it is bounded to 200 linked worktrees
+  and not paged. Like refs it is listed at the resolved repository root and refetched on
+  navigation.
+- **Worktree changes load per row.** Counting uncommitted work walks every file of a
+  checkout, so it is a separate request (`git/worktree-status`) that each row of the list
+  makes for itself once the list has rendered. It splits tracked changes from untracked
+  files, since `git stash` and `git worktree remove` treat the two differently, and stops
+  counting at 1000 changes, reported as lower bounds past that. A browser asks for every
+  row at once, and each gix walk already uses every core, so the agent queues the walks
+  behind a process-wide semaphore (two at a time) instead of seeking between checkouts. A
+  queued request waits before its blocking walk starts, so dropping it costs nothing, and
+  the server gives the call a longer deadline than other Git calls to cover the wait.
 - **Pages are offsets, not cursors.** Each list returns up to 100 rows (`GitPage`, at most
   500 per request and an offset of at most a million) plus `has_more`, and the UI's
   `useInfiniteQuery` asks for the next offset from a "Load more" button. A time-ordered

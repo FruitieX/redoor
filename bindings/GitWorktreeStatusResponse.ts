@@ -4,7 +4,7 @@
  * How many uncommitted paths a checkout has, split the way people decide what to do next:
  * tracked edits to commit or stash, and new files that `git stash` would leave behind.
  */
-export type GitWorktreeChanges = { 
+export type GitWorktreeStatusResponse = { 
 /**
  * Tracked paths that differ from HEAD in the index or on disk, including conflicts.
  */

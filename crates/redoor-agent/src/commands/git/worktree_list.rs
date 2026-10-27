@@ -1,33 +1,26 @@
 //! The main and linked worktrees of a repository (`git worktree list`), with what each has
-//! checked out and how much uncommitted work it holds, so the Git view can show where work is
-//! happening without visiting every checkout.
+//! checked out, so the Git view can show where work is happening without visiting every
+//! checkout. Only HEAD and the index file are read here, so the list answers quickly; the
+//! uncommitted changes of each checkout are counted by `worktree_status` on request.
 
 use std::{
     cmp::Ordering,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
-    time::UNIX_EPOCH,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use gix::bstr::ByteSlice;
 
 use redoor_protocol::{
-    api::git::{
-        GitChangeState,
-        worktree_list::{
-            GitWorktree, GitWorktreeChanges, GitWorktreeListResponse, MAX_GIT_WORKTREE_CHANGES,
-            MAX_GIT_WORKTREES,
-        },
-    },
+    api::git::worktree_list::{GitWorktree, GitWorktreeListResponse, MAX_GIT_WORKTREES},
     ids::UnixTimestampSeconds,
     wire::request::CommandError,
 };
 
 use super::{
     GitFailure, check_interrupt, discover_required_repository, internal_failure,
-    revision::commit_summary,
-    run_blocking,
-    status::{StatusCollection, collect_status},
+    revision::commit_summary, run_blocking,
 };
 
 /// Lists every checkout of the repository containing `path`.
@@ -93,7 +86,7 @@ struct WorktreeLister<'a> {
 }
 
 impl WorktreeLister<'_> {
-    /// Reads one checkout's HEAD and, when its directory exists, its uncommitted changes.
+    /// Reads one checkout's HEAD and when its index was last written.
     fn describe(
         &self,
         repo: &gix::Repository,
@@ -132,13 +125,12 @@ impl WorktreeLister<'_> {
             None => (None, None),
         };
 
-        let (changes, changed_at) = match &root {
-            Some(root) => {
-                let (changes, changed_at) = self.changes(repo, root)?;
-                (Some(changes), changed_at)
-            }
-            None => (None, None),
-        };
+        // Git rewrites the index on add, commit, checkout and most status runs, so its time
+        // tells when someone last worked in the checkout without walking its files.
+        let indexed_at = std::fs::metadata(repo.index_path())
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(unix_seconds);
 
         Ok(GitWorktree {
             is_current: root.as_deref() == Some(self.current_root),
@@ -146,63 +138,17 @@ impl WorktreeLister<'_> {
             is_main,
             branch_name,
             head_commit,
-            changes,
-            last_activity_at: committed_at.max(changed_at).map(UnixTimestampSeconds::new),
+            last_activity_at: committed_at.max(indexed_at).map(UnixTimestampSeconds::new),
             locked,
             missing,
         })
     }
+}
 
-    /// Counts a checkout's uncommitted paths and finds the newest modification time among
-    /// them, which says when someone last worked there better than any commit can.
-    fn changes(
-        &self,
-        repo: &gix::Repository,
-        root: &Path,
-    ) -> Result<(GitWorktreeChanges, Option<i64>), GitFailure> {
-        let StatusCollection {
-            changes,
-            omitted_non_utf8_entries,
-            overflowed,
-        } = collect_status(
-            repo,
-            |_| true,
-            false,
-            MAX_GIT_WORKTREE_CHANGES,
-            Vec::new(),
-            self.interrupt.clone(),
-        )?;
-
-        let mut counts = GitWorktreeChanges {
-            // Paths that are not UTF-8 are still uncommitted work, so they keep a checkout
-            // from looking clean even though they cannot be classified.
-            changed: u32::try_from(omitted_non_utf8_entries).unwrap_or(u32::MAX),
-            untracked: 0,
-            truncated: overflowed,
-        };
-        let mut newest = None;
-        for (path, status) in &changes {
-            let untracked = status.index_state == GitChangeState::Unmodified
-                && status.worktree_state == GitChangeState::Added
-                && status.conflict_state.is_none();
-            if untracked {
-                counts.untracked += 1;
-            } else {
-                counts.changed += 1;
-            }
-            // Deleted files have no time, and the collection only holds UTF-8 paths.
-            let Ok(relative) = path.to_str() else {
-                continue;
-            };
-            let modified = std::fs::symlink_metadata(root.join(relative))
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .and_then(|age| i64::try_from(age.as_secs()).ok());
-            newest = newest.max(modified);
-        }
-        Ok((counts, newest))
-    }
+/// Converts a file time to whole seconds since the epoch, dropping times before it.
+fn unix_seconds(time: SystemTime) -> Option<i64> {
+    let age = time.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(age.as_secs()).ok()
 }
 
 /// The main worktree first because every other checkout branches off it, then the most
@@ -229,7 +175,6 @@ mod tests {
             is_current: false,
             branch_name: None,
             head_commit: None,
-            changes: None,
             last_activity_at: activity.map(UnixTimestampSeconds::new),
             locked: false,
             missing,
