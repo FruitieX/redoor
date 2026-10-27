@@ -127,6 +127,11 @@ export function GitCommitList(props: {
      * from HEAD, so every page walks the same history even if HEAD moves between pages.
      */
     headCommitId: string | null;
+    /**
+     * The worktree's checked-out branch, so the header can say whose history this is
+     * instead of an opaque HEAD. Null for a detached HEAD or a browsed revision.
+     */
+    branchName: string | null;
 }) {
     const query = useInfiniteQuery(
         gitLogQueryOptions(
@@ -152,8 +157,13 @@ export function GitCommitList(props: {
     const commits = query.data.pages.flatMap((page) => page.commits);
     const now = Date.now();
 
+    // The walk only follows the starting commit's ancestors, so name the branch when there
+    // is one; otherwise the commit itself is the most precise description.
+    const startCommitId = props.commitId ?? props.headCommitId;
+    const branchName = props.commitId === null ? props.branchName : null;
     const start =
-        props.commitId === null ? "HEAD" : shortCommitId(props.commitId);
+        branchName ??
+        (startCommitId === null ? "HEAD" : shortCommitId(startCommitId));
 
     return (
         <>
@@ -163,11 +173,16 @@ export function GitCommitList(props: {
                         className="h-4 w-4 text-slate-400"
                         aria-hidden="true"
                     />
-                    History from <code className="font-mono">{start}</code>
+                    {branchName === null ? "History from" : "History of"}{" "}
+                    <code className="font-mono">{start}</code>
                 </span>
                 <span className="text-slate-400">
                     {relativePath === "" ? (
-                        "Every commit in the repository."
+                        branchName === null ? (
+                            "This commit and its ancestors."
+                        ) : (
+                            "Commits reachable from this branch."
+                        )
                     ) : (
                         <>
                             Only commits that changed{" "}

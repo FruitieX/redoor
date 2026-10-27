@@ -146,6 +146,11 @@ export function GitView(props: {
                     path={props.path}
                     commitId={commitId}
                     headCommitId={headCommitId}
+                    branchName={
+                        props.reference.type === "worktree"
+                            ? props.reference.branchName
+                            : null
+                    }
                 />
             ) : props.tab === "worktrees" ? (
                 <GitWorktreeList
