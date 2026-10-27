@@ -12,7 +12,10 @@ import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { ClearableInput } from "#ui/components/clearable-input";
 import { IconButton } from "#ui/components/icon-button";
-import { DiffLayoutSwitch } from "#ui/components/browser/diff-layout-control";
+import {
+    DiffLayoutSwitch,
+    WrapDiffLinesToggle,
+} from "#ui/components/browser/diff-layout-control";
 import {
     ChangeBadge,
     type GitChangeKind,
@@ -20,6 +23,14 @@ import {
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
 import { cn } from "#ui/utils/cn";
 import type { FileNameFilter } from "#ui/utils/file-name-filter";
+
+/** How one file of a diff list shows its patch, as chosen in the file's header. */
+export type GitDiffBodyView = {
+    /** Whether a similar removed and added line show as one row with inline changes. */
+    mergeModifiedLines: boolean;
+    /** Whether long lines wrap instead of scrolling the patch sideways. */
+    wrapLines: boolean;
+};
 
 /** One changed file in a diff list, already resolved to what its header and body show. */
 export type GitDiffListFile = {
@@ -43,7 +54,7 @@ export type GitDiffListFile = {
      * while the file is expanded, so a body that fetches its own diff loads nothing for a
      * collapsed file.
      */
-    renderBody: (mergeModifiedLines: boolean) => React.ReactNode;
+    renderBody: (view: GitDiffBodyView) => React.ReactNode;
 };
 
 /**
@@ -212,7 +223,7 @@ export function GitDiffCollapseControls(props: {
 
 /**
  * Splits a repository-relative path into its name and its directory, so the header can lead
- * with the name and dim the directory beside it.
+ * with the name and dim the directory below it.
  */
 function splitRelativePath(relativePath: string) {
     const slash = relativePath.lastIndexOf("/");
@@ -240,6 +251,9 @@ function GitDiffSection(props: {
     onInlineChange: (inline: boolean) => void;
 }) {
     const file = props.file;
+    // Only a file with long lines needs to wrap, and the choice is only for this glance at
+    // it, so it lives with the section instead of in the stored preferences.
+    const [wrapLines, setWrapLines] = React.useState(false);
     const parts = splitRelativePath(file.relativePath);
     const bodyId = React.useId();
 
@@ -275,35 +289,45 @@ function GitDiffSection(props: {
                     )}
                 </IconButton>
                 <ChangeBadge kind={file.change} />
-                <h3 className="min-w-0 flex-1 truncate text-sm">
+                {/* The directory sits below the name, so on a phone it gets the full width
+                    left of the controls instead of being cut off right after the name. */}
+                <h3 className="flex min-w-0 flex-1 flex-col text-sm">
                     <Link
                         {...browserRoute(props.agent, file.path)}
                         search={file.fileSearch}
                         title={file.relativePath}
-                        className="font-medium text-slate-100 hover:text-blue-300 hover:underline"
+                        className="truncate font-medium text-slate-100 hover:text-blue-300 hover:underline"
                     >
                         {parts.name}
                     </Link>
                     {parts.directory === "" ? null : (
-                        <span className="ml-2 font-mono text-xs text-slate-500">
+                        <span className="break-all font-mono text-xs text-slate-500">
                             {parts.directory}
                         </span>
                     )}
                     {file.originalPath === null ? null : (
-                        <span className="ml-2 text-xs text-slate-500">
+                        <span className="break-all text-xs text-slate-500">
                             from {file.originalPath}
                         </span>
                     )}
                 </h3>
-                {/* A collapsed file shows no patch, so it has no layout to switch. */}
+                {/* A collapsed file shows no patch, so it has no layout or wrapping to switch. */}
                 {props.collapsed ? null : (
-                    <DiffLayoutSwitch
-                        label={`Diff layout for ${file.relativePath}`}
-                        className="shrink-0"
-                        iconOnly
-                        inline={props.inline}
-                        onChange={props.onInlineChange}
-                    />
+                    <div className="flex shrink-0 items-center gap-2">
+                        <DiffLayoutSwitch
+                            label={`Diff layout for ${file.relativePath}`}
+                            iconOnly
+                            inline={props.inline}
+                            onChange={props.onInlineChange}
+                        />
+                        <WrapDiffLinesToggle
+                            label={`Wrap diff lines for ${file.relativePath}`}
+                            wrap={wrapLines}
+                            onChange={setWrapLines}
+                            // Matches the height of the icon-only layout switch beside it.
+                            className="h-7 w-7"
+                        />
+                    </div>
                 )}
             </div>
             {props.collapsed ? null : (
@@ -311,7 +335,10 @@ function GitDiffSection(props: {
                     id={bodyId}
                     className="git-diff-list-body w-full min-w-0 overflow-x-hidden [&>p]:p-3"
                 >
-                    {file.renderBody(props.inline)}
+                    {file.renderBody({
+                        mergeModifiedLines: props.inline,
+                        wrapLines,
+                    })}
                 </div>
             )}
         </section>

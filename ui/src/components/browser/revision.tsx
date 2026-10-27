@@ -13,7 +13,6 @@ import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Tooltip } from "#ui/components/tooltip";
 import { GitDiffResultView } from "#ui/components/browser/git";
-import { WrapDiffLinesToggle } from "#ui/components/browser/diff-layout-control";
 import {
     GitDiffCollapseControls,
     GitDiffFilterField,
@@ -447,10 +446,10 @@ export function GitCommitView(props: {
         change: file.change,
         fileSearch: { rev: fileRevision(file.change) },
         regionLabel: `Commit diff for ${file.repository_relative_path}`,
-        renderBody: (mergeModifiedLines) => (
+        renderBody: (view) => (
             <GitDiffResultView
                 result={file.result}
-                mergeModifiedLines={mergeModifiedLines}
+                view={view}
                 editorFile={
                     file.change === "deleted"
                         ? undefined
@@ -520,9 +519,6 @@ export function GitCommitView(props: {
             <GitPanelBar
                 actions={
                     <>
-                        {diff.files.length === 0 ? null : (
-                            <WrapDiffLinesToggle />
-                        )}
                         <GitDiffCollapseControls
                             collapsed={collapsed}
                             fileCount={diff.files.length}

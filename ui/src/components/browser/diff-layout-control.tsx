@@ -3,6 +3,7 @@ import { Rows2, WholeWord, WrapText } from "lucide-react";
 import { SegmentedControl } from "#ui/components/segmented-control";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
+import { cn } from "#ui/utils/cn";
 import { useUserState } from "#ui/user-state";
 
 /**
@@ -47,29 +48,28 @@ export function DiffLayoutSwitch(props: {
 }
 
 /**
- * Switches every diff between wrapping and sideways-scrolling long lines. Wrapping is a
- * matter of screen width rather than of one file's edits, so it stays one user-wide setting
- * in each diff view's bar and switching it in one view switches the diffs everywhere.
+ * Switches a diff between wrapping and sideways-scrolling long lines. The single-file views
+ * switch the stored preference with it, and diff lists put one in every file's header, so
+ * only the file with long lines has to wrap while the others keep their columns aligned.
  */
-export function WrapDiffLinesToggle() {
-    const [userState, setUserState] = useUserState();
-
+export function WrapDiffLinesToggle(props: {
+    label: string;
+    wrap: boolean;
+    onChange: (wrap: boolean) => void;
+    /** Sizes the toggle to the controls beside it, such as a file header's compact switch. */
+    className?: string;
+}) {
     return (
         <ToggleButton
-            label="Wrap diff lines"
-            pressed={userState.wrapDiffLines}
+            label={props.label}
+            pressed={props.wrap}
             tooltip={
-                userState.wrapDiffLines
+                props.wrap
                     ? "Scroll long lines sideways instead of wrapping them"
                     : "Wrap long lines to fit the view"
             }
-            className="h-8 w-8 shrink-0 p-0"
-            onClick={() => {
-                setUserState((current) => ({
-                    ...current,
-                    wrapDiffLines: !current.wrapDiffLines,
-                }));
-            }}
+            className={cn("h-8 w-8 shrink-0 p-0", props.className)}
+            onClick={() => props.onChange(!props.wrap)}
         >
             <WrapText className="h-3.5 w-3.5" aria-hidden="true" />
         </ToggleButton>
@@ -77,13 +77,14 @@ export function WrapDiffLinesToggle() {
 }
 
 /**
- * The layout and wrap controls of a view that shows a single diff. Its layout switch sets
- * the stored preference, which is also what every file of a diff list starts with. On
+ * The layout and wrap controls of a view that shows a single diff. Its switches set the
+ * stored preferences, which are also what every file of a diff list starts with. On
  * phones it shrinks to its icons, so it fits one bar with the change counts and leaves the
  * screen to the patch.
  */
 export function DiffLayoutControl() {
     const [inlineChanges, setInlineChanges] = useAtom(inlineDiffChangesAtom);
+    const [userState, setUserState] = useUserState();
 
     return (
         <div className="flex shrink-0 items-center gap-2">
@@ -93,7 +94,16 @@ export function DiffLayoutControl() {
                 inline={inlineChanges}
                 onChange={setInlineChanges}
             />
-            <WrapDiffLinesToggle />
+            <WrapDiffLinesToggle
+                label="Wrap diff lines"
+                wrap={userState.wrapDiffLines}
+                onChange={(wrap) => {
+                    setUserState((current) => ({
+                        ...current,
+                        wrapDiffLines: wrap,
+                    }));
+                }}
+            />
         </div>
     );
 }

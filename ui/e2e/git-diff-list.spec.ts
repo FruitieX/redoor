@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { $ } from "zx";
@@ -8,6 +8,15 @@ import {
     teardownTestDir,
     WEB_BASE_URL,
 } from "./helpers";
+
+/** Whether the diff table is wider than its box, so the reader would scroll it sideways. */
+async function scrollsSideways(table: Locator) {
+    return table.evaluate((element) => {
+        const box = element.parentElement;
+
+        return box !== null && box.scrollWidth > box.clientWidth;
+    });
+}
 
 /** The worktree files the tests edit, so each test sees the same mixed change set. */
 const files = ["src/server.ts", "src/server.test.ts", "src/my-test/helpers.ts"];
@@ -106,6 +115,63 @@ test.describe("Git diff list", () => {
         await expect(
             serverTest.locator('tr[data-line-kind="delete"]'),
         ).toHaveCount(0);
+    });
+
+    test("wraps the long lines of one file without changing the others", async ({
+        page,
+    }) => {
+        const longValue = "word ".repeat(200);
+
+        // Both files get a line too long for the view, so either could scroll sideways.
+        for (const file of ["src/server.ts", "src/server.test.ts"]) {
+            await fs.writeFile(
+                path.join(repositoryPath, file),
+                `export const mode = "${longValue}";\n`,
+            );
+        }
+
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${agentName}/browser/${encodeFilesystemPath(repositoryPath)}?view=git`,
+        );
+
+        await page.getByRole("button", { name: "Expand all" }).click();
+
+        const server = page.getByRole("region", {
+            name: `Git diff for ${path.join(repositoryPath, "src/server.ts")}`,
+        });
+
+        const serverTest = page.getByRole("region", {
+            name: `Git diff for ${path.join(repositoryPath, "src/server.test.ts")}`,
+        });
+
+        const serverTable = server.getByRole("table");
+        const serverTestTable = serverTest.getByRole("table");
+
+        const serverWrap = server.getByRole("button", {
+            name: "Wrap diff lines for src/server.ts",
+        });
+
+        const serverTestWrap = serverTest.getByRole("button", {
+            name: "Wrap diff lines for src/server.test.ts",
+        });
+
+        // Every file starts unwrapped, so long lines scroll sideways.
+        await expect(serverWrap).toHaveAttribute("aria-pressed", "false");
+        await expect(serverTestWrap).toHaveAttribute("aria-pressed", "false");
+        await expect(serverTable).toBeVisible();
+        await expect(serverTestTable).toBeVisible();
+        expect(await scrollsSideways(serverTable)).toBe(true);
+        expect(await scrollsSideways(serverTestTable)).toBe(true);
+
+        await serverWrap.click();
+
+        // The switched file fits its long line inside its box.
+        await expect(serverWrap).toHaveAttribute("aria-pressed", "true");
+        await expect.poll(() => scrollsSideways(serverTable)).toBe(false);
+
+        // The other file still scrolls, so the choice was only for one file.
+        await expect(serverTestWrap).toHaveAttribute("aria-pressed", "false");
+        expect(await scrollsSideways(serverTestTable)).toBe(true);
     });
 
     test("filters files by name and excludes dashed words", async ({

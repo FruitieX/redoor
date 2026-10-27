@@ -10,10 +10,7 @@ import {
 import type { Agent } from "#ui/api-client";
 import { SegmentedControl } from "#ui/components/segmented-control";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
-import {
-    DiffLayoutControl,
-    WrapDiffLinesToggle,
-} from "#ui/components/browser/diff-layout-control";
+import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
 import { useUserState } from "#ui/user-state";
 import {
@@ -21,6 +18,7 @@ import {
     GitDiffFilterField,
     GitDiffList,
     useCollapsedGitDiffs,
+    type GitDiffBodyView,
     type GitDiffListFile,
 } from "#ui/components/browser/git-diff-list";
 import {
@@ -140,7 +138,7 @@ function CleanState(props: { message: string }) {
 function WorktreeDiffBody(props: {
     agent: Agent;
     path: string;
-    mergeModifiedLines: boolean;
+    view: GitDiffBodyView;
 }) {
     const diffQuery = useQuery(
         gitDiffQueryOptions(props.agent, [props.path], "full"),
@@ -166,7 +164,7 @@ function WorktreeDiffBody(props: {
         <GitDiffResultView
             result={diffQuery.data.diffs[0]?.result ?? { type: "no_changes" }}
             editorFile={{ deviceName: props.agent.name, path: props.path }}
-            mergeModifiedLines={props.mergeModifiedLines}
+            view={props.view}
         />
     );
 }
@@ -247,11 +245,11 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
             // A file deleted from the worktree still exists at HEAD, so that is where it opens.
             fileSearch: item.state === "deleted" ? { rev: "HEAD" } : {},
             regionLabel: `Git diff for ${entry.path}`,
-            renderBody: (mergeModifiedLines) => (
+            renderBody: (view) => (
                 <WorktreeDiffBody
                     agent={props.agent}
                     path={entry.path}
-                    mergeModifiedLines={mergeModifiedLines}
+                    view={view}
                 />
             ),
         };
@@ -268,7 +266,6 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
             <GitPanelBar
                 actions={
                     <>
-                        {files.length === 0 ? null : <WrapDiffLinesToggle />}
                         <GitDiffCollapseControls
                             collapsed={collapsed}
                             fileCount={files.length}
@@ -357,18 +354,16 @@ export function GitDiffResultView(props: {
     /** Omitted when the file has no editor to open, such as a file the diff deleted. */
     editorFile?: { deviceName: string; path: string };
     /** Comes from the view, since lists switch it per file and single files by preference. */
-    mergeModifiedLines: boolean;
+    view: GitDiffBodyView;
 }) {
-    const [userState] = useUserState();
-
     if (props.result.type === "text") {
         return (
             <UnifiedDiff
                 unifiedDiff={props.result.unified_diff}
                 emptyMessage="No changes in this comparison."
                 editorFile={props.editorFile}
-                mergeModifiedLines={props.mergeModifiedLines}
-                wrapLines={userState.wrapDiffLines}
+                mergeModifiedLines={props.view.mergeModifiedLines}
+                wrapLines={props.view.wrapLines}
             />
         );
     }
@@ -427,8 +422,9 @@ export function GitFileView(props: {
         gitDiffQueryOptions(props.agent, [props.path], props.mode),
     );
 
-    // A single file follows the stored preference, which its bar's layout switch sets.
+    // A single file follows the stored preferences, which its bar's switches set.
     const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
+    const [userState] = useUserState();
     const tracking = trackingLabel(props.context);
 
     return (
@@ -497,7 +493,10 @@ export function GitFileView(props: {
                             deviceName: props.agent.name,
                             path: props.path,
                         }}
-                        mergeModifiedLines={mergeModifiedLines}
+                        view={{
+                            mergeModifiedLines,
+                            wrapLines: userState.wrapDiffLines,
+                        }}
                     />
                 )}
             </section>
