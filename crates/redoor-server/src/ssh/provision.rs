@@ -321,13 +321,50 @@ impl BinaryExpectation {
         }
     }
 
-    /// This server's version and exactly the bytes of `local_sha1`, used for debug builds
-    /// whose version does not change between rebuilds and to verify an upload.
+    /// This server's version and exactly the bytes of `local_sha1`, used to verify an
+    /// uploaded release artifact, which is always built for this server's version.
     fn exact(local_sha1: String) -> Self {
         Self {
             version: redoor_core::identity::version_line(),
             sha1: Some(local_sha1),
         }
+    }
+
+    /// The version and exact bytes of the local debug build at `path`, matched by SHA-1
+    /// because the version does not change between rebuilds. The version is read from
+    /// the build itself rather than taken from this server: the build on disk can be
+    /// newer than the running server, for example after a version bump without a
+    /// restart, and expecting the server's version would reject every upload of it and
+    /// re-upload the same bytes forever.
+    async fn local_build(path: &Path) -> Result<Self, std::io::Error> {
+        let output = tokio::process::Command::new(path)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to run '{} --version': {error}",
+                    path.display()
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "'{} --version' exited with {}",
+                path.display(),
+                output.status
+            )));
+        }
+        // The remote probe compares only the first line, so the expectation must too.
+        let version = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        Ok(Self {
+            version,
+            sha1: Some(file_sha1sum(path).await?),
+        })
     }
 
     /// Decides whether a probed binary can be used; mirrors the check in [`Self::launch_script`].
@@ -517,15 +554,21 @@ impl Installer<'_> {
                 expect = BinaryExpectation::this_version();
                 continue;
             }
-            let local_path = match target.debug_binary {
-                Some(path) => path,
+            let (local_path, upload_expect) = match target.debug_binary {
+                Some(path) => {
+                    let upload_expect = BinaryExpectation::local_build(&path).await?;
+                    (path, upload_expect)
+                }
                 None => {
-                    self.provision
+                    let path = self
+                        .provision
                         .binaries
                         .ensure(env!("CARGO_PKG_VERSION"), &sniff.os, &sniff.arch, |line| {
                             self.status.report(line)
                         })
-                        .await?
+                        .await?;
+                    let upload_expect = BinaryExpectation::exact(file_sha1sum(&path).await?);
+                    (path, upload_expect)
                 }
             };
             log!(
@@ -537,10 +580,9 @@ impl Installer<'_> {
                 sniff.sha1sum,
                 local_path.display()
             );
-            let local_sha1 = file_sha1sum(&local_path).await?;
             upload_binary(self.host, &local_path, &remote_bin, self.status).await?;
             uploaded = true;
-            expect = BinaryExpectation::exact(local_sha1);
+            expect = upload_expect;
         }
         let message = format!(
             "could not settle on a remote binary for {} after several attempts",
@@ -560,10 +602,9 @@ impl Installer<'_> {
             Some(path) => {
                 self.status
                     .report("Comparing the remote debug install to this local build");
-                let local_sha1 = file_sha1sum(&path).await?;
                 Ok((
                     debug_remote_bin(&self.provision.app_name),
-                    BinaryExpectation::exact(local_sha1),
+                    BinaryExpectation::local_build(&path).await?,
                 ))
             }
             None => Ok((
@@ -1053,6 +1094,29 @@ echo uploaded
         assert!(exact.matches(&sniff(&version, "local-digest")));
         // A release install is matched by version alone.
         assert!(BinaryExpectation::this_version().matches(&sniff(&version, "any-digest")));
+    }
+
+    /// A local debug build is expected to report its own version, not this server's, so a
+    /// build that is newer than the running server still verifies after its upload.
+    #[tokio::test]
+    async fn local_build_expects_the_build_version() {
+        let home = redoor_core::test_support::TempDir::create();
+        let path = home.path().join("target/debug/redoor");
+        fake_binary(&path, "redoor 999.0.0").await;
+        let expect = BinaryExpectation::local_build(&path).await.unwrap();
+        // The version comes from the build's first `--version` line.
+        assert_eq!(expect.version, "redoor 999.0.0");
+        // The bytes must still match exactly, since debug rebuilds keep the version.
+        assert_eq!(expect.sha1, Some(file_sha1sum(&path).await.unwrap()));
+        let sniff = RemoteSniff {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            version_output: "redoor 999.0.0".to_string(),
+            sha1sum: file_sha1sum(&path).await.unwrap(),
+            remote_bin: "/bin/redoor".to_string(),
+        };
+        // An identical upload verifies even though this server reports another version.
+        assert!(expect.matches(&sniff));
     }
 
     /// Ensures the upload temp path stays beside the final binary so remote

@@ -653,7 +653,11 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   SHA-1 of the binary at the default install path, and `exec`s it only when it matches this
   server. A device with a current binary therefore starts in one SSH session. Otherwise the
   script exits without starting anything, the server uploads the matching release from the
-  local cache and starts again, and that second report verifies the upload. Each step is
+  local cache and starts again, and that second report verifies the upload. A debug server
+  uses its local debug build instead when the platform matches, at a separate path. It is
+  matched by SHA-1 and by the version that build reports, not the server's own version,
+  because the build on disk can be newer than the running server after a version bump
+  without a restart. Each step is
   published as `provisioning_status`, which the UI lists while the agent starts. The ssh
   child holds the remote agent's stdin, so killing ssh makes the remote agent exit
   (`--exit-on-stdin-eof`). Relays probe and install once before their first start instead,
