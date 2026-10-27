@@ -161,6 +161,7 @@ export function GitCommitList(props: {
     // is one; otherwise the commit itself is the most precise description.
     const startCommitId = props.commitId ?? props.headCommitId;
     const branchName = props.commitId === null ? props.branchName : null;
+
     const start =
         branchName ??
         (startCommitId === null ? "HEAD" : shortCommitId(startCommitId));
