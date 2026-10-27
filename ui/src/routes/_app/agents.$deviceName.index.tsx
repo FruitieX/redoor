@@ -180,6 +180,16 @@ function AgentDetailsContent(props: {
 
             return next;
         });
+
+        // The router keeps this page rendered while the next page's loader runs, so the
+        // details can arrive after the user has already clicked elsewhere, such as the edit
+        // link. Redirecting then would replace the page they chose with the file browser,
+        // so the redirect only happens while no other navigation is on its way.
+        const userNavigatedAway =
+            router.latestLocation.href !== router.state.resolvedLocation?.href;
+
+        if (userNavigatedAway) return;
+
         void router.navigate(browserRoute(props.agent, targetPath));
     }, [
         locations,
