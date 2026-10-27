@@ -165,6 +165,25 @@ test.describe.serial("Git history browsing", () => {
         ).toHaveCount(0);
     });
 
+    test("leaves history without leaving the current view", async ({
+        page,
+    }) => {
+        await page.goto(
+            `${deviceBrowserUrl(ctx.agentName, path.join(repositoryPath, "src"))}?view=git&rev=v1`,
+        );
+
+        await page
+            .getByRole("region", { name: "Git revision" })
+            .getByRole("link", { name: "Working tree" })
+            .click();
+
+        // Only the revision is dropped, so the Git view stays open instead of the file list.
+        await expect(page).toHaveURL(/\/src\?view=git$/);
+        await expect(
+            page.getByRole("region", { name: "Git revision" }),
+        ).toHaveCount(0);
+    });
+
     test("shows revision details in the same layout with writes disabled", async ({
         page,
     }) => {

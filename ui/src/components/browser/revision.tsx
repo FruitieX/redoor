@@ -48,7 +48,7 @@ import type { LsEntry } from "#bindings/LsEntry";
 /**
  * Marks the page as a read-only view of history, directly below the breadcrumbs, so it is
  * impossible to mistake committed content for the working files. It also offers the way
- * back to the working tree, which drops the revision from the URL. On phones it keeps to
+ * back to the working tree, which drops only the revision from the URL. On phones it keeps to
  * one row: the summary already heads the page's own views, and the links show their icons.
  */
 export function RevisionBanner(props: {
@@ -127,9 +127,11 @@ export function RevisionBanner(props: {
                     </Tooltip>
                 )}
                 <Tooltip content="Leave history and show the current working files">
+                    {/* Only the revision goes, so the reader stays on the same view, such as
+                        the Git changes, instead of falling back to the file list. */}
                     <Link
                         {...browserRoute(props.agent, props.path)}
-                        search={{ rev: undefined }}
+                        search={(previous) => ({ ...previous, rev: undefined })}
                         className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 max-sm:p-2"
                     >
                         <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
