@@ -282,8 +282,8 @@ const SIGNS = {
 } satisfies Record<DiffLine["kind"], string>;
 
 /**
- * The line numbers and change sign. It sticks to the left edge so the numbers stay in view
- * while a long line scrolls sideways, which is why its background must be opaque.
+ * The line numbers and change sign. It scrolls sideways with the rest of its row, so a long
+ * line never slides underneath the numbers.
  */
 function Gutter(props: {
     kind: DiffLine["kind"] | "skip";
@@ -297,7 +297,7 @@ function Gutter(props: {
     return (
         <td
             className={cn(
-                "sticky left-0 z-[1] select-none whitespace-nowrap border-l-3 px-2 text-right tabular-nums text-slate-500",
+                "select-none whitespace-nowrap border-l-3 px-2 text-right tabular-nums text-slate-500",
                 props.kind === "skip" ? "bg-surface-raised" : ROW_CLASSES[kind],
                 MARKER_CLASSES[kind],
             )}

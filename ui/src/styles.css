@@ -53,9 +53,8 @@
         rgb(255 255 255 / 0.1)
     );
     /*
-     * Diff rows are opaque, unlike tinted overlays, because the sticky line-number gutter
-     * paints over code scrolling under it. Dark values are GitHub's tints blended onto the
-     * dark surface.
+     * Diff rows are opaque, unlike tinted overlays, so they read the same on any surface.
+     * Dark values are GitHub's tints blended onto the dark surface.
      */
     --app-diff-insert: light-dark(#e6ffec, #152921);
     --app-diff-insert-strong: light-dark(#abf2bc, #1d4c2b);
