@@ -39,6 +39,7 @@
 - Do all work and commits directly on the `main` branch; do not create feature branches
 - When making git commits always add description explaining why the change was made, not what it does
 - Make multiple commits if there are clear distinct edits
+- To make a release run `node scripts/release.mts <patch|minor|major>` on a clean `main`. It pushes `main`, bumps the version in `Cargo.toml`, commits, tags and pushes the tag, so do not bump versions or tag by hand
 - On test failures see the ./log dir for related logs
 - When a single test needs cleanup, always use onTestFinished() instead of try-finally
 - When using `tokio::select!` keep the arm bodies small be delegating to methods/functions, since `cargo fmt` does not work with it.
