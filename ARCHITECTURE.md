@@ -232,7 +232,10 @@ returns `anyhow::Result<ExitCode>`, and errors are printed once.
   generic over its target, so the agent and server (no target) and relays (a relay ID) cannot
   drift apart. A relay service is `<app-name>-relay-<id>` and runs
   `redoor agent relay start <id>` in the foreground; its systemd unit is `Type=exec` because
-  a relay retries SSH forever and never sends a readiness notification.
+  a relay retries SSH forever and never sends a readiness notification. `launchctl bootout`
+  can return before launchd has removed the job, and a bootstrap in that window fails with
+  status 5 or is silently discarded, so the launchd backend waits for the job and its process
+  to disappear after every bootout, retries that conflict, and verifies the job is loaded.
 - `process_control` and `process_logs`: PID files, stopping processes and reading logs.
 - `upgrade`: the `redoor upgrade` command on top of `redoor_core::upgrade`, plus the detached
   restart helper. See "Upgrading in place".
