@@ -45,10 +45,11 @@ const gitRevisionSchema = z
 
 /**
  * Names the list the Git view shows instead of its changes: the history of the path, or the
- * repository's branches or tags. The changes are the default and stay out of the URL.
+ * repository's branches, tags or worktrees. The changes are the default and stay out of the
+ * URL.
  */
 const gitTabSchema = z
-    .enum(["commits", "branches", "tags"])
+    .enum(["commits", "branches", "tags", "worktrees"])
     .optional()
     .catch(undefined);
 

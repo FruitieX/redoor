@@ -1,5 +1,6 @@
 import type { GitChangeState } from "#bindings/GitChangeState";
 import { formatModifiedAge } from "#ui/components/browser/utils";
+import { cn } from "#ui/utils/cn";
 
 /** Shortens a commit id the way Git tools display it. */
 export function shortCommitId(id: string): string {
@@ -175,6 +176,24 @@ export function GitPanelBar(props: {
                 </div>
             )}
         </div>
+    );
+}
+
+/** A short status line for the loading, error and empty states every Git list shares. */
+export function ListMessage(props: {
+    role: "status" | "alert";
+    children: string;
+}) {
+    return (
+        <p
+            role={props.role}
+            className={cn(
+                "px-4 py-10 text-center text-sm sm:px-5",
+                props.role === "alert" ? "text-red-300" : "text-slate-400",
+            )}
+        >
+            {props.children}
+        </p>
     );
 }
 

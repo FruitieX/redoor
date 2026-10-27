@@ -21,6 +21,7 @@ use crate::api::git::revision::{GitRevisionContentResponse, GitRevisionTreeRespo
 use crate::api::git::worktree::{
     GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse,
 };
+use crate::api::git::worktree_list::GitWorktreeListResponse;
 use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchResponse};
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
@@ -469,6 +470,12 @@ pub struct GitRefList {
     pub page: GitPage,
 }
 
+/// Lists the main and linked worktrees of the repository containing a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitWorktreeList {
+    pub path: String,
+}
+
 /// Reads the stable filesystem identity needed to delete only the source that was copied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveMetadata {
@@ -620,6 +627,7 @@ agent_requests! {
     GitLog => GitLogResponse,
     GitCommitNeighbors => GitCommitNeighborsResponse,
     GitRefList => GitRefListResponse,
+    GitWorktreeList => GitWorktreeListResponse,
     GitRevisionStat => GitRevisionStatResult,
     GitDownload => (),
     MoveMetadata => MoveMetadataResult,
@@ -743,6 +751,10 @@ mod tests {
         assert_round_trip::<GitRefList>(json!({"repository_root": "/repo", "refs": [{
             "name": "main", "full_name": "refs/heads/main", "kind": "branch", "is_head": true,
             "is_default": true, "commit": commit}], "total": 1, "has_more": false}));
+        assert_round_trip::<GitWorktreeList>(json!({"repository_root": "/repo", "worktrees": [{
+            "path": "/repo", "is_main": true, "is_current": true, "branch_name": "main",
+            "head_commit": commit, "changes": {"changed": 1, "untracked": 2, "truncated": false},
+            "last_activity_at": 1, "locked": false, "missing": false}], "truncated": false}));
         assert_round_trip::<MoveMetadata>(json!({"file_size": 3, "is_file": true,
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));

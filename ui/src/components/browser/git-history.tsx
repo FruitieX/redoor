@@ -20,6 +20,7 @@ import {
     AuthorAvatar,
     CommitAge,
     GitPanelBar,
+    ListMessage,
     shortCommitId,
 } from "#ui/components/browser/git-parts";
 import {
@@ -50,18 +51,6 @@ const REF_SORT_OPTIONS: ReadonlyArray<SegmentedControlOption<GitRefSort>> = [
         tooltip: "By name, with version numbers in numeric order",
     },
 ];
-
-/** A short status line for the loading, error and empty states every list shares. */
-function ListMessage(props: { role: "status" | "alert"; children: string }) {
-    return (
-        <p
-            role={props.role}
-            className={`px-4 py-10 text-center text-sm sm:px-5 ${props.role === "alert" ? "text-red-300" : "text-slate-400"}`}
-        >
-            {props.children}
-        </p>
-    );
-}
 
 /** Asks for the next page of a list, which only exists while the agent reports more rows. */
 function LoadMore(props: {

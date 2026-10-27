@@ -6,6 +6,7 @@ pub mod history;
 pub mod refs;
 pub mod revision;
 pub mod worktree;
+pub mod worktree_list;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;

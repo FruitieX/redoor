@@ -35,6 +35,7 @@ use super::{
         refs::{git_branches_handler, git_tags_handler},
         revision::{git_revision_content_handler, git_revision_tree_handler},
         worktree::{git_context_handler, git_diff_handler, git_status_handler},
+        worktree_list::git_worktrees_handler,
     },
     logging_levels::{
         get_agent_logging_level_handler, get_server_logging_level_handler,
@@ -268,6 +269,14 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route(
             "/api/v1/agents/{agent}/git/tags/{*path}",
             get(git_tags_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/worktrees",
+            get(git_worktrees_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/worktrees/{*path}",
+            get(git_worktrees_handler),
         )
         .route(
             "/api/v1/agents/{agent}/one-time-token",

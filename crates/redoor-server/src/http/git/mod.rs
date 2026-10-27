@@ -7,6 +7,7 @@ pub(crate) mod history;
 pub(crate) mod refs;
 pub(crate) mod revision;
 pub(crate) mod worktree;
+pub(crate) mod worktree_list;
 
 use super::{
     agent_helpers::{absolute_path_from_url, require_absolute_path},

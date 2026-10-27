@@ -28,20 +28,20 @@ use super::{
 pub(crate) const MAX_GIT_STATUS_ENTRIES: usize = 5_000;
 
 /// Accumulates the two independent status comparisons for one path.
-struct StatusAccumulator {
-    index_state: GitChangeState,
-    worktree_state: GitChangeState,
-    conflict_state: Option<GitConflictState>,
+pub(super) struct StatusAccumulator {
+    pub(super) index_state: GitChangeState,
+    pub(super) worktree_state: GitChangeState,
+    pub(super) conflict_state: Option<GitConflictState>,
     original_path: Option<String>,
     entry_kind: GitStatusEntryKind,
     ignored: bool,
 }
 
 /// Returns bounded status entries together with omission and truncation metadata.
-struct StatusCollection {
-    changes: BTreeMap<Vec<u8>, StatusAccumulator>,
-    omitted_non_utf8_entries: usize,
-    overflowed: bool,
+pub(super) struct StatusCollection {
+    pub(super) changes: BTreeMap<Vec<u8>, StatusAccumulator>,
+    pub(super) omitted_non_utf8_entries: usize,
+    pub(super) overflowed: bool,
 }
 
 impl Default for StatusAccumulator {
@@ -295,7 +295,7 @@ pub(super) fn classify_tracking(
 }
 
 /// Walks both status comparisons with ignored files visible for direct context classification.
-fn collect_status(
+pub(super) fn collect_status(
     repo: &gix::Repository,
     include_path: impl Fn(&[u8]) -> bool,
     include_ignored: bool,

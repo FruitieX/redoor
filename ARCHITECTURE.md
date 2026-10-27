@@ -66,7 +66,7 @@ The contract between all parties, with no runtime dependencies (no tokio).
   identity"); `validate_device_name` holds the device name rules.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
   transfers, git, tokens, ...). Git is a directory with one module per feature area
-  (`worktree`, `revision`, `commit`, `history`, `refs`), plus the vocabulary they share
+  (`worktree`, `worktree_list`, `revision`, `commit`, `history`, `refs`), plus the vocabulary they share
   (including `GitPage`, the bounded offset and size every paged Git list uses), so later
   Git features (such as search) are added beside them rather than into one file.
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
@@ -125,7 +125,8 @@ The agent runtime and the implementation of every command.
     validation and repository discovery). `status` and `diff` read the worktree; `revision`
     resolves a user-supplied revision to a commit once per request; `tree` and
     `commit_diff` read committed history; `history` lists the commits that changed a path
-    and `refs` lists branches and tags (see "Git history, branch and tag lists"); `export`
+    and `refs` lists branches and tags (see "Git history, branch and tag lists");
+    `worktree_list` lists the main and linked checkouts of a repository; `export`
     streams committed files and directory archives for downloads and copies (see "Git
     history downloads and copies"). All Git work runs in `spawn_blocking` and every
     response is bounded (entries, files, bytes per blob and per batch), because gix inflates
@@ -1329,7 +1330,7 @@ cache, so Back, reload and shared links all land on the same screen.
 - **URL state is a validated schema.** `browser-search.ts` defines the search keys: `view`
   (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file), `rev`
   (a browsed Git revision, see "Git revision browsing"), `gitTab` (the Git view's commits,
-  branches or tags list) and `sort` / `order` (the listing order). Each field falls back to
+  branches, tags or worktrees list) and `sort` / `order` (the listing order). Each field falls back to
   undefined, so a stale link shows the defaults. The loader depends on `view`, `diffMode`,
   `rev` and `gitTab`, so it prefetches the diff or list the page is about to show; sorting and `line` stay out of the loader's dependencies and never
   reload the route.
@@ -1413,7 +1414,7 @@ or file always shows which repository it belongs to and is one click from the wh
 repository, followed by the root's absolute path and a badge for what is checked out (the
 branch and HEAD commit, a detached HEAD, or the browsed revision). Below it a segmented
 switch picks the panel: Changes (the worktree status, file diff or commit diff), Commits,
-Branches and Tags. The switch is the `gitTab` search key, so a panel survives reload and
+Branches, Tags and Worktrees. The switch is the `gitTab` search key, so a panel survives reload and
 Back. It is deliberately not a second row of underlined view tabs, so it reads as part of
 the Git view rather than another level of page navigation.
 
@@ -1461,6 +1462,20 @@ the Git view rather than another level of page navigation.
   of the heap order rather than a later insert, so offsets stay consistent. Either order visits every ref, but at most
   `skip + limit` candidates are held in a heap, so a huge tag namespace costs reading, not
   memory; the name order skips reading commit times.
+- **Worktrees show where work is happening.** `git/worktrees` lists the main checkout and
+  every linked one (`git worktree list`) from the main repository, so the list is the same
+  whichever checkout the request came from, and marks the one containing the browsed path as
+  current. Each row carries its branch (or a detached HEAD), its HEAD commit, the lock and a
+  `missing` flag for a registration whose directory is gone, and a status walk of the
+  checkout split into tracked changes and untracked files, since `git stash` and
+  `git worktree remove` treat the two differently. The main checkout always leads, then
+  checkouts by their latest activity: the newer of the HEAD commit's committer time and the
+  newest modification time among the changed files, so fresh uncommitted work on an old
+  branch counts as recent. Missing checkouts trail. The agent sorts and bounds the list (200
+  linked worktrees, 1000 counted changes per checkout, reported as lower bounds past that).
+  It is not paged, because every checkout's status is needed to order it anyway, and it
+  gets a longer deadline than other Git calls because it walks one status per checkout.
+  Like refs it is listed at the resolved repository root and refetched on navigation.
 - **Pages are offsets, not cursors.** Each list returns up to 100 rows (`GitPage`, at most
   500 per request and an offset of at most a million) plus `has_more`, and the UI's
   `useInfiniteQuery` asks for the next offset from a "Load more" button. A time-ordered

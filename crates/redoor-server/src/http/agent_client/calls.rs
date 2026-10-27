@@ -12,8 +12,8 @@ pub(crate) use redoor_protocol::wire::request::{
     ChmodPath, ChownPath, ContentGrep, CreateDirectory, DeletePartial, DirectorySize, Echo,
     EmptyTrash, FileSearch, GetAgentDetails, GetLoggingLevel, GitCommitDiff, GitCommitNeighbors,
     GitContext, GitDiff, GitLog, GitRefList, GitRevisionContent, GitRevisionStat, GitRevisionTree,
-    GitStatus, ListAccounts, ListPartials, ListTrash, Ls, Metadata, MoveMetadata, OpenPath,
-    ProbePartial, RawDelete, ReadPartial, RenamePath, Restart, RestoreTrash, SelfExec,
+    GitStatus, GitWorktreeList, ListAccounts, ListPartials, ListTrash, Ls, Metadata, MoveMetadata,
+    OpenPath, ProbePartial, RawDelete, ReadPartial, RenamePath, Restart, RestoreTrash, SelfExec,
     SetLoggingLevel, Trash,
 };
 use std::time::Duration;
@@ -22,6 +22,8 @@ use std::time::Duration;
 pub(crate) const STANDARD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Deadline for process control that answers immediately or not at all.
 pub(crate) const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for listing worktrees, which walks the status of every checkout in turn.
+pub(crate) const GIT_WORKTREE_LIST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Deadline for permanently deleting every trash entry, which can touch many files.
 pub(crate) const EMPTY_TRASH_TIMEOUT: Duration = Duration::from_secs(300);
 /// Extra wait beyond an agent-enforced limit so the agent's own timeout result arrives first.
@@ -96,6 +98,16 @@ impl AgentCall for DirectorySize {
 
     fn timeout(&self) -> Option<Duration> {
         agent_limited(self.timeout_seconds)
+    }
+}
+
+impl AgentCall for GitWorktreeList {
+    const OPERATION: &'static str = "listing git worktrees";
+
+    /// One status walk fits the standard deadline, but a repository with many checkouts
+    /// walks one per worktree.
+    fn timeout(&self) -> Option<Duration> {
+        Some(GIT_WORKTREE_LIST_TIMEOUT)
     }
 }
 

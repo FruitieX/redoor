@@ -136,6 +136,8 @@ export const queryKeys = {
             list.sort,
             repositoryRoot,
         ] as const,
+    gitWorktrees: (agentId: string, repositoryRoot: string) =>
+        [...queryKeys.git(agentId), "worktrees", repositoryRoot] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -706,9 +708,22 @@ export function gitRefsQueryOptions(
 }
 
 /**
+ * Every checkout of the repository, main first and then the most recently active. Asked for
+ * at the repository root the page resolved, like the refs, and refetched on navigation
+ * because checkouts change under the page.
+ */
+export function gitWorktreesQueryOptions(agent: Agent, repositoryRoot: string) {
+    return queryOptions({
+        queryKey: queryKeys.gitWorktrees(agent.id, repositoryRoot),
+        queryFn: () => agent.gitWorktrees(repositoryRoot),
+    });
+}
+
+/**
  * Primes the first page of the Git list a route is about to show. Failures stay in the
  * query, so the list reports them inside its tab instead of failing the whole page. Refs
- * move, so navigation refetches them; history is keyed by commit id and never changes.
+ * and worktrees move, so navigation refetches them; history is keyed by commit id and never
+ * changes.
  */
 export async function prefetchGitList(options: {
     queryClient: QueryClient;
@@ -717,7 +732,7 @@ export async function prefetchGitList(options: {
     repositoryRoot: string;
     /** The commit history starts at: the browsed commit, or HEAD in the worktree. */
     commitId: string | null;
-    tab: "commits" | GitRefListKind;
+    tab: "commits" | "worktrees" | GitRefListKind;
     /** The order of a branch or tag list; absent is the default recent order. */
     refSort: GitRefSort | undefined;
 }) {
@@ -727,6 +742,11 @@ export async function prefetchGitList(options: {
         await queryClient.prefetchInfiniteQuery({
             ...gitLogQueryOptions(agent, path, commitId),
             staleTime: commitId === null ? 0 : Number.POSITIVE_INFINITY,
+        });
+    } else if (tab === "worktrees") {
+        await queryClient.prefetchQuery({
+            ...gitWorktreesQueryOptions(agent, repositoryRoot),
+            staleTime: 0,
         });
     } else {
         await queryClient.prefetchInfiniteQuery({

@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import {
     FileDiff,
     FolderGit2,
+    FolderTree,
     GitBranch,
     GitCommitHorizontal,
     History,
@@ -13,6 +14,7 @@ import { browserRoute } from "#ui/browser-route";
 import type { GitTab } from "#ui/browser-search";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { GitCommitList, GitRefList } from "#ui/components/browser/git-history";
+import { GitWorktreeList } from "#ui/components/browser/git-worktrees";
 import {
     displayRevision,
     shortCommitId,
@@ -79,8 +81,8 @@ export function WorktreeGitView(props: {
 /**
  * The whole Git view: one card whose header names the repository, where the browsed path
  * sits in it and what is checked out, followed by a switch between the path's changes,
- * its history and the repository's branches and tags. The switch is the `gitTab` search
- * key, so a list survives reload and Back like every other browser view.
+ * its history and the repository's branches, tags and worktrees. The switch is the `gitTab`
+ * search key, so a list survives reload and Back like every other browser view.
  */
 export function GitView(props: {
     agent: Agent;
@@ -144,6 +146,11 @@ export function GitView(props: {
                     path={props.path}
                     commitId={commitId}
                     headCommitId={headCommitId}
+                />
+            ) : props.tab === "worktrees" ? (
+                <GitWorktreeList
+                    agent={props.agent}
+                    repositoryRoot={props.repository.root}
                 />
             ) : props.tab === "branches" || props.tab === "tags" ? (
                 <GitRefList
@@ -356,6 +363,16 @@ function GitViewNav(props: {
             label: "Tags",
             icon: (
                 <Tag className="hidden h-4 w-4 sm:block" aria-hidden="true" />
+            ),
+        },
+        {
+            tab: "worktrees",
+            label: "Worktrees",
+            icon: (
+                <FolderTree
+                    className="hidden h-4 w-4 sm:block"
+                    aria-hidden="true"
+                />
             ),
         },
     ];

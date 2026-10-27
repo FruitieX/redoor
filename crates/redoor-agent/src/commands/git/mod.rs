@@ -10,6 +10,7 @@ pub(crate) mod refs;
 pub(crate) mod revision;
 pub(crate) mod status;
 pub(crate) mod tree;
+pub(crate) mod worktree_list;
 
 use redoor_protocol::wire::{command::CommandErrorKind, request::CommandError};
 use std::{

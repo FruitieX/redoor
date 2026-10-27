@@ -88,6 +88,7 @@ import type { GitCommitNeighborsResponse } from "#bindings/GitCommitNeighborsRes
 import type { GitLogResponse } from "#bindings/GitLogResponse";
 import type { GitRefListResponse } from "#bindings/GitRefListResponse";
 import type { GitRefSort } from "#bindings/GitRefSort";
+import type { GitWorktreeListResponse } from "#bindings/GitWorktreeListResponse";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
 import type { AgentAccountsResponse } from "#bindings/AgentAccountsResponse";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -483,6 +484,18 @@ export class Agent {
     ): Promise<GitRefListResponse> {
         return apiRequest<GitRefListResponse>(
             this.filesystemQueryUrl(`git/${kind}`, path, options),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /**
+     * Lists the main and linked worktrees of the repository containing a path, main first
+     * and then the most recently active, with each one's branch and uncommitted changes.
+     */
+    async gitWorktrees(path: string): Promise<GitWorktreeListResponse> {
+        return apiRequest<GitWorktreeListResponse>(
+            this.filesystemUrl("git/worktrees", path),
             undefined,
             this.requestContext,
         );
