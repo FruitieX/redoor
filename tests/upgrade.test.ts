@@ -5,6 +5,7 @@ import {
     readFileSync,
     readlinkSync,
     rmSync,
+    statSync,
     writeFileSync,
     copyFileSync,
 } from "node:fs";
@@ -219,6 +220,7 @@ port = ${port}
 
         const client = new ApiClient(`http://127.0.0.1:${setup.port}`);
         await client.login(USERNAME, PASSWORD);
+        const originalInode = statSync(setup.binary).ino;
 
         const request: ExecRequest = {
             argv: [setup.binary, "upgrade", RELEASE_TAG],
@@ -244,6 +246,9 @@ port = ${port}
 
         await vi.waitFor(
             () => {
+                // Both processes already ran this path before the upgrade, so only a replaced
+                // file proves the paths below point at the installed release.
+                expect(statSync(setup.binary).ino).not.toBe(originalInode);
                 // The server restarting drops the agent's connection, which kills the exec'd
                 // command, so both restarts must complete even though their caller dies.
                 expect(executableOf(serverPid)).toBe(setup.binary);
