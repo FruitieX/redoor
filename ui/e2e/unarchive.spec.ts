@@ -189,22 +189,46 @@ test.describe.serial("Unarchive file action", () => {
         await expect(
             page.getByRole("link", { name: "current-output.txt", exact: true }),
         ).toHaveCount(0);
+        let listingRequestCount = 0;
+
+        /** Matches only the originating directory's listing, not file or other directory reads. */
+        const isOriginListing = (url: string) =>
+            decodeURIComponent(new URL(url).pathname).endsWith(
+                `/ls${ctx.testDirPath}`,
+            );
+
+        page.on("request", (request) => {
+            if (isOriginListing(request.url())) {
+                listingRequestCount += 1;
+            }
+        });
+
+        // Leaving the focused terminal reloads the browser path on purpose (files may have
+        // changed in the shell), so the close click itself refetches the listing. The delayed
+        // refresh is therefore observed through listing requests rather than the rendered rows.
+        const leaveTerminalRefresh = page.waitForResponse((response) =>
+            isOriginListing(response.url()),
+        );
+
         await page.getByRole("button", { name: "Close agent1_src 1" }).click();
-        // Closing the terminal after a successful send must not cancel its earned refresh.
+        await leaveTerminalRefresh;
         await expect(
             page.getByRole("button", { name: "Close agent1_src 1" }),
         ).toHaveCount(0);
-        await page.clock.runFor(999);
-        // The refresh is intentionally delayed for one complete second after command delivery.
-        await expect(
-            page.getByRole("link", { name: "current-output.txt", exact: true }),
-        ).toHaveCount(0);
-        await page.clock.runFor(1);
-        await page.clock.resume();
-        // Refetching the exact originating query makes extracted entries appear without navigation.
+        // The leave-terminal reload already shows the extracted entry without navigation.
         await expect(
             page.getByRole("link", { name: "current-output.txt", exact: true }),
         ).toBeVisible();
+        const requestsAfterClose = listingRequestCount;
+        await page.clock.runFor(999);
+        // The refresh is intentionally delayed for one complete second after command delivery.
+        expect(listingRequestCount).toBe(requestsAfterClose);
+        await page.clock.runFor(1);
+        // Closing the terminal after a successful send must not cancel its earned refresh.
+        await expect
+            .poll(() => listingRequestCount)
+            .toBe(requestsAfterClose + 1);
+        await page.clock.resume();
         // The terminal socket proves extraction starts in the archive's containing directory.
         expect(
             new URL(terminalSockets[0]?.url() ?? "").searchParams.get("cwd"),
