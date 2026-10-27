@@ -1,10 +1,9 @@
 //! Selects and provisions Redoor binaries without coupling local release caching to SSH.
 
-use futures_util::StreamExt;
 use redoor_core::log;
+use redoor_core::upgrade::install::{ReleaseInstall, ReleaseTarget};
 use redoor_protocol::wire::log::Level;
 use std::path::{Path, PathBuf};
-use tokio::{io::AsyncWriteExt, process::Command};
 
 /// Local cache of released binaries shared by SSH provisioning and agent upgrades.
 ///
@@ -140,19 +139,19 @@ impl BinaryCache {
         let binaries_dir = self
             .directory(version, os, arch)
             .map_err(|error| UpgradeBinaryError::Provision(format!("{error:#}")))?;
-        let url = release_url(version, os, arch);
-        self.ensure_in_from_url(version, os, arch, &binaries_dir, &url, report)
+        self.ensure_in(version, os, arch, &binaries_dir, None, report)
             .await
     }
 
-    /// Provisions from an explicit directory and URL so cache behavior can be tested locally.
-    async fn ensure_in_from_url(
+    /// Provisions into an explicit directory, from an optional release mirror, so cache
+    /// behavior can be tested locally.
+    async fn ensure_in(
         &self,
         version: &str,
         os: &str,
         arch: &str,
         binaries_dir: &Path,
-        url: &str,
+        base_url: Option<&str>,
         report: impl Fn(&str) + Send + Sync,
     ) -> Result<PathBuf, UpgradeBinaryError> {
         validate_release_version(version)?;
@@ -177,17 +176,12 @@ impl BinaryCache {
                 .await
                 .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
         }
-        report(&format!("Downloading the matching binary from {url}"));
-        download_binary(version, os, arch, binaries_dir, &final_path, url).await?;
+        report(&format!(
+            "Downloading the matching binary from release v{version} for {os}/{arch}"
+        ));
+        install_release(version, os, arch, binaries_dir, base_url).await?;
         Ok(final_path)
     }
-}
-
-/// Constructs a release URL only after callers validate the platform pair.
-fn release_url(version: &str, os: &str, arch: &str) -> String {
-    format!(
-        "https://github.com/esamattis/redoor/releases/download/v{version}/redoor-{arch}-{os}.tar.gz"
-    )
 }
 
 /// Accepts only complete-looking executable files as published cache entries.
@@ -202,92 +196,46 @@ async fn cached_binary_is_ready(path: &Path) -> Result<bool, UpgradeBinaryError>
     Ok(metadata.is_file() && metadata.len() > 0 && metadata.permissions().mode() & 0o111 != 0)
 }
 
-/// Streams a release archive to disk and extracts its executable without whole-file buffering.
-async fn download_binary(
+/// Installs a release into the cache directory with `install.sh`, the shared downloader.
+///
+/// The script's temporary download lives in a unique work directory inside the cache, so
+/// failed and cancelled runs leave nothing behind; the script itself publishes the binary
+/// with an atomic rename, so concurrent readers never see a partial file.
+async fn install_release(
     version: &str,
     os: &str,
     arch: &str,
     binaries_dir: &Path,
-    final_path: &Path,
-    url: &str,
+    base_url: Option<&str>,
 ) -> Result<(), UpgradeBinaryError> {
     let work_dir = binaries_dir.join(format!(
         ".redoor-provision-{}",
         uuid::Uuid::new_v4().simple()
     ));
-    let tar_path = work_dir.join("archive.tar.gz");
-    let extract_dir = work_dir.join("extract");
     let mut work_dir_guard = ProvisionWorkDir::new(work_dir.clone());
     log!(
         Level::Info,
-        "Redoor binary cache miss; downloading release: version={version}, os={os}, arch={arch}, url={url}, cache_path={}",
-        final_path.display()
+        "Redoor binary cache miss; downloading release: version={version}, os={os}, arch={arch}, cache_dir={}",
+        binaries_dir.display()
     );
     let result = async {
-        tokio::fs::create_dir_all(&extract_dir)
+        tokio::fs::create_dir_all(&work_dir)
             .await
             .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        let response = reqwest::get(url)
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        if !response.status().is_success() {
-            return Err(UpgradeBinaryError::Provision(format!(
-                "download from {url} failed: HTTP {}",
-                response.status()
-            )));
+        ReleaseInstall {
+            tag: Some(format!("v{version}")),
+            install_dir: binaries_dir.to_path_buf(),
+            target: Some(ReleaseTarget {
+                os: os.to_string(),
+                arch: arch.to_string(),
+            }),
+            temp_dir: Some(work_dir.clone()),
+            base_url: base_url.map(str::to_string),
         }
-        let mut file = tokio::fs::File::create(&tar_path)
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        }
-        file.flush()
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        file.sync_all()
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        drop(file);
-
-        let mut tar = Command::new("tar");
-        tar.arg("-xzf")
-            .arg(&tar_path)
-            .arg("-C")
-            .arg(&extract_dir)
-            .kill_on_drop(true);
-        let status = tar
-            .status()
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        if !status.success() {
-            return Err(UpgradeBinaryError::Provision(format!(
-                "tar extraction failed with status {}",
-                status.code().unwrap_or(-1)
-            )));
-        }
-
-        let extracted = extract_dir.join("redoor");
-        if !tokio::fs::try_exists(&extracted)
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?
-        {
-            return Err(UpgradeBinaryError::Provision(format!(
-                "extracted tarball did not contain a 'redoor' binary at {}",
-                extracted.display()
-            )));
-        }
-        make_executable(&extracted)
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        tokio::fs::rename(&extracted, final_path)
-            .await
-            .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))?;
-        Ok(())
+        .run()
+        .await
+        .map(|_| ())
+        .map_err(|error| UpgradeBinaryError::Provision(error.to_string()))
     }
     .await;
     let cleanup = work_dir_guard.cleanup().await;
@@ -305,16 +253,6 @@ async fn download_binary(
     }
 }
 
-/// Gives newly cached release files the executable mode expected by SSH and upgrades.
-async fn make_executable(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = tokio::fs::metadata(path).await?;
-    let mut permissions = metadata.permissions();
-    permissions.set_mode(0o755);
-    tokio::fs::set_permissions(path, permissions).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,7 +263,18 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tokio::io::AsyncReadExt;
+    use tokio::process::Command;
     use tokio::sync::Notify;
+
+    /// Gives newly cached release files the executable mode expected by SSH and upgrades.
+    async fn make_executable(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = tokio::fs::metadata(path).await?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o755);
+        tokio::fs::set_permissions(path, permissions).await
+    }
 
     /// State for a local server that streams one archive and records cache misses.
     #[derive(Clone)]
@@ -367,7 +316,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
-            .route("/artifact", get(test_archive_handler))
+            .route("/{*path}", get(test_archive_handler))
             .with_state(TestArchiveServer {
                 path,
                 requests: requests.clone(),
@@ -375,7 +324,7 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{address}/artifact"), requests, task)
+        (format!("http://{address}"), requests, task)
     }
 
     /// Holds an artifact response open after signaling that provisioning reached the download.
@@ -394,12 +343,12 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let started = Arc::new(Notify::new());
         let app = Router::new()
-            .route("/artifact", get(hanging_archive_handler))
+            .route("/{*path}", get(hanging_archive_handler))
             .with_state(started.clone());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{address}/artifact"), started, task)
+        (format!("http://{address}"), started, task)
     }
 
     /// Waits cooperatively for a cache directory to contain no provisioning artifacts.
@@ -468,11 +417,6 @@ mod tests {
     fn aarch64_android_release_is_supported() {
         // Accepting the platform lets servers provision upgrades for Termux agents.
         assert!(validate_release_platform("android", "aarch64").is_ok());
-        // The URL must remain aligned with the workflow's Android archive name.
-        assert_eq!(
-            release_url("1.2.3", "android", "aarch64"),
-            "https://github.com/esamattis/redoor/releases/download/v1.2.3/redoor-aarch64-android.tar.gz"
-        );
     }
 
     /// Builds a cache rooted in a throwaway home so tests never share real cache state.
@@ -502,12 +446,12 @@ mod tests {
         tokio::fs::write(&expected, b"cached").await.unwrap();
         make_executable(&expected).await.unwrap();
         let selected = test_cache(temp_dir.path())
-            .ensure_in_from_url(
+            .ensure_in(
                 "1.2.3",
                 "linux",
                 "x86_64",
                 &dir,
-                "http://127.0.0.1:9/unreachable",
+                Some("http://127.0.0.1:9/unreachable"),
                 |_| {},
             )
             .await
@@ -527,8 +471,8 @@ mod tests {
 
         let binaries = test_cache(temp_dir.path());
         let (first, second) = tokio::join!(
-            binaries.ensure_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {}),
-            binaries.ensure_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {})
+            binaries.ensure_in("1.2.3", "linux", "x86_64", &cache, Some(&url), |_| {}),
+            binaries.ensure_in("1.2.3", "linux", "x86_64", &cache, Some(&url), |_| {})
         );
         let first = first.unwrap();
         let second = second.unwrap();
@@ -559,7 +503,7 @@ mod tests {
         let cache = root.join("cache");
 
         let result = test_cache(temp_dir.path())
-            .ensure_in_from_url("1.2.3", "linux", "x86_64", &cache, &url, |_| {})
+            .ensure_in("1.2.3", "linux", "x86_64", &cache, Some(&url), |_| {})
             .await;
         // Extraction failure must be visible rather than publishing corrupt bytes.
         assert!(result.is_err());
@@ -584,7 +528,14 @@ mod tests {
         let binaries = test_cache(temp_dir.path());
         let provision = tokio::spawn(async move {
             binaries
-                .ensure_in_from_url("1.2.3", "linux", "x86_64", &provision_cache, &url, |_| {})
+                .ensure_in(
+                    "1.2.3",
+                    "linux",
+                    "x86_64",
+                    &provision_cache,
+                    Some(&url),
+                    |_| {},
+                )
                 .await
         });
 

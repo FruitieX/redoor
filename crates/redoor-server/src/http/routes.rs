@@ -344,6 +344,10 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route("/api/v1/agents/{agent}/echo", post(echo_agent_handler))
         .route("/api/v1/server/restart", post(restart_server_handler))
         .route(
+            "/api/v1/server/upgrade",
+            post(super::server_upgrade::upgrade_server_handler),
+        )
+        .route(
             "/api/v1/tokens",
             get(super::tokens::handlers::list).post(super::tokens::handlers::create),
         )

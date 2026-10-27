@@ -4,6 +4,7 @@ mod examples;
 mod process_control;
 mod process_logs;
 mod service;
+mod upgrade;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -78,6 +79,9 @@ enum Commands {
     Agent(Box<AgentCommandArgs>),
     /// Authenticate and operate on devices through a remote server.
     Remote(redoor_cli::RemoteArgs),
+    /// Install a release over this binary and restart the redoor processes running it.
+    #[command(visible_alias = "update", after_help = examples::UPGRADE)]
+    Upgrade(upgrade::UpgradeArgs),
 }
 
 /// Preserves flat server startup flags while exposing `server logs`.
@@ -309,6 +313,7 @@ async fn run(command: Commands, context: RuntimeContext, parent: LaunchParent) -
         }
         Commands::Server(args) => run_server_command(args, context, parent).await,
         Commands::Agent(args) => run_agent_command(*args, context, parent).await,
+        Commands::Upgrade(args) => args.run().await,
     }
 }
 

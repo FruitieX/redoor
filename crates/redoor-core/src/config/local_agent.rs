@@ -10,8 +10,9 @@ use tokio::process::Command;
 /// [`tokio::process::Child`] so the watchdog supervisor can wait for it or
 /// kill it when the WebSocket goes stale.
 ///
-/// The child reuses the server's own binary (via `std::env::current_exe`),
-/// which is always present because the server itself was launched from it.
+/// The child reuses the server's own binary (via [`crate::executable::current`]),
+/// which is always present because the server itself was launched from it, and
+/// after `redoor upgrade` is the upgraded file the restarted server will run too.
 /// This avoids requiring the operator to keep two binaries in sync or
 /// configure a path. Stdio is inherited so agent logs appear in the same
 /// terminal as the server logs unless `log` is set in the toml, in which case
@@ -38,7 +39,7 @@ pub async fn spawn_local_agent(
         redoor_protocol::wire::handshake::AGENT_WS_PATH
     );
 
-    let bin = std::env::current_exe()
+    let bin = crate::executable::current()
         .map_err(|e| with_context(e, "Failed to determine redoor binary path"))?;
 
     let mut command = Command::new(&bin);

@@ -73,7 +73,10 @@ pub async fn run_relay(
         log_max_size: relay.log_max_size,
     };
     redoor_core::logging::init(Some(provision.log_file(&log))).await?;
-    Relay {
+    // Caught from now on, so `redoor upgrade` restarts the relay instead of killing it.
+    let mut reexec_requests = redoor_core::process::listen_for_reexec()
+        .context("Failed to listen for the upgrade re-exec signal")?;
+    let relay = Relay {
         secure_server: server.is_secure().then(|| SecureRelayServer {
             authority: server.authority(),
             insecure: relay.insecure,
@@ -88,9 +91,15 @@ pub async fn run_relay(
         token,
         provision,
         backoff: Backoff::default(),
+    };
+    tokio::select! {
+        result = relay.run() => return result,
+        _ = reexec_requests.recv() => {}
     }
-    .run()
-    .await
+    // The relay future is dropped by now, and `kill_on_drop` stopped its SSH session, so the
+    // restarted relay does not race an orphaned tunnel for the remote agent.
+    eprintln!("Re-exec signal received; restarting relay");
+    redoor_core::process::reexec_current_process()
 }
 
 /// One running relay: its target, where the tunnel ends, and the retry state.

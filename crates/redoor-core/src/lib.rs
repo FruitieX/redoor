@@ -10,6 +10,7 @@ pub mod config;
 pub mod desktop;
 pub mod destination;
 pub mod directory_measurement;
+pub mod executable;
 pub mod identity;
 pub mod logging;
 pub mod partial_signatures;
@@ -26,4 +27,5 @@ pub mod subprocess;
 pub mod systemd_notify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod upgrade;
 pub mod websocket;

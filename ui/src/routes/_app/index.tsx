@@ -19,6 +19,7 @@ import type { ServerAuthMode } from "#bindings/ServerAuthMode";
 import { AgentStatusDot } from "#ui/components/agent-status-dot";
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
 import { Button } from "#ui/components/button";
+import { ServerUpdateButton } from "#ui/components/server-update-button";
 import {
     CopyableCodeRow,
     CopyablePath,
@@ -235,6 +236,12 @@ server = ${JSON.stringify(serverAddress)}
                             build_mode: serverInfo.build_mode,
                             build_date: serverInfo.build_date,
                         }}
+                        versionAction={
+                            <ServerUpdateButton
+                                currentVersion={serverInfo.version}
+                                exePath={serverInfo.exe_path}
+                            />
+                        }
                     />
                 </div>
                 <div className="mt-6">

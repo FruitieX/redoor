@@ -87,6 +87,14 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         default_directory
     );
 
+    // Server- and relay-launched agents are restarted by their owner, which also keeps
+    // their binary in step with that owner's version.
+    if std::env::var_os(redoor_core::process::MANAGED_AGENT_ENV).is_none() {
+        let requests = redoor_core::process::listen_for_reexec()
+            .context("Failed to listen for the upgrade re-exec signal")?;
+        tokio::spawn(reexec_on_signal(requests));
+    }
+
     let (handle, receiver, lifecycle_receiver) = AgentHandle::channel(AGENT_MAILBOX_CAPACITY);
     let services = AgentServices::new(
         trash,
@@ -119,6 +127,19 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         AgentExit::Shutdown => ExitCode::SUCCESS,
         AgentExit::Rejected => ExitCode::FAILURE,
     })
+}
+
+/// Replaces a standalone agent with its launch binary when `redoor upgrade` asks for it.
+///
+/// Mirrors the agent restart command, which also re-execs at once without draining work, so
+/// an upgrade interrupts running commands exactly like a restart from the UI does.
+async fn reexec_on_signal(mut requests: tokio::signal::unix::Signal) {
+    if requests.recv().await.is_some() {
+        // Printed rather than logged: the log writer is asynchronous and exec would drop the
+        // queued entry, while the restarted agent's startup log records the restart anyway.
+        eprintln!("Re-exec signal received; restarting agent");
+        redoor_core::process::reexec_current_process();
+    }
 }
 
 /// Finds the TOML file this agent should read, importing it from stdin when required.

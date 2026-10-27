@@ -8,6 +8,8 @@ Redoor is a single `redoor` binary that plays several roles:
   with an access token
 - **service management**: installs the server, agent or a named relay as a systemd or launchd
   service
+- **self-upgrade** (`redoor upgrade`): installs a release over the running binary and restarts
+  the local redoor processes that run it
 
 The Rust code is a cargo workspace under `crates/`. The roles live in separate crates so the
 compiler enforces that agent and server code never depend on each other.
@@ -100,6 +102,9 @@ Infrastructure that more than one role needs:
   for the percentage of local directory uploads.
 - Process helpers (`process`, `subprocess::run_checked`), `bounded_tail`, `paths::home()`,
   binary identity and build information.
+- `upgrade`: installing releases and restarting the processes of a replaced binary, shared by
+  `redoor upgrade` and the server. `upgrade::install` embeds the repository's `install.sh`
+  (`include_str!`) and runs it with bash; it is the only code that downloads releases.
 
 ### `redoor-agent`
 
@@ -228,6 +233,8 @@ returns `anyhow::Result<ExitCode>`, and errors are printed once.
   `redoor agent relay start <id>` in the foreground; its systemd unit is `Type=exec` because
   a relay retries SSH forever and never sends a readiness notification.
 - `process_control` and `process_logs`: PID files, stopping processes and reading logs.
+- `upgrade`: the `redoor upgrade` command on top of `redoor_core::upgrade`, plus the detached
+  restart helper. See "Upgrading in place".
 - The binary re-executes itself as the SSH askpass helper, so no second executable is
   shipped.
 
@@ -658,9 +665,65 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   edited agent comes back as `Stopped` with the same id. Supervisors are keyed by id, so the
   session finds its supervisor through the id in `hello` even after a rename. Changes made to
   `config.toml` by hand take effect on the next server restart.
-- **Server restart** (`POST /api/v1/server/restart`) validates the config first. It then
-  stops every managed child before re-executing, because `exec` would otherwise leave them
-  orphaned. Standalone agents simply reconnect.
+- **Server restart** (`POST /api/v1/server/restart`, or the `redoor upgrade` signal) validates
+  the config first. It then stops every managed child before re-executing, because `exec`
+  would otherwise leave them orphaned. Standalone agents simply reconnect.
+
+## Upgrading in place
+
+`redoor upgrade [TAG]` replaces the binary it was run from and restarts every local redoor
+process still running the old file. `install.sh` writes the new binary beside the old one and
+renames it over the path, so running processes keep their old image and never see a
+half-written file.
+
+- **`install.sh` is the one downloader.** `redoor_core::upgrade::install` runs the embedded
+  script for `redoor upgrade`, the server's update endpoint and the server's release cache
+  (`BinaryCache`), which fetches binaries for agent upgrades and SSH provisioning. The cache
+  picks another platform with `REDOOR_TARGET_OS`/`REDOOR_TARGET_ARCH` and installs into its
+  versioned cache directory; `REDOOR_RELEASE_BASE_URL` points every caller at a mirror. A
+  captured run gets its own process group, killed when the run is dropped, so a cancelled
+  download also stops `curl` and `tar`. Hosts that download releases therefore need bash,
+  curl and tar, which the container image installs.
+
+- **Everything executes the binary's path** (`redoor_core::executable`). After the rename,
+  Linux reports a running image as `<path> (deleted)` through `/proc/self/exe`, so
+  `current_exe()` names nothing. Re-exec, managed local agents, SSH askpass, daemon spawning
+  and agent upgrades from the running server strip that marker and use the path, which then
+  holds the upgraded binary. Until the server restarts, a protocol change can therefore make
+  its new local agents and running-server agent upgrades fail to connect; a default
+  `redoor upgrade` restarts the server within seconds, so only `--no-restart` leaves that
+  window open.
+- **Roles restart themselves on `SIGUSR2`.** The server, standalone agents and relays catch
+  it and re-exec in place, which keeps their PID, arguments, environment, working directory,
+  terminal and supervisor, so the upgrade never has to rebuild a command line. The server
+  goes through the same validated restart as the REST route. A relay drops its SSH session
+  first (`kill_on_drop`). Agents launched by a server or relay do not catch it; their owner
+  restarts them. SIGHUP was not used because a foreground process gets it when its terminal
+  closes.
+- **Processes are found by executable path, before the install.** The process table is
+  scanned for the canonical path being replaced; macOS can no longer name a replaced file
+  afterwards, and a failed install restarts nothing. The signal's default action terminates,
+  so a process gets it only if its caught-signal mask (`/proc/<pid>/status`, `ps -o caught`)
+  shows the handler. Older builds without it are listed for a manual restart rather than
+  restarted through systemd or launchd: re-exec keeps a service's PID, so supervised and
+  unsupervised processes need the same single restart path once every build has it.
+- **All current builds are signalled before any is awaited.** A restarting server stops
+  accepting at once, so restarted agents reconnect to the new server and not to the old one,
+  which would reject a newer protocol with `426` and make the agent exit. On Linux the
+  upgrade then waits until `/proc/<pid>/exe` names the new file and the handler is back.
+- **Upgrading from inside a restarted process uses a detached helper.** When an agent's web
+  terminal or exec runs the upgrade, restarting the server drops that agent's connection, and
+  the agent kills its terminals and execs. So the upgrade re-runs itself with the hidden
+  `--restart-pids` option in a new session (`setsid`), outside the process groups that teardown
+  signals, and that helper finishes the restarts.
+- **The server updates itself in-process.** `POST /api/v1/server/upgrade` (session only,
+  like restart) validates the config, finds the processes of its binary and runs the
+  installer. A failed install is answered with the script's output while the old server keeps
+  serving. After a successful one the server starts its own validated restart, which stops
+  accepting at once, then signals the other processes without waiting for them, since it
+  cannot outlive the wait, and answers with each process's outcome; graceful shutdown
+  delivers that answer before the re-exec. The home page's Update button then waits for the
+  replacement server like the restart dialog does.
 
 ## Server-side lanes to an agent
 

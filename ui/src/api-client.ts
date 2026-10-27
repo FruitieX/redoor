@@ -44,6 +44,8 @@ import type { OpenPathResponse } from "#bindings/OpenPathResponse";
 import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { RestartResponse } from "#bindings/RestartResponse";
+import type { ServerUpgradeRequest } from "#bindings/ServerUpgradeRequest";
+import type { ServerUpgradeResponse } from "#bindings/ServerUpgradeResponse";
 import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import type { UpgradeAgentRequest } from "#bindings/UpgradeAgentRequest";
 import type { RenamePathRequest } from "#bindings/RenamePathRequest";
@@ -1022,6 +1024,28 @@ export class ApiClient {
         this.sessionCookie = null;
 
         return response;
+    }
+
+    /**
+     * Installs a release over the server binary. Resolves once installed; the server and its
+     * local agents restart right after, so callers wait for the replacement process.
+     */
+    async upgradeServer(
+        targetVersion: string | null,
+    ): Promise<ServerUpgradeResponse> {
+        const request: ServerUpgradeRequest = { target_version: targetVersion };
+
+        return apiRequest<ServerUpgradeResponse>(
+            `${this.baseUrl}/api/v1/server/upgrade`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
     }
 
     /** Asks the server to restart in place after validating its configuration. */

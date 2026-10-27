@@ -2,9 +2,28 @@
 
 use std::{ffi::OsString, path::Path};
 
+/// Signal `redoor upgrade` sends to make a long-lived role re-exec its launch binary.
+///
+/// Not SIGHUP, which a foreground process also receives when its terminal closes. Until a
+/// role calls [`listen_for_reexec`] the default action terminates the process, so the
+/// upgrade command checks a process's caught-signal mask before sending it.
+pub const REEXEC_SIGNAL: nix::sys::signal::Signal = nix::sys::signal::Signal::SIGUSR2;
+
+/// Starts catching [`REEXEC_SIGNAL`] so an upgrade can restart this process in place.
+///
+/// Must be called inside the Tokio runtime by the role that owns the process lifetime.
+pub fn listen_for_reexec() -> std::io::Result<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(
+        REEXEC_SIGNAL as i32,
+    ))
+}
+
 /// Replaces this process with the same executable and arguments so supervisors keep tracking it.
+///
+/// Executes the path rather than the running image, so a restart after `redoor upgrade`
+/// runs the upgraded binary.
 pub fn reexec_current_process() -> ! {
-    let exe = std::env::current_exe().unwrap_or_else(|error| {
+    let exe = crate::executable::current().unwrap_or_else(|error| {
         eprintln!("restart: failed to resolve current executable: {error}");
         std::process::exit(1);
     });

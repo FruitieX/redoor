@@ -4,7 +4,7 @@
 //! [`ServerConfig::resolve`] is a pure precedence function (CLI > env > file > default),
 //! [`ServerRuntime::build`] performs the fallible side effects (logging, credential
 //! storage, actors, listener, managed inventory), and [`ServerRuntime::serve_until_restart`]
-//! runs until the restart route asks for a re-exec.
+//! runs until the restart route or the `redoor upgrade` signal asks for a re-exec.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -316,11 +316,14 @@ impl ServerRuntime {
         // Oneshot so restart can drop the axum listener before self-exec; keeping
         // the listen FD open would race the restarted process on the same port.
         let (shutdown_tx, shutdown) = tokio::sync::oneshot::channel::<()>();
+        // Caught from now on, so `redoor upgrade` restarts the server instead of killing it.
+        let reexec_requests = redoor_core::process::listen_for_reexec()
+            .context("Failed to listen for the upgrade re-exec signal")?;
         let transfer_service = crate::http::services::transfer::TransferService::new(
             router.clone(),
             runtime.paths.data_dir()?,
         );
-        let app = build_app(ServerState {
+        let state = ServerState {
             runtime,
             binaries,
             launcher: launcher.clone(),
@@ -340,7 +343,10 @@ impl ServerRuntime {
             ssh_key_operations: crate::http::ssh_keys::SshKeyOperations::default(),
             auth_mode,
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
-        });
+            upgrade_lock: Arc::default(),
+        };
+        state.clone().restart_on_reexec_signal(reexec_requests);
+        let app = build_app(state);
 
         let listener = tokio::net::TcpListener::bind(&address)
             .await

@@ -439,7 +439,8 @@ async fn ensure_relay_not_running(id: &str, paths: &AppPaths) -> Result<()> {
 
 /// Spawns the current command without `--daemon` in a new session, reporting `description`.
 async fn spawn_daemon_process(description: &str) -> Result<()> {
-    let executable = std::env::current_exe().context("Failed to locate the current executable")?;
+    let executable =
+        redoor_core::executable::current().context("Failed to locate the current executable")?;
     let arguments: Vec<OsString> = std::env::args_os()
         .skip(1)
         .filter(|argument| argument != "--daemon")

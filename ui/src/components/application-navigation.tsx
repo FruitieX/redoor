@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { getRouteApi, Link, useRouter } from "@tanstack/react-router";
 import {
     ArrowLeftRight,
@@ -27,17 +27,12 @@ import { SidebarModeToggle } from "#ui/components/sidebar-mode-toggle";
 import { SideMenu, SideMenuCloseButton } from "#ui/components/side-menu";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import { Tooltip } from "#ui/components/tooltip";
-import {
-    invalidateAllAgentData,
-    queryKeys,
-    serverInfoQueryOptions,
-} from "#ui/queries";
 import { useCloseSideMenu } from "#ui/side-menu-state";
 import { useAgents } from "#ui/use-agents";
 import { useBrowserLocation } from "#ui/use-browser-location";
+import { useWaitForServerRestart } from "#ui/use-server-restart";
 import { cn } from "#ui/utils/cn";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
-import { waitForRestart } from "#ui/utils/wait-for-restart";
 import {
     getPinnedFileKey,
     reorderPinnedFiles,
@@ -340,7 +335,7 @@ function Logo(props: { className: string }) {
  */
 function ServerRestartDialog(props: { isOpen: boolean; onClose: () => void }) {
     const { api } = rootRouteApi.useRouteContext();
-    const queryClient = useQueryClient();
+    const waitForServerRestart = useWaitForServerRestart();
 
     return (
         <RestartDialog
@@ -349,34 +344,7 @@ function ServerRestartDialog(props: { isOpen: boolean; onClose: () => void }) {
             target="server"
             description="The server will restart and re-read its configuration. Connected agents reconnect automatically. In-flight transfers and terminals are interrupted."
             restart={() => api.restartServer()}
-            waitUntilReady={() => {
-                let oldServerClosed = false;
-
-                return waitForRestart(async () => {
-                    try {
-                        await queryClient.fetchQuery({
-                            ...serverInfoQueryOptions(api),
-                            staleTime: 0,
-                        });
-                    } catch (error) {
-                        oldServerClosed = true;
-                        throw error;
-                    }
-
-                    if (!oldServerClosed) {
-                        throw new Error("Old server is still shutting down");
-                    }
-
-                    // A new server process may report different agents and files.
-                    await Promise.all([
-                        queryClient.invalidateQueries({
-                            queryKey: queryKeys.agents(),
-                            exact: true,
-                        }),
-                        invalidateAllAgentData(queryClient),
-                    ]);
-                }, "Server did not come back after restart");
-            }}
+            waitUntilReady={waitForServerRestart}
         />
     );
 }

@@ -131,7 +131,7 @@ The property list contains the absolute executable path selected during installa
 redoor agent launchd install --start
 ```
 
-Replacing the executable at the same path does not require reinstalling the property list. Restart the service to run the new binary:
+Replacing the executable at the same path does not require reinstalling the property list. `redoor upgrade` replaces it and restarts the service itself; after replacing it any other way, restart the service to run the new binary:
 
 ```bash
 redoor agent launchd restart

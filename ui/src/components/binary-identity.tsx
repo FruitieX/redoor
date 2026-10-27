@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { CalendarClock, GitCommitHorizontal, Hammer, Tag } from "lucide-react";
 
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
@@ -125,6 +126,8 @@ export function BinaryIdentityFields(props: {
     binary: BinaryIdentity;
     /** Optional class applied to each field separator row. */
     rowClassName?: string;
+    /** Control shown beside the version, such as the server's update button. */
+    versionAction?: ReactNode;
 }) {
     const rowClass =
         props.rowClassName ??
@@ -138,12 +141,13 @@ export function BinaryIdentityFields(props: {
                     <h2 className="text-sm font-medium text-slate-400">
                         Version
                     </h2>
-                    <p className="mt-1">
+                    <div className="mt-1 flex flex-wrap items-center gap-3">
                         <VersionValue
                             version={props.binary.version}
                             versionDirty={props.binary.version_dirty}
                         />
-                    </p>
+                        {props.versionAction}
+                    </div>
                 </div>
             </div>
             <div className={rowClass}>

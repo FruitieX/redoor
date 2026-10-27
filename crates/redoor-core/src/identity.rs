@@ -36,9 +36,10 @@ pub fn current_binary_identity() -> BinaryIdentity {
 
 /// Absolute filesystem path of the running binary for operator diagnostics.
 ///
-/// Prefer the canonical path so `/proc/self/exe`-style links resolve to a real file.
+/// Prefer the canonical path so `/proc/self/exe`-style links resolve to a real file, even
+/// after `redoor upgrade` replaced it, so an agent still reports where to install the next one.
 pub async fn current_exe_path() -> String {
-    match std::env::current_exe() {
+    match crate::executable::current() {
         Ok(path) => match tokio::fs::canonicalize(&path).await {
             Ok(canonical) => canonical.display().to_string(),
             Err(_) => path.display().to_string(),

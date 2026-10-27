@@ -12,6 +12,7 @@ redoor-core.workspace = true
 redoor-agent.workspace = true
 redoor-server.workspace = true
 redoor-cli.workspace = true
+redoor-protocol.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 fastrand.workspace = true

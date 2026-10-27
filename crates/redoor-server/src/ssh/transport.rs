@@ -1372,7 +1372,8 @@ fn ssh_command_argv_debug(ssh: &Command) -> String {
 /// Points OpenSSH at this binary as `SSH_ASKPASS` so password auth can use a
 /// separate process instead of the SSH stdin already reserved for secrets and uploads.
 fn apply_askpass_env(ssh: &mut Command, password: &str) -> Result<(), std::io::Error> {
-    let exe = std::env::current_exe().map_err(|error| {
+    // The path stays valid after `redoor upgrade` replaced the running binary.
+    let exe = redoor_core::executable::current().map_err(|error| {
         std::io::Error::other(format!(
             "failed to locate redoor executable for SSH_ASKPASS: {error}"
         ))

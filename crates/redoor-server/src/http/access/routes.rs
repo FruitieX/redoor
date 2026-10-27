@@ -46,7 +46,7 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
         )
         | ("GET", "/api/v1/protocol-mismatches" | "/api/v1/server")
         | ("GET" | "PUT", "/api/v1/server/logging-level" | "/api/v1/user/state")
-        | ("POST", "/api/v1/server/restart")
+        | ("POST", "/api/v1/server/restart" | "/api/v1/server/upgrade")
         | ("POST", "/api/v1/agents" | "/api/v1/local-agents")
         | ("PUT" | "DELETE", "/api/v1/agents/{agent}" | "/api/v1/local-agents/{agent}")
         | (
@@ -259,6 +259,7 @@ mod tests {
                 Access::SessionOnly,
             ),
             (Method::POST, "/api/v1/server/restart", Access::SessionOnly),
+            (Method::POST, "/api/v1/server/upgrade", Access::SessionOnly),
             (
                 Method::POST,
                 "/api/v1/agents/{agent}/ssh-key",

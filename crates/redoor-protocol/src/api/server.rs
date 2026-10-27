@@ -1,4 +1,4 @@
-//! Server identity, restart, and authentication-mode bodies.
+//! Server identity, restart, upgrade, and authentication-mode bodies.
 
 use crate::identity::ServerBuildMode;
 use serde::{Deserialize, Serialize};
@@ -55,4 +55,56 @@ pub struct ServerInfoResponse {
 #[ts(export)]
 pub struct RestartResponse {
     pub restarting: bool,
+}
+
+/// Selects the release `POST /api/v1/server/upgrade` installs over the server binary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ServerUpgradeRequest {
+    /// Release tag such as `v1.3.1`; the latest published release when absent.
+    #[serde(default)]
+    pub target_version: Option<String>,
+}
+
+/// Reports a finished install; the server restarts itself right after answering.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ServerUpgradeResponse {
+    /// Output of `install.sh`, naming the release and where it was installed.
+    pub output: String,
+    /// Every other local process that ran the replaced binary and what happened to it.
+    pub processes: Vec<UpgradeProcessReport>,
+}
+
+/// One local process that ran the replaced binary.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpgradeProcessReport {
+    /// Process ID, which an in-place restart keeps.
+    pub pid: u32,
+    /// Command line, so an operator can tell the processes apart.
+    pub command: String,
+    /// What the upgrade did with it.
+    pub outcome: UpgradeProcessOutcome,
+}
+
+/// What an upgrade did with one process running the replaced binary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UpgradeProcessOutcome {
+    /// It runs the new binary.
+    Restarted,
+    /// It was told to restart; the server cannot wait for it because it restarts too.
+    Restarting,
+    /// Nothing could restart it automatically, so it still runs the old version.
+    LeftRunning {
+        /// What the operator should do instead.
+        hint: String,
+    },
+    /// Restarting it was attempted and failed.
+    Failed {
+        /// Why it failed.
+        error: String,
+    },
 }

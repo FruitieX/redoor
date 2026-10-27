@@ -30,7 +30,7 @@ similar.workspace = true
 sysinfo.workspace = true
 tar.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true

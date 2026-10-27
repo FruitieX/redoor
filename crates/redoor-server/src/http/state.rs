@@ -59,6 +59,8 @@ pub(crate) struct ServerState {
     /// Signals axum graceful shutdown; restart fires this after a successful
     /// pre-validation so the listener is dropped before exec.
     pub(crate) shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Held while `redoor upgrade` installs, so two installs never race over the binary.
+    pub(crate) upgrade_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Arguments for `redoor server`.

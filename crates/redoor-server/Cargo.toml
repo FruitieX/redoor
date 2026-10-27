@@ -34,7 +34,7 @@ sha2.workspace = true
 similar.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 tokio-util.workspace = true
 tower-http.workspace = true
 uuid.workspace = true

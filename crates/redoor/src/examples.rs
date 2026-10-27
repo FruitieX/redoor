@@ -1,4 +1,4 @@
-//! Usage examples shown at the end of each `redoor server|agent ...` command's `--help`.
+//! Usage examples shown at the end of each `redoor server|agent|upgrade ...` command's `--help`.
 //!
 //! The startup flags, utility subcommands and service managers share one namespace per role,
 //! so examples show which invocations start a process and which only manage one. They live
@@ -285,3 +285,17 @@ pub(crate) const REFRESH_LOCAL_NETWORK_PERMISSION: &str = "Examples:
 
   # Same for the LaunchAgent of the relay with ID production
   redoor agent relay launchd refresh-local-network-permission production";
+
+/// Shown by `redoor upgrade --help`.
+pub(crate) const UPGRADE: &str = "Examples:
+  # Install the latest release and restart the running server, agents and relays
+  redoor upgrade
+
+  # Install a specific release
+  redoor upgrade v1.3.1
+
+  # Replace the binary system-wide, including root-owned services
+  sudo redoor upgrade
+
+  # Only replace the binary; restart the processes later yourself
+  redoor upgrade --no-restart";

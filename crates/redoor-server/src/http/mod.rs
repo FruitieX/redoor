@@ -31,6 +31,7 @@ mod restart;
 mod retry_agent_start;
 pub(crate) mod routes;
 mod server_info;
+mod server_upgrade;
 pub(crate) mod services;
 pub(crate) mod ssh_keys;
 pub mod state;
