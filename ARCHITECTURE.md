@@ -1441,8 +1441,14 @@ the Git view rather than another level of page navigation.
   their grammar has loaded.
   File names and per-line Open links are router `Link`s, and parsing and highlighting are
   memoized on the patch text so re-renders do not redo them. Whether edited lines pair into
-  inline rows or stay separate -/+ rows is one browser-wide preference
-  (`inlineDiffChangesAtom`, stored in localStorage), switched from every diff view's bar.
+  inline rows or stay separate -/+ rows is chosen per file: single-diff views (a file's Git
+  diff, Sync) switch the browser-wide preference (`inlineDiffChangesAtom`, stored in
+  localStorage) from their bar, and diff lists (worktree changes, commits) put a switch in
+  every file header whose choice lives in memory for that list and defaults to the
+  preference. Line wrapping stays one user-wide setting in every diff view's bar. Diff lists
+  can be narrowed by file name (`utils/file-name-filter.ts`): every word must appear in the
+  repository-relative path, a `-word` must not, and quotes keep a word literal (`"-test"`).
+  The filter is client-side over the listed files, so it never refetches status or diffs.
 
 - **History follows the browsed path.** `git/log` lists the commits that changed the path,
   newest first by commit time, starting at HEAD in the worktree or at the browsed commit

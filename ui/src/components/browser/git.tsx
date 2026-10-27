@@ -10,11 +10,15 @@ import {
 import type { Agent } from "#ui/api-client";
 import { SegmentedControl } from "#ui/components/segmented-control";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
-import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
+import {
+    DiffLayoutControl,
+    WrapDiffLinesToggle,
+} from "#ui/components/browser/diff-layout-control";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
 import { useUserState } from "#ui/user-state";
 import {
     GitDiffCollapseControls,
+    GitDiffFilterField,
     GitDiffList,
     useCollapsedGitDiffs,
     type GitDiffListFile,
@@ -30,6 +34,7 @@ import {
     prefetchGitDiffs,
 } from "#ui/queries";
 import { getErrorMessage } from "#ui/utils/error";
+import { FileNameFilter } from "#ui/utils/file-name-filter";
 import { getBaseName } from "#ui/utils/path";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
@@ -132,7 +137,11 @@ function CleanState(props: { message: string }) {
  * One file's patch in the worktree diff list. It mounts only when the file is expanded, so
  * a diff is fetched the first time its file is opened, and then comes from the cache.
  */
-function WorktreeDiffBody(props: { agent: Agent; path: string }) {
+function WorktreeDiffBody(props: {
+    agent: Agent;
+    path: string;
+    mergeModifiedLines: boolean;
+}) {
     const diffQuery = useQuery(
         gitDiffQueryOptions(props.agent, [props.path], "full"),
     );
@@ -157,6 +166,7 @@ function WorktreeDiffBody(props: { agent: Agent; path: string }) {
         <GitDiffResultView
             result={diffQuery.data.diffs[0]?.result ?? { type: "no_changes" }}
             editorFile={{ deviceName: props.agent.name, path: props.path }}
+            mergeModifiedLines={props.mergeModifiedLines}
         />
     );
 }
@@ -171,12 +181,13 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
     );
 
     const queryClient = useQueryClient();
+    const scope = `${props.agent.id}:${props.path}`;
 
     // Diffs load per file on expansion, so a large change set opens without fetching any.
-    const collapsed = useCollapsedGitDiffs({
-        scope: `${props.agent.id}:${props.path}`,
-        initiallyCollapsed: true,
-    });
+    const collapsed = useCollapsedGitDiffs({ scope, initiallyCollapsed: true });
+
+    // The filter outlives directory changes, so `-test` keeps hiding tests while browsing.
+    const [filterQuery, setFilterQuery] = React.useState("");
 
     if (statusQuery.isPending) {
         return (
@@ -236,24 +247,37 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
             // A file deleted from the worktree still exists at HEAD, so that is where it opens.
             fileSearch: item.state === "deleted" ? { rev: "HEAD" } : {},
             regionLabel: `Git diff for ${entry.path}`,
-            body: <WorktreeDiffBody agent={props.agent} path={entry.path} />,
+            renderBody: (mergeModifiedLines) => (
+                <WorktreeDiffBody
+                    agent={props.agent}
+                    path={entry.path}
+                    mergeModifiedLines={mergeModifiedLines}
+                />
+            ),
         };
     });
+
+    const filter = FileNameFilter.parse(filterQuery);
+
+    const shownFiles = files.filter((file) =>
+        filter.matches(file.relativePath),
+    );
 
     return (
         <>
             <GitPanelBar
                 actions={
                     <>
-                        {files.length === 0 ? null : <DiffLayoutControl />}
+                        {files.length === 0 ? null : <WrapDiffLinesToggle />}
                         <GitDiffCollapseControls
                             collapsed={collapsed}
                             fileCount={files.length}
+                            // Filtered-out files expand too, but stay unfetched until shown.
                             onExpandAll={() =>
                                 prefetchGitDiffs({
                                     queryClient,
                                     agent: props.agent,
-                                    files: files.map((file) => file.path),
+                                    files: shownFiles.map((file) => file.path),
                                     mode: "full",
                                 })
                             }
@@ -307,10 +331,20 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                         were omitted.
                     </p>
                 ) : null}
+                {files.length === 0 ? null : (
+                    <GitDiffFilterField
+                        query={filterQuery}
+                        onChange={setFilterQuery}
+                        filter={filter}
+                        shownCount={shownFiles.length}
+                        totalCount={files.length}
+                    />
+                )}
                 <GitDiffList
                     agent={props.agent}
-                    files={files}
+                    files={shownFiles}
                     collapsed={collapsed}
+                    scope={scope}
                 />
             </div>
         </>
@@ -322,9 +356,9 @@ export function GitDiffResultView(props: {
     result: GitDiffResult;
     /** Omitted when the file has no editor to open, such as a file the diff deleted. */
     editorFile?: { deviceName: string; path: string };
+    /** Comes from the view, since lists switch it per file and single files by preference. */
+    mergeModifiedLines: boolean;
 }) {
-    // Every Git diff follows the one layout preference its view's bar switches.
-    const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
     const [userState] = useUserState();
 
     if (props.result.type === "text") {
@@ -333,7 +367,7 @@ export function GitDiffResultView(props: {
                 unifiedDiff={props.result.unified_diff}
                 emptyMessage="No changes in this comparison."
                 editorFile={props.editorFile}
-                mergeModifiedLines={mergeModifiedLines}
+                mergeModifiedLines={props.mergeModifiedLines}
                 wrapLines={userState.wrapDiffLines}
             />
         );
@@ -393,6 +427,8 @@ export function GitFileView(props: {
         gitDiffQueryOptions(props.agent, [props.path], props.mode),
     );
 
+    // A single file follows the stored preference, which its bar's layout switch sets.
+    const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
     const tracking = trackingLabel(props.context);
 
     return (
@@ -461,6 +497,7 @@ export function GitFileView(props: {
                             deviceName: props.agent.name,
                             path: props.path,
                         }}
+                        mergeModifiedLines={mergeModifiedLines}
                     />
                 )}
             </section>

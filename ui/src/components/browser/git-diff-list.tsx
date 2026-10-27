@@ -1,5 +1,6 @@
 import React from "react";
 import { Link } from "@tanstack/react-router";
+import { useAtomValue } from "jotai";
 import {
     ChevronDown,
     ChevronRight,
@@ -9,11 +10,16 @@ import {
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
+import { ClearableInput } from "#ui/components/clearable-input";
 import { IconButton } from "#ui/components/icon-button";
+import { DiffLayoutSwitch } from "#ui/components/browser/diff-layout-control";
 import {
     ChangeBadge,
     type GitChangeKind,
 } from "#ui/components/browser/git-parts";
+import { inlineDiffChangesAtom } from "#ui/diff-preferences";
+import { cn } from "#ui/utils/cn";
+import type { FileNameFilter } from "#ui/utils/file-name-filter";
 
 /** One changed file in a diff list, already resolved to what its header and body show. */
 export type GitDiffListFile = {
@@ -33,10 +39,11 @@ export type GitDiffListFile = {
     /** Names the file's region, so tests and assistive technology can find one patch. */
     regionLabel: string;
     /**
-     * The patch or a message about it. It is only rendered while the file is expanded, so a
-     * body that fetches its own diff loads nothing for a collapsed file.
+     * Renders the patch or a message about it in the file's own layout. It is only called
+     * while the file is expanded, so a body that fetches its own diff loads nothing for a
+     * collapsed file.
      */
-    body: React.ReactNode;
+    renderBody: (mergeModifiedLines: boolean) => React.ReactNode;
 };
 
 /**
@@ -86,6 +93,71 @@ export function useCollapsedGitDiffs(options: {
 
 /** The collapse state a diff list and its controls share. */
 export type CollapsedGitDiffs = ReturnType<typeof useCollapsedGitDiffs>;
+
+/**
+ * Remembers the layout chosen for each file of a list, because one file's edits read best as
+ * inline word changes while a rewritten file reads best as separate lines. Files without a
+ * choice follow the stored preference, and the choices start over with the scope, like the
+ * collapse state, since the same paths in another commit are other edits.
+ */
+function useGitDiffLayouts(scope: string) {
+    const inlineByDefault = useAtomValue(inlineDiffChangesAtom);
+
+    const [state, setState] = React.useState<{
+        scope: string;
+        inlineByPath: ReadonlyMap<string, boolean>;
+    }>({ scope, inlineByPath: new Map() });
+
+    const inlineByPath =
+        state.scope === scope ? state.inlineByPath : new Map<string, boolean>();
+
+    return {
+        isInline: (path: string) => inlineByPath.get(path) ?? inlineByDefault,
+        setInline: (path: string, inline: boolean) =>
+            setState((previous) => {
+                const next = new Map(
+                    previous.scope === scope ? previous.inlineByPath : [],
+                );
+
+                next.set(path, inline);
+
+                return { scope, inlineByPath: next };
+            }),
+    };
+}
+
+/**
+ * Narrows a diff list by file name, so a large change set can be read one area at a time or
+ * without its tests (`-test`). It names how many files the filter keeps, because a hidden
+ * file would otherwise look like one the change never touched.
+ */
+export function GitDiffFilterField(props: {
+    query: string;
+    onChange: (query: string) => void;
+    filter: FileNameFilter;
+    shownCount: number;
+    totalCount: number;
+}) {
+    return (
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+            <ClearableInput
+                label="Filter files by name"
+                clearLabel="Clear file filter"
+                value={props.query}
+                placeholder='Filter files, -test excludes, "-test" is literal'
+                onChange={props.onChange}
+                className="min-w-0 flex-1 sm:max-w-md"
+            />
+            {props.filter.isActive ? (
+                <span role="status" className="text-xs text-slate-400">
+                    {props.shownCount === 0
+                        ? "No files match the filter"
+                        : `Showing ${props.shownCount} of ${props.totalCount} files`}
+                </span>
+            ) : null}
+        </div>
+    );
+}
 
 /**
  * Collapses or expands every diff at once, for the panel bar above a list, so a long change
@@ -164,6 +236,8 @@ function GitDiffSection(props: {
     file: GitDiffListFile;
     collapsed: boolean;
     onToggle: () => void;
+    inline: boolean;
+    onInlineChange: (inline: boolean) => void;
 }) {
     const file = props.file;
     const parts = splitRelativePath(file.relativePath);
@@ -175,7 +249,10 @@ function GitDiffSection(props: {
             className="overflow-clip rounded-lg border border-slate-800 bg-slate-950/30"
         >
             <div
-                className={`git-diff-sticky-header sticky z-10 flex min-w-0 items-center gap-3 bg-surface px-3 py-2 ${props.collapsed ? "" : "border-b border-slate-800"}`}
+                className={cn(
+                    "git-diff-sticky-header sticky z-10 flex min-w-0 items-center gap-3 bg-surface px-3 py-2",
+                    !props.collapsed && "border-b border-slate-800",
+                )}
             >
                 <IconButton
                     type="button"
@@ -218,13 +295,23 @@ function GitDiffSection(props: {
                         </span>
                     )}
                 </h3>
+                {/* A collapsed file shows no patch, so it has no layout to switch. */}
+                {props.collapsed ? null : (
+                    <DiffLayoutSwitch
+                        label={`Diff layout for ${file.relativePath}`}
+                        className="shrink-0"
+                        iconOnly
+                        inline={props.inline}
+                        onChange={props.onInlineChange}
+                    />
+                )}
             </div>
             {props.collapsed ? null : (
                 <div
                     id={bodyId}
                     className="git-diff-list-body w-full min-w-0 overflow-x-hidden [&>p]:p-3"
                 >
-                    {file.body}
+                    {file.renderBody(props.inline)}
                 </div>
             )}
         </section>
@@ -239,7 +326,11 @@ export function GitDiffList(props: {
     agent: Agent;
     files: GitDiffListFile[];
     collapsed: CollapsedGitDiffs;
+    /** The list's identity for remembering each file's layout, such as one commit. */
+    scope: string;
 }) {
+    const layouts = useGitDiffLayouts(props.scope);
+
     return (
         <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
             {props.files.map((file) => (
@@ -249,6 +340,10 @@ export function GitDiffList(props: {
                     file={file}
                     collapsed={props.collapsed.isCollapsed(file.path)}
                     onToggle={() => props.collapsed.toggle(file.path)}
+                    inline={layouts.isInline(file.path)}
+                    onInlineChange={(inline) =>
+                        layouts.setInline(file.path, inline)
+                    }
                 />
             ))}
         </div>

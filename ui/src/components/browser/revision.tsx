@@ -13,9 +13,10 @@ import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Tooltip } from "#ui/components/tooltip";
 import { GitDiffResultView } from "#ui/components/browser/git";
-import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
+import { WrapDiffLinesToggle } from "#ui/components/browser/diff-layout-control";
 import {
     GitDiffCollapseControls,
+    GitDiffFilterField,
     GitDiffList,
     useCollapsedGitDiffs,
     type GitDiffListFile,
@@ -36,6 +37,7 @@ import {
 } from "#ui/queries";
 import { cn } from "#ui/utils/cn";
 import { getErrorMessage } from "#ui/utils/error";
+import { FileNameFilter } from "#ui/utils/file-name-filter";
 import type { GitChangeState } from "#bindings/GitChangeState";
 import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
 import type { GitCommitSummary } from "#bindings/GitCommitSummary";
@@ -391,11 +393,16 @@ export function GitCommitView(props: {
         gitCommitDiffQueryOptions(props.agent, props.path, props.commitId),
     );
 
+    const scope = `${props.agent.id}:${props.path}:${props.commitId}`;
+
     // The commit's patches arrive in one response anyway, so they start expanded.
     const collapsed = useCollapsedGitDiffs({
-        scope: `${props.agent.id}:${props.path}:${props.commitId}`,
+        scope,
         initiallyCollapsed: false,
     });
+
+    // The filter outlives stepping through commits, so `-test` keeps hiding tests in each.
+    const [filterQuery, setFilterQuery] = React.useState("");
 
     if (diffQuery.isPending) {
         return (
@@ -438,9 +445,10 @@ export function GitCommitView(props: {
         change: file.change,
         fileSearch: { rev: fileRevision(file.change) },
         regionLabel: `Commit diff for ${file.repository_relative_path}`,
-        body: (
+        renderBody: (mergeModifiedLines) => (
             <GitDiffResultView
                 result={file.result}
+                mergeModifiedLines={mergeModifiedLines}
                 editorFile={
                     file.change === "deleted"
                         ? undefined
@@ -452,6 +460,12 @@ export function GitCommitView(props: {
             />
         ),
     }));
+
+    const filter = FileNameFilter.parse(filterQuery);
+
+    const shownFiles = files.filter((file) =>
+        filter.matches(file.relativePath),
+    );
 
     return (
         <>
@@ -504,7 +518,9 @@ export function GitCommitView(props: {
             <GitPanelBar
                 actions={
                     <>
-                        {diff.files.length === 0 ? null : <DiffLayoutControl />}
+                        {diff.files.length === 0 ? null : (
+                            <WrapDiffLinesToggle />
+                        )}
                         <GitDiffCollapseControls
                             collapsed={collapsed}
                             fileCount={diff.files.length}
@@ -550,10 +566,20 @@ export function GitCommitView(props: {
                         subdirectory to see the rest.
                     </p>
                 ) : null}
+                {files.length === 0 ? null : (
+                    <GitDiffFilterField
+                        query={filterQuery}
+                        onChange={setFilterQuery}
+                        filter={filter}
+                        shownCount={shownFiles.length}
+                        totalCount={files.length}
+                    />
+                )}
                 <GitDiffList
                     agent={props.agent}
-                    files={files}
+                    files={shownFiles}
                     collapsed={collapsed}
+                    scope={scope}
                 />
             </div>
         </>
