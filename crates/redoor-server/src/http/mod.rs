@@ -11,6 +11,7 @@ mod archive_upload;
 pub(crate) mod auth;
 mod copy;
 mod diffs;
+mod editor_buffers;
 pub(crate) mod error;
 mod exec;
 #[cfg(test)]

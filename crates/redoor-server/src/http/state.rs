@@ -50,6 +50,8 @@ pub(crate) struct ServerState {
     pub(crate) config_path: PathBuf,
     /// Serializes read-modify-write config edits so concurrent submissions cannot lose entries.
     pub(crate) config_edit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes editor buffer writes so a revision check and its write cannot interleave.
+    pub(crate) editor_buffer_lock: Arc<tokio::sync::Mutex<()>>,
     /// Managed SSH keys and pinned host keys of SSH devices.
     pub(crate) ssh_keys: crate::ssh::keys::SshKeyStore,
     /// Devices with a key operation or edit in progress, so they cannot race each other.

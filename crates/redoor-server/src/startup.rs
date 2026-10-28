@@ -342,6 +342,7 @@ impl ServerRuntime {
             mcp,
             config_path: config.config_path,
             config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            editor_buffer_lock: Arc::default(),
             ssh_keys,
             ssh_key_operations: crate::http::ssh_keys::SshKeyOperations::default(),
             auth_mode,

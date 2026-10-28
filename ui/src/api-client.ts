@@ -75,6 +75,10 @@ import type { UpdateLocalAgentResponse } from "#bindings/UpdateLocalAgentRespons
 import type { UpdateLocalAgentRequest } from "#bindings/UpdateLocalAgentRequest";
 import type { DeleteManagedAgentResponse } from "#bindings/DeleteManagedAgentResponse";
 import type { UpdateUserStateRequest } from "#bindings/UpdateUserStateRequest";
+import type { EditorBufferResponse } from "#bindings/EditorBufferResponse";
+import type { PutEditorBufferRequest } from "#bindings/PutEditorBufferRequest";
+import type { PutEditorBufferResponse } from "#bindings/PutEditorBufferResponse";
+import type { DeleteEditorBufferResponse } from "#bindings/DeleteEditorBufferResponse";
 import type { UserStateResponse } from "#bindings/UserStateResponse";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import type { GitStatusResponse } from "#bindings/GitStatusResponse";
@@ -1522,6 +1526,64 @@ export class ApiClient {
             },
             this.requestContext(),
         );
+    }
+
+    /** Loads the stored editor buffer of one open file; `buffer` is null when none exists. */
+    async getEditorBuffer(key: string): Promise<EditorBufferResponse> {
+        return apiRequest<EditorBufferResponse>(
+            this.editorBufferUrl(key),
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /**
+     * Stores an editor buffer (last writer wins) and returns its new version. `keepalive`
+     * lets a small final write outlive a closing page.
+     */
+    async putEditorBuffer(
+        key: string,
+        request: PutEditorBufferRequest,
+        keepalive = false,
+    ): Promise<PutEditorBufferResponse> {
+        return apiRequest<PutEditorBufferResponse>(
+            this.editorBufferUrl(key),
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+                keepalive,
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Forgets the stored buffer of a file that was closed. */
+    async deleteEditorBuffer(key: string): Promise<DeleteEditorBufferResponse> {
+        return apiRequest<DeleteEditorBufferResponse>(
+            this.editorBufferUrl(key),
+            { method: "DELETE" },
+            this.requestContext(),
+        );
+    }
+
+    /**
+     * Encodes the key as base64url, so a file path's slashes stay inside one URL segment and
+     * no proxy can normalize them away.
+     */
+    private editorBufferUrl(key: string) {
+        let binary = "";
+
+        for (const byte of new TextEncoder().encode(key)) {
+            binary += String.fromCharCode(byte);
+        }
+
+        const encoded = btoa(binary)
+            .replaceAll("+", "-")
+            .replaceAll("/", "_")
+            .replace(/=+$/, "");
+
+        return `${this.baseUrl}/api/v1/user/editor-buffers/${encoded}`;
     }
 
     async waitForAgentNames(names: string[], timeoutMs = 5000): Promise<void> {

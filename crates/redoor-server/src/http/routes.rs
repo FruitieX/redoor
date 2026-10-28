@@ -26,6 +26,9 @@ use super::{
     auth::{login_handler, logout_handler},
     copy::copy_file_handler,
     diffs::diff_files_handler,
+    editor_buffers::{
+        delete_editor_buffer_handler, get_editor_buffer_handler, put_editor_buffer_handler,
+    },
     file_edit::file_edit_handler,
     files::{create_directory_handler, raw_agent_delete_handler, rename_path_handler},
     git::{
@@ -106,6 +109,16 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route(
             "/api/v1/user/state",
             get(get_user_state_handler).put(update_user_state_handler),
+        )
+        .route(
+            "/api/v1/user/editor-buffers/{key}",
+            get(get_editor_buffer_handler)
+                .put(put_editor_buffer_handler)
+                .delete(delete_editor_buffer_handler)
+                // A buffer carries a whole document and its history, above axum's 2 MiB default.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    redoor_protocol::api::editor_buffers::MAX_EDITOR_BUFFER_BYTES,
+                )),
         )
         .route(
             "/api/v1/transfers/progress",

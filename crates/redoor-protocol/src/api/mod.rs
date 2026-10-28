@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod auth;
 pub mod diffs;
+pub mod editor_buffers;
 pub mod exec;
 pub mod files;
 pub mod git;
