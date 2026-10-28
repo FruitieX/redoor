@@ -2,6 +2,7 @@
 name = "redoor-agent"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 
 [dependencies]
 redoor-protocol.workspace = true

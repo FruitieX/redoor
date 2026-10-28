@@ -1,0 +1,67 @@
+# cargo-deny configuration: audits the Rust dependency graph for security
+# advisories, license compatibility, banned/duplicate crates and untrusted
+# sources. Run with `mise exec -- cargo deny check`.
+
+[graph]
+# Only the platforms redoor ships to (see .github/workflows/build.yml) plus the
+# x86_64 hosts used for development, so Windows/wasm-only crates do not add
+# advisories or licenses that never end up in a binary.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-linux-android",
+]
+all-features = true
+
+[advisories]
+# Fail on every vulnerability, unsound and unmaintained advisory affecting any
+# crate in the graph, including transitive ones, because redoor exposes a
+# remote command-execution API where dependency bugs are directly exploitable.
+unmaintained = "all"
+yanked = "deny"
+# Each entry must say why the advisory does not apply and when to revisit it.
+ignore = []
+
+[licenses]
+# redoor is AGPL-3.0; every license here is compatible with distributing the
+# combined binary under it.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[licenses.private]
+# The workspace crates are `publish = false` and covered by the repository LICENSE.
+ignore = true
+
+[bans]
+# Duplicate versions only cost binary size, which matters for the Termux and
+# embedded targets, so surface them without failing the check.
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates have no version requirement.
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+# Only crates.io: a git or alternative registry dependency would bypass the
+# advisory database and lockfile checksum guarantees.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
