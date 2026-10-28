@@ -852,6 +852,18 @@ test.describe.serial("Open files", () => {
         return stored === null ? null : String(stored.data.state.doc);
     }
 
+    /** Reads where the stored buffer was scrolled, as another computer would restore it. */
+    async function storedScrollAnchor(filePath: string) {
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+
+        const stored = parseStoredBuffer(
+            await api.getEditorBuffer(`${ctx.agentId}:${filePath}`),
+        );
+
+        return stored?.data.scroll?.anchor ?? null;
+    }
+
     /** Writes a tall file, so restoring the scroll position is observable. */
     async function writeTallFile(name: string, prefix: string) {
         const filePath = path.join(ctx.testDirPath, name);
@@ -932,6 +944,44 @@ test.describe.serial("Open files", () => {
         await expect(
             page.getByRole("button", { name: "Save file" }),
         ).toBeDisabled();
+    });
+
+    test("writes the scroll position of a file switched away from when the page is hidden", async ({
+        page,
+    }) => {
+        const firstPath = await writeTallFile("scroll-a.txt", "delta");
+        const secondPath = await writeTallFile("scroll-b.txt", "epsilon");
+        const editor = page.getByLabel("File editor", { exact: true });
+
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
+        );
+        await keepOpen(page);
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`,
+        );
+        await keepOpen(page);
+
+        await editor.hover();
+        await page.mouse.wheel(0, 10000);
+        // Scrolling alone moves the view but writes nothing yet.
+        await expect(
+            editor.getByText("delta line 300", { exact: true }),
+        ).toBeInViewport();
+
+        await page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("list", { name: "Open files" })
+            .getByRole("link", { name: "scroll-b.txt", exact: true })
+            .click();
+        await expect(editor).toContainText("epsilon line 1");
+        await page.evaluate(() =>
+            window.dispatchEvent(new PageTransitionEvent("pagehide")),
+        );
+        // The file no longer shown still gets its scroll written, so another computer resumes there.
+        await expect
+            .poll(() => storedScrollAnchor(firstPath))
+            .toBeGreaterThan(0);
     });
 
     test("keeps unsaved edits with their undo history across a reload and on another computer", async ({

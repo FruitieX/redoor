@@ -9,6 +9,7 @@ import {
     vi,
 } from "vitest";
 import { redo, undo, undoDepth } from "@codemirror/commands";
+import type { EditorState } from "@codemirror/state";
 import { QueryClient } from "@tanstack/react-query";
 import type { DeleteEditorBufferResponse } from "#bindings/DeleteEditorBufferResponse";
 import type { EditorBufferResponse } from "#bindings/EditorBufferResponse";
@@ -86,6 +87,7 @@ const noHandlers = {
         onFocus: () => undefined,
         onSave: () => undefined,
         onBecameDirty: () => undefined,
+        onStateReplaced: () => undefined,
     },
 } satisfies ActivateRequest["handlers"];
 
@@ -380,4 +382,29 @@ test("closing a file discards its edits and deletes its stored copy", async () =
     expect(api.read("a")).toBeNull();
     // No write follows for a closed file.
     expect(api.writes).toHaveLength(1);
+});
+
+test("discarding tells the chrome about the replaced state, since setState emits no update", () => {
+    const { workspace } = createWorkspace();
+    const replaced: EditorState[] = [];
+
+    const view = show(workspace, {
+        key: "a",
+        deviceContent: "base text",
+        handlers: {
+            current: {
+                ...noHandlers.current,
+                onStateReplaced: (state) => replaced.push(state),
+            },
+        },
+    });
+
+    view.dispatch({
+        changes: { from: 0, insert: "draft " },
+        selection: { anchor: 0, head: 5 },
+    });
+    workspace.discard("a", "base text");
+    // Without this the Copy selection action would still offer the discarded "draft".
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]?.selection.main.empty).toBe(true);
 });

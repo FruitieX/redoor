@@ -42,6 +42,11 @@ export type EditorHandlers = {
     onSave: () => void;
     /** The first edit that makes a clean buffer dirty, which opens the file. */
     onBecameDirty: () => void;
+    /**
+     * The shown state was swapped without a view update (discard or an adopted server copy),
+     * so chrome mirroring the selection must re-read it instead of keeping the old one.
+     */
+    onStateReplaced: (state: EditorState) => void;
 };
 
 /** Where `?line=` asks to go, and the history entry that asked, so it applies only once. */
@@ -76,9 +81,9 @@ const RETRY_DELAY_MS = 5000;
 
 /**
  * A browser `fetch` with `keepalive` may carry at most 64 KiB, so only smaller final writes
- * can be promised to outlive a closing page.
+ * can be promised to outlive a closing page. The limit is in bytes, not characters.
  */
-const KEEPALIVE_LIMIT_CHARS = 60 * 1024;
+const KEEPALIVE_LIMIT_BYTES = 60 * 1024;
 
 /** One buffer write, as the mutation that sends it sees it. */
 type BufferWrite = {
@@ -179,8 +184,8 @@ export class EditorWorkspace extends ExternalStore<
     }
 
     /**
-     * Writes pending buffers, and the scroll position of the shown one, when the page is
-     * hidden or closed: that is the moment the user may walk to another computer.
+     * Writes pending buffers and moved scroll positions when the page is hidden or closed:
+     * that is the moment the user may walk to another computer.
      */
     start(target: Window) {
         target.addEventListener("pagehide", () => this.flush());
@@ -403,8 +408,7 @@ export class EditorWorkspace extends ExternalStore<
         buffer.base = { text: null, hash: stored.data.baseHash };
 
         if (this.isShown(key) && this.view !== null) {
-            this.view.setState(state);
-            this.reconfigure();
+            this.replaceShownState(this.view, state);
             this.restoreScroll(buffer, null);
         }
 
@@ -448,8 +452,7 @@ export class EditorWorkspace extends ExternalStore<
 
         if (this.isShown(key) && this.view !== null) {
             const scroll = this.view.scrollSnapshot();
-            this.view.setState(state);
-            this.reconfigure();
+            this.replaceShownState(this.view, state);
             this.view.dispatch({ effects: scroll });
         }
 
@@ -489,8 +492,8 @@ export class EditorWorkspace extends ExternalStore<
     }
 
     /**
-     * Writes every open buffer with unwritten changes now, and the shown one also when only
-     * its scroll position moved, for a page that is hidden or going away.
+     * Writes every open buffer with unwritten changes now, also when only its scroll position
+     * moved, for a page that is hidden or going away.
      */
     flush() {
         const shown =
@@ -503,9 +506,11 @@ export class EditorWorkspace extends ExternalStore<
         }
 
         for (const buffer of this.buffers.values()) {
-            const scrolled =
-                buffer === shown &&
-                !sameScroll(buffer.storedScroll, buffer.writtenScroll);
+            // Buffers switched away from stashed their scroll at that moment, so they count too.
+            const scrolled = !sameScroll(
+                buffer.storedScroll,
+                buffer.writtenScroll,
+            );
 
             if (
                 this.openKeys.has(buffer.key) &&
@@ -694,6 +699,16 @@ export class EditorWorkspace extends ExternalStore<
         }
     }
 
+    /**
+     * Swaps a new state into the shown view. `setState` emits no view update, so the chrome
+     * is told directly, or it would keep offering the replaced selection.
+     */
+    private replaceShownState(view: EditorView, state: EditorState) {
+        view.setState(state);
+        this.reconfigure();
+        this.handlers?.current.onStateReplaced(view.state);
+    }
+
     /** Matches the shown state's compartments to the current preferences. */
     private reconfigure() {
         if (this.view === null || this.settings === null) {
@@ -833,13 +848,13 @@ export class EditorWorkspace extends ExternalStore<
             return;
         }
 
-        const body = JSON.stringify(data);
+        const bodyBytes = new TextEncoder().encode(JSON.stringify(data)).length;
 
         try {
             const response = await this.writes.mutate({
                 key,
                 request: { data },
-                keepalive: keepalive && body.length < KEEPALIVE_LIMIT_CHARS,
+                keepalive: keepalive && bodyBytes < KEEPALIVE_LIMIT_BYTES,
             });
 
             if (this.buffers.get(key) === buffer && this.openKeys.has(key)) {

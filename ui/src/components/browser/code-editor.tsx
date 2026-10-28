@@ -190,6 +190,7 @@ export function CodeEditor(props: CodeEditorProps) {
         },
         onSave: () => propsRef.current.onSave(),
         onBecameDirty: () => propsRef.current.onBecameDirty(),
+        onStateReplaced: (state: EditorState) => syncFromState(state),
     });
 
     // Swaps this file's buffer into the shared view; leaving stashes it with its scroll.
