@@ -8,6 +8,7 @@ import {
 } from "./reorder";
 
 import { ApiClient } from "#ui/api-client";
+import { BackgroundTabs } from "./background-tabs";
 import {
     API_BASE_URL,
     WEB_BASE_URL,
@@ -75,6 +76,7 @@ test.describe.serial("Pinned files", () => {
 
     test("pins editor files beside the navigation rail and keeps newer pins at the bottom", async ({
         page,
+        browser,
     }) => {
         const firstName = "file1.txt";
         const secondName = "file2.txt";
@@ -181,16 +183,17 @@ test.describe.serial("Pinned files", () => {
                 ],
             });
 
-        const backgroundTabPromise = page.context().waitForEvent("page");
+        const backgroundTabs = await BackgroundTabs.watch(browser);
         await firstItem
             .getByRole("link", { name: firstName, exact: true })
             .click({ button: "middle" });
-        const backgroundTab = await backgroundTabPromise;
         // Middle-click must open the pinned destination while preserving both pins and the current page.
-        await expect(backgroundTab).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`,
-        );
-        await backgroundTab.close();
+        await expect
+            .poll(() => backgroundTabs.urls())
+            .toEqual([
+                `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`,
+            ]);
+        await backgroundTabs.close();
         await expect(
             pinnedFiles.getByRole("link", { name: firstName, exact: true }),
         ).toBeVisible();
@@ -297,6 +300,7 @@ test.describe.serial("Pinned files", () => {
 
     test("opens full-window pins in background tabs and closes them with the close button", async ({
         page,
+        browser,
     }) => {
         const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
@@ -314,14 +318,14 @@ test.describe.serial("Pinned files", () => {
             name: "Editor pinned files",
         });
 
-        const backgroundTabPromise = page.context().waitForEvent("page");
+        const backgroundTabs = await BackgroundTabs.watch(browser);
         await pins
             .getByRole("link", { name: "file1.txt", exact: true })
             .click({ button: "middle" });
-        const backgroundTab = await backgroundTabPromise;
-        // Native navigation must leave the pins and the expanded editor on the original page intact.
-        await expect(backgroundTab).toHaveURL(firstUrl);
-        await backgroundTab.close();
+        // Native navigation must open the pin in its own tab and leave the pins and the expanded
+        // editor on the original page intact.
+        await expect.poll(() => backgroundTabs.urls()).toEqual([firstUrl]);
+        await backgroundTabs.close();
         await expect(
             pins.getByRole("link", { name: "file1.txt", exact: true }),
         ).toBeVisible();

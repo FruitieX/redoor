@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
+import { BackgroundTabs } from "./background-tabs";
 import { dragReorderRow } from "./reorder";
 import { ApiClient } from "#ui/api-client";
 import {
@@ -179,6 +180,7 @@ test.describe.serial("Bookmarks", () => {
 
     test("should bookmark a file from the list menu and persist it under its agent", async ({
         page,
+        browser,
     }) => {
         const fileName = "file1.txt";
         const filePath = path.join(ctx.testDirPath, fileName);
@@ -239,16 +241,17 @@ test.describe.serial("Bookmarks", () => {
                 .getByRole("list", { name: `${ctx.agentName} bookmarks` })
                 .getByRole("link", { name: fileName, exact: true }),
         ).toBeVisible();
-        const backgroundTabPromise = page.context().waitForEvent("page");
+        const backgroundTabs = await BackgroundTabs.watch(browser);
         await agentBookmarks
             .getByRole("link", { name: fileName, exact: true })
             .click({ button: "middle" });
-        const backgroundTab = await backgroundTabPromise;
         // Middle-click must open the bookmarked destination without removing its saved entry.
-        await expect(backgroundTab).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
-        );
-        await backgroundTab.close();
+        await expect
+            .poll(() => backgroundTabs.urls())
+            .toEqual([
+                `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
+            ]);
+        await backgroundTabs.close();
         await expect(
             agentBookmarks.getByRole("link", { name: fileName, exact: true }),
         ).toBeVisible();
