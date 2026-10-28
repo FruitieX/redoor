@@ -2,11 +2,11 @@
     "name": "redoor-ui",
     "private": true,
     "type": "module",
-    "packageManager": "pnpm@11.20.0",
+    "packageManager": "pnpm@12.15.0",
     "devEngines": {
         "runtime": {
             "name": "node",
-            "version": "26.7.0",
+            "version": "26.12.1",
             "onFail": "download"
         }
     },
@@ -114,12 +114,12 @@
         "@types/react": "^19.2.18",
         "@types/react-dom": "^19.2.4",
         "@types/ws": "^8.18.1",
-        "@vitejs/plugin-react": "^6.0.5",
+        "@vitejs/plugin-react": "^6.1.2",
         "jsdom": "^30.0.1",
         "oxlint": "^1.78.0",
         "oxlint-tsgolint": "7.0.2001",
         "typescript": "^7.0.2",
-        "vite": "^8.2.1",
+        "vite": "^8.3.5",
         "vitest": "^4.1.10",
         "web-vitals": "^6.1.0",
         "ws": "^8.21.2"
