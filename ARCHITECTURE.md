@@ -661,19 +661,37 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   watchdog never gives up. The latest error is shown as the agent's `connection_issue` while
   it stays `Starting`.
 - **SSH provisioning runs on every attempt**, so the UI always shows current results. The
-  agent is started by a launch script that first reports the OS, architecture, version and
-  SHA-1 of the binary at the default install path, and `exec`s it only when it matches this
-  server. A device with a current binary therefore starts in one SSH session. Otherwise the
-  script exits without starting anything, the server uploads the matching release from the
-  local cache and starts again, and that second report verifies the upload. A debug server
-  uses its local debug build instead when the platform matches, at a separate path. It is
-  matched by SHA-1 and by the version that build reports, not the server's own version,
-  because the build on disk can be newer than the running server after a version bump
-  without a restart. Each step is
+  agent is started by a launch script that first reports the OS, architecture and version
+  of the binary at the default install path, and `exec`s it only when the version matches
+  this server. A device with a current binary therefore starts in one SSH session.
+  Otherwise the script exits without starting anything, the server uploads the matching
+  release from the local cache and starts again, and that second report verifies the
+  upload.
+- **Install paths identify the bytes, so devices never hash binaries.** Hashing a debug
+  build of hundreds of megabytes on the device (Perl `shasum` on macOS, phones and boards
+  without hashing instructions) made every start slow, and the hash only has to tell
+  builds apart. Release installs live at versioned paths. A debug server uses its local
+  debug build instead when the platform matches, at
+  `binaries/debug-<hash>/redoor`, where `<hash>` is the first 16 hex characters of the
+  build's BLAKE3 hash; a binary there that reports the expected version is that build. The
+  expected version is the one the build itself reports, not the server's, because the
+  build on disk can be newer than the running server after a version bump without a
+  restart. The server hashes and runs the build lazily on the first provision after it
+  starts or the file changes and caches the result keyed by path, size and modification
+  time, so later starts only stat the file; it is not computed at startup because most
+  servers never provision an SSH device. Every upload streams into a temp file whose byte
+  count must equal the local file's size before it is renamed into place, because a
+  stream that ended early would otherwise be trusted forever at a content-addressed path.
+  The size check plus the post-upload `--version` probe replace the former SHA-1
+  comparison for release, debug and forced uploads. After a debug upload verifies, a
+  background task removes the other `debug-*` directories and the legacy `debug/`
+  directory; an agent still running an old build keeps its deleted file open. Each step is
   published as `provisioning_status`, which the UI lists while the agent starts. The ssh
   child holds the remote agent's stdin, so killing ssh makes the remote agent exit
   (`--exit-on-stdin-eof`). Relays probe and install once before their first start instead,
-  because they restart the agent many times from the prepared state.
+  because they restart the agent many times from the prepared state; they prepare again
+  only when the remote shell reports the binary missing (exit 127), which happens after
+  another provision's cleanup removed their `debug-<hash>` directory.
 - **A stop wins every race.** Every start, shutdown and retry bumps an attempt generation, and
   the router commits a registration only if its generation is still current. An agent that
   connects while its entry is not desired-running gets `rejected` with `stopped` and exits.

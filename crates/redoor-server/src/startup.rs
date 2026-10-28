@@ -310,6 +310,9 @@ impl ServerRuntime {
                 binaries: binaries.clone(),
                 ssh_keys: ssh_keys.clone(),
                 log_max_size: config.log_max_size,
+                // Empty until the first SSH provision, so servers that never provision a
+                // device never hash the debug build.
+                local_build: Default::default(),
             },
         );
 

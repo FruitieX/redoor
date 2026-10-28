@@ -71,6 +71,8 @@ pub async fn run_relay(
         ssh_keys: crate::ssh::keys::SshKeyStore::for_data_dir(&paths.data_dir()?),
         binaries: crate::binaries::BinaryCache::new(paths),
         log_max_size: relay.log_max_size,
+        // Filled on the first preparation that uploads the local debug build.
+        local_build: Default::default(),
     };
     redoor_core::logging::init(Some(provision.log_file(&log))).await?;
     // Caught from now on, so `redoor upgrade` restarts the relay instead of killing it.
@@ -136,16 +138,32 @@ enum AttemptOutcome {
     },
 }
 
+/// Exit status of `sh` when the `exec`ed program does not exist; OpenSSH passes the
+/// remote command's status through.
+const EXIT_COMMAND_NOT_FOUND: i32 = 127;
+
+impl AttemptOutcome {
+    /// Whether the remote shell could not find the prepared binary. Another provision
+    /// in the same namespace can upload a newer debug build and remove the old
+    /// `debug-<hash>` directory, so the relay must prepare again instead of retrying the
+    /// deleted path forever.
+    fn binary_missing(&self) -> bool {
+        matches!(self, Self::Exited { status, .. } if status.code() == Some(EXIT_COMMAND_NOT_FOUND))
+    }
+}
+
 impl Relay {
     /// Prepares until it succeeds, then relaunches the SSH session forever.
     ///
-    /// Preparation is not repeated after success: provisioning is the slow part and the
-    /// installed binary stays valid across reconnects.
+    /// Preparation is repeated only when the prepared binary has disappeared: provisioning
+    /// is the slow part and the installed binary otherwise stays valid across reconnects.
     async fn run(mut self) -> Result<()> {
-        let prepared = self.prepare_until_ready().await;
+        let mut prepared = self.prepare_until_ready().await;
         loop {
             let started = Instant::now();
-            match Self::run_attempt(&prepared).await {
+            let outcome = Self::run_attempt(&prepared).await;
+            let binary_missing = outcome.as_ref().is_ok_and(AttemptOutcome::binary_missing);
+            match outcome {
                 Ok(AttemptOutcome::PortOccupied {
                     remote_port,
                     status,
@@ -169,6 +187,14 @@ impl Relay {
                 self.backoff.reset();
             }
             self.backoff.wait().await;
+            if binary_missing {
+                log!(
+                    Level::Warning,
+                    "Relay binary is missing on the remote host; preparing again: remote_bin={}",
+                    prepared.remote_bin
+                );
+                prepared = self.prepare_until_ready().await;
+            }
         }
     }
 
@@ -351,6 +377,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// Only the shell's "not found" status triggers a new preparation, so ordinary
+    /// session exits keep reusing the prepared binary.
+    #[test]
+    fn binary_missing_only_for_command_not_found() {
+        let exited = |code: i32| AttemptOutcome::Exited {
+            remote_port: 52000,
+            status: std::process::ExitStatus::from_raw(code << 8),
+        };
+        // A deleted `debug-<hash>` binary makes `exec` fail with 127 and must re-prepare.
+        assert!(exited(EXIT_COMMAND_NOT_FOUND).binary_missing());
+        // A normal disconnect or crash must not re-provision on every reconnect.
+        assert!(!exited(255).binary_missing());
+        // An occupied port is a forwarding problem, not a missing binary.
+        assert!(
+            !AttemptOutcome::PortOccupied {
+                remote_port: 52000,
+                status: std::process::ExitStatus::from_raw(EXIT_COMMAND_NOT_FOUND << 8),
+            }
+            .binary_missing()
+        );
+    }
 
     /// Verifies forwarding failures are recognized even when the fixed-size
     /// stderr reader splits OpenSSH's message across chunks.

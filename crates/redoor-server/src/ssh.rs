@@ -32,7 +32,10 @@
 //! stdin is then forwarded normally.
 //!
 //! Binary uploads stream the file into one script that creates the directory, writes a
-//! temp file, marks it executable and renames it into place in a single SSH session.
+//! temp file, checks that every byte arrived, marks it executable and renames it into
+//! place in a single SSH session. Remote binaries are never hashed on the device: release
+//! installs are versioned paths, and a debug server installs its local build under a
+//! directory named after the build's content hash, so the path identifies the bytes.
 //!
 //! Optional `password` values are delivered through OpenSSH `SSH_ASKPASS` by
 //! re-executing this binary. That keeps the secret off argv and off the SSH
@@ -92,6 +95,9 @@ pub(crate) struct ProvisionContext {
     /// Size limit of the agent log files this process forwards SSH and child output into;
     /// `None` uses the default limit.
     pub(crate) log_max_size: Option<u64>,
+    /// Identity of the local debug build, computed on the first SSH provision that needs it
+    /// and shared by every clone so concurrent starts hash a rebuilt binary only once.
+    pub(crate) local_build: provision::LocalBuildCache,
 }
 
 impl ProvisionContext {

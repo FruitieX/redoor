@@ -1,6 +1,8 @@
 //! Selects, verifies, and streams compatible agent binaries to remote hosts.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
@@ -19,8 +21,8 @@ const REMOTE_TEMP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// by a shell startup file, for example) is not mistaken for probe fields.
 const PROBE_MARKER: &str = "redoor-probe";
 
-/// Lines of a probe report: the marker, os, arch, sha1, path and version.
-pub(super) const PROBE_REPORT_LINES: usize = 6;
+/// Lines of a probe report: the marker, os, arch, path and version.
+pub(super) const PROBE_REPORT_LINES: usize = 5;
 
 /// Last line of a launch report when the binary matched and is being started.
 pub(super) const LAUNCH_READY: &str = "ready";
@@ -124,15 +126,26 @@ pub(super) fn default_remote_bin(app_name: &str) -> String {
     )
 }
 
-/// Dedicated remote path for local debug binary uploads so iterative debug
-/// deploys never overwrite a versioned release install on the same host.
-fn debug_remote_bin(app_name: &str) -> String {
-    format!("${{XDG_DATA_HOME:-$HOME/.local/share}}/{app_name}/binaries/debug/redoor")
+/// Directory holding every install of `app_name` on a device: the versioned releases and
+/// the content-addressed debug builds. Stale debug builds are only ever removed below it.
+fn remote_binaries_dir(app_name: &str) -> String {
+    format!("${{XDG_DATA_HOME:-$HOME/.local/share}}/{app_name}/binaries")
 }
 
-/// Result of probing a remote host: which OS/arch it runs, what its existing
-/// redoor binary reports for `--version`, and the SHA-1 of that binary file
-/// (empty version/sha1 when there is no readable binary at the path).
+/// Content-addressed remote path for an upload of the local debug build with `hash`.
+///
+/// Debug rebuilds keep the same `--version`, so the version cannot tell them apart. Naming
+/// the directory after the build's content hash makes the path itself the identity: a
+/// binary there that runs and reports the expected version is the build, and the device
+/// never has to hash hundreds of megabytes (slow with Perl `shasum` on macOS or on phones
+/// and boards without hashing instructions). It also keeps debug deploys from overwriting
+/// a versioned release install on the same host.
+fn debug_remote_bin(app_name: &str, hash: &str) -> String {
+    format!("{}/debug-{hash}/redoor", remote_binaries_dir(app_name))
+}
+
+/// Result of probing a remote host: which OS/arch it runs and what its existing redoor
+/// binary reports for `--version` (empty when there is no runnable binary at the path).
 #[derive(Debug)]
 pub(super) struct RemoteSniff {
     pub(super) os: String,
@@ -141,11 +154,6 @@ pub(super) struct RemoteSniff {
     /// Empty when the binary is missing, not executable, or otherwise fails to run,
     /// in which case it needs to be (re)installed.
     pub(super) version_output: String,
-    /// Lowercase hex SHA-1 of the remote binary file contents. Empty when the
-    /// file is missing or unreadable. Used to skip re-upload when the remote
-    /// bytes already match the local binary (critical for debug builds where
-    /// `--version` stays constant across rebuilds).
-    pub(super) sha1sum: String,
     /// Shell-expanded remote path so status lines can show the real file.
     pub(super) remote_bin: String,
 }
@@ -155,18 +163,14 @@ pub(super) struct RemoteSniff {
 /// The script stays a single line so it can also be passed through `sh -c`. Each field is
 /// printed on its own line, and only the first line of `--version` is kept, so a version
 /// string or path containing commas, or a broken binary printing garbage, cannot shift
-/// the other fields. Prefer `sha1sum` (Linux) and fall back to `shasum` (macOS); hosts
-/// with neither report an empty SHA-1 and are matched by version. `awk` is not needed:
-/// `${sha1%% *}` keeps the digest before the file name.
+/// the other fields. The binary is deliberately not hashed: its path already identifies
+/// the build (see [`debug_remote_bin`]), and hashing it remotely was the slowest part of
+/// every start on small devices.
 fn probe_statements(remote_bin: &str) -> String {
     format!(
         "bin={bin}; os=$(uname); arch=$(uname -m); \
-         version=$(\"$bin\" --version 2>/dev/null | head -n 1); sha1=; \
-         if [ -f \"$bin\" ]; then \
-         if command -v sha1sum >/dev/null 2>&1; then sha1=$(sha1sum \"$bin\" 2>/dev/null); \
-         else sha1=$(shasum -a 1 \"$bin\" 2>/dev/null); fi; fi; \
-         sha1=${{sha1%% *}}; \
-         printf '%s\\n' {PROBE_MARKER} \"$os\" \"$arch\" \"$sha1\" \"$bin\" \"$version\"",
+         version=$(\"$bin\" --version 2>/dev/null | head -n 1); \
+         printf '%s\\n' {PROBE_MARKER} \"$os\" \"$arch\" \"$bin\" \"$version\"",
         bin = path_word(remote_bin)
     )
 }
@@ -181,7 +185,7 @@ fn remote_sniff_script(remote_bin: &str) -> String {
 impl RemoteSniff {
     /// Parses the probe report lines printed by [`probe_statements`].
     pub(super) fn parse(target: &str, report: &[String]) -> Result<Self, ProvisionError> {
-        let [marker, os, arch, sha1sum, remote_bin, version_output] = report else {
+        let [marker, os, arch, remote_bin, version_output] = report else {
             return Err(Self::unexpected(target, report));
         };
         if marker != PROBE_MARKER {
@@ -213,7 +217,6 @@ impl RemoteSniff {
             os: os.to_string(),
             arch: arch.to_string(),
             version_output: version_output.trim().to_string(),
-            sha1sum: sha1sum.trim().to_string(),
             remote_bin: remote_bin.to_string(),
         })
     }
@@ -227,14 +230,14 @@ impl RemoteSniff {
             report
         );
         ProvisionError::Remote(format!(
-            "unexpected probe output from {target}: {report:?}; expected '{PROBE_MARKER}' followed by os, arch, sha1, path and version lines"
+            "unexpected probe output from {target}: {report:?}; expected '{PROBE_MARKER}' followed by os, arch, path and version lines"
         ))
     }
 
     /// Formats probe fields for the sticky starting UI without sending raw script output.
     pub(super) fn status_message(&self) -> String {
         format!(
-            "Sniff results: arch={}, platform={}, path={}, version={}, sha1sum={}",
+            "Sniff results: arch={}, platform={}, path={}, version={}",
             self.arch,
             self.os,
             self.remote_bin,
@@ -242,21 +245,15 @@ impl RemoteSniff {
                 "(none)"
             } else {
                 self.version_output.as_str()
-            },
-            if self.sha1sum.is_empty() {
-                "(none)"
-            } else {
-                self.sha1sum.as_str()
             }
         )
     }
 }
 
 /// Probes the remote host with a single ssh command that reports its OS,
-/// CPU architecture, the `--version` output of the configured redoor binary,
-/// and that binary's SHA-1. Batching into one round-trip avoids paying ssh
-/// setup latency multiple times for what is conceptually one "is the host
-/// ready" check.
+/// CPU architecture and the `--version` output of the configured redoor binary.
+/// Batching into one round-trip avoids paying ssh setup latency multiple times
+/// for what is conceptually one "is the host ready" check.
 pub(super) async fn sniff_remote(
     host: &SshHost,
     remote_bin: &str,
@@ -290,53 +287,73 @@ pub(super) async fn sniff_remote(
     let sniff = RemoteSniff::parse(host.target(), &report)?;
     log!(
         Level::Info,
-        "Remote sniff complete: target={}, remote_bin={}, os={}, arch={}, version_output='{}', sha1sum='{}', elapsed={:?}",
+        "Remote sniff complete: target={}, remote_bin={}, os={}, arch={}, version_output='{}', elapsed={:?}",
         host.target(),
         sniff.remote_bin,
         sniff.os,
         sniff.arch,
         sniff.version_output,
-        sniff.sha1sum,
         sniff_start.elapsed()
     );
     Ok(sniff)
 }
 
-/// What a remote binary must report before it is used, in the probe script and in Rust.
-#[derive(Clone, Debug)]
-pub(super) struct BinaryExpectation {
-    /// Exact first line of `--version`.
+/// Bytes read per step while hashing the local debug build: large enough to keep the
+/// hasher fast, small enough that a build of hundreds of megabytes never sits in memory.
+const HASH_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Hex characters of the BLAKE3 hash kept in a debug install directory name. The hash only
+/// tells builds apart and does not need to resist forgery, so 64 bits are plenty, and a
+/// short name keeps remote paths and status lines readable.
+const DEBUG_HASH_LEN: usize = 16;
+
+/// What provisioning needs to know about the local debug build: enough to name its remote
+/// install, verify an upload of it and recognize it on the device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct LocalBuild {
+    /// File size in bytes, which the upload script checks so a cut-off stream is never
+    /// installed at a content-addressed path that would then be trusted.
+    size: u64,
+    /// Leading hex characters of the BLAKE3 hash of the file, naming its remote directory.
+    hash: String,
+    /// First `--version` line of the build. It is read from the build itself rather than
+    /// taken from this server: the build on disk can be newer than the running server, for
+    /// example after a version bump without a restart, and expecting the server's version
+    /// would reject every upload of it and re-upload the same bytes forever.
     version: String,
-    /// SHA-1 of the local binary the remote one must equal, when it is known. A remote
-    /// host without a checksum utility is matched by version alone.
-    sha1: Option<String>,
 }
 
-impl BinaryExpectation {
-    /// Any binary reporting this server's version, as for a versioned release install.
-    fn this_version() -> Self {
-        Self {
-            version: redoor_core::identity::version_line(),
-            sha1: None,
+impl LocalBuild {
+    /// Hashes and runs the build described by `stamp`. Fails when the file changes while it
+    /// is read, because a hash of a half-rewritten file would name the wrong bytes.
+    async fn read(stamp: &BuildStamp) -> Result<Self, std::io::Error> {
+        let started = std::time::Instant::now();
+        let version = Self::version(&stamp.path).await?;
+        let hash = Self::content_hash(&stamp.path, stamp.size).await?;
+        if BuildStamp::read(&stamp.path).await? != *stamp {
+            return Err(std::io::Error::other(format!(
+                "local debug build '{}' changed while it was being hashed",
+                stamp.path.display()
+            )));
         }
+        log!(
+            Level::Info,
+            "Identified local debug build: path={}, size={}, hash={}, version='{}', elapsed={:?}",
+            stamp.path.display(),
+            stamp.size,
+            hash,
+            version,
+            started.elapsed()
+        );
+        Ok(Self {
+            size: stamp.size,
+            hash,
+            version,
+        })
     }
 
-    /// This server's version and exactly the bytes of `local_sha1`, used to verify an
-    /// uploaded release artifact, which is always built for this server's version.
-    fn exact(local_sha1: String) -> Self {
-        Self {
-            version: redoor_core::identity::version_line(),
-            sha1: Some(local_sha1),
-        }
-    }
-
-    /// The version and exact bytes of the local debug build at `path`, matched by SHA-1
-    /// because the version does not change between rebuilds. The version is read from
-    /// the build itself rather than taken from this server: the build on disk can be
-    /// newer than the running server, for example after a version bump without a
-    /// restart, and expecting the server's version would reject every upload of it and
-    /// re-upload the same bytes forever.
-    async fn local_build(path: &Path) -> Result<Self, std::io::Error> {
+    /// Reads the first `--version` line, which is all the remote probe compares.
+    async fn version(path: &Path) -> Result<String, std::io::Error> {
         let output = tokio::process::Command::new(path)
             .arg("--version")
             .output()
@@ -354,26 +371,150 @@ impl BinaryExpectation {
                 output.status
             )));
         }
-        // The remote probe compares only the first line, so the expectation must too.
-        let version = String::from_utf8_lossy(&output.stdout)
+        Ok(String::from_utf8_lossy(&output.stdout)
             .lines()
             .next()
             .unwrap_or_default()
             .trim()
-            .to_string();
+            .to_string())
+    }
+
+    /// Streams the file through BLAKE3 in fixed chunks so the whole build never sits in
+    /// memory, and checks that exactly `size` bytes were read so a concurrent rebuild
+    /// cannot slip a different file length past the stamp.
+    async fn content_hash(path: &Path, size: u64) -> Result<String, std::io::Error> {
+        let mut file = tokio::fs::File::open(path).await.map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to open '{}' to hash it: {error}",
+                path.display()
+            ))
+        })?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; HASH_CHUNK_SIZE];
+        let mut total: u64 = 0;
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+        }
+        if total != size {
+            return Err(std::io::Error::other(format!(
+                "local debug build '{}' changed while it was being hashed: read {total} bytes, expected {size}",
+                path.display()
+            )));
+        }
+        let mut hash = hasher.finalize().to_hex().to_string();
+        hash.truncate(DEBUG_HASH_LEN);
+        Ok(hash)
+    }
+}
+
+/// What a cached [`LocalBuild`] was computed from. Cargo rewrites the file on every
+/// rebuild, which changes its modification time and usually its size, so an unchanged
+/// stamp means the cached hash still describes the file without reading it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BuildStamp {
+    /// Path of the build, so a different build file never reuses another's identity.
+    path: PathBuf,
+    /// File size in bytes.
+    size: u64,
+    /// Last modification time, `None` on a filesystem that does not record one.
+    modified: Option<SystemTime>,
+}
+
+impl BuildStamp {
+    /// Stats the build; this is the only file access a cached provision makes.
+    async fn read(path: &Path) -> Result<Self, std::io::Error> {
+        let metadata = tokio::fs::metadata(path).await.map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to access local debug build '{}': {error}",
+                path.display()
+            ))
+        })?;
         Ok(Self {
-            version,
-            sha1: Some(file_sha1sum(path).await?),
+            path: path.to_path_buf(),
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
         })
+    }
+}
+
+/// A computed [`LocalBuild`] together with the stamp it is valid for.
+#[derive(Debug)]
+struct CachedBuild {
+    /// File state the build identity was computed from.
+    stamp: BuildStamp,
+    /// The identity, reused while the stamp is unchanged.
+    build: LocalBuild,
+}
+
+/// Lazily computed identity of the local debug build, shared by every provision of this
+/// process.
+///
+/// Hashing and running a debug build of hundreds of megabytes on every agent start would
+/// slow down each start, so the identity is computed on the first use after the server
+/// starts or the build changes, and later uses only stat the file. It is deliberately not
+/// computed at startup: most servers (including every integration test server) never
+/// provision an SSH device. The mutex makes concurrent provisions wait for one hash
+/// instead of reading the same file in parallel.
+#[derive(Clone, Default)]
+pub(crate) struct LocalBuildCache {
+    /// Last computed identity; `Arc` so clones of the provisioning context share it.
+    cached: Arc<tokio::sync::Mutex<Option<CachedBuild>>>,
+}
+
+impl LocalBuildCache {
+    /// Returns the identity of the build at `path`, computing it only when the file is new
+    /// to this cache or changed since it was last computed.
+    async fn get(&self, path: &Path) -> Result<LocalBuild, std::io::Error> {
+        let mut cached = self.cached.lock().await;
+        let stamp = BuildStamp::read(path).await?;
+        if let Some(entry) = cached.as_ref()
+            && entry.stamp == stamp
+        {
+            return Ok(entry.build.clone());
+        }
+        let build = LocalBuild::read(&stamp).await?;
+        *cached = Some(CachedBuild {
+            stamp,
+            build: build.clone(),
+        });
+        Ok(build)
+    }
+}
+
+/// What a remote binary must report before it is used, in the probe script and in Rust.
+///
+/// Only the version is compared: the install path already says which bytes are there,
+/// because release installs are versioned and debug installs are content-addressed, and
+/// every upload is size-checked before it is moved into place.
+#[derive(Clone, Debug)]
+pub(super) struct BinaryExpectation {
+    /// Exact first line of `--version`.
+    version: String,
+}
+
+impl BinaryExpectation {
+    /// Any binary reporting this server's version, as for a versioned release install.
+    fn this_version() -> Self {
+        Self {
+            version: redoor_core::identity::version_line(),
+        }
+    }
+
+    /// The version the local debug build reports, which may differ from this server's.
+    fn of_build(build: &LocalBuild) -> Self {
+        Self {
+            version: build.version.clone(),
+        }
     }
 
     /// Decides whether a probed binary can be used; mirrors the check in [`Self::launch_script`].
     pub(super) fn matches(&self, sniff: &RemoteSniff) -> bool {
         sniff.version_output == self.version
-            && match &self.sha1 {
-                Some(sha1) => sniff.sha1sum.is_empty() || &sniff.sha1sum == sha1,
-                None => true,
-            }
     }
 
     /// Builds the single-line launch script: it prints the probe report, then either
@@ -381,10 +522,9 @@ impl BinaryExpectation {
     /// arguments, or prints [`LAUNCH_NEEDS_INSTALL`] and exits without starting anything.
     /// Probing and starting in one session saves an SSH round-trip on every start.
     pub(super) fn launch_script(&self, remote_bin: &str) -> String {
-        let sha1 = quote(self.sha1.as_deref().unwrap_or(""));
         format!(
             "{{ {probe}; \
-             if [ \"$version\" = {version} ] && {{ [ -z {sha1} ] || [ -z \"$sha1\" ] || [ \"$sha1\" = {sha1} ]; }}; then \
+             if [ \"$version\" = {version} ]; then \
              echo {LAUNCH_READY}; exec \"$bin\" \"$@\"; fi; \
              echo {LAUNCH_NEEDS_INSTALL}; }}",
             probe = probe_statements(remote_bin),
@@ -395,12 +535,8 @@ impl BinaryExpectation {
     /// Explains why a just-uploaded binary was rejected.
     fn mismatch_message(&self, sniff: &RemoteSniff) -> String {
         format!(
-            "remote binary at {} did not verify after upload: version '{}' (want '{}'), sha1sum '{}' (want '{}')",
-            sniff.remote_bin,
-            sniff.version_output,
-            self.version,
-            sniff.sha1sum,
-            self.sha1.as_deref().unwrap_or("any")
+            "remote binary at {} did not verify after upload: version '{}' (want '{}')",
+            sniff.remote_bin, sniff.version_output, self.version
         )
     }
 }
@@ -448,20 +584,44 @@ impl BinaryCheck for ProbeCheck<'_> {
     }
 }
 
+/// Local binary a missing or stale remote install is uploaded from.
+enum InstallSource {
+    /// The local debug build at `path`, installed at its content-addressed path.
+    Debug {
+        /// Local file to upload.
+        path: PathBuf,
+        /// Identity the remote path and expectation were derived from.
+        build: LocalBuild,
+    },
+    /// The release artifact of the probed platform, fetched into the local cache on demand
+    /// so a device that already has it never triggers a download.
+    Release,
+}
+
 /// Where a missing or stale binary is installed from and to.
 struct InstallTarget {
-    /// Remote path the binary is uploaded to.
+    /// Remote path the binary is checked at and uploaded to.
     remote_bin: String,
-    /// Local debug build to upload, or `None` for the release artifact of the platform.
-    debug_binary: Option<PathBuf>,
+    /// What gets uploaded when the remote binary does not match.
+    source: InstallSource,
+}
+
+impl InstallTarget {
+    /// What the binary at [`Self::remote_bin`] must report to be used.
+    fn expectation(&self) -> BinaryExpectation {
+        match &self.source {
+            InstallSource::Debug { build, .. } => BinaryExpectation::of_build(build),
+            InstallSource::Release => BinaryExpectation::this_version(),
+        }
+    }
 }
 
 /// Makes sure a device runs a binary matching this server, installing one when needed.
 ///
 /// Only the default install locations are managed here; an operator-provided path is
-/// used as-is by the caller. A debug server prefers its local debug build at a dedicated
-/// path, matched by SHA-1 because the version does not change between rebuilds, and
-/// falls back to the versioned release install when the device's platform differs.
+/// used as-is by the caller. A debug server prefers its local debug build at a path named
+/// after the build's content hash, because the version does not change between rebuilds,
+/// and falls back to the versioned release install when the device's platform differs.
 pub(super) struct Installer<'a> {
     /// Host to install on.
     pub(super) host: &'a SshHost,
@@ -480,21 +640,22 @@ impl Installer<'_> {
         check: &mut C,
     ) -> Result<C::Ready, ProvisionError> {
         self.status.report("Sniffing the SSH target");
-        let (mut remote_bin, mut expect) = self.first_candidate().await?;
+        let mut target = self.first_candidate().await?;
         let mut uploaded = false;
         let mut first_check = true;
         // At most: the debug path, the release path after a platform mismatch, and the
         // verification after the upload.
         for _ in 0..3 {
+            let expect = target.expectation();
             log!(
                 Level::Debug,
                 "Checking remote binary: target={}, remote_bin={}, expect={:?}, uploaded={}",
                 self.host.target(),
-                remote_bin,
+                target.remote_bin,
                 expect,
                 uploaded
             );
-            let result = check.check(&remote_bin, &expect).await?;
+            let result = check.check(&target.remote_bin, &expect).await?;
             let sniff = result.sniff;
             if first_check {
                 // Later checks follow an upload or a platform switch and have their own lines.
@@ -507,6 +668,9 @@ impl Installer<'_> {
                         "Verified the uploaded binary at {}",
                         sniff.remote_bin
                     ));
+                    if let InstallSource::Debug { build, .. } = &target.source {
+                        self.spawn_stale_debug_cleanup(&build.hash);
+                    }
                 } else {
                     self.status.report(format!(
                         "Using existing remote binary at {}",
@@ -515,11 +679,10 @@ impl Installer<'_> {
                 }
                 log!(
                     Level::Info,
-                    "Remote binary matches: target={}, remote_bin={}, version='{}', sha1sum='{}', uploaded={}",
+                    "Remote binary matches: target={}, remote_bin={}, version='{}', uploaded={}",
                     self.host.target(),
                     sniff.remote_bin,
                     sniff.version_output,
-                    sniff.sha1sum,
                     uploaded
                 );
                 return Ok(ready);
@@ -534,55 +697,36 @@ impl Installer<'_> {
                 );
                 return Err(ProvisionError::Remote(message));
             }
-            let target = self.install_target(&sniff).await?;
-            if target.remote_bin != remote_bin {
-                // The probe looked at the debug path, but this platform needs the release
-                // install, which may already be in place.
+            let install = self.install_target(&sniff).await?;
+            if install.remote_bin != target.remote_bin {
+                // The probe looked at another path than this platform installs to: the
+                // debug path on a device that needs the release install, or the previous
+                // debug path after a rebuild. The binary may already be in place there.
                 log!(
                     Level::Info,
-                    "Switching to the release install for a different remote platform: target={}, os={}, arch={}, remote_bin={}",
+                    "Switching the remote install path: target={}, os={}, arch={}, from={}, to={}",
                     self.host.target(),
                     sniff.os,
                     sniff.arch,
-                    target.remote_bin
+                    target.remote_bin,
+                    install.remote_bin
                 );
-                self.status.report(format!(
-                    "Checking the release install at {} for this platform",
-                    target.remote_bin
-                ));
-                remote_bin = target.remote_bin;
-                expect = BinaryExpectation::this_version();
+                self.status.report(match install.source {
+                    InstallSource::Release => format!(
+                        "Checking the release install at {} for this platform",
+                        install.remote_bin
+                    ),
+                    InstallSource::Debug { .. } => format!(
+                        "Checking the debug install at {} for the rebuilt local binary",
+                        install.remote_bin
+                    ),
+                });
+                target = install;
                 continue;
             }
-            let (local_path, upload_expect) = match target.debug_binary {
-                Some(path) => {
-                    let upload_expect = BinaryExpectation::local_build(&path).await?;
-                    (path, upload_expect)
-                }
-                None => {
-                    let path = self
-                        .provision
-                        .binaries
-                        .ensure(env!("CARGO_PKG_VERSION"), &sniff.os, &sniff.arch, |line| {
-                            self.status.report(line)
-                        })
-                        .await?;
-                    let upload_expect = BinaryExpectation::exact(file_sha1sum(&path).await?);
-                    (path, upload_expect)
-                }
-            };
-            log!(
-                Level::Info,
-                "Remote binary missing or stale, uploading: target={}, remote_bin={}, remote_version='{}', remote_sha1sum='{}', local_path={}",
-                self.host.target(),
-                sniff.remote_bin,
-                sniff.version_output,
-                sniff.sha1sum,
-                local_path.display()
-            );
-            upload_binary(self.host, &local_path, &remote_bin, self.status).await?;
+            target = install;
+            self.upload(&target, &sniff).await?;
             uploaded = true;
-            expect = upload_expect;
         }
         let message = format!(
             "could not settle on a remote binary for {} after several attempts",
@@ -592,127 +736,205 @@ impl Installer<'_> {
         Err(ProvisionError::Remote(message))
     }
 
-    /// The path and expectation checked first, before the remote platform is known: the
-    /// local debug build when this is a debug server that has one, otherwise the versioned
-    /// release install.
-    async fn first_candidate(&self) -> Result<(String, BinaryExpectation), ProvisionError> {
-        let debug_binary =
-            available_debug_binary(std::env::consts::OS, std::env::consts::ARCH).await?;
-        match debug_binary {
+    /// Uploads the binary `target` installs from, fetching the release artifact for the
+    /// probed platform first when that is the source.
+    async fn upload(
+        &self,
+        target: &InstallTarget,
+        sniff: &RemoteSniff,
+    ) -> Result<(), ProvisionError> {
+        let (local_path, size) = match &target.source {
+            // The size is the one the hash was computed for, so a rebuild that changes the
+            // file length during the upload is rejected by the size check.
+            InstallSource::Debug { path, build } => (path.clone(), build.size),
+            InstallSource::Release => {
+                let path = self
+                    .provision
+                    .binaries
+                    .ensure(env!("CARGO_PKG_VERSION"), &sniff.os, &sniff.arch, |line| {
+                        self.status.report(line)
+                    })
+                    .await?;
+                let size = local_file_size(&path).await?;
+                (path, size)
+            }
+        };
+        log!(
+            Level::Info,
+            "Remote binary missing or stale, uploading: target={}, remote_bin={}, remote_version='{}', local_path={}, size={}",
+            self.host.target(),
+            sniff.remote_bin,
+            sniff.version_output,
+            local_path.display(),
+            size
+        );
+        upload_binary(
+            self.host,
+            &local_path,
+            &target.remote_bin,
+            size,
+            self.status,
+        )
+        .await
+    }
+
+    /// The install checked first, before the remote platform is known: the local debug
+    /// build when this is a debug server that has one, otherwise the versioned release
+    /// install.
+    async fn first_candidate(&self) -> Result<InstallTarget, ProvisionError> {
+        match available_debug_binary(std::env::consts::OS, std::env::consts::ARCH).await? {
             Some(path) => {
                 self.status
                     .report("Comparing the remote debug install to this local build");
-                Ok((
-                    debug_remote_bin(&self.provision.app_name),
-                    BinaryExpectation::local_build(&path).await?,
-                ))
+                self.debug_target(path).await
             }
-            None => Ok((
-                default_remote_bin(&self.provision.app_name),
-                BinaryExpectation::this_version(),
-            )),
+            None => Ok(self.release_target()),
         }
     }
 
     /// Where the binary for the probed platform is installed from and to.
     async fn install_target(&self, sniff: &RemoteSniff) -> Result<InstallTarget, ProvisionError> {
-        let debug_binary = available_debug_binary(&sniff.os, &sniff.arch).await?;
-        let remote_bin = if debug_binary.is_some() {
-            debug_remote_bin(&self.provision.app_name)
-        } else {
-            default_remote_bin(&self.provision.app_name)
-        };
+        match available_debug_binary(&sniff.os, &sniff.arch).await? {
+            Some(path) => self.debug_target(path).await,
+            None => Ok(self.release_target()),
+        }
+    }
+
+    /// The content-addressed install of the local debug build at `path`. The identity is
+    /// cached, so only the first provision after a rebuild pays for hashing it.
+    async fn debug_target(&self, path: PathBuf) -> Result<InstallTarget, ProvisionError> {
+        let build = self.provision.local_build.get(&path).await?;
         Ok(InstallTarget {
-            remote_bin,
-            debug_binary,
+            remote_bin: debug_remote_bin(&self.provision.app_name, &build.hash),
+            source: InstallSource::Debug { path, build },
         })
+    }
+
+    /// The versioned release install of this server's version.
+    fn release_target(&self) -> InstallTarget {
+        InstallTarget {
+            remote_bin: default_remote_bin(&self.provision.app_name),
+            source: InstallSource::Release,
+        }
+    }
+
+    /// Removes the installs of other debug builds once the build with `keep_hash` verified.
+    ///
+    /// Every rebuild gets a new content-addressed directory, so without this a device would
+    /// keep hundreds of megabytes per rebuild. An agent still running an older build keeps
+    /// its deleted file open, so removing it is safe. It runs as its own bounded task: the
+    /// agent may already be connected when the upload verifies, and neither its start nor
+    /// a stop requested right after it should wait for, or cancel, the cleanup.
+    fn spawn_stale_debug_cleanup(&self, keep_hash: &str) {
+        let host = self.host.clone();
+        let script = stale_debug_cleanup_script(&self.provision.app_name, keep_hash);
+        let keep_hash = keep_hash.to_string();
+        tokio::spawn(async move {
+            remove_stale_debug_installs(&host, &script, &keep_hash).await;
+        });
     }
 }
 
-/// Streams `path` through SHA-1 so large binaries never need to sit fully in
-/// memory, matching the same digest the remote `sha1sum`/`shasum` probe uses.
-async fn file_sha1sum(path: &Path) -> Result<String, std::io::Error> {
-    use sha1::{Digest, Sha1};
+/// Runs the cleanup built by [`stale_debug_cleanup_script`]. Failures are only logged: the
+/// agent is already usable and the next verified upload tries again.
+async fn remove_stale_debug_installs(host: &SshHost, script: &str, keep_hash: &str) {
+    let options = SshRunOptions::default().compressed();
+    match timeout(REMOTE_TEMP_CLEANUP_TIMEOUT, host.run(script, &[], &options)).await {
+        Ok(Ok(status)) if status.success() => log!(
+            Level::Info,
+            "Removed stale remote debug installs: target={}, kept=debug-{}",
+            host.target(),
+            keep_hash
+        ),
+        Ok(Ok(status)) => redoor_core::log_failure!(
+            Level::Error,
+            "Stale remote debug install cleanup failed: target={}, status={}",
+            host.target(),
+            status.code().unwrap_or(-1)
+        ),
+        Ok(Err(error)) => redoor_core::log_failure!(
+            Level::Error,
+            "Stale remote debug install cleanup failed: target={}, error={:#}",
+            host.target(),
+            error
+        ),
+        Err(_) => redoor_core::log_failure!(
+            Level::Error,
+            "Stale remote debug install cleanup timed out: target={}",
+            host.target()
+        ),
+    }
+}
 
-    let mut file = tokio::fs::File::open(path).await.map_err(|error| {
+/// Builds the single-line script that deletes every debug install of `app_name` except the
+/// one named after `keep_hash`, including the `debug/` directory older servers used.
+///
+/// It only touches `debug-*` and `debug` entries directly inside the binaries directory,
+/// so versioned release installs and anything else stay untouched; the pattern is
+/// expanded by the remote shell, and an unmatched pattern is skipped by the `-d` test.
+fn stale_debug_cleanup_script(app_name: &str, keep_hash: &str) -> String {
+    format!(
+        "base={base}; keep={keep}; \
+         for dir in \"$base\"/debug-* \"$base\"/debug; do \
+         if [ \"$dir\" != \"$base/$keep\" ] && [ -d \"$dir\" ]; then rm -rf \"$dir\"; fi; \
+         done",
+        base = path_word(&remote_binaries_dir(app_name)),
+        keep = quote(&format!("debug-{keep_hash}")),
+    )
+}
+
+/// Size of a local binary, which the upload script compares with the bytes it received.
+async fn local_file_size(path: &Path) -> Result<u64, std::io::Error> {
+    let metadata = tokio::fs::metadata(path).await.map_err(|error| {
         std::io::Error::other(format!(
-            "failed to open '{}' to calculate its SHA-1: {error}",
+            "failed to access binary source '{}': {error}",
             path.display()
         ))
     })?;
-    let mut hasher = Sha1::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
+    if !metadata.is_file() {
+        return Err(std::io::Error::other(format!(
+            "binary source '{}' is not a regular file",
+            path.display()
+        )));
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(metadata.len())
 }
 
 /// Unconditionally streams an operator-selected binary to the remote install
-/// path and verifies that the resulting executable contains the same bytes.
+/// path and verifies that the upload arrived complete and runs.
 /// This intentionally bypasses version/cache selection so local development or
 /// cross-compiled artifacts can replace an otherwise matching remote release.
+/// The upload script rejects a stream of the wrong length before anything is moved into
+/// place, and the probe afterwards proves the installed file executes.
 pub(super) async fn force_upload_binary(
     host: &SshHost,
     local_path: &Path,
     remote_bin: &str,
     status: &ProvisioningStatusSink,
 ) -> Result<String, ProvisionError> {
-    let metadata = tokio::fs::metadata(local_path).await.map_err(|error| {
-        std::io::Error::other(format!(
-            "failed to access binary source '{}': {error}",
-            local_path.display()
-        ))
-    })?;
-    if !metadata.is_file() {
-        return Err(ProvisionError::Remote(format!(
-            "binary source '{}' is not a regular file",
-            local_path.display()
-        )));
-    }
-
-    let local_sha1 = file_sha1sum(local_path).await?;
-    upload_binary(host, local_path, remote_bin, status).await?;
+    let size = local_file_size(local_path).await?;
+    upload_binary(host, local_path, remote_bin, size, status).await?;
     let uploaded = sniff_remote(host, remote_bin).await?;
     if uploaded.version_output.is_empty() {
         redoor_core::log_failure!(
             Level::Error,
-            "Forced binary upload does not run: target={}, remote_bin={}, sha1sum='{}'",
+            "Forced binary upload does not run: target={}, remote_bin={}",
             host.target(),
-            uploaded.remote_bin,
-            uploaded.sha1sum
+            uploaded.remote_bin
         );
         return Err(ProvisionError::Remote(format!(
             "uploaded binary at {} did not execute successfully with --version",
             uploaded.remote_bin
         )));
     }
-    if !uploaded.sha1sum.is_empty() && uploaded.sha1sum != local_sha1 {
-        redoor_core::log_failure!(
-            Level::Error,
-            "Forced binary upload checksum mismatch: target={}, remote_bin={}, remote_sha1sum='{}', local_sha1sum='{}'",
-            host.target(),
-            uploaded.remote_bin,
-            uploaded.sha1sum,
-            local_sha1
-        );
-        return Err(ProvisionError::Remote(format!(
-            "remote binary at {} sha1sum mismatch after forced upload: got '{}', want '{}'",
-            uploaded.remote_bin, uploaded.sha1sum, local_sha1
-        )));
-    }
 
     log!(
         Level::Info,
-        "Forced binary upload verified: binary_source={}, remote_bin={}, version='{}', sha1sum='{}'",
+        "Forced binary upload verified: binary_source={}, remote_bin={}, version='{}', size={}",
         local_path.display(),
         uploaded.remote_bin,
         uploaded.version_output,
-        uploaded.sha1sum
+        size
     );
     Ok(uploaded.remote_bin)
 }
@@ -749,6 +971,11 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Replaces the workspace debug build that a debug server uploads. Integration tests use
+/// it to give the server a "rebuilt" binary without touching the shared `target/debug`
+/// output; release servers never upload a debug build, so they ignore it.
+const TEST_DEBUG_BINARY_ENV: &str = "REDOOR_TEST_DEBUG_BINARY";
+
 /// Resolves the matching local debug binary only when it exists. Missing debug
 /// output is not an error because GitHub release provisioning remains the
 /// intended fallback for fresh checkouts and cross-compiled server binaries.
@@ -763,7 +990,12 @@ async fn available_debug_binary(
         remote_os,
         remote_arch,
         &workspace_root(),
-    );
+    )
+    .map(|workspace_build| {
+        std::env::var_os(TEST_DEBUG_BINARY_ENV)
+            .filter(|path| !path.is_empty())
+            .map_or(workspace_build, PathBuf::from)
+    });
 
     match candidate {
         Some(path) if tokio::fs::try_exists(&path).await? => Ok(Some(path)),
@@ -786,21 +1018,33 @@ fn remote_upload_tmp_path(remote_bin: &str, unique: &str) -> String {
 /// It creates the parent directory for a fresh host and marks the file executable
 /// because `cat` does not carry mode bits. `set -e` stops at the first failing step and
 /// the EXIT trap removes the temp file on that failure.
-fn upload_script(remote_bin: &str, remote_tmp: &str) -> String {
+///
+/// The received length must equal `size` before the file is moved into place. A stream
+/// that ended early would otherwise be installed, and at a content-addressed debug path a
+/// truncated binary that still answered `--version` would be trusted from then on. A size
+/// check is enough to catch that without hashing on the device. `wc -c` pads its output
+/// with spaces on macOS and BSD, so the count is compared unquoted as a number; the
+/// negation also fails the check when `wc` printed nothing.
+fn upload_script(remote_bin: &str, remote_tmp: &str, size: u64) -> String {
     format!(
         "{{ set -e; bin={bin}; tmp={tmp}; mkdir -p \"$(dirname \"$bin\")\"; \
-         trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; chmod +x \"$tmp\"; mv -f \"$tmp\" \"$bin\"; \
+         trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; received=$(wc -c < \"$tmp\"); \
+         if ! [ $received -eq {size} ]; then \
+         echo \"received $received bytes of the binary, expected {size}\" >&2; exit 1; fi; \
+         chmod +x \"$tmp\"; mv -f \"$tmp\" \"$bin\"; \
          trap - EXIT; }}",
         bin = path_word(remote_bin),
         tmp = path_word(remote_tmp)
     )
 }
 
-/// Uploads the binary in one SSH session with [`upload_script`].
+/// Uploads the binary in one SSH session with [`upload_script`], which only installs it
+/// when exactly `size` bytes arrived.
 async fn upload_binary(
     host: &SshHost,
     local_path: &Path,
     remote_bin: &str,
+    size: u64,
     status: &ProvisioningStatusSink,
 ) -> Result<(), ProvisionError> {
     let unique = format!(
@@ -829,7 +1073,7 @@ async fn upload_binary(
     if let Err(error) = host
         .upload(
             local_path,
-            &upload_script(remote_bin, &remote_tmp),
+            &upload_script(remote_bin, &remote_tmp, size),
             "binary upload",
         )
         .await
@@ -854,9 +1098,10 @@ async fn upload_binary(
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryExpectation, LAUNCH_NEEDS_INSTALL, LAUNCH_READY, PROBE_REPORT_LINES, RemoteSniff,
-        debug_binary_candidate, debug_remote_bin, default_remote_bin, file_sha1sum,
-        remote_sniff_script, remote_upload_tmp_path, upload_script,
+        BinaryExpectation, DEBUG_HASH_LEN, LAUNCH_NEEDS_INSTALL, LAUNCH_READY, LocalBuild,
+        LocalBuildCache, PROBE_REPORT_LINES, RemoteSniff, debug_binary_candidate, debug_remote_bin,
+        default_remote_bin, remote_sniff_script, remote_upload_tmp_path,
+        stale_debug_cleanup_script, upload_script,
     };
     use crate::ssh::shell::sh_command;
     use std::path::{Path, PathBuf};
@@ -910,17 +1155,88 @@ printf 'agent:%s|' "$@"
             .collect()
     }
 
-    /// Verifies local SHA-1 matches the well-known digest for a fixed payload so
-    /// remote `sha1sum` comparisons cannot drift from a buggy hasher.
+    /// Sets the modification time of `path`, so a test can rewrite a file without the
+    /// cache noticing, or make it notice a rebuild that kept the same size.
+    async fn set_modified(path: &Path, modified: std::time::SystemTime) {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(modified))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    /// Reads the modification time of `path`.
+    async fn modified(path: &Path) -> std::time::SystemTime {
+        tokio::fs::metadata(path).await.unwrap().modified().unwrap()
+    }
+
+    /// The streamed hash is the leading part of the one-shot BLAKE3 hash, and a file whose
+    /// length differs from the stamped size is rejected rather than hashed.
     #[tokio::test]
-    async fn file_sha1sum_matches_known_digest() {
+    async fn content_hash_streams_blake3_and_checks_the_size() {
         let directory = redoor_core::test_support::TempDir::create();
         let path = directory.path().join("payload.bin");
-        tokio::fs::write(&path, b"redoor").await.unwrap();
+        // Larger than one chunk, so the streaming loop runs more than once.
+        let payload: Vec<u8> = (0..super::HASH_CHUNK_SIZE * 2 + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        tokio::fs::write(&path, &payload).await.unwrap();
 
-        // echo -n redoor | sha1sum
-        let digest = file_sha1sum(&path).await.unwrap();
-        assert_eq!(digest, "5cd57297d6ccaa26976cb250ba018adbc98d5907");
+        let hash = LocalBuild::content_hash(&path, payload.len() as u64)
+            .await
+            .unwrap();
+        // Chunked hashing must name the same bytes as hashing the whole file at once.
+        assert_eq!(hash, blake3::hash(&payload).to_hex()[..DEBUG_HASH_LEN]);
+        // A length change means the file was rewritten while it was read.
+        assert!(
+            LocalBuild::content_hash(&path, payload.len() as u64 + 1)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The build identity is reused while the file's size and modification time are
+    /// unchanged, and recomputed as soon as either changes.
+    #[tokio::test]
+    async fn local_build_cache_recomputes_only_after_a_change() {
+        let home = redoor_core::test_support::TempDir::create();
+        let path = home.path().join("target/debug/redoor");
+        let cache = LocalBuildCache::default();
+        fake_binary(&path, "redoor 1.0.0").await;
+        let first = cache.get(&path).await.unwrap();
+        // The identity comes from the build itself.
+        assert_eq!(first.version, "redoor 1.0.0");
+        assert_eq!(first.hash.len(), DEBUG_HASH_LEN);
+
+        // Same size, and the original modification time restored.
+        let original = modified(&path).await;
+        fake_binary(&path, "redoor 2.0.0").await;
+        set_modified(&path, original).await;
+        // An unchanged stamp reuses the cached identity without reading the file again,
+        // which is what keeps every later start cheap.
+        assert_eq!(cache.get(&path).await.unwrap(), first);
+
+        // Same size, but a newer modification time, as after a rebuild.
+        set_modified(&path, original + std::time::Duration::from_secs(5)).await;
+        let rebuilt = cache.get(&path).await.unwrap();
+        // A new modification time alone triggers a recompute.
+        assert_eq!(rebuilt.version, "redoor 2.0.0");
+        assert_ne!(rebuilt.hash, first.hash);
+
+        // A different size with the previous modification time restored.
+        let previous = modified(&path).await;
+        fake_binary(&path, "redoor 10.0.0").await;
+        set_modified(&path, previous).await;
+        let resized = cache.get(&path).await.unwrap();
+        // A new size alone triggers a recompute.
+        assert_eq!(resized.version, "redoor 10.0.0");
+        assert_ne!(resized.size, rebuilt.size);
+        assert_ne!(resized.hash, rebuilt.hash);
     }
 
     /// Streams the generated probe to a POSIX shell just as SSH does, proving
@@ -955,9 +1271,8 @@ printf 'agent:%s|' "$@"
                 home.path().display()
             )
         );
-        // A missing binary has neither a version nor a checksum, so it gets installed.
+        // A missing binary has no version, so it gets installed.
         assert_eq!(sniff.version_output, "");
-        assert_eq!(sniff.sha1sum, "");
     }
 
     /// A path with spaces and shell syntax is probed literally, and only the first version
@@ -980,8 +1295,6 @@ printf 'agent:%s|' "$@"
         assert_eq!(sniff.remote_bin, path.display().to_string());
         // Only the first `--version` line is reported.
         assert_eq!(sniff.version_output, "redoor 1.2.3");
-        // The checksum covers the file the probe ran.
-        assert_eq!(sniff.sha1sum, file_sha1sum(&path).await.unwrap());
         // The path's command substitution never ran.
         assert!(!home.path().join("pwned").exists());
     }
@@ -994,11 +1307,14 @@ printf 'agent:%s|' "$@"
         let path = home.path().join("bin/redoor");
         let expected = redoor_core::identity::version_line();
         fake_binary(&path, &expected).await;
-        let local_sha1 = file_sha1sum(&path).await.unwrap();
         let cases = [
             (BinaryExpectation::this_version(), true),
-            (BinaryExpectation::exact(local_sha1.clone()), true),
-            (BinaryExpectation::exact("0".repeat(40)), false),
+            (
+                BinaryExpectation {
+                    version: "redoor 0.0.0".to_string(),
+                },
+                false,
+            ),
         ];
         for (expect, starts) in cases {
             let command = sh_command(&expect.launch_script("~/bin/redoor"), &["agent", "a b'c"]);
@@ -1029,11 +1345,13 @@ printf 'agent:%s|' "$@"
         let home = redoor_core::test_support::TempDir::create();
         let remote_bin = "~/data dir/redoor";
         let remote_tmp = remote_upload_tmp_path(remote_bin, "1-2");
-        let command = sh_command(&upload_script(remote_bin, &remote_tmp), &[]);
-
         let binary = b"#!/bin/sh
 echo uploaded
 ";
+        let command = sh_command(
+            &upload_script(remote_bin, &remote_tmp, binary.len() as u64),
+            &[],
+        );
         let output = run_remote(&command, binary, home.path()).await;
         // The directory is created and the binary moved into place.
         assert!(
@@ -1061,7 +1379,7 @@ echo uploaded
             .unwrap();
         let blocked_bin = "~/blocked/redoor";
         let command = sh_command(
-            &upload_script(blocked_bin, &remote_upload_tmp_path(blocked_bin, "3-4")),
+            &upload_script(blocked_bin, &remote_upload_tmp_path(blocked_bin, "3-4"), 4),
             &[],
         );
         let output = run_remote(&command, b"data", home.path()).await;
@@ -1072,28 +1390,115 @@ echo uploaded
         assert!(entries.next_entry().await.unwrap().is_none());
     }
 
-    /// Verifies checksum-less hosts can reuse a binary only when its executable
-    /// still reports the exact expected version.
+    /// A stream shorter or longer than the local file is rejected before anything reaches
+    /// the final path, so a cut-off upload can never be installed at a trusted debug path.
+    #[tokio::test]
+    async fn upload_script_rejects_a_stream_of_the_wrong_size() {
+        let home = redoor_core::test_support::TempDir::create();
+        let remote_bin = "~/debug-0123456789abcdef/redoor";
+        let directory = home.path().join("debug-0123456789abcdef");
+        let binary = b"#!/bin/sh
+echo uploaded
+";
+        // The stream ended early, then a stream with unexpected extra bytes.
+        for (index, received) in [&binary[..10], &[binary.as_slice(), b"extra"].concat()]
+            .into_iter()
+            .enumerate()
+        {
+            let command = sh_command(
+                &upload_script(
+                    remote_bin,
+                    &remote_upload_tmp_path(remote_bin, &index.to_string()),
+                    binary.len() as u64,
+                ),
+                &[],
+            );
+            let output = run_remote(&command, received, home.path()).await;
+            // The size mismatch fails the upload, which makes provisioning report it.
+            assert!(!output.status.success());
+            // The reason names both sizes so the operator can tell a cut-off stream apart.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!(
+                    "received {} bytes of the binary, expected {}",
+                    received.len(),
+                    binary.len()
+                )),
+                "stderr: {stderr}"
+            );
+            // Neither the final binary nor the temp file is left behind.
+            let mut entries = tokio::fs::read_dir(&directory).await.unwrap();
+            assert!(entries.next_entry().await.unwrap().is_none());
+        }
+    }
+
+    /// The cleanup removes other debug builds and the legacy `debug/` install, and keeps
+    /// the current build, release installs and other files.
+    #[tokio::test]
+    async fn stale_debug_cleanup_keeps_only_the_current_build() {
+        let home = redoor_core::test_support::TempDir::create();
+        let binaries = home.path().join(".local/share/redoor-dev/binaries");
+        for directory in [
+            "debug-1111111111111111",
+            "debug-2222222222222222",
+            "debug",
+            "1.2.3",
+            "debugger",
+        ] {
+            fake_binary(&binaries.join(directory).join("redoor"), "redoor 1.2.3").await;
+        }
+        tokio::fs::write(binaries.join("debug-notes"), b"a file, not an install")
+            .await
+            .unwrap();
+        // Another namespace's debug build must survive a cleanup of this one.
+        let other_app = home
+            .path()
+            .join(".local/share/other/binaries/debug-3333333333333333");
+        fake_binary(&other_app.join("redoor"), "redoor 1.2.3").await;
+
+        let command = sh_command(
+            &stale_debug_cleanup_script("redoor-dev", "2222222222222222"),
+            &[],
+        );
+        let output = run_remote(&command, b"", home.path()).await;
+        // Success lets the installer log a completed cleanup.
+        assert!(
+            output.status.success(),
+            "cleanup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut remaining = Vec::new();
+        let mut entries = tokio::fs::read_dir(&binaries).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            remaining.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        remaining.sort();
+        // Only the stale debug installs are removed; the kept build, the release install
+        // and names that merely start with `debug` are untouched.
+        assert_eq!(
+            remaining,
+            ["1.2.3", "debug-2222222222222222", "debug-notes", "debugger"]
+        );
+        // The cleanup is scoped to this namespace's binaries directory.
+        assert!(other_app.join("redoor").exists());
+    }
+
+    /// A binary is matched by its version alone, because its install path already
+    /// identifies the bytes.
     #[test]
-    fn expectation_falls_back_to_version_without_sha1() {
-        let version = redoor_core::identity::version_line();
-        let sniff = |version: &str, sha1sum: &str| RemoteSniff {
+    fn expectation_matches_by_version() {
+        let sniff = |version: &str| RemoteSniff {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             version_output: version.to_string(),
-            sha1sum: sha1sum.to_string(),
             remote_bin: "/bin/redoor".to_string(),
         };
-        let exact = BinaryExpectation::exact("local-digest".to_string());
-        // A matching version is the only available identity signal on a minimal host.
-        assert!(exact.matches(&sniff(&version, "")));
-        // A stale version must still trigger an upload when no digest can be calculated.
-        assert!(!exact.matches(&sniff("redoor 0.0.0", "")));
-        // A present digest must match even if the version text matches.
-        assert!(!exact.matches(&sniff(&version, "different-digest")));
-        assert!(exact.matches(&sniff(&version, "local-digest")));
-        // A release install is matched by version alone.
-        assert!(BinaryExpectation::this_version().matches(&sniff(&version, "any-digest")));
+        let expect = BinaryExpectation::this_version();
+        // The release install of this server's version is used as is.
+        assert!(expect.matches(&sniff(&redoor_core::identity::version_line())));
+        // Another version, or a binary that does not run, has to be installed.
+        assert!(!expect.matches(&sniff("redoor 0.0.0")));
+        assert!(!expect.matches(&sniff("")));
     }
 
     /// A local debug build is expected to report its own version, not this server's, so a
@@ -1103,19 +1508,17 @@ echo uploaded
         let home = redoor_core::test_support::TempDir::create();
         let path = home.path().join("target/debug/redoor");
         fake_binary(&path, "redoor 999.0.0").await;
-        let expect = BinaryExpectation::local_build(&path).await.unwrap();
+        let build = LocalBuildCache::default().get(&path).await.unwrap();
+        let expect = BinaryExpectation::of_build(&build);
         // The version comes from the build's first `--version` line.
         assert_eq!(expect.version, "redoor 999.0.0");
-        // The bytes must still match exactly, since debug rebuilds keep the version.
-        assert_eq!(expect.sha1, Some(file_sha1sum(&path).await.unwrap()));
         let sniff = RemoteSniff {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             version_output: "redoor 999.0.0".to_string(),
-            sha1sum: file_sha1sum(&path).await.unwrap(),
             remote_bin: "/bin/redoor".to_string(),
         };
-        // An identical upload verifies even though this server reports another version.
+        // An upload of the build verifies even though this server reports another version.
         assert!(expect.matches(&sniff));
     }
 
@@ -1125,10 +1528,10 @@ echo uploaded
     fn remote_upload_tmp_path_stays_in_same_directory() {
         assert_eq!(
             remote_upload_tmp_path(
-                "${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/debug/redoor",
+                "${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/debug-0123456789abcdef/redoor",
                 "1-2"
             ),
-            "${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/debug/redoor.tmp.1-2"
+            "${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/debug-0123456789abcdef/redoor.tmp.1-2"
         );
     }
 
@@ -1146,14 +1549,14 @@ echo uploaded
         );
     }
 
-    /// Verifies debug uploads target a dedicated install path rather than the
-    /// versioned release layout, so both can coexist on one remote host.
+    /// Verifies debug uploads target a content-addressed install path beside, not over,
+    /// the versioned release layout, so each build has its own path that identifies it.
     #[test]
-    fn debug_remote_bin_uses_dedicated_debug_version() {
+    fn debug_remote_bin_is_named_after_the_build_hash() {
         assert_eq!(
-            debug_remote_bin("redoor-dev"),
-            "${XDG_DATA_HOME:-$HOME/.local/share}/redoor-dev/binaries/debug/redoor",
-            "the debug install path should use the effective application namespace"
+            debug_remote_bin("redoor-dev", "0123456789abcdef"),
+            "${XDG_DATA_HOME:-$HOME/.local/share}/redoor-dev/binaries/debug-0123456789abcdef/redoor",
+            "the debug install path should use the namespace and the build's hash"
         );
     }
 
