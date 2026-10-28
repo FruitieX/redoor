@@ -8,6 +8,7 @@ import {
 import { $ } from "zx";
 import { z } from "zod";
 import {
+    ignoreServerEvents,
     setupTestDir,
     teardownTestDir,
     WEB_BASE_URL,
@@ -75,6 +76,9 @@ test.describe.serial("Unarchive file action", () => {
     });
 
     test("extracts each destination in a fresh terminal", async ({ page }) => {
+        // Other specs' uploads and edits broadcast `routes_changed`, which refetches this
+        // listing at random moments and breaks both the stale-listing and request-count checks.
+        await ignoreServerEvents(page);
         await page.clock.install({
             time: new Date("2026-08-20T08:00:00Z"),
         });
@@ -412,6 +416,8 @@ test.describe.serial("Unarchive file action", () => {
     test("refreshes only the originating listing after navigation", async ({
         page,
     }) => {
+        // Server events from parallel specs would refetch listings and inflate the count.
+        await ignoreServerEvents(page);
         await page.clock.install({
             time: new Date("2026-08-20T12:00:00Z"),
         });
