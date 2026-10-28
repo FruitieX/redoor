@@ -8,6 +8,15 @@ edition = "2024"
 # Distributed only as release binaries, never on crates.io; cargo-deny also skips license checks for private crates.
 publish = false
 
+# Dependencies run optimized in debug builds: tests push hundreds of megabytes through
+# hashing, compression, regex and async I/O code that is many times slower unoptimized.
+# Workspace crates stay at opt-level 0 so incremental rebuilds remain fast, and the
+# dependencies are compiled once and then cached. Line tables keep backtraces readable
+# while dropping the full debug info that made the binary tests upload over SSH balloon.
+[profile.dev.package."*"]
+opt-level = 2
+debug = "line-tables-only"
+
 [workspace.dependencies]
 blake3 = "1.8"
 redoor-protocol = { path = "crates/redoor-protocol" }
