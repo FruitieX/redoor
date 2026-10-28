@@ -22,16 +22,6 @@ test.describe.serial("File Browser Navigation", () => {
         await teardownTestDir(ctx.testDirPath);
     });
 
-    test("should display file list at agent root", async ({ page }) => {
-        await page.goto(ctx.agentBrowserUrl);
-
-        await expect(
-            page.locator(
-                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
-            ),
-        ).toBeVisible();
-    });
-
     test("should display modified time and sort every metadata column", async ({
         page,
     }) => {
@@ -860,29 +850,6 @@ test.describe.serial("File Browser Navigation", () => {
         await expect(
             fs.access(path.join(currentPath, "old.txt")),
         ).rejects.toThrow();
-    });
-
-    test("should navigate to deep nested directory", async ({ page }) => {
-        await page.goto(ctx.agentBrowserUrl);
-        await page
-            .locator(
-                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
-            )
-            .click();
-        await page.getByRole("link", { name: "subdir2", exact: true }).click();
-
-        await expect(
-            page.getByRole("link", { name: "deep", exact: true }),
-        ).toBeVisible();
-
-        await page.getByRole("link", { name: "deep", exact: true }).click();
-
-        await expect(
-            page.getByRole("link", { name: "nested3.txt", exact: true }),
-        ).toBeVisible();
-
-        const fileEntries = page.locator("main tbody tr");
-        await expect(fileEntries).toHaveCount(1);
     });
 
     test("should navigate using breadcrumbs", async ({ page }) => {

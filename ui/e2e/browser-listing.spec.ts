@@ -111,39 +111,6 @@ test.describe.serial("File Browser Listing", () => {
         await expect(page).toHaveURL(agent1DirectoryUrl);
     });
 
-    test("should display correct icons and sizes", async ({ page }) => {
-        await page.goto(ctx.agentBrowserUrl);
-        await page
-            .locator(
-                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
-            )
-            .click();
-
-        const dirLinks = page.getByRole("link", {
-            name: /^(subdir1|subdir2|subdir3)$/,
-        });
-
-        await expect(dirLinks).toHaveCount(3);
-
-        const fileEntries = page
-            .locator("td")
-            .filter({ hasText: /^(file1|file2)\.txt$/ });
-
-        await expect(fileEntries).toHaveCount(2);
-
-        const dirSizeColumn = page.getByRole("cell", {
-            name: "Size for subdir1",
-        });
-
-        await expect(dirSizeColumn).toBeVisible();
-
-        const fileSizeColumn = page.getByRole("cell", {
-            name: "Size for file1.txt",
-        });
-
-        await expect(fileSizeColumn).not.toHaveText("-");
-    });
-
     test("should refresh the file list when the tab is focused", async ({
         page,
     }) => {

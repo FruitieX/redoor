@@ -12,8 +12,6 @@ const FAILING_AGENT = "failing_managed";
 
 const CREATED_SSH_AGENT = `playwright-ssh-test-${process.pid}`;
 
-const CREATED_SSH_PASSWORD_AGENT = `playwright-ssh-password-${process.pid}`;
-
 const CREATED_SSH_MISSING_PASSWORD_AGENT = `playwright-ssh-missing-password-${process.pid}`;
 
 const CREATED_SSH_MODE_SWITCH_AGENT = `playwright-ssh-mode-switch-${process.pid}`;
@@ -55,7 +53,6 @@ test.describe.serial("Agent management", () => {
             VALID_AGENT,
             FAILING_AGENT,
             CREATED_SSH_AGENT,
-            CREATED_SSH_PASSWORD_AGENT,
             CREATED_SSH_MISSING_PASSWORD_AGENT,
             CREATED_SSH_MODE_SWITCH_AGENT,
             CREATED_SSH_PASSWORD_CHANGE_AGENT,
@@ -493,60 +490,6 @@ test.describe.serial("Agent management", () => {
         ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
     });
 
-    test("adds and connects an SSH agent with password auth", async ({
-        page,
-    }) => {
-        test.skip(
-            process.env.REDOOR_SSH_TEST !== "1" ||
-                !process.env.REDOOR_SSH_TEST_PASSWORD,
-            "redoor-ssh-test password fixture is not enabled",
-        );
-        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
-        const password = process.env.REDOOR_SSH_TEST_PASSWORD;
-
-        if (password === undefined) {
-            throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
-        }
-
-        await page.goto(`${WEB_BASE_URL}/`);
-        await page.getByRole("link", { name: "Add device" }).click();
-
-        await page.getByLabel("SSH target").fill("redoor-ssh-test");
-        await page.getByLabel("SSH username").fill("redoor-password");
-        await page.getByLabel("Device name").fill(CREATED_SSH_PASSWORD_AGENT);
-        // Storing the password is only offered without a dedicated key.
-        await page
-            .getByRole("checkbox", {
-                name: "Create a dedicated SSH key (recommended)",
-            })
-            .uncheck();
-        await page.getByRole("radio", { name: "Use ssh password" }).check();
-        // Password mode must enable the field before a secret can be typed.
-        await expect(
-            page.getByLabel("SSH password", { exact: true }),
-        ).toBeEnabled();
-        await page.getByLabel("SSH password", { exact: true }).fill(password);
-        await page.getByRole("button", { name: "Add device" }).click();
-        await page
-            .getByRole("button", { name: "Connect", exact: true })
-            .click();
-
-        // Password auth must prepare and connect without a TTY or ssh-agent key.
-        await expect(
-            page.getByRole("link", {
-                name: `${CREATED_SSH_PASSWORD_AGENT}, connected`,
-            }),
-        ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
-
-        const connected = await getAgent(
-            page.request,
-            CREATED_SSH_PASSWORD_AGENT,
-        );
-
-        expect(connected.managed).toBe(true);
-        expect(connected.connection_id).not.toBeNull();
-    });
-
     test("switches an existing agent from password auth to key auth", async ({
         page,
     }) => {
@@ -575,16 +518,30 @@ test.describe.serial("Agent management", () => {
             })
             .uncheck();
         await page.getByRole("radio", { name: "Use ssh password" }).check();
+        // Password mode must enable the field before a secret can be typed.
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeEnabled();
         await page.getByLabel("SSH password", { exact: true }).fill(password);
         await page.getByRole("button", { name: "Add device" }).click();
         await page
             .getByRole("button", { name: "Connect", exact: true })
             .click();
+        // Password auth must prepare and connect without a TTY or ssh-agent key.
         await expect(
             page.getByRole("link", {
                 name: `${CREATED_SSH_MODE_SWITCH_AGENT}, connected`,
             }),
         ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+
+        const connected = await getAgent(
+            page.request,
+            CREATED_SSH_MODE_SWITCH_AGENT,
+        );
+
+        // A password-provisioned device is server managed and holds a live connection.
+        expect(connected.managed).toBe(true);
+        expect(connected.connection_id).not.toBeNull();
 
         await page
             .getByRole("link", {

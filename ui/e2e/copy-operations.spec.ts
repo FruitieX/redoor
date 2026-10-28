@@ -462,11 +462,11 @@ test.describe.serial("Copy Operations", () => {
         );
     });
 
-    test("should replace an existing directory when resolving a copy conflict", async ({
+    test("should send the chosen directory conflict policy with the copy", async ({
         page,
     }) => {
-        test.setTimeout(60_000);
-        const sourceName = `replace-existing-${Date.now()}`;
+        test.setTimeout(90_000);
+        const sourceName = `conflict-policy-${Date.now()}`;
         const sourcePath = path.join(ctx.testDirPath, sourceName);
 
         const destinationPath = path.join(
@@ -477,128 +477,57 @@ test.describe.serial("Copy Operations", () => {
 
         await fs.mkdir(sourcePath);
         await fs.writeFile(path.join(sourcePath, "conflict.txt"), "source");
-        await fs.writeFile(path.join(sourcePath, "source-only.txt"), "source");
         await fs.mkdir(destinationPath);
         await fs.writeFile(
             path.join(destinationPath, "conflict.txt"),
             "destination",
         );
-        await fs.writeFile(
-            path.join(destinationPath, "destination-only.txt"),
-            "destination",
-        );
 
-        await openCopyConflict({
-            page,
-            ctx,
-            sourceName,
-            sourceType: "directory",
-            destinationDirectoryName: "subdir1",
-        });
+        // The copy semantics of each policy are covered by tests/raw-copy.test.ts; this only
+        // guards the mapping from the dialog choice to the API value.
+        const options = [
+            { label: "Replace existing", onExisting: "override" },
+            {
+                label: "Merge directories and replace files",
+                onExisting: "merge",
+            },
+            { label: "Rename", onExisting: "error" },
+        ];
 
-        const dialog = page.getByRole("dialog", {
-            name: "Destination items already exist",
-        });
+        for (const option of options) {
+            // Each copy leaves the destination directory in place, so every round conflicts again.
+            await openCopyConflict({
+                page,
+                ctx,
+                sourceName,
+                sourceType: "directory",
+                destinationDirectoryName: "subdir1",
+            });
 
-        await dialog.getByRole("radio", { name: "Replace existing" }).check();
+            const dialog = page.getByRole("dialog", {
+                name: "Destination items already exist",
+            });
 
-        const copyRequest = page.waitForRequest(
-            (request) =>
-                request.url() === `${WEB_BASE_URL}/api/v1/copy` &&
-                request.method() === "POST",
-        );
+            await dialog.getByRole("radio", { name: option.label }).check();
 
-        await dialog.getByRole("button", { name: "Continue copying" }).click();
-        // Choosing replacement must map to the API's override policy.
-        expect((await copyRequest).postDataJSON().on_existing).toBe("override");
-        await expect(
-            page.getByRole("button", { name: "Clear selection" }),
-        ).toHaveCount(0, { timeout: 30_000 });
-        // Override must publish the source version of conflicting content.
-        await expect(
-            fs.readFile(path.join(destinationPath, "conflict.txt"), "utf8"),
-        ).resolves.toBe("source");
-        // Override must include entries that only exist in the source.
-        await expect(
-            fs.readFile(path.join(destinationPath, "source-only.txt"), "utf8"),
-        ).resolves.toBe("source");
-        // Override replaces the entire destination rather than retaining old entries.
-        await expect(
-            fs.stat(path.join(destinationPath, "destination-only.txt")),
-        ).rejects.toThrow();
-    });
+            const copyRequest = page.waitForRequest(
+                (request) =>
+                    request.url() === `${WEB_BASE_URL}/api/v1/copy` &&
+                    request.method() === "POST",
+            );
 
-    test("should merge an existing directory when resolving a copy conflict", async ({
-        page,
-    }) => {
-        test.setTimeout(60_000);
-        const sourceName = `merge-existing-${Date.now()}`;
-        const sourcePath = path.join(ctx.testDirPath, sourceName);
-
-        const destinationPath = path.join(
-            ctx.testDirPath,
-            "subdir1",
-            sourceName,
-        );
-
-        await fs.mkdir(sourcePath);
-        await fs.writeFile(path.join(sourcePath, "conflict.txt"), "source");
-        await fs.writeFile(path.join(sourcePath, "source-only.txt"), "source");
-        await fs.mkdir(destinationPath);
-        await fs.writeFile(
-            path.join(destinationPath, "conflict.txt"),
-            "destination",
-        );
-        await fs.writeFile(
-            path.join(destinationPath, "destination-only.txt"),
-            "destination",
-        );
-
-        await openCopyConflict({
-            page,
-            ctx,
-            sourceName,
-            sourceType: "directory",
-            destinationDirectoryName: "subdir1",
-        });
-
-        const dialog = page.getByRole("dialog", {
-            name: "Destination items already exist",
-        });
-
-        await dialog
-            .getByRole("radio", {
-                name: "Merge directories and replace files",
-            })
-            .check();
-
-        const copyRequest = page.waitForRequest(
-            (request) =>
-                request.url() === `${WEB_BASE_URL}/api/v1/copy` &&
-                request.method() === "POST",
-        );
-
-        await dialog.getByRole("button", { name: "Continue copying" }).click();
-        // Choosing merge must map directly to the API's merge policy.
-        expect((await copyRequest).postDataJSON().on_existing).toBe("merge");
-        await expect(
-            page.getByRole("button", { name: "Clear selection" }),
-        ).toHaveCount(0, { timeout: 30_000 });
-        // Merge must favor the source when both trees contain the same entry.
-        await expect(
-            fs.readFile(path.join(destinationPath, "conflict.txt"), "utf8"),
-        ).resolves.toBe("source");
-        // Merge must add entries found only in the source tree.
-        await expect(
-            fs.readFile(path.join(destinationPath, "source-only.txt"), "utf8"),
-        ).resolves.toBe("source");
-        // Merge must retain entries found only in the destination tree.
-        await expect(
-            fs.readFile(
-                path.join(destinationPath, "destination-only.txt"),
-                "utf8",
-            ),
-        ).resolves.toBe("destination");
+            await dialog
+                .getByRole("button", { name: "Continue copying" })
+                .click();
+            // Each dialog choice must reach the server as its matching copy policy.
+            expect((await copyRequest).postDataJSON().on_existing).toBe(
+                option.onExisting,
+            );
+            // A finished copy clears the selection, so the next round starts from a clean page.
+            await expect(
+                page.getByRole("button", { name: "Clear selection" }),
+            ).toHaveCount(0, { timeout: 30_000 });
+        }
     });
 
     test("should copy multiple selected files when only one conflicts", async ({

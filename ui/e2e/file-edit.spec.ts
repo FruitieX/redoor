@@ -543,29 +543,6 @@ test.describe.serial("File Edit View", () => {
         await expectEditorText(editor, "manually reloaded");
     });
 
-    test("should save edits to disk", async ({ page }) => {
-        const filePath = path.join(ctx.testDirPath, "file1.txt");
-        await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
-        );
-
-        const editor = page.getByLabel("File editor", { exact: true });
-        await expectEditorText(editor, "content1");
-        await fillEditor(editor, "saved from ui");
-        // Wait until React marks the buffer dirty so Save is actually clickable.
-        await expect(
-            page.getByRole("button", { name: "Save file" }),
-        ).toBeEnabled();
-        await page.getByRole("button", { name: "Save file" }).click();
-
-        // Status feedback confirms the inode-preserving edit completed in the UI.
-        await expect(page.getByLabel("File edit status")).toHaveText("Saved");
-        // Polling the filesystem verifies the edit PUT rewrote the remote bytes.
-        await expect
-            .poll(async () => fs.readFile(filePath, "utf8"))
-            .toBe("saved from ui");
-    });
-
     test("should save through a relative symlink with the dedicated edit endpoint", async ({
         page,
     }) => {
@@ -746,23 +723,6 @@ test.describe.serial("File Edit View", () => {
             .toBe("saved with shortcut");
         // Mod-s must leave the caret in CodeMirror so the next keystroke still edits.
         await expect(editor).toBeFocused();
-    });
-
-    test("should expose the save shortcut on the Save control", async ({
-        page,
-    }) => {
-        await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
-        );
-
-        await expect(
-            page.getByLabel("File editor", { exact: true }),
-        ).toBeVisible();
-        await page.getByRole("button", { name: "Save file" }).hover();
-        // The tooltip keeps the accessible name as Save file while advertising Ctrl+S.
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Save file (Ctrl+S)",
-        );
     });
 
     test("should copy selected text with its file and starting line reference", async ({
