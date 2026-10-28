@@ -165,7 +165,7 @@ function WorktreeDiffBody(props: {
     return (
         <GitDiffResultView
             result={diffQuery.data.diffs[0]?.result ?? { type: "no_changes" }}
-            editorFile={{ deviceName: props.agent.name, path: props.path }}
+            editorFile={{ device: props.agent, path: props.path }}
             view={props.view}
         />
     );
@@ -353,7 +353,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
 export function GitDiffResultView(props: {
     result: GitDiffResult;
     /** Omitted when the file has no editor to open, such as a file the diff deleted. */
-    editorFile?: { deviceName: string; path: string };
+    editorFile?: { device: { id: string; name: string }; path: string };
     /** Comes from the view, since lists switch it per file and single files by preference. */
     view: GitDiffBodyView;
 }) {
@@ -493,7 +493,7 @@ export function GitFileView(props: {
                             }
                         }
                         editorFile={{
-                            deviceName: props.agent.name,
+                            device: props.agent,
                             path: props.path,
                         }}
                         view={{

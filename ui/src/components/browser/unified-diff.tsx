@@ -9,6 +9,12 @@ import {
     type DiffEditorRoute,
 } from "#ui/components/browser/diff-view";
 import { WholeFileToggle } from "#ui/components/browser/diff-layout-control";
+import {
+    OpenInBackgroundButton,
+    useBackgroundOpen,
+    type BackgroundOpen,
+} from "#ui/components/browser/open-file-actions";
+import { getBaseName } from "#ui/utils/path";
 
 /** Words for the file-level changes worth a badge; plain modifications need none. */
 const FILE_TYPE_LABELS = {
@@ -51,6 +57,7 @@ function changeCounts(file: DiffFile) {
 function DiffFileHeader(props: {
     file: DiffFile;
     editorRoute: DiffEditorRoute | null;
+    background: BackgroundOpen | null;
     /** Null when the patch cannot show the file whole, so no toggle is offered. */
     wholeFile: { shown: boolean; onChange: (shown: boolean) => void } | null;
 }) {
@@ -93,6 +100,9 @@ function DiffFileHeader(props: {
                 >
                     {name}
                 </Link>
+            )}
+            {props.background === null ? null : (
+                <OpenInBackgroundButton target={props.background} />
             )}
             {typeLabel === null ? null : (
                 <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-400">
@@ -140,10 +150,10 @@ export function UnifiedDiff(props: {
     emptyMessage?: string;
     /**
      * The current file, so the file name and trailing Open links can jump to it with
-     * ?line=. It carries the device's current name because that is what the browser URL
-     * holds.
+     * ?line=, or open it without leaving the diff. The device's current name is what the
+     * browser URL holds; its id is what the open files list keys the file by.
      */
-    editorFile?: { deviceName: string; path: string };
+    editorFile?: { device: { id: string; name: string }; path: string };
     /**
      * Whether a similar removed and added line show as one row with inline changes. It
      * comes from the reader's stored preference, which the diff views own.
@@ -186,7 +196,8 @@ export function UnifiedDiff(props: {
             return next;
         });
 
-    const editorDeviceName = props.editorFile?.deviceName;
+    const editorDeviceId = props.editorFile?.device.id;
+    const editorDeviceName = props.editorFile?.device.name;
     const editorPath = props.editorFile?.path;
 
     // Parsing pairs similar lines with word diffs, which is too slow to redo every render.
@@ -195,14 +206,36 @@ export function UnifiedDiff(props: {
         [props.unifiedDiff, mergeModifiedLines, fullContext],
     );
 
-    // A stable route keeps the memoized rows from re-rendering when the parent does.
+    // A stable route and file keep the memoized rows from re-rendering when the parent does.
     const editorRoute = React.useMemo(
         () =>
-            editorDeviceName === undefined || editorPath === undefined
+            editorDeviceId === undefined ||
+            editorDeviceName === undefined ||
+            editorPath === undefined
                 ? null
-                : browserRoute({ name: editorDeviceName }, editorPath),
-        [editorDeviceName, editorPath],
+                : browserRoute(
+                      { id: editorDeviceId, name: editorDeviceName },
+                      editorPath,
+                  ),
+        [editorDeviceId, editorDeviceName, editorPath],
     );
+
+    const backgroundFile = React.useMemo(
+        () =>
+            editorDeviceId === undefined ||
+            editorDeviceName === undefined ||
+            editorPath === undefined
+                ? null
+                : {
+                      agentId: editorDeviceId,
+                      agentName: editorDeviceName,
+                      path: editorPath,
+                      name: getBaseName(editorPath),
+                  },
+        [editorDeviceId, editorDeviceName, editorPath],
+    );
+
+    const background = useBackgroundOpen(backgroundFile);
 
     if (props.unifiedDiff === "") {
         return (
@@ -233,6 +266,7 @@ export function UnifiedDiff(props: {
                         <DiffFileHeader
                             file={file}
                             editorRoute={editorRoute}
+                            background={background}
                             wholeFile={
                                 props.wholeFile === undefined &&
                                 isExpandable(file)
@@ -253,6 +287,7 @@ export function UnifiedDiff(props: {
                                         : `Changes in ${name}`
                                 }
                                 editorRoute={editorRoute}
+                                background={background}
                                 wrapLines={props.wrapLines ?? false}
                                 wholeFile={wholeFile}
                             />

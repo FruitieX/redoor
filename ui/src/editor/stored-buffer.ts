@@ -31,6 +31,11 @@ export const storedBufferDataSchema = z.object({
     scroll: storedScrollSchema.nullable(),
     /** The history entry whose `?line=` target was already applied, so a reload skips it. */
     lineEntry: z.string().nullable(),
+    /**
+     * The id of the open files list's line request already applied, so it is shown once. A
+     * buffer stored before such requests existed has none.
+     */
+    revealEntry: z.string().nullable().catch(null),
     /** Lets the open files list ask before closing a file that was not visited since a reload. */
     dirty: z.boolean(),
 });

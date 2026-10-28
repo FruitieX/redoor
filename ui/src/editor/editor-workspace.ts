@@ -52,6 +52,17 @@ export type EditorHandlers = {
 /** Where `?line=` asks to go, and the history entry that asked, so it applies only once. */
 export type LineTarget = { line: number; entry: string };
 
+/**
+ * The lines a shown file is asked to go to. `link` comes from a `?line=` URL and `reveal`
+ * from the open files list, when the file was opened from a diff or search result without
+ * going to it. Each is applied once, remembered by its own entry in the buffer, and a link
+ * wins over a reveal because following a link is the newer, explicit choice.
+ */
+export type LineTargets = {
+    link: LineTarget | null;
+    reveal: LineTarget | null;
+};
+
 /** Everything needed to show one file in the shared view. */
 export type ActivateRequest = {
     container: HTMLElement;
@@ -60,7 +71,7 @@ export type ActivateRequest = {
     deviceContent: string;
     stored: StoredBuffer | null;
     settings: EditorSettings;
-    lineTarget: LineTarget | null;
+    lineTargets: LineTargets;
     handlers: { readonly current: EditorHandlers };
 };
 
@@ -110,6 +121,8 @@ type FileBuffer = {
     /** The scroll position the last write carried, so leaving only rewrites a moved one. */
     writtenScroll: StoredScroll | null;
     lineEntry: string | null;
+    /** The open files list's line request already applied. */
+    revealEntry: string | null;
     /** The server version this tab last wrote or adopted, or null if it has none. */
     lastSeenVersion: number | null;
     /** Document or selection changes the server has not been sent yet. */
@@ -247,7 +260,7 @@ export class EditorWorkspace extends ExternalStore<
 
     /**
      * Shows a file in the shared view, creating its buffer from memory, the server copy or the
-     * device text, and restoring its scroll position or applying a new `?line=` target.
+     * device text, and restoring its scroll position or applying a new line target.
      */
     activate(request: ActivateRequest): EditorView {
         const view = this.ensureView(request.settings);
@@ -273,7 +286,7 @@ export class EditorWorkspace extends ExternalStore<
         this.reconfigure();
         this.receiveStored(request.key, request.stored);
         this.applyDeviceContent(request.key, request.deviceContent);
-        this.restoreScroll(buffer, request.lineTarget);
+        this.restoreScroll(buffer, request.lineTargets);
         this.publishStatuses();
         this.notifyDocument();
 
@@ -295,18 +308,19 @@ export class EditorWorkspace extends ExternalStore<
     }
 
     /**
-     * Follows a `?line=` link to the file already on screen. A target is applied once per
-     * history entry, so re-rendering or coming back to the same entry keeps the user's place.
+     * Follows a `?line=` link or a line request of the open files list to the file already on
+     * screen. A target is applied once per entry, so re-rendering or coming back to the same
+     * history entry keeps the user's place.
      */
-    goToLine(key: string, lineTarget: LineTarget) {
+    goToLine(key: string, lineTargets: LineTargets) {
         const buffer = this.buffers.get(key);
 
         if (
             buffer !== undefined &&
             this.isShown(key) &&
-            buffer.lineEntry !== lineTarget.entry
+            pendingLineTarget(buffer, lineTargets) !== null
         ) {
-            this.restoreScroll(buffer, lineTarget);
+            this.restoreScroll(buffer, lineTargets);
         }
     }
 
@@ -405,11 +419,12 @@ export class EditorWorkspace extends ExternalStore<
         buffer.writtenScroll = stored.data.scroll;
         buffer.scroll = null;
         buffer.lineEntry = stored.data.lineEntry;
+        buffer.revealEntry = stored.data.revealEntry;
         buffer.base = { text: null, hash: stored.data.baseHash };
 
         if (this.isShown(key) && this.view !== null) {
             this.replaceShownState(this.view, state);
-            this.restoreScroll(buffer, null);
+            this.restoreScroll(buffer, NO_LINE_TARGETS);
         }
 
         // The copy may be based on other device text than this tab last saw.
@@ -601,6 +616,7 @@ export class EditorWorkspace extends ExternalStore<
             storedScroll: null,
             writtenScroll: null,
             lineEntry: null,
+            revealEntry: null,
             lastSeenVersion: null,
             unsynced: false,
         };
@@ -612,6 +628,7 @@ export class EditorWorkspace extends ExternalStore<
             buffer.storedScroll = data.scroll;
             buffer.writtenScroll = data.scroll;
             buffer.lineEntry = data.lineEntry;
+            buffer.revealEntry = data.revealEntry;
             buffer.lastSeenVersion = request.stored.version;
         }
 
@@ -664,10 +681,10 @@ export class EditorWorkspace extends ExternalStore<
     }
 
     /**
-     * Applies a new `?line=` target once per history entry, and otherwise brings back where
-     * the buffer was scrolled, so returning to a file never jumps away from the user's place.
+     * Applies a new line target once per entry, and otherwise brings back where the buffer
+     * was scrolled, so returning to a file never jumps away from the user's place.
      */
-    private restoreScroll(buffer: FileBuffer, lineTarget: LineTarget | null) {
+    private restoreScroll(buffer: FileBuffer, lineTargets: LineTargets) {
         const view = this.view;
 
         if (view === null) {
@@ -675,11 +692,20 @@ export class EditorWorkspace extends ExternalStore<
         }
 
         let effect: StateEffect<unknown> | null = null;
+        const target = pendingLineTarget(buffer, lineTargets);
 
-        if (lineTarget !== null && lineTarget.entry !== buffer.lineEntry) {
-            // The caret move marks the buffer changed, so the applied entry is written too.
-            buffer.lineEntry = lineTarget.entry;
-            effect = moveCaretToLine(view, lineTarget.line);
+        if (target !== null) {
+            // A link supersedes a pending reveal, so both count as applied. The caret move
+            // marks the buffer changed, so the applied entries are written too.
+            if (lineTargets.link !== null) {
+                buffer.lineEntry = lineTargets.link.entry;
+            }
+
+            if (lineTargets.reveal !== null) {
+                buffer.revealEntry = lineTargets.reveal.entry;
+            }
+
+            effect = moveCaretToLine(view, target.line);
         } else if (buffer.scroll !== null) {
             effect = buffer.scroll;
             view.dispatch({ effects: effect });
@@ -888,6 +914,7 @@ export class EditorWorkspace extends ExternalStore<
             baseHash: buffer.base.hash,
             scroll: buffer.storedScroll,
             lineEntry: buffer.lineEntry,
+            revealEntry: buffer.revealEntry,
             dirty: buffer.isDirty,
         };
 
@@ -922,6 +949,34 @@ export class EditorWorkspace extends ExternalStore<
             listener();
         }
     }
+}
+
+/** Shows a file where it was, for a state swapped in without any line to go to. */
+const NO_LINE_TARGETS: LineTargets = { link: null, reveal: null };
+
+/**
+ * The line a buffer should go to now: a `?line=` link not applied yet, otherwise a line
+ * request of the open files list not applied yet, otherwise none.
+ */
+function pendingLineTarget(
+    buffer: FileBuffer,
+    lineTargets: LineTargets,
+): LineTarget | null {
+    if (
+        lineTargets.link !== null &&
+        lineTargets.link.entry !== buffer.lineEntry
+    ) {
+        return lineTargets.link;
+    }
+
+    if (
+        lineTargets.reveal !== null &&
+        lineTargets.reveal.entry !== buffer.revealEntry
+    ) {
+        return lineTargets.reveal;
+    }
+
+    return null;
 }
 
 /** Reads the view's scroll position in the form stored on the server. */

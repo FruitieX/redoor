@@ -1347,8 +1347,10 @@ context (`useTerminals`, `useUploads`).
 
 A file becomes *open* when it is first edited or double-clicked in the editor (a double click
 selects a word but changes nothing, so it opens a file without editing it); any other file
-shown in the editor is a *preview*. The open files list (`openFiles` in the user state)
-is shown in the application menu and, in full-window mode, as a strip above the editor.
+shown in the editor is a *preview*. Diff file headers, diff rows and search results also
+have a small button that opens a file without going to it (`OpenInBackgroundButton`). The
+open files list (`openFiles` in the user state) is shown in the application menu and, in
+full-window mode, as a strip above the editor.
 
 - **One view, one buffer per open file.** `EditorWorkspace` (`ui/src/editor`), created in
   `main.tsx` and reached through the router context, owns the single `EditorView` and a
@@ -1379,8 +1381,8 @@ is shown in the application menu and, in full-window mode, as a strip above the 
   buffer in the account's private `editor-buffers/` directory, named by the SHA-256 of the key
   (`<agentId>:<path>`, sent base64url-encoded), so no key can escape the directory, and written
   atomically. The payload is opaque to the server: CodeMirror's state JSON with history, the
-  hash of the device text it is based on, a scroll anchor, the `?line=` history entry already
-  applied and a dirty flag. Buffers live outside the user state document because that is
+  hash of the device text it is based on, a scroll anchor, the `?line=` history entry and the
+  open files line request already applied, and a dirty flag. Buffers live outside the user state document because that is
   replaced whole on every preference change, so buffers there would be rewritten on each
   keystroke.
 - **Last writer wins, with versions.** Buffers belong to one user, who works from one computer
@@ -1417,6 +1419,15 @@ is shown in the application menu and, in full-window mode, as a strip above the 
 - **`?line=` applies once per history entry.** The applied entry is stored with the buffer,
   so returning to a file or reloading the page restores the user's place instead of jumping
   back to the linked line.
+- **Opening at a line without going there.** A diff row or content search result opens its
+  file with a `reveal` (`{ line, id }`) on the open file's entry in the user state, since the
+  file may have no buffer anywhere yet and the line must survive a reload or a move to
+  another computer. When the file is next shown, the workspace selects and centers the line
+  and stores the request's id as the buffer's `revealEntry`, so it is applied once on
+  whichever computer shows the file first. The entry is never cleared from the user state:
+  clearing it would be a settings write triggered by rendering, and the stored id already
+  makes it inert. A `?line=` link not applied yet wins over a pending reveal and consumes
+  it, because following a link is the newer, explicit choice.
 
 ### Browser component library and theme
 

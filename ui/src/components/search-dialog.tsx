@@ -21,6 +21,10 @@ import type { FileSearchResponse } from "#bindings/FileSearchResponse";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import { type Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
+import {
+    OpenInBackgroundButton,
+    useBackgroundOpen,
+} from "#ui/components/browser/open-file-actions";
 import { getImmediateParentPath } from "#ui/components/browser/utils";
 import { Dialog } from "#ui/components/dialog";
 import { IconButton } from "#ui/components/icon-button";
@@ -42,6 +46,7 @@ import { useUserState } from "#ui/user-state";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { isPlainKey } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
+import { getBaseName } from "#ui/utils/path";
 
 const agentRoute = getRouteApi("/_app/agents/$deviceName");
 
@@ -171,6 +176,44 @@ function useOpenSearchShortcut(isOpen: boolean) {
 
 /** Names where a search result leads, with the line a content match should reveal. */
 type SearchResultTarget = { path: string; line?: number };
+
+/**
+ * One result row: the link fills it and the open-in-background button stays at its right
+ * edge, also while a wide preview scrolls sideways. The button sits beside the link, never
+ * inside it, and arrow-key focus only walks the links.
+ */
+function SearchResultRow(props: {
+    agent: Agent;
+    target: SearchResultTarget;
+    /** Directories have nothing to open in the editor. */
+    canOpenInBackground: boolean;
+    children: React.ReactNode;
+}) {
+    const background = useBackgroundOpen(
+        props.canOpenInBackground
+            ? {
+                  agentId: props.agent.id,
+                  agentName: props.agent.name,
+                  path: props.target.path,
+                  name: getBaseName(props.target.path),
+              }
+            : null,
+    );
+
+    return (
+        <div className="flex w-max min-w-full items-start border-b border-slate-800">
+            {props.children}
+            {background === null ? null : (
+                <div className="sticky right-0 shrink-0 self-stretch bg-surface px-2 py-2">
+                    <OpenInBackgroundButton
+                        target={background}
+                        line={props.target.line}
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
 
 /** Leaves modified clicks on the real href so middle-click and new-tab still work. */
 function handleSearchResultClick(
@@ -653,25 +696,33 @@ function PathResult(props: {
     const ResultIcon = props.result.type === "directory" ? Folder : File;
 
     return (
-        <Link
-            {...browserRoute(props.agent, props.target.path)}
-            search={{ line: props.target.line }}
-            className="flex w-full items-start gap-3 rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
-            aria-label={`Open path ${props.result.path}`}
-            onClick={(event) =>
-                handleSearchResultClick(event, () => props.onOpen(props.target))
-            }
+        <SearchResultRow
+            agent={props.agent}
+            target={props.target}
+            canOpenInBackground={props.result.type !== "directory"}
         >
-            <ResultIcon className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
-            <span className="min-w-0">
-                <span className="block text-sm font-medium text-blue-300 sm:text-base">
-                    {props.result.name}
+            <Link
+                {...browserRoute(props.agent, props.target.path)}
+                search={{ line: props.target.line }}
+                className="flex min-w-0 flex-1 items-start gap-3 rounded-none px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
+                aria-label={`Open path ${props.result.path}`}
+                onClick={(event) =>
+                    handleSearchResultClick(event, () =>
+                        props.onOpen(props.target),
+                    )
+                }
+            >
+                <ResultIcon className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
+                <span className="min-w-0">
+                    <span className="block text-sm font-medium text-blue-300 sm:text-base">
+                        {props.result.name}
+                    </span>
+                    <span className="block whitespace-nowrap font-mono text-[11px] font-normal text-slate-500 sm:text-xs">
+                        {props.result.path}
+                    </span>
                 </span>
-                <span className="block whitespace-nowrap font-mono text-[11px] font-normal text-slate-500 sm:text-xs">
-                    {props.result.path}
-                </span>
-            </span>
-        </Link>
+            </Link>
+        </SearchResultRow>
     );
 }
 
@@ -683,58 +734,66 @@ function ContentResult(props: {
     onOpen: (target: SearchResultTarget) => void;
 }) {
     return (
-        <Link
-            {...browserRoute(props.agent, props.target.path)}
-            search={{ line: props.target.line }}
-            className="block w-full rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
-            aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}
-            onClick={(event) =>
-                handleSearchResultClick(event, () => props.onOpen(props.target))
-            }
+        <SearchResultRow
+            agent={props.agent}
+            target={props.target}
+            canOpenInBackground
         >
-            <span className="block text-xs text-blue-300 sm:text-sm">
-                {props.result.path}:{props.result.line_number}
-            </span>
-            <span className="mt-1 block font-mono text-xs font-normal sm:text-sm">
-                {props.result.before_context.map((line) => (
-                    <span
-                        key={line.line_number}
-                        className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
-                    >
-                        <span className="pr-3 text-right select-none">
-                            {line.line_number}
-                        </span>
-                        <span className="whitespace-pre">
-                            {line.line}
-                            {line.line_truncated ? "…" : ""}
-                        </span>
-                    </span>
-                ))}
-                <span className="grid grid-cols-[3rem_minmax(0,1fr)] bg-blue-500/10 text-slate-200">
-                    <span className="pr-3 text-right text-blue-300 select-none">
-                        {props.result.line_number}
-                    </span>
-                    <span className="whitespace-pre">
-                        {props.result.line}
-                        {props.result.line_truncated ? "…" : ""}
-                    </span>
+            <Link
+                {...browserRoute(props.agent, props.target.path)}
+                search={{ line: props.target.line }}
+                className="block min-w-0 flex-1 rounded-none px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
+                aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}
+                onClick={(event) =>
+                    handleSearchResultClick(event, () =>
+                        props.onOpen(props.target),
+                    )
+                }
+            >
+                <span className="block text-xs text-blue-300 sm:text-sm">
+                    {props.result.path}:{props.result.line_number}
                 </span>
-                {props.result.after_context.map((line) => (
-                    <span
-                        key={line.line_number}
-                        className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
-                    >
-                        <span className="pr-3 text-right select-none">
-                            {line.line_number}
+                <span className="mt-1 block font-mono text-xs font-normal sm:text-sm">
+                    {props.result.before_context.map((line) => (
+                        <span
+                            key={line.line_number}
+                            className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
+                        >
+                            <span className="pr-3 text-right select-none">
+                                {line.line_number}
+                            </span>
+                            <span className="whitespace-pre">
+                                {line.line}
+                                {line.line_truncated ? "…" : ""}
+                            </span>
+                        </span>
+                    ))}
+                    <span className="grid grid-cols-[3rem_minmax(0,1fr)] bg-blue-500/10 text-slate-200">
+                        <span className="pr-3 text-right text-blue-300 select-none">
+                            {props.result.line_number}
                         </span>
                         <span className="whitespace-pre">
-                            {line.line}
-                            {line.line_truncated ? "…" : ""}
+                            {props.result.line}
+                            {props.result.line_truncated ? "…" : ""}
                         </span>
                     </span>
-                ))}
-            </span>
-        </Link>
+                    {props.result.after_context.map((line) => (
+                        <span
+                            key={line.line_number}
+                            className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
+                        >
+                            <span className="pr-3 text-right select-none">
+                                {line.line_number}
+                            </span>
+                            <span className="whitespace-pre">
+                                {line.line}
+                                {line.line_truncated ? "…" : ""}
+                            </span>
+                        </span>
+                    ))}
+                </span>
+            </Link>
+        </SearchResultRow>
     );
 }
 

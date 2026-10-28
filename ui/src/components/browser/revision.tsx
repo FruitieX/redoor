@@ -476,7 +476,7 @@ export function GitCommitView(props: {
                     file.change === "deleted"
                         ? undefined
                         : {
-                              deviceName: props.agent.name,
+                              device: props.agent,
                               path: file.path,
                           }
                 }

@@ -55,7 +55,11 @@ import {
 import { useAgentSearchNavigation } from "#ui/search-navigation";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
-import { getOpenFileKey, useUserState } from "#ui/user-state";
+import {
+    getOpenFileKey,
+    useUserState,
+    type OpenFileReveal,
+} from "#ui/user-state";
 import {
     editorBufferQueryOptions,
     type StoredBuffer,
@@ -514,6 +518,7 @@ function FileEditorSurface(props: {
     wrapLines: boolean;
     preview: boolean;
     scrollToLine?: number;
+    reveal?: OpenFileReveal;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
     isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
@@ -551,6 +556,7 @@ function FileEditorSurface(props: {
                     vimMode={props.vimMode}
                     wrapLines={props.wrapLines}
                     scrollToLine={props.scrollToLine}
+                    reveal={props.reveal}
                     onBecameDirty={props.onBecameDirty}
                     onDoubleClick={props.onDoubleClick}
                     onFocus={props.onFocus}
@@ -766,6 +772,11 @@ function useFileBuffer(props: FileEditViewProps) {
     const status = statuses.get(bufferKey);
     const openFiles = userState.openFiles;
 
+    // A revision's key never matches an open file, so it never takes the file's line request.
+    const reveal = openFiles.find(
+        (file) => getOpenFileKey(file) === bufferKey,
+    )?.reveal;
+
     // Tells the workspace which buffers to keep and write, before the editor activates.
     React.useLayoutEffect(() => {
         editor.setOpenKeys(openFiles.map((file) => getOpenFileKey(file)));
@@ -796,6 +807,7 @@ function useFileBuffer(props: FileEditViewProps) {
         editor,
         readOnly,
         bufferKey,
+        reveal,
         contentQuery,
         storedQuery,
         saveMutation,
@@ -998,6 +1010,7 @@ export function FileEditView(props: FileEditViewProps) {
                         wrapLines={userState.wrapEditorLines}
                         preview={isPreviewShown}
                         scrollToLine={props.scrollToLine}
+                        reveal={buffer.reveal}
                         onBecameDirty={() => {
                             if (saveMutation.isSuccess) saveMutation.reset();
 

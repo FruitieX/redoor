@@ -24,6 +24,19 @@ export const bookmarkSchema = z.object({
 export type Bookmark = z.infer<typeof bookmarkSchema>;
 
 /**
+ * A line to select and center the next time an open file is shown, set when the file is
+ * opened from a diff or search result without going to it. `id` tells a new request apart
+ * from one already applied: the file's buffer remembers the applied id, so the line is
+ * shown once, on whichever computer shows the file first, and never again after that.
+ */
+export const openFileRevealSchema = z.object({
+    line: z.number().int().min(1),
+    id: z.string(),
+});
+
+export type OpenFileReveal = z.infer<typeof openFileRevealSchema>;
+
+/**
  * One open editor file, listed in the left menu so it can be reopened without browsing. Its
  * buffer (unsaved text, caret, undo history) is kept on the server while it stays open.
  */
@@ -32,6 +45,8 @@ export const openFileSchema = z.object({
     path: z.string(),
     name: z.string(),
     agentName: z.string(),
+    // A malformed request only loses the line, never the open file itself.
+    reveal: openFileRevealSchema.optional().catch(undefined),
 });
 
 export type OpenFile = z.infer<typeof openFileSchema>;
@@ -103,6 +118,31 @@ export function openFile(openFiles: OpenFile[], file: OpenFile) {
     }
 
     return [...openFiles, file];
+}
+
+/**
+ * Opens a file without going to it, from a diff or search result. With a line, the file is
+ * also asked to show that line the next time it is shown; an already open file keeps its
+ * place in the list and only gets the new line, since the user asked to look there now.
+ */
+export function openFileAtLine(
+    openFiles: OpenFile[],
+    file: OpenFile,
+    reveal: OpenFileReveal | undefined,
+) {
+    if (reveal === undefined) {
+        return openFile(openFiles, file);
+    }
+
+    if (!isFileOpen(openFiles, file)) {
+        return [...openFiles, { ...file, reveal }];
+    }
+
+    const targetKey = getOpenFileKey(file);
+
+    return openFiles.map((entry) =>
+        getOpenFileKey(entry) === targetKey ? { ...entry, reveal } : entry,
+    );
 }
 
 /** Drops one open file without reordering the files that remain. */

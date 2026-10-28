@@ -123,7 +123,7 @@ function show(
         fileName: `${request.key}.txt`,
         stored: null,
         settings,
-        lineTarget: null,
+        lineTargets: { link: null, reveal: null },
         handlers: noHandlers,
         ...request,
     });
@@ -407,4 +407,85 @@ test("discarding tells the chrome about the replaced state, since setState emits
     // Without this the Copy selection action would still offer the discarded "draft".
     expect(replaced).toHaveLength(1);
     expect(replaced[0]?.selection.main.empty).toBe(true);
+});
+
+test("a line request of the open files list is shown once, also after moving to another computer", async () => {
+    const api = new FakeBufferApi();
+    const first = createWorkspace(api).workspace;
+    first.setOpenKeys(["a"]);
+    const content = "one\ntwo\nthree\nfour";
+    const reveal = { line: 3, entry: "r1" };
+
+    const view = show(first, {
+        key: "a",
+        deviceContent: content,
+        lineTargets: { link: null, reveal },
+    });
+
+    // The requested line is selected when the file is first shown.
+    expect(
+        view.state.sliceDoc(
+            view.state.selection.main.from,
+            view.state.selection.main.to,
+        ),
+    ).toBe("three");
+
+    view.dispatch({ selection: { anchor: 0 } });
+    first.goToLine("a", { link: null, reveal });
+    // The same request does not pull the caret back once it was applied.
+    expect(view.state.selection.main.head).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    first.deactivate(container);
+    const second = createWorkspace(api).workspace;
+    second.setOpenKeys(["a"]);
+
+    const restored = show(second, {
+        key: "a",
+        deviceContent: content,
+        stored: api.read("a"),
+        lineTargets: { link: null, reveal },
+    });
+
+    // The applied request is stored with the buffer, so another computer keeps the caret.
+    expect(restored.state.selection.main.head).toBe(0);
+
+    second.goToLine("a", { link: null, reveal: { line: 2, entry: "r2" } });
+    // A new request for the file on screen moves to its line right away.
+    expect(
+        restored.state.sliceDoc(
+            restored.state.selection.main.from,
+            restored.state.selection.main.to,
+        ),
+    ).toBe("two");
+});
+
+test("following a link to a file supersedes its pending line request", () => {
+    const { workspace } = createWorkspace();
+    workspace.setOpenKeys(["a"]);
+    const content = "one\ntwo\nthree\nfour";
+    const reveal = { line: 3, entry: "r1" };
+
+    const view = show(workspace, {
+        key: "a",
+        deviceContent: content,
+        lineTargets: { link: { line: 4, entry: "history-1" }, reveal },
+    });
+
+    // The link is the newer, explicit choice, so its line wins.
+    expect(
+        view.state.sliceDoc(
+            view.state.selection.main.from,
+            view.state.selection.main.to,
+        ),
+    ).toBe("four");
+
+    workspace.goToLine("a", { link: null, reveal });
+    // The request counts as applied, so it does not move the caret later.
+    expect(
+        view.state.sliceDoc(
+            view.state.selection.main.from,
+            view.state.selection.main.to,
+        ),
+    ).toBe("four");
 });

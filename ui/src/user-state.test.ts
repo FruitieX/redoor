@@ -3,6 +3,7 @@ import { expect, test } from "vitest";
 import {
     commitDeviceOrder,
     defaultUserState,
+    openFileAtLine,
     reorderBookmarks,
     reorderOpenFiles,
     resolveDeviceOrder,
@@ -163,4 +164,33 @@ test("a stale open file move cannot restore a closed file or discard a new one",
             overId: "a:/one",
         }).map((file) => file.name),
     ).toEqual(["three", "one", "fresh"]);
+});
+
+test("opens a file at a line without moving an already open file", () => {
+    const files = [openEntry("a", "one"), openEntry("a", "two")];
+    const reveal = { line: 42, id: "r1" };
+
+    const appended = openFileAtLine(files, openEntry("b", "three"), reveal);
+    // A newly opened file goes last, carrying the line to show when it is visited.
+    expect(appended.map((file) => file.name)).toEqual(["one", "two", "three"]);
+    expect(appended[2]?.reveal).toEqual(reveal);
+
+    const moved = openFileAtLine(files, openEntry("a", "one"), reveal);
+    // An open file keeps its place and only gets the new line.
+    expect(moved.map((file) => file.name)).toEqual(["one", "two"]);
+    expect(moved[0]?.reveal).toEqual(reveal);
+    // The other files are untouched, so React keeps their rows.
+    expect(moved[1]).toBe(files[1]);
+
+    // Without a line, opening an open file changes nothing, so no settings write follows.
+    expect(openFileAtLine(files, openEntry("a", "two"), undefined)).toBe(files);
+});
+
+test("a malformed line request keeps the open file", () => {
+    const parsed = userStateSchema.parse({
+        openFiles: [{ ...openEntry("a", "one"), reveal: { line: "x" } }],
+    });
+
+    // Only the line is lost; dropping the whole list would close every open file.
+    expect(parsed.openFiles).toEqual([openEntry("a", "one")]);
 });

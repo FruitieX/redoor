@@ -25,6 +25,10 @@ import {
     ChangeBadge,
     type GitChangeKind,
 } from "#ui/components/browser/git-parts";
+import {
+    OpenInBackgroundButton,
+    useBackgroundOpen,
+} from "#ui/components/browser/open-file-actions";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
 import {
     HistoryEntryStore,
@@ -361,6 +365,18 @@ function GitDiffSection(props: {
     const parts = splitRelativePath(file.relativePath);
     const bodyId = React.useId();
 
+    // A deleted file has no working copy to open; every other diff shows one that exists.
+    const background = useBackgroundOpen(
+        file.change === "deleted"
+            ? null
+            : {
+                  agentId: props.agent.id,
+                  agentName: props.agent.name,
+                  path: file.path,
+                  name: parts.name,
+              },
+    );
+
     return (
         <section
             aria-label={file.regionLabel}
@@ -415,6 +431,13 @@ function GitDiffSection(props: {
                         </span>
                     )}
                 </h3>
+                {background === null ? null : (
+                    <OpenInBackgroundButton
+                        target={background}
+                        // Matches the height of the copy menu beside it.
+                        className="h-7 w-7"
+                    />
+                )}
                 <GitDiffCopyPathMenu file={file} name={parts.name} />
                 {/* A collapsed file shows no patch, so it has no layout or wrapping to switch. */}
                 {props.collapsed ? null : (

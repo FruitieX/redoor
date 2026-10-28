@@ -18,6 +18,10 @@ import { HighlightedTokens } from "#ui/components/highlighted-tokens";
 import { IconButton } from "#ui/components/icon-button";
 import { LinkButton } from "#ui/components/link-button";
 import {
+    OpenInBackgroundButton,
+    type BackgroundOpen,
+} from "#ui/components/browser/open-file-actions";
+import {
     fileLines,
     isExpandable,
     lineSideText,
@@ -397,6 +401,7 @@ const Line = React.memo(function Line(props: {
     oldTokens: HighlightToken[] | undefined;
     newTokens: HighlightToken[] | undefined;
     editorRoute: DiffEditorRoute | null;
+    background: BackgroundOpen | null;
     slots: GutterSlots;
     wrapLines: boolean;
 }) {
@@ -472,16 +477,26 @@ const Line = React.memo(function Line(props: {
                 >
                     {props.editorRoute === null || openLine === null ? null : (
                         // Only new-side lines exist in the current file, so only they open.
-                        <LinkButton
-                            {...props.editorRoute}
-                            search={{ line: openLine }}
-                            variant="secondary"
-                            size="sm"
-                            aria-label={`Open line ${String(openLine)} in editor`}
-                            className="px-1.5 py-0 font-sans text-[length:inherit] leading-[inherit]"
-                        >
-                            Open
-                        </LinkButton>
+                        <span className="inline-flex items-center gap-1">
+                            <LinkButton
+                                {...props.editorRoute}
+                                search={{ line: openLine }}
+                                variant="secondary"
+                                size="sm"
+                                aria-label={`Open line ${String(openLine)} in editor`}
+                                className="px-1.5 py-0 font-sans text-[length:inherit] leading-[inherit]"
+                            >
+                                Open
+                            </LinkButton>
+                            {props.background === null ? null : (
+                                // Tighter than the button's own padding, so rows keep their height.
+                                <OpenInBackgroundButton
+                                    target={props.background}
+                                    line={openLine}
+                                    className="p-0.5"
+                                />
+                            )}
+                        </span>
                     )}
                 </td>
             </tr>
@@ -555,6 +570,8 @@ function SkipBlockRow(props: {
 interface RowContext {
     highlight: FileHighlight | null;
     editorRoute: DiffEditorRoute | null;
+    /** Opens the current file at a row's line without leaving the diff. */
+    background: BackgroundOpen | null;
     slots: GutterSlots;
     wrapLines: boolean;
 }
@@ -578,6 +595,7 @@ function Rows(props: { lines: DiffLine[]; context: RowContext }) {
                     : context.highlight?.new.get(line.newLineNumber)
             }
             editorRoute={context.editorRoute}
+            background={context.background}
             slots={context.slots}
             wrapLines={context.wrapLines}
         />
@@ -753,6 +771,7 @@ export function Diff(props: {
     file: DiffFile;
     label: string;
     editorRoute: DiffEditorRoute | null;
+    background: BackgroundOpen | null;
     wrapLines: boolean;
     /** Reveals every folded line, so the patch reads as the whole file with its changes. */
     wholeFile: boolean;
@@ -773,6 +792,7 @@ export function Diff(props: {
     const context: RowContext = {
         highlight,
         editorRoute: props.editorRoute,
+        background: props.background,
         slots,
         wrapLines: props.wrapLines,
     };

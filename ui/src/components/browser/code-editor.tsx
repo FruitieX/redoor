@@ -6,11 +6,12 @@ import {
     EditorSearch,
     type EditorSearchHandle,
 } from "#ui/components/browser/editor-search";
-import type { EditorHandlers, LineTarget } from "#ui/editor/editor-workspace";
+import type { EditorHandlers, LineTargets } from "#ui/editor/editor-workspace";
 import type { StoredBuffer } from "#ui/editor/stored-buffer";
 import { historyEntryKey } from "#ui/history-entry-state";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { useTerminals } from "#ui/use-terminals";
+import type { OpenFileReveal } from "#ui/user-state";
 import { isTerminalInputTarget, isUnmodifiedAltKey } from "#ui/utils/keyboard";
 import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
 
@@ -108,6 +109,8 @@ type CodeEditorProps = {
     vimMode: boolean;
     wrapLines: boolean;
     scrollToLine?: number;
+    /** The open files list's request to show a line, once, when the file was opened elsewhere. */
+    reveal?: OpenFileReveal;
     onFocus: () => void;
     onSave: () => void;
     /** The first edit of a clean buffer, which opens the file. */
@@ -161,13 +164,22 @@ export function CodeEditor(props: CodeEditorProps) {
     const settingsRef = React.useRef(settings);
     settingsRef.current = settings;
 
-    const lineTarget: LineTarget | null =
-        props.scrollToLine === undefined
-            ? null
-            : { line: props.scrollToLine, entry: lineEntry };
+    const revealLine = props.reveal?.line;
+    const revealId = props.reveal?.id;
 
-    const lineTargetRef = React.useRef(lineTarget);
-    lineTargetRef.current = lineTarget;
+    const lineTargets: LineTargets = {
+        link:
+            props.scrollToLine === undefined
+                ? null
+                : { line: props.scrollToLine, entry: lineEntry },
+        reveal:
+            revealLine === undefined || revealId === undefined
+                ? null
+                : { line: revealLine, entry: revealId },
+    };
+
+    const lineTargetsRef = React.useRef(lineTargets);
+    lineTargetsRef.current = lineTargets;
 
     /** Mirrors the editor's caret and selection into the chrome and the accessible spans. */
     const syncFromState = React.useCallback((state: EditorState) => {
@@ -215,7 +227,7 @@ export function CodeEditor(props: CodeEditorProps) {
             deviceContent: current.deviceContent,
             stored: current.stored,
             settings: settingsRef.current,
-            lineTarget: lineTargetRef.current,
+            lineTargets: lineTargetsRef.current,
             handlers: handlersRef,
         });
 
@@ -248,14 +260,17 @@ export function CodeEditor(props: CodeEditorProps) {
         workspace,
     ]);
 
+    // The targets are rebuilt from these values each render, so the ref holds the current ones.
     React.useLayoutEffect(() => {
-        if (props.scrollToLine !== undefined) {
-            workspace.goToLine(props.bufferKey, {
-                line: props.scrollToLine,
-                entry: lineEntry,
-            });
-        }
-    }, [lineEntry, props.bufferKey, props.scrollToLine, workspace]);
+        workspace.goToLine(props.bufferKey, lineTargetsRef.current);
+    }, [
+        lineEntry,
+        props.bufferKey,
+        props.scrollToLine,
+        revealId,
+        revealLine,
+        workspace,
+    ]);
 
     useFocusEditorShortcut(view);
 
