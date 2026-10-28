@@ -238,6 +238,13 @@ returns `anyhow::Result<ExitCode>`, and errors are printed once.
   status 5 or is silently discarded, so the launchd backend waits for the job and its process
   to disappear after every bootout, retries that conflict, and verifies the job is loaded.
 - `process_control` and `process_logs`: PID files, stopping processes and reading logs.
+  Every PID file is a JSON record with a top-level `pid`, a start time and the
+  `BinaryIdentity` of the image that wrote it (relays add their launch metadata). The
+  advisory lock, not the file, decides liveness. The process records its own build because
+  after `redoor upgrade` the executable on disk no longer describes the one in memory;
+  re-exec drops the close-on-exec lock, so the new image claims the file again and rewrites
+  it. `status` prints that build and notes when it differs from the CLI's own. Bare-number
+  files from older builds are still read so their processes can be stopped.
 - `upgrade`: the `redoor upgrade` command on top of `redoor_core::upgrade`, plus the detached
   restart helper. See "Upgrading in place".
 - The binary re-executes itself as the SSH askpass helper, so no second executable is

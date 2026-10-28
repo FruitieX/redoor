@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { onTestFinished, describe, expect, test, vi } from "vitest";
+import { z } from "zod";
 import { ApiClient } from "#ui/api-client";
 import {
     getAvailablePort,
@@ -53,12 +54,19 @@ function isolatedProcess(role: "agent" | "server") {
     return { env, pidFile, stopArgs };
 }
 
-/** Waits for a daemon to atomically publish its numeric PID without relying on fixed delays. */
+/** Fields of the JSON PID record these lifecycle tests rely on. */
+const pidRecordSchema = z.object({ pid: z.number() });
+
+/** Waits for a daemon to publish its JSON PID record without relying on fixed delays. */
 async function waitForPid(pidFile: string, stalePid?: number): Promise<number> {
     let pid = 0;
     await vi.waitFor(() => {
-        pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-        // A numeric PID proves the daemon completed the process-lock startup phase.
+        // Parsing throws while the record is still being written, which retries the wait.
+        pid = pidRecordSchema.parse(
+            JSON.parse(readFileSync(pidFile, "utf8")),
+        ).pid;
+
+        // A positive PID proves the daemon completed the process-lock startup phase.
         expect(pid).toBeGreaterThan(0);
 
         if (stalePid !== undefined) {
@@ -68,6 +76,13 @@ async function waitForPid(pidFile: string, stalePid?: number): Promise<number> {
     });
 
     return pid;
+}
+
+/** Reads the version the tested binary reports, e.g. `1.4.4` from `redoor 1.4.4`. */
+async function binaryVersion(): Promise<string> {
+    const output = await execFileAsync(SERVER_PATH, ["--version"]);
+
+    return output.stdout.trim().split(" ").at(-1) ?? "";
 }
 
 /** Starts a foreground command beneath a shell that can be SIGKILLed independently. */
@@ -133,6 +148,13 @@ port = ${port}
 
         // Status must report the lock owner rather than only checking file presence.
         expect(status.stdout).toContain(`server is running with PID ${pid}`);
+        // The running build's version comes from the PID record, so operators can tell
+        // which binary is in memory after an upgrade replaced the one on disk.
+        expect(status.stdout).toContain(`version:    ${await binaryVersion()}`);
+        // Printing the PID file location lets operators inspect the raw record directly.
+        expect(status.stdout).toContain(`pid file:   ${isolated.pidFile}`);
+        // The same binary started the daemon, so status must not claim a pending restart.
+        expect(status.stdout).not.toContain("differs from this redoor binary");
 
         await expect(
             execFileAsync(SERVER_PATH, ["server", "--config", configPath], {
@@ -189,6 +211,8 @@ port = ${port}
 
         // Status shares the same lock truth as stop/duplicate-start rejection.
         expect(status.stdout).toContain(`agent is running with PID ${pid}`);
+        // Agents record their build like the server, so both status commands report it.
+        expect(status.stdout).toContain(`version:    ${await binaryVersion()}`);
 
         await expect(
             execFileAsync(SERVER_PATH, agentArgs, { env: isolated.env }),

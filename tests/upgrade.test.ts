@@ -20,6 +20,7 @@ import {
     test,
     vi,
 } from "vitest";
+import { z } from "zod";
 import { $ } from "zx";
 import { ApiClient } from "#ui/api-client";
 import type { ErrorResponse } from "#bindings/ErrorResponse";
@@ -58,11 +59,19 @@ function executableOf(pid: number): string {
     return readlinkSync(`/proc/${pid}/exe`);
 }
 
+/** Fields of the JSON PID record the upgrade tests rely on. */
+const pidRecordSchema = z.object({ pid: z.number() });
+
 /** Waits for a daemon to publish its PID file without relying on fixed delays. */
 async function waitForPid(pidFile: string): Promise<number> {
     let pid = 0;
     await vi.waitFor(() => {
-        pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+        // Parsing throws while the record is still being written, which retries the wait.
+        pid = pidRecordSchema.parse(
+            JSON.parse(readFileSync(pidFile, "utf8")),
+        ).pid;
+
+        // A positive PID proves the daemon completed the process-lock startup phase.
         expect(pid).toBeGreaterThan(0);
     });
 

@@ -80,7 +80,7 @@ async function sshRootTestCommand(command: string): Promise<string> {
 /** Kills one remote relay agent so the owning local SSH process must reconnect it. */
 async function killRemoteAgent(agentAppName: string): Promise<void> {
     const appName = shellQuote(agentAppName);
-    const command = `app=${appName}; pid_file="$HOME/.local/share/$app/agent.pid"; pid=$(tr -d '[:space:]' < "$pid_file"); kill -KILL "$pid"`;
+    const command = `app=${appName}; pid_file="$HOME/.local/share/$app/agent.pid"; pid=$(sed -n 's/^ *"pid": *\\([0-9][0-9]*\\).*/\\1/p' "$pid_file"); kill -KILL "$pid"`;
     await sshTestCommand(command);
 }
 

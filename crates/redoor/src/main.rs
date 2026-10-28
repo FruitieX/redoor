@@ -460,9 +460,8 @@ async fn run_named_relay(
         .clone()
         .unwrap_or_else(|| format!("{}-relay-{}", paths.app_name(), relay.id));
     let metadata = process_control::RelayPidMetadata {
-        pid: 0,
+        process: process_control::ProcessPidMetadata::current(),
         id: relay.id.clone(),
-        started_at: jiff::Timestamp::now().to_string(),
         target: relay.agent.target.clone(),
         server: relay.server.clone(),
         agent_name,
