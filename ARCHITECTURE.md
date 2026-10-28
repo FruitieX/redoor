@@ -1457,7 +1457,17 @@ the Git view rather than another level of page navigation.
   at once; others come from `@codemirror/language-data`, render plain first and colour when
   their grammar has loaded.
   File names and per-line Open links are router `Link`s, and parsing and highlighting are
-  memoized on the patch text so re-renders do not redo them. Whether edited lines pair into
+  memoized on the patch text so re-renders do not redo them. When the server marks a patch
+  `full_context` (Git diffs from the agent, Sync diffs from the server, see the agent's
+  `git/` budgets), `diff-parse.ts` folds the whole-file hunk back to 3 lines of context.
+  Changed lines are paired within each folded hunk, so revealing context never re-pairs edits.
+  Each gap keeps its rows as an expandable `SkipBlock`. `diff-view.tsx` reveals 20 lines
+  at a time, or the whole gap, and a per-file toggle shows the whole file. All of this
+  happens in the browser without another request. Reveals are keyed on the file's hunk
+  layout, so switching the inline layout keeps them. Highlighting covers every row the
+  patch carries, so a folded line keeps the colours of a string or comment opened above it.
+  Single-diff views toggle the whole file in the patch's own header; diff lists put the
+  toggle in each file's sticky header. Whether edited lines pair into
   inline rows or stay separate -/+ rows is chosen per file: single-diff views (a file's Git
   diff, Sync) switch the browser-wide preference (`inlineDiffChangesAtom`, stored in
   localStorage) from their bar, and diff lists (worktree changes, commits) put a switch in

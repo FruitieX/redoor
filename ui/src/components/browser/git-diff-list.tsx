@@ -18,6 +18,7 @@ import { useCopyFeedback } from "#ui/components/copyable-code-row";
 import { IconButton } from "#ui/components/icon-button";
 import {
     DiffLayoutSwitch,
+    WholeFileToggle,
     WrapDiffLinesToggle,
 } from "#ui/components/browser/diff-layout-control";
 import {
@@ -34,6 +35,11 @@ export type GitDiffBodyView = {
     mergeModifiedLines: boolean;
     /** Whether long lines wrap instead of scrolling the patch sideways. */
     wrapLines: boolean;
+    /**
+     * Whether the patch shows its whole file. Lists set it from the file's header; a single
+     * file's view leaves it unset so the patch's own header offers the toggle.
+     */
+    wholeFile?: boolean;
 };
 
 /** One changed file in a diff list, already resolved to what its header and body show. */
@@ -313,6 +319,8 @@ function GitDiffSection(props: {
     // Only a file with long lines needs to wrap, and the choice is only for this glance at
     // it, so it lives with the section instead of in the stored preferences.
     const [wrapLines, setWrapLines] = React.useState(false);
+    // Reading a file whole is likewise a choice for this glance at one file.
+    const [wholeFile, setWholeFile] = React.useState(false);
     const parts = splitRelativePath(file.relativePath);
     const bodyId = React.useId();
 
@@ -387,6 +395,12 @@ function GitDiffSection(props: {
                             // Matches the height of the icon-only layout switch beside it.
                             className="h-7 w-7"
                         />
+                        <WholeFileToggle
+                            label={`Show whole file ${file.relativePath}`}
+                            shown={wholeFile}
+                            onChange={setWholeFile}
+                            className="h-7 w-7"
+                        />
                     </div>
                 )}
             </div>
@@ -398,6 +412,7 @@ function GitDiffSection(props: {
                     {file.renderBody({
                         mergeModifiedLines: props.inline,
                         wrapLines,
+                        wholeFile,
                     })}
                 </div>
             )}

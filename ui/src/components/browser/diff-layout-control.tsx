@@ -1,5 +1,11 @@
 import { useAtom } from "jotai";
-import { Rows2, WholeWord, WrapText } from "lucide-react";
+import {
+    FoldVertical,
+    Rows2,
+    UnfoldVertical,
+    WholeWord,
+    WrapText,
+} from "lucide-react";
 import { SegmentedControl } from "#ui/components/segmented-control";
 import { ToggleButton } from "#ui/components/toggle-button";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
@@ -72,6 +78,39 @@ export function WrapDiffLinesToggle(props: {
             onClick={() => props.onChange(!props.wrap)}
         >
             <WrapText className="h-3.5 w-3.5" aria-hidden="true" />
+        </ToggleButton>
+    );
+}
+
+/**
+ * Switches one file's diff between its changes with a little context and the whole file with
+ * the changes marked in it. It sits beside the file's name, since reading a file whole is a
+ * choice for that file, and it never fetches, because the patch already carries the file.
+ */
+export function WholeFileToggle(props: {
+    label: string;
+    shown: boolean;
+    onChange: (shown: boolean) => void;
+    /** Sizes the toggle to the controls beside it, such as a file header's compact switch. */
+    className?: string;
+}) {
+    return (
+        <ToggleButton
+            label={props.label}
+            pressed={props.shown}
+            tooltip={
+                props.shown
+                    ? "Fold the unchanged lines around the changes again"
+                    : "Show the whole file with its changes"
+            }
+            className={cn("h-8 w-8 shrink-0 p-0", props.className)}
+            onClick={() => props.onChange(!props.shown)}
+        >
+            {props.shown ? (
+                <FoldVertical className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+                <UnfoldVertical className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
         </ToggleButton>
     );
 }

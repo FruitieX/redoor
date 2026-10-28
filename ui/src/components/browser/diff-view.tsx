@@ -7,14 +7,21 @@
  */
 import React from "react";
 import type { Language } from "@codemirror/language";
-import { ChevronsUpDown } from "lucide-react";
+import {
+    ArrowDownFromLine,
+    ArrowUpFromLine,
+    ChevronsUpDown,
+    UnfoldVertical,
+} from "lucide-react";
 import type { browserRoute } from "#ui/browser-route";
 import { HighlightedTokens } from "#ui/components/highlighted-tokens";
+import { IconButton } from "#ui/components/icon-button";
 import { LinkButton } from "#ui/components/link-button";
 import {
+    fileLines,
+    isExpandable,
     lineSideText,
     type DiffFile,
-    type DiffHunk,
     type DiffLine,
     type LineSegment,
     type SkipBlock,
@@ -53,19 +60,13 @@ export function diffFileName(file: DiffFile): string {
  * highlights by its shebang.
  */
 function firstFileLine(file: DiffFile): string {
-    for (const hunk of file.hunks) {
-        if (hunk.type !== "hunk") {
-            continue;
+    for (const line of fileLines(file)) {
+        if (line.newLineNumber === 1) {
+            return lineSideText(line, "new");
         }
 
-        for (const line of hunk.lines) {
-            if (line.newLineNumber === 1) {
-                return lineSideText(line, "new");
-            }
-
-            if (line.oldLineNumber === 1) {
-                return lineSideText(line, "old");
-            }
+        if (line.oldLineNumber === 1) {
+            return lineSideText(line, "old");
         }
     }
 
@@ -78,10 +79,10 @@ function diffFileLanguage(file: DiffFile): HighlightLanguageSource {
 }
 
 /**
- * Highlights one side of a hunk as a block, so strings and comments spanning lines keep
- * their colours, and files each line's tokens under its line number.
+ * Highlights consecutive lines of one side as a block, so strings and comments spanning
+ * lines keep their colours, and files each line's tokens under its line number.
  */
-function highlightHunkSide(
+function highlightBlock(
     texts: Array<string | undefined>,
     start: number,
     language: Language,
@@ -115,7 +116,43 @@ function highlightHunkSide(
     return entries;
 }
 
-/** Highlights both sides of every hunk of a file. */
+/**
+ * Highlights every run of consecutive lines of one side as one block. A default-context
+ * patch gives one run per hunk; a patch carrying its whole file gives one run, so even a
+ * folded line keeps the colours of a string or comment opened far above it.
+ */
+function highlightSide(
+    texts: Map<number, string>,
+    language: Language,
+): Map<number, HighlightToken[]> {
+    const numbers = [...texts.keys()].sort((a, b) => a - b);
+    const highlighted = new Map<number, HighlightToken[]>();
+    let runStart = 0;
+
+    for (let index = 1; index <= numbers.length; index++) {
+        const previous = numbers[index - 1] ?? 0;
+
+        if (index < numbers.length && numbers[index] === previous + 1) {
+            continue;
+        }
+
+        const run = numbers.slice(runStart, index);
+
+        for (const [line, tokens] of highlightBlock(
+            run.map((number) => texts.get(number)),
+            run[0] ?? 0,
+            language,
+        )) {
+            highlighted.set(line, tokens);
+        }
+
+        runStart = index;
+    }
+
+    return highlighted;
+}
+
+/** Highlights both sides of every row the patch carries for a file, folded or not. */
 function highlightFile(
     file: DiffFile,
     language: Language | null,
@@ -124,58 +161,32 @@ function highlightFile(
         return null;
     }
 
-    const highlight: FileHighlight = { old: new Map(), new: new Map() };
+    const oldTexts = new Map<number, string>();
+    const newTexts = new Map<number, string>();
     let characters = 0;
 
-    for (const hunk of file.hunks) {
-        if (hunk.type !== "hunk") {
-            continue;
+    for (const line of fileLines(file)) {
+        if (line.oldLineNumber !== null) {
+            const text = lineSideText(line, "old");
+            oldTexts.set(line.oldLineNumber, text);
+            characters += text.length;
         }
 
-        const oldTexts = Array.from<string | undefined>({
-            length: hunk.oldLines,
-        });
-
-        const newTexts = Array.from<string | undefined>({
-            length: hunk.newLines,
-        });
-
-        for (const line of hunk.lines) {
-            if (line.oldLineNumber !== null) {
-                const text = lineSideText(line, "old");
-                oldTexts[line.oldLineNumber - hunk.oldStart] = text;
-                characters += text.length;
-            }
-
-            if (line.newLineNumber !== null) {
-                const text = lineSideText(line, "new");
-                newTexts[line.newLineNumber - hunk.newStart] = text;
-                characters += text.length;
-            }
+        if (line.newLineNumber !== null) {
+            const text = lineSideText(line, "new");
+            newTexts.set(line.newLineNumber, text);
+            characters += text.length;
         }
 
         if (characters > MAX_HIGHLIGHTED_CHARACTERS) {
             return null;
         }
-
-        for (const [line, tokens] of highlightHunkSide(
-            oldTexts,
-            hunk.oldStart,
-            language,
-        )) {
-            highlight.old.set(line, tokens);
-        }
-
-        for (const [line, tokens] of highlightHunkSide(
-            newTexts,
-            hunk.newStart,
-            language,
-        )) {
-            highlight.new.set(line, tokens);
-        }
     }
 
-    return highlight;
+    return {
+        old: highlightSide(oldTexts, language),
+        new: highlightSide(newTexts, language),
+    };
 }
 
 /** Cuts the tokens covering characters `start` to `end` of their line. */
@@ -282,6 +293,50 @@ const SIGNS = {
 } satisfies Record<DiffLine["kind"], string>;
 
 /**
+ * CSS widths of the gutter's slots, shared by every row of a file so the line numbers, the
+ * change sign and a fold's expand buttons line up in the same columns.
+ */
+interface GutterSlots {
+    number: string;
+    sign: string;
+}
+
+/** How wide a slot must be to hold one extra-small icon button. */
+const BUTTON_SLOT_WIDTH = "1.375rem";
+
+/**
+ * Sizes the gutter for the file's largest line number. A file with expandable folds widens
+ * every slot to fit a button, so the buttons sit in the columns of the numbers and sign.
+ */
+function gutterSlots(file: DiffFile): GutterSlots {
+    let largest = 0;
+
+    for (const line of fileLines(file)) {
+        largest = Math.max(
+            largest,
+            line.oldLineNumber ?? 0,
+            line.newLineNumber ?? 0,
+        );
+    }
+
+    const number = `${String(String(largest).length)}ch`;
+
+    return isExpandable(file)
+        ? {
+              number: `max(${number}, ${BUTTON_SLOT_WIDTH})`,
+              sign: BUTTON_SLOT_WIDTH,
+          }
+        : { number, sign: "1ch" };
+}
+
+/** What a fold row puts in the gutter's slots instead of line numbers and a sign. */
+interface GutterContent {
+    old: React.ReactNode;
+    new: React.ReactNode;
+    sign: React.ReactNode;
+}
+
+/**
  * The line numbers and change sign. It scrolls sideways with the rest of its row, so a long
  * line never slides underneath the numbers.
  */
@@ -289,7 +344,10 @@ function Gutter(props: {
     kind: DiffLine["kind"] | "skip";
     oldLineNumber: number | null;
     newLineNumber: number | null;
-    numberWidth: number;
+    slots: GutterSlots;
+    /** Replaces the numbers and sign slot by slot, keeping their columns. */
+    content?: GutterContent;
+    /** Replaces the slots entirely, for a marker that belongs to no column. */
     children?: React.ReactNode;
 }) {
     const kind = props.kind === "skip" ? "normal" : props.kind;
@@ -305,22 +363,23 @@ function Gutter(props: {
             {props.children ?? (
                 <>
                     <span
-                        className="inline-block"
-                        style={{ minWidth: `${String(props.numberWidth)}ch` }}
+                        className="inline-block align-middle"
+                        style={{ minWidth: props.slots.number }}
                     >
-                        {props.oldLineNumber ?? ""}
+                        {props.content?.old ?? props.oldLineNumber ?? ""}
                     </span>
                     <span
-                        className="ml-2 inline-block"
-                        style={{ minWidth: `${String(props.numberWidth)}ch` }}
+                        className="ml-2 inline-block align-middle"
+                        style={{ minWidth: props.slots.number }}
                     >
-                        {props.newLineNumber ?? ""}
+                        {props.content?.new ?? props.newLineNumber ?? ""}
                     </span>
                     <span
-                        aria-hidden="true"
-                        className="ml-2 inline-block w-[1ch] text-center"
+                        aria-hidden={props.content === undefined}
+                        className="ml-2 inline-block text-center align-middle"
+                        style={{ width: props.slots.sign }}
                     >
-                        {SIGNS[kind]}
+                        {props.content?.sign ?? SIGNS[kind]}
                     </span>
                 </>
             )}
@@ -338,7 +397,7 @@ const Line = React.memo(function Line(props: {
     oldTokens: HighlightToken[] | undefined;
     newTokens: HighlightToken[] | undefined;
     editorRoute: DiffEditorRoute | null;
-    numberWidth: number;
+    slots: GutterSlots;
     wrapLines: boolean;
 }) {
     const line = props.line;
@@ -370,7 +429,7 @@ const Line = React.memo(function Line(props: {
                     kind={line.kind}
                     oldLineNumber={line.oldLineNumber}
                     newLineNumber={line.newLineNumber}
-                    numberWidth={props.numberWidth}
+                    slots={props.slots}
                 />
                 <td
                     className={cn(
@@ -432,7 +491,7 @@ const Line = React.memo(function Line(props: {
                         kind="normal"
                         oldLineNumber={null}
                         newLineNumber={null}
-                        numberWidth={props.numberWidth}
+                        slots={props.slots}
                     />
                     <td colSpan={2} className="pl-2 italic text-slate-500">
                         \ No newline at end of file
@@ -443,9 +502,29 @@ const Line = React.memo(function Line(props: {
     );
 });
 
-/** Stands in for the unchanged lines between hunks, with the section Git names there. */
-export function SkipBlockRow(props: { block: SkipBlock; numberWidth: number }) {
-    const hidden = `${String(props.block.count)} unchanged ${props.block.count === 1 ? "line" : "lines"} hidden`;
+/** How many folded lines one step of expanding reveals. */
+const EXPAND_STEP = 20;
+
+/** How much of one fold the reader has revealed, from its top and from its bottom. */
+interface Reveal {
+    fromTop: number;
+    fromBottom: number;
+}
+
+const NOTHING_REVEALED: Reveal = { fromTop: 0, fromBottom: 0 };
+
+/**
+ * Stands in for the unchanged lines between hunks, with the section Git names there. The
+ * buttons that reveal the lines sit in the gutter's columns; a fold without them keeps a
+ * plain marker there instead.
+ */
+function SkipBlockRow(props: {
+    block: SkipBlock;
+    hiddenCount: number;
+    slots: GutterSlots;
+    buttons?: GutterContent;
+}) {
+    const hidden = `${String(props.hiddenCount)} unchanged ${props.hiddenCount === 1 ? "line" : "lines"} hidden`;
 
     return (
         <tr data-skip-block="" className="bg-surface-raised text-slate-400">
@@ -453,12 +532,15 @@ export function SkipBlockRow(props: { block: SkipBlock; numberWidth: number }) {
                 kind="skip"
                 oldLineNumber={null}
                 newLineNumber={null}
-                numberWidth={props.numberWidth}
+                slots={props.slots}
+                content={props.buttons}
             >
-                <ChevronsUpDown
-                    className="mx-auto h-3.5 w-3.5 opacity-60"
-                    aria-hidden="true"
-                />
+                {props.buttons === undefined ? (
+                    <ChevronsUpDown
+                        className="mx-auto h-3.5 w-3.5 opacity-60"
+                        aria-hidden="true"
+                    />
+                ) : undefined}
             </Gutter>
             <td colSpan={2} className="py-1 pl-2 italic">
                 {props.block.content === ""
@@ -469,63 +551,211 @@ export function SkipBlockRow(props: { block: SkipBlock; numberWidth: number }) {
     );
 }
 
-/** One hunk's rows. */
-export function Hunk(props: {
-    hunk: DiffHunk;
+/** The rows the view draws with, shared by hunks and revealed folds. */
+interface RowContext {
     highlight: FileHighlight | null;
     editorRoute: DiffEditorRoute | null;
-    numberWidth: number;
+    slots: GutterSlots;
     wrapLines: boolean;
-}) {
-    return props.hunk.lines.map((line, index) => (
+}
+
+/** Renders rows of a hunk or a revealed fold. */
+function Rows(props: { lines: DiffLine[]; context: RowContext }) {
+    const context = props.context;
+
+    return props.lines.map((line, index) => (
         <Line
             key={index}
             line={line}
             oldTokens={
                 line.oldLineNumber === null
                     ? undefined
-                    : props.highlight?.old.get(line.oldLineNumber)
+                    : context.highlight?.old.get(line.oldLineNumber)
             }
             newTokens={
                 line.newLineNumber === null
                     ? undefined
-                    : props.highlight?.new.get(line.newLineNumber)
+                    : context.highlight?.new.get(line.newLineNumber)
             }
-            editorRoute={props.editorRoute}
-            numberWidth={props.numberWidth}
-            wrapLines={props.wrapLines}
+            editorRoute={context.editorRoute}
+            slots={context.slots}
+            wrapLines={context.wrapLines}
         />
     ));
 }
 
-/** Sizes the number columns for the file's largest line number, so every row aligns. */
-function lineNumberWidth(file: DiffFile): number {
-    let largest = 0;
+/**
+ * One fold: its revealed rows around a row that names the lines still hidden. Revealing
+ * grows the visible context from the hunk above (down) or below (up), like GitHub, so a fold
+ * at the top of the file only expands up and one at the end only down.
+ */
+function Fold(props: {
+    block: SkipBlock;
+    reveal: Reveal;
+    onReveal: (reveal: Reveal) => void;
+    /** Shows every folded line, for reading the whole file. */
+    wholeFile: boolean;
+    hasHunkAbove: boolean;
+    hasHunkBelow: boolean;
+    context: RowContext;
+}) {
+    const lines = props.block.lines;
 
-    for (const hunk of file.hunks) {
-        if (hunk.type === "hunk") {
-            largest = Math.max(
-                largest,
-                hunk.oldStart + hunk.oldLines,
-                hunk.newStart + hunk.newLines,
-            );
-        }
+    if (lines === null) {
+        return (
+            <SkipBlockRow
+                block={props.block}
+                hiddenCount={props.block.count}
+                slots={props.context.slots}
+            />
+        );
     }
 
-    return String(largest).length;
+    const fromTop = props.wholeFile ? lines.length : props.reveal.fromTop;
+    const fromBottom = props.reveal.fromBottom;
+    const hiddenCount = lines.length - fromTop - fromBottom;
+
+    if (hiddenCount <= 0) {
+        return <Rows lines={lines} context={props.context} />;
+    }
+
+    const expandDown = () =>
+        props.onReveal({
+            fromTop: fromTop + Math.min(EXPAND_STEP, hiddenCount),
+            fromBottom,
+        });
+
+    const expandUp = () =>
+        props.onReveal({
+            fromTop,
+            fromBottom: fromBottom + Math.min(EXPAND_STEP, hiddenCount),
+        });
+
+    const expandAll = () =>
+        props.onReveal({ fromTop: fromTop + hiddenCount, fromBottom });
+
+    const stepped = hiddenCount > EXPAND_STEP;
+
+    return (
+        <>
+            <Rows lines={lines.slice(0, fromTop)} context={props.context} />
+            <SkipBlockRow
+                block={props.block}
+                hiddenCount={hiddenCount}
+                slots={props.context.slots}
+                // Down grows the hunk above and up the hunk below, so they take the old and
+                // new number columns in reading order; the whole fold opens from the sign's.
+                buttons={{
+                    old:
+                        stepped && props.hasHunkAbove ? (
+                            <IconButton
+                                type="button"
+                                variant="ghost"
+                                size="xs"
+                                label="Expand down"
+                                tooltip={`Show ${String(EXPAND_STEP)} more unchanged lines below the change above`}
+                                onClick={expandDown}
+                            >
+                                <ArrowDownFromLine
+                                    className="h-3.5 w-3.5"
+                                    aria-hidden="true"
+                                />
+                            </IconButton>
+                        ) : null,
+                    new:
+                        stepped && props.hasHunkBelow ? (
+                            <IconButton
+                                type="button"
+                                variant="ghost"
+                                size="xs"
+                                label="Expand up"
+                                tooltip={`Show ${String(EXPAND_STEP)} more unchanged lines above the change below`}
+                                onClick={expandUp}
+                            >
+                                <ArrowUpFromLine
+                                    className="h-3.5 w-3.5"
+                                    aria-hidden="true"
+                                />
+                            </IconButton>
+                        ) : null,
+                    sign: (
+                        <IconButton
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            label="Expand all"
+                            tooltip={`Show all ${String(hiddenCount)} hidden unchanged ${hiddenCount === 1 ? "line" : "lines"}`}
+                            onClick={expandAll}
+                        >
+                            <UnfoldVertical
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                            />
+                        </IconButton>
+                    ),
+                }}
+            />
+            <Rows
+                lines={lines.slice(lines.length - fromBottom)}
+                context={props.context}
+            />
+        </>
+    );
+}
+
+/**
+ * Remembers how far each fold of a file is revealed. The folds are identified by the file's
+ * hunk layout rather than the parsed object, so switching the inline layout, which parses
+ * the patch again, keeps what the reader opened, while a patch whose hunks moved starts over.
+ */
+function useFoldReveals(file: DiffFile) {
+    const layout = React.useMemo(
+        () =>
+            file.hunks
+                .map((hunk) =>
+                    hunk.type === "hunk" ? hunk.header : String(hunk.count),
+                )
+                .join("|"),
+        [file],
+    );
+
+    const [state, setState] = React.useState<{
+        layout: string;
+        reveals: ReadonlyMap<number, Reveal>;
+    }>({ layout, reveals: new Map() });
+
+    const reveals =
+        state.layout === layout ? state.reveals : new Map<number, Reveal>();
+
+    return {
+        get: (index: number) => reveals.get(index) ?? NOTHING_REVEALED,
+        set: (index: number, reveal: Reveal) =>
+            setState((previous) => {
+                const next = new Map(
+                    previous.layout === layout ? previous.reveals : [],
+                );
+
+                next.set(index, reveal);
+
+                return { layout, reveals: next };
+            }),
+    };
 }
 
 /**
  * One file's rows as a table. It scrolls sideways inside its own box, so wide lines never
  * widen the page or the file header above them, unless `wrapLines` fits them to the box
  * for readers who would rather not scroll. Highlighting is memoized on the parsed file, so
- * re-rendering a large diff does not highlight it again.
+ * re-rendering a large diff does not highlight it again. Folded unchanged lines come from the
+ * patch itself, so revealing them never asks the server again.
  */
 export function Diff(props: {
     file: DiffFile;
     label: string;
     editorRoute: DiffEditorRoute | null;
     wrapLines: boolean;
+    /** Reveals every folded line, so the patch reads as the whole file with its changes. */
+    wholeFile: boolean;
 }) {
     const file = props.file;
     // A grammar that loads lazily renders plain rows first and colours them once loaded.
@@ -537,7 +767,15 @@ export function Diff(props: {
         [file, language],
     );
 
-    const numberWidth = lineNumberWidth(file);
+    const slots = React.useMemo(() => gutterSlots(file), [file]);
+    const reveals = useFoldReveals(file);
+
+    const context: RowContext = {
+        highlight,
+        editorRoute: props.editorRoute,
+        slots,
+        wrapLines: props.wrapLines,
+    };
 
     return (
         <div className="w-full min-w-0 overflow-x-auto overflow-y-hidden">
@@ -551,19 +789,23 @@ export function Diff(props: {
                 <tbody>
                     {file.hunks.map((hunk, index) =>
                         hunk.type === "hunk" ? (
-                            <Hunk
+                            <Rows
                                 key={index}
-                                hunk={hunk}
-                                highlight={highlight}
-                                editorRoute={props.editorRoute}
-                                numberWidth={numberWidth}
-                                wrapLines={props.wrapLines}
+                                lines={hunk.lines}
+                                context={context}
                             />
                         ) : (
-                            <SkipBlockRow
+                            <Fold
                                 key={index}
                                 block={hunk}
-                                numberWidth={numberWidth}
+                                reveal={reveals.get(index)}
+                                onReveal={(reveal) =>
+                                    reveals.set(index, reveal)
+                                }
+                                wholeFile={props.wholeFile}
+                                hasHunkAbove={index > 0}
+                                hasHunkBelow={index < file.hunks.length - 1}
+                                context={context}
                             />
                         ),
                     )}

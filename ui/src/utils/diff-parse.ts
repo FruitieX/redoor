@@ -48,12 +48,17 @@ export interface DiffHunk {
     lines: DiffLine[];
 }
 
-/** The unchanged lines between two hunks, which the patch leaves out. */
+/** The unchanged lines between two hunks, which the view folds away. */
 export interface SkipBlock {
     type: "skip";
     count: number;
     /** The function or section name Git prints after the next hunk's header. */
     content: string;
+    /**
+     * The folded rows when the patch carried every unchanged line, so the view can reveal
+     * them without asking the server again; null when the patch left them out.
+     */
+    lines: DiffLine[] | null;
 }
 
 /** How the patch changed the file as a whole. */
@@ -71,10 +76,16 @@ export interface DiffFile {
 }
 
 /**
- * Tuning for pairing deleted and inserted lines. The defaults are what the viewer uses; the
- * options exist so tests can pin one behaviour, not as user-facing settings.
+ * How a patch is read: mostly tuning for pairing deleted and inserted lines. The defaults are
+ * what the viewer uses, except that `mergeModifiedLines` and `fullContext` follow the reader's
+ * preference and what the server sent.
  */
 export interface ParseOptions {
+    /**
+     * Whether the patch holds every unchanged line of its files, so they fold to
+     * `CONTEXT_LINES` around each change and stay expandable instead of being dropped.
+     */
+    fullContext: boolean;
     /** How many lines apart a deleted and an inserted line may be and still pair. */
     maxDiffDistance: number;
     /** The largest share of changed characters at which two lines still count as similar. */
@@ -86,6 +97,7 @@ export interface ParseOptions {
 }
 
 const DEFAULT_OPTIONS: ParseOptions = {
+    fullContext: false,
     maxDiffDistance: 30,
     maxChangeRatio: 0.45,
     mergeModifiedLines: true,
@@ -97,6 +109,12 @@ const DEFAULT_OPTIONS: ParseOptions = {
  * their inline result is unreadable anyway, so such lines stay plain deletes and inserts.
  */
 const MAX_PAIRABLE_LINE_LENGTH = 1000;
+
+/**
+ * The unchanged lines kept around each change when a whole file is folded, matching what
+ * `git diff` and the server send when a file is too large to send whole.
+ */
+const CONTEXT_LINES = 3;
 
 /** A patch line as read, before similar deletes and inserts are paired. */
 type RawChange =
@@ -784,7 +802,125 @@ function parseHunk(hunk: RawHunk, options: ParseOptions): DiffHunk {
     };
 }
 
-/** Marks the unchanged stretches the patch skipped, so a gap is never silent. */
+/** Folds a run of a hunk's unchanged lines into an expandable skip block. */
+function foldedBlock(changes: RawChange[]): SkipBlock {
+    return {
+        type: "skip",
+        count: changes.length,
+        content: "",
+        lines: changes.map(changeToLine),
+    };
+}
+
+/**
+ * The stretches of a hunk to show, as [start, end) change indexes: every change with
+ * `CONTEXT_LINES` around it. A gap of a single line stays visible, because a row saying one
+ * line is hidden takes as much room as the line.
+ */
+function visibleRanges(changes: RawChange[]): Array<[number, number]> {
+    const ranges: Array<[number, number]> = [];
+
+    changes.forEach((change, index) => {
+        if (change.type === "normal") {
+            return;
+        }
+
+        const start = Math.max(0, index - CONTEXT_LINES);
+        const end = Math.min(changes.length, index + 1 + CONTEXT_LINES);
+        const last = ranges.at(-1);
+
+        if (last !== undefined && start - last[1] <= 1) {
+            last[1] = end;
+        } else {
+            ranges.push([start, end]);
+        }
+    });
+
+    const first = ranges.at(0);
+    const last = ranges.at(-1);
+
+    if (first !== undefined && first[0] <= 1) {
+        first[0] = 0;
+    }
+
+    if (last !== undefined && changes.length - last[1] <= 1) {
+        last[1] = changes.length;
+    }
+
+    return ranges;
+}
+
+/**
+ * Splits a hunk that carries its whole file into the hunks a default-context patch would
+ * have, with the unchanged lines between them kept as expandable skip blocks. Similar lines
+ * pair within each visible hunk only, as they would in a default-context patch, so revealing
+ * unchanged lines never changes how edits pair.
+ */
+function foldHunk(
+    hunk: RawHunk,
+    options: ParseOptions,
+): Array<DiffHunk | SkipBlock> {
+    const ranges = visibleRanges(hunk.changes);
+
+    if (ranges.length === 0) {
+        return [parseHunk(hunk, options)];
+    }
+
+    // Where each change sits in the old and new file, so a visible stretch knows its start.
+    const oldLineAt: number[] = [];
+    const newLineAt: number[] = [];
+    let oldLine = hunk.oldStart;
+    let newLine = hunk.newStart;
+
+    for (const change of hunk.changes) {
+        oldLineAt.push(oldLine);
+        newLineAt.push(newLine);
+        oldLine += change.type === "insert" ? 0 : 1;
+        newLine += change.type === "delete" ? 0 : 1;
+    }
+
+    const result: Array<DiffHunk | SkipBlock> = [];
+    let position = 0;
+
+    for (const [start, end] of ranges) {
+        if (start > position) {
+            result.push(foldedBlock(hunk.changes.slice(position, start)));
+        }
+
+        const changes = hunk.changes.slice(start, end);
+        const oldStart = oldLineAt[start] ?? hunk.oldStart;
+        const newStart = newLineAt[start] ?? hunk.newStart;
+        const oldLines = changes.filter((c) => c.type !== "insert").length;
+        const newLines = changes.filter((c) => c.type !== "delete").length;
+
+        result.push(
+            parseHunk(
+                {
+                    header: `@@ -${String(oldStart)},${String(oldLines)} +${String(newStart)},${String(newLines)} @@`,
+                    oldStart,
+                    oldLines,
+                    newStart,
+                    newLines,
+                    context: "",
+                    changes,
+                },
+                options,
+            ),
+        );
+        position = end;
+    }
+
+    if (position < hunk.changes.length) {
+        result.push(foldedBlock(hunk.changes.slice(position)));
+    }
+
+    return result;
+}
+
+/**
+ * Marks the unchanged stretches the patch skipped, so a gap is never silent. A patch that
+ * carries whole files has one hunk per file, which folds into hunks and expandable blocks.
+ */
 function insertSkipBlocks(hunks: RawHunk[], options: ParseOptions) {
     const result: Array<DiffHunk | SkipBlock> = [];
     let lastHunkLine = 1;
@@ -799,14 +935,34 @@ function insertSkipBlocks(hunks: RawHunk[], options: ParseOptions) {
                 type: "skip",
                 count: distanceToLastHunk,
                 content: hunk.context,
+                lines: null,
             });
         }
 
         lastHunkLine = Math.max(hunk.oldStart + hunk.oldLines, lastHunkLine);
-        result.push(parseHunk(hunk, options));
+
+        if (options.fullContext) {
+            result.push(...foldHunk(hunk, options));
+        } else {
+            result.push(parseHunk(hunk, options));
+        }
     }
 
     return result;
+}
+
+/** Whether any of the file's folded lines can be revealed from the patch itself. */
+export function isExpandable(file: DiffFile): boolean {
+    return file.hunks.some(
+        (hunk) => hunk.type === "skip" && hunk.lines !== null,
+    );
+}
+
+/** Every row the patch carries for a file, shown or folded, in file order. */
+export function fileLines(file: DiffFile): DiffLine[] {
+    return file.hunks.flatMap((hunk) =>
+        hunk.type === "hunk" ? hunk.lines : (hunk.lines ?? []),
+    );
 }
 
 /** Parses a unified diff into files of rows ready to render. */

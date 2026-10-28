@@ -302,6 +302,9 @@ function useSyncDiff(
         unifiedDiff: diffMutation.isSuccess
             ? diffMutation.data.unified_diff
             : null,
+        fullContext: diffMutation.isSuccess
+            ? diffMutation.data.full_context
+            : false,
         run: () => diffMutation.mutate(),
         reset: () => diffMutation.reset(),
     };
@@ -938,6 +941,7 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
             </div>
             <UnifiedDiff
                 unifiedDiff={diff.unifiedDiff}
+                fullContext={diff.fullContext}
                 mergeModifiedLines={mergeModifiedLines}
                 wrapLines={userState.wrapDiffLines}
             />

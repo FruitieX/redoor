@@ -2,12 +2,13 @@ import React from "react";
 import { Link } from "@tanstack/react-router";
 import { FileText } from "lucide-react";
 import { browserRoute } from "#ui/browser-route";
-import { parseDiff, type DiffFile } from "#ui/utils/diff-parse";
+import { isExpandable, parseDiff, type DiffFile } from "#ui/utils/diff-parse";
 import {
     Diff,
     diffFileName,
     type DiffEditorRoute,
 } from "#ui/components/browser/diff-view";
+import { WholeFileToggle } from "#ui/components/browser/diff-layout-control";
 
 /** Words for the file-level changes worth a badge; plain modifications need none. */
 const FILE_TYPE_LABELS = {
@@ -50,6 +51,8 @@ function changeCounts(file: DiffFile) {
 function DiffFileHeader(props: {
     file: DiffFile;
     editorRoute: DiffEditorRoute | null;
+    /** Null when the patch cannot show the file whole, so no toggle is offered. */
+    wholeFile: { shown: boolean; onChange: (shown: boolean) => void } | null;
 }) {
     const file = props.file;
     const name = diffFileName(file);
@@ -96,12 +99,24 @@ function DiffFileHeader(props: {
                     {typeLabel}
                 </span>
             )}
-            {counts.added + counts.removed === 0 ? null : (
-                <span className="ml-auto font-mono text-xs tabular-nums">
-                    <span className="text-emerald-400">+{counts.added}</span>{" "}
-                    <span className="text-red-400">−{counts.removed}</span>
-                </span>
-            )}
+            <span className="ml-auto flex items-center gap-3">
+                {counts.added + counts.removed === 0 ? null : (
+                    <span className="font-mono text-xs tabular-nums">
+                        <span className="text-emerald-400">
+                            +{counts.added}
+                        </span>{" "}
+                        <span className="text-red-400">−{counts.removed}</span>
+                    </span>
+                )}
+                {props.wholeFile === null ? null : (
+                    <WholeFileToggle
+                        label={`Show whole file ${name}`}
+                        shown={props.wholeFile.shown}
+                        onChange={props.wholeFile.onChange}
+                        className="h-7 w-7"
+                    />
+                )}
+            </span>
         </div>
     );
 }
@@ -139,15 +154,45 @@ export function UnifiedDiff(props: {
      * the reader's stored preference, which the diff views own.
      */
     wrapLines?: boolean;
+    /**
+     * Whether the patch carries every unchanged line, as the server says, so the view folds
+     * them itself and can reveal them without fetching.
+     */
+    fullContext?: boolean;
+    /**
+     * Shows every file whole. Diff lists set it from their own header, which replaces the
+     * file header here; other views leave it unset and toggle each file in its header.
+     */
+    wholeFile?: boolean;
 }) {
     const mergeModifiedLines = props.mergeModifiedLines ?? true;
+    const fullContext = props.fullContext ?? false;
+
+    // Files are toggled by position, since a patch's files have no other stable identity.
+    const [wholeFiles, setWholeFiles] = React.useState<ReadonlySet<number>>(
+        () => new Set(),
+    );
+
+    const showWholeFile = (index: number, shown: boolean) =>
+        setWholeFiles((current) => {
+            const next = new Set(current);
+
+            if (shown) {
+                next.add(index);
+            } else {
+                next.delete(index);
+            }
+
+            return next;
+        });
+
     const editorDeviceName = props.editorFile?.deviceName;
     const editorPath = props.editorFile?.path;
 
     // Parsing pairs similar lines with word diffs, which is too slow to redo every render.
     const files = React.useMemo(
-        () => parseDiff(props.unifiedDiff, { mergeModifiedLines }),
-        [props.unifiedDiff, mergeModifiedLines],
+        () => parseDiff(props.unifiedDiff, { mergeModifiedLines, fullContext }),
+        [props.unifiedDiff, mergeModifiedLines, fullContext],
     );
 
     // A stable route keeps the memoized rows from re-rendering when the parent does.
@@ -181,10 +226,24 @@ export function UnifiedDiff(props: {
             {files.map((file, index) => {
                 const name = diffFileName(file);
                 const hasRows = file.hunks.some((hunk) => hunk.type === "hunk");
+                const wholeFile = props.wholeFile ?? wholeFiles.has(index);
 
                 return (
                     <div key={index} className="min-w-0">
-                        <DiffFileHeader file={file} editorRoute={editorRoute} />
+                        <DiffFileHeader
+                            file={file}
+                            editorRoute={editorRoute}
+                            wholeFile={
+                                props.wholeFile === undefined &&
+                                isExpandable(file)
+                                    ? {
+                                          shown: wholeFile,
+                                          onChange: (shown) =>
+                                              showWholeFile(index, shown),
+                                      }
+                                    : null
+                            }
+                        />
                         {hasRows ? (
                             <Diff
                                 file={file}
@@ -195,6 +254,7 @@ export function UnifiedDiff(props: {
                                 }
                                 editorRoute={editorRoute}
                                 wrapLines={props.wrapLines ?? false}
+                                wholeFile={wholeFile}
                             />
                         ) : (
                             <p className="px-3 py-2 text-sm text-slate-400">

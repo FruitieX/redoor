@@ -1,5 +1,11 @@
 import { expect, test } from "vitest";
-import { lineSideText, parseDiff, type DiffHunk } from "#ui/utils/diff-parse";
+import {
+    fileLines,
+    isExpandable,
+    lineSideText,
+    parseDiff,
+    type DiffHunk,
+} from "#ui/utils/diff-parse";
 
 /** Returns a file's hunks without skip blocks, failing loudly when the file is missing. */
 function hunksOf(diff: string, fileIndex = 0): DiffHunk[] {
@@ -201,6 +207,8 @@ test("keeps absolute Sync paths and marks skipped lines between hunks", () => {
         type: "skip",
         count: 7,
         content: "section name",
+        // A default-context patch does not carry the skipped lines, so they cannot expand.
+        lines: null,
     });
 });
 
@@ -219,4 +227,77 @@ test("does not mistake content lines for file headers", () => {
             lineSideText(line, line.kind === "delete" ? "old" : "new"),
         ),
     ).toEqual(["-- removed rule", "++ added rule", "tail"]);
+});
+
+/** Writes a whole-file patch of numbered lines with the given new-side replacements. */
+function wholeFilePatch(lineCount: number, changed: number[]): string {
+    const body = Array.from({ length: lineCount }, (_, index) => {
+        const line = index + 1;
+
+        return changed.includes(line)
+            ? `-line ${String(line)}\n+line ${String(line)} edited`
+            : ` line ${String(line)}`;
+    });
+
+    return `--- a/file.txt
++++ b/file.txt
+@@ -1,${String(lineCount)} +1,${String(lineCount)} @@
+${body.join("\n")}
+`;
+}
+
+test("folds a whole-file patch to default context with expandable gaps", () => {
+    const file = parseDiff(wholeFilePatch(40, [10, 30]), {
+        fullContext: true,
+    })[0];
+
+    // Unchanged stretches fold like a default-context patch: before, between and after.
+    expect(
+        file?.hunks.map((hunk) =>
+            hunk.type === "skip" ? `skip ${String(hunk.count)}` : hunk.header,
+        ),
+    ).toEqual([
+        "skip 6",
+        "@@ -7,7 +7,7 @@",
+        "skip 13",
+        "@@ -27,7 +27,7 @@",
+        "skip 7",
+    ]);
+
+    // The folded rows carry their own numbers, so revealing them needs no request.
+    const trailing = file?.hunks.at(-1);
+    expect(
+        trailing?.type === "skip"
+            ? trailing.lines?.map((line) => line.newLineNumber)
+            : null,
+    ).toEqual([34, 35, 36, 37, 38, 39, 40]);
+    // Every line of the file stays available for highlighting and line numbering, each
+    // edit being one modified row.
+    expect(file === undefined ? 0 : fileLines(file).length).toBe(40);
+    // The view offers expansion only when the patch carried the folded lines.
+    expect(file === undefined ? false : isExpandable(file)).toBe(true);
+});
+
+test("pairs edits within each folded hunk as a default-context patch would", () => {
+    const hunks = parseDiff(wholeFilePatch(40, [10, 30]), {
+        fullContext: true,
+    })[0]?.hunks.filter((hunk) => hunk.type === "hunk");
+
+    // Each edit stays one modified row inside its own hunk.
+    expect(
+        hunks?.map(
+            (hunk) =>
+                hunk.lines.filter((line) => line.kind === "modified").length,
+        ),
+    ).toEqual([1, 1]);
+});
+
+test("keeps single-line gaps visible instead of folding them", () => {
+    // Lines 1 to 3 are context for line 5's change; line 4 alone would be folded.
+    const file = parseDiff(wholeFilePatch(9, [5]), { fullContext: true })[0];
+
+    // A one-line fold would take as much room as the line itself.
+    expect(file?.hunks.map((hunk) => hunk.type)).toEqual(["hunk"]);
+    // Nothing is folded, so there is nothing to expand.
+    expect(file === undefined ? true : isExpandable(file)).toBe(false);
 });

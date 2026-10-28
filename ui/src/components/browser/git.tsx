@@ -364,6 +364,8 @@ export function GitDiffResultView(props: {
                 editorFile={props.editorFile}
                 mergeModifiedLines={props.view.mergeModifiedLines}
                 wrapLines={props.view.wrapLines}
+                fullContext={props.result.full_context}
+                wholeFile={props.view.wholeFile}
             />
         );
     }
