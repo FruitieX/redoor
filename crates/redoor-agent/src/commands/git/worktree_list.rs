@@ -184,7 +184,7 @@ mod tests {
     /// Confirms the main worktree leads, the most recent follow, and missing ones trail.
     #[test]
     fn worktrees_sort_main_first_then_most_recent() {
-        let mut worktrees = vec![
+        let mut worktrees = [
             worktree("/old", false, false, Some(1)),
             worktree("/gone", false, true, Some(9)),
             worktree("/main", true, false, Some(0)),

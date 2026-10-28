@@ -337,7 +337,7 @@ mod tests {
     /// Confirms the newest commits lead and equal times are ordered by name.
     #[test]
     fn candidates_sort_newest_first_then_by_name() {
-        let mut sorted = vec![
+        let mut sorted = [
             candidate(GitRefSort::Recent, 1, "a"),
             candidate(GitRefSort::Recent, 3, "c"),
             candidate(GitRefSort::Recent, 3, "b"),
@@ -351,7 +351,7 @@ mod tests {
     /// Confirms the name order ignores commit times and compares version numbers by value.
     #[test]
     fn candidates_sort_by_natural_name() {
-        let mut sorted = vec![
+        let mut sorted = [
             candidate(GitRefSort::Name, 9, "refs/tags/v1.10"),
             candidate(GitRefSort::Name, 1, "refs/tags/v1.9"),
             candidate(GitRefSort::Name, 5, "refs/tags/v1.9.1"),
@@ -371,7 +371,7 @@ mod tests {
         for sort in [GitRefSort::Recent, GitRefSort::Name] {
             let mut default = candidate(sort, 1, "refs/heads/zeta");
             default.is_default = true;
-            let mut sorted = vec![candidate(sort, 9, "refs/heads/alpha"), default];
+            let mut sorted = [candidate(sort, 9, "refs/heads/alpha"), default];
             sorted.sort();
             // Neither a newer commit nor an earlier name moves a branch above the default.
             assert_eq!(sorted[0].full_name, "refs/heads/zeta", "{sort:?}");
