@@ -1368,8 +1368,10 @@ is shown in the application menu and, in full-window mode, as a strip above the 
   text (focus, window focus, Reload, after a reload), a clean buffer takes it as a minimal
   change outside the undo history (`Transaction.addToHistory` false), so the caret and history
   stay. A dirty buffer keeps its text; if the device moved away from the text the edits are
-  based on, the editor shows a "changed on device" banner with Discard my changes (which loads
-  the device text and starts the history over). Saving overwrites the device.
+  based on, the editor shows a "changed on device" banner with Keep my changes (which rebases
+  the edits on the new device text, so the banner returns only if the device changes again) and
+  Discard my changes (which loads the device text and starts the history over). Saving
+  overwrites the device.
 - **Buffers are stored on the server per user.** The goal is to edit a file on one computer,
   walk to another and continue exactly where you left off. `GET`, `PUT` and `DELETE
   /api/v1/user/editor-buffers/{key}` (`http/editor_buffers.rs`, session only) keep one file per

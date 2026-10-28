@@ -470,10 +470,11 @@ function useFileSaveShortcut(onSave: () => void) {
 /**
  * Warns that the device changed under unsaved browser edits. The browser version wins until
  * the user decides, so the device text is only loaded when they discard their changes;
- * saving instead overwrites the device.
+ * keeping them dismisses the warning, and saving overwrites the device.
  */
 function DeviceChangedBanner(props: {
     deviceName: string;
+    onKeep: () => void;
     onDiscard: () => void;
 }) {
     return (
@@ -486,15 +487,26 @@ function DeviceChangedBanner(props: {
                 This file changed on {props.deviceName} after your unsaved edits
                 started. Saving overwrites the device version.
             </span>
-            <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                tooltip="Throw away the unsaved browser changes and load the file from the device"
-                onClick={props.onDiscard}
-            >
-                Discard my changes
-            </Button>
+            <div className="flex gap-2">
+                <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    tooltip="Dismiss this warning and keep editing the browser version"
+                    onClick={props.onKeep}
+                >
+                    Keep my changes
+                </Button>
+                <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    tooltip="Throw away the unsaved browser changes and load the file from the device"
+                    onClick={props.onDiscard}
+                >
+                    Discard my changes
+                </Button>
+            </div>
         </div>
     );
 }
@@ -788,7 +800,7 @@ function useFileBuffer(props: FileEditViewProps) {
             // device had changed it, and a clean buffer would follow it.
             await queryClient.cancelQueries({ queryKey: fileQuery.queryKey });
             // The buffer learns its new base before the cache update reaches it as device text.
-            editor.markSaved(bufferKey, nextContent);
+            editor.rebase(bufferKey, nextContent);
             queryClient.setQueryData(fileQuery.queryKey, nextContent);
         },
     });
@@ -956,6 +968,14 @@ export function FileEditView(props: FileEditViewProps) {
                 {buffer.conflict === null ? null : (
                     <DeviceChangedBanner
                         deviceName={props.agent.name}
+                        onKeep={() => {
+                            if (buffer.conflict !== null) {
+                                buffer.editor.rebase(
+                                    buffer.bufferKey,
+                                    buffer.conflict,
+                                );
+                            }
+                        }}
                         onDiscard={() => {
                             if (buffer.conflict !== null) {
                                 buffer.editor.discard(

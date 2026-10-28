@@ -417,8 +417,12 @@ export class EditorWorkspace extends ExternalStore<
         this.notifyDocument();
     }
 
-    /** Records a successful save, which makes the saved text the new clean base. */
-    markSaved(key: string, content: string) {
+    /**
+     * Makes device text the base the buffer's edits are compared against: after a save the
+     * buffer is clean again, and after "Keep my changes" the edits stay dirty but no longer
+     * conflict, so the warning returns only if the device changes once more.
+     */
+    rebase(key: string, content: string) {
         const buffer = this.buffers.get(key);
 
         if (buffer === undefined) {

@@ -1039,6 +1039,54 @@ test.describe.serial("Open files", () => {
         expect(await fs.readFile(filePath, "utf8")).not.toContain("unsaved");
     });
 
+    test("dismisses the device change warning when the user keeps their edits", async ({
+        page,
+    }) => {
+        const filePath = path.join(ctx.testDirPath, "device-changed-keep.txt");
+        await fs.writeFile(filePath, "device original");
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`;
+        const editor = page.getByLabel("File editor", { exact: true });
+
+        const banner = page.getByRole("alert", {
+            name: "File changed on device",
+        });
+
+        await page.goto(fileUrl);
+        await expect(editor).toHaveText("device original");
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+End");
+        await page.keyboard.type(" browser");
+        // The edit's own write lands first, so the write awaited below is the kept decision.
+        await expect
+            .poll(() => storedDocument(filePath))
+            .toBe("device original browser");
+
+        await fs.writeFile(filePath, "device rewrote this");
+        await simulateTabRefocus(page);
+        await expect(banner).toBeVisible();
+
+        const keptPersisted = page.waitForResponse(
+            (response) =>
+                response.request().method() === "PUT" &&
+                response.url().includes("/api/v1/user/editor-buffers/"),
+        );
+
+        await banner.getByRole("button", { name: "Keep my changes" }).click();
+        // Keeping dismisses the warning while the browser edits stay unsaved.
+        await expect(banner).toBeHidden();
+        await expect(editor).toHaveText("device original browser");
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeEnabled();
+
+        // Reloading before the write lands would read the old base and warn again.
+        await keptPersisted;
+        await page.reload();
+        // The decision is stored with the buffer, so a reload does not bring the warning back.
+        await expect(editor).toHaveText("device original browser");
+        await expect(banner).toBeHidden();
+    });
+
     test("keeps unsaved edits over a device change until the user discards them", async ({
         page,
     }) => {
