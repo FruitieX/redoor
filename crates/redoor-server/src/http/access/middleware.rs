@@ -42,7 +42,7 @@ pub(crate) async fn access_control(
     } else {
         match authenticate(&state, request.headers()).await {
             Ok(principal) => Some(principal),
-            Err(response) => return response,
+            Err(error) => return error.into_response(),
         }
     };
     let (mut parts, body) = request.into_parts();
@@ -67,7 +67,7 @@ pub(crate) async fn access_control(
 
 /// A bearer token alone decides when present, so a stale cookie can never upgrade a rejected
 /// token; otherwise the browser session cookie is used.
-async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Principal, Response> {
+async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Principal, ApiError> {
     if let Some(secret) = bearer_token(headers) {
         return match state.tokens.authenticate(secret).await {
             Some(grant) => Ok(Principal::Token(grant)),
@@ -129,8 +129,8 @@ fn authorize(
 }
 
 /// Builds the 401 body every client already understands.
-fn unauthorized(message: &str) -> Response {
-    ApiError::status(StatusCode::UNAUTHORIZED, message).into_response()
+fn unauthorized(message: &str) -> ApiError {
+    ApiError::status(StatusCode::UNAUTHORIZED, message)
 }
 
 /// Reminds developers in debug builds that a new API route needs a table entry; release
