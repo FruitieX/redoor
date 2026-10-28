@@ -30,6 +30,7 @@ import {
     gitRefsQueryOptions,
     type GitRefListKind,
 } from "#ui/queries";
+import { cn } from "#ui/utils/cn";
 import { getErrorMessage } from "#ui/utils/error";
 import type { GitCommitSummary } from "#bindings/GitCommitSummary";
 import type { GitRef } from "#bindings/GitRef";
@@ -260,7 +261,10 @@ function CommitRow(props: {
     return (
         <li
             aria-current={props.current ? "true" : undefined}
-            className={`flex min-w-0 items-center gap-3 px-3 py-2.5 transition-colors ${props.current ? "bg-blue-400/10" : "hover:bg-tint"}`}
+            className={cn(
+                "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5 transition-colors sm:flex-nowrap",
+                props.current ? "bg-blue-400/10" : "hover:bg-tint",
+            )}
         >
             <AuthorAvatar name={commit.author_name} />
             <div className="min-w-0 flex-1">
@@ -281,7 +285,9 @@ function CommitRow(props: {
                     />
                 </p>
             </div>
-            <span className="flex shrink-0 items-center gap-1.5">
+            {/* On a phone the actions take their own row so the message is not cut off
+                after a few words. */}
+            <span className="flex shrink-0 basis-full items-center justify-end gap-1.5 sm:basis-auto">
                 {props.current ? (
                     <span className="rounded-full border border-blue-400/40 px-2 py-0.5 text-[11px] font-medium text-blue-300">
                         Viewing
