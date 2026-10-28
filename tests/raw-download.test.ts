@@ -626,7 +626,7 @@ describe("Raw Download API", () => {
             throw new Error(`Agent ${proxiedAgentName} was not registered`);
         }
 
-        await proxy.addToxic({
+        const bandwidthToxic = await proxy.addToxic({
             name: "slow-download",
             type: "bandwidth",
             stream: "upstream",
@@ -683,6 +683,11 @@ describe("Raw Download API", () => {
         // Returning the proxied agent name proves the responsive command still reached the intended agent during the download.
         expect(firstCompletion.details.name).toBe(proxiedAgent.name);
 
+        // The race above is the responsiveness proof. Lifting the throttle lets the
+        // remaining ~8 MB finish in milliseconds instead of ~16 s on the same live
+        // connection, which still proves the stream survives the concurrent command.
+        await bandwidthToxic.remove();
+
         const downloadedContent = Buffer.from(await downloadPromise);
 
         // Matching bytes prove the throttled download still completes successfully after the concurrent command.
@@ -713,7 +718,7 @@ describe("Raw Download API", () => {
         });
 
         // Limit the agent connection from birth so the agent cannot finish the file before abort.
-        await proxy.addToxic({
+        const bandwidthToxic = await proxy.addToxic({
             name: "slow-cancel-download",
             type: "bandwidth",
             stream: "upstream",
@@ -834,6 +839,11 @@ describe("Raw Download API", () => {
         expect(serverLogAfterCancel).not.toMatch(
             /No streaming response found for request_id=/,
         );
+
+        // The throttle only exists to keep the first attempt in flight until the abort.
+        // The retry checks row folding and byte-exact content, which do not depend on
+        // link speed, so it runs unthrottled instead of spending ~16 s on 8 MB.
+        await bandwidthToxic.remove();
 
         const resumedResponse = await proxiedAgent.download(sourcePath);
         // Android can retry a canceled browser download as a second full HTTP request.
