@@ -1,10 +1,11 @@
+// Serial: adds and removes SSH devices in the shared device list.
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
 import type { SshHostKeyResponse } from "#bindings/SshHostKeyResponse";
 import type { SshKeyRemovalResponse } from "#bindings/SshKeyRemovalResponse";
-import { WEB_BASE_URL } from "./helpers";
+import { WEB_BASE_URL } from "../helpers";
 
 // Only the password user is used here: the integration tests enroll keys for `redoor`, and
 // two suites rewriting the same authorized_keys at once would race.

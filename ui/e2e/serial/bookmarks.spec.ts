@@ -1,7 +1,8 @@
+// Serial: replaces the shared user settings to seed bookmarks and asserts on the saved list.
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { BackgroundTabs } from "./background-tabs";
-import { dragReorderRow } from "./reorder";
+import { BackgroundTabs } from "../background-tabs";
+import { dragReorderRow } from "../reorder";
 import { ApiClient } from "#ui/api-client";
 import {
     setupTestDir,
@@ -10,7 +11,7 @@ import {
     WEB_BASE_URL,
     encodeFilesystemPath,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 test.describe.serial("Bookmarks", () => {
     let ctx: TestContext;

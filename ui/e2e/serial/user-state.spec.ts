@@ -1,7 +1,8 @@
+// Serial: changes the shared user settings (hidden files, theme, search, pins) and asserts on them.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, expect } from "@playwright/test";
-import { dragReorderRow } from "./reorder";
+import { dragReorderRow } from "../reorder";
 import { ApiClient } from "#ui/api-client";
 import {
     setupTestDir,
@@ -9,7 +10,7 @@ import {
     API_BASE_URL,
     WEB_BASE_URL,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 test.describe.serial("User state", () => {
     let ctx: TestContext;

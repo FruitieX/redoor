@@ -6,6 +6,7 @@ import { $ } from "zx";
 import { z } from "zod";
 import {
     encodeFilesystemPath,
+    ignoreServerEvents,
     setupTestDir,
     simulateTabRefocus,
     teardownTestDir,
@@ -123,6 +124,8 @@ test.describe.serial("Git browser", () => {
         page,
     }) => {
         await page.setViewportSize({ width: 360, height: 600 });
+        // The request counts below must only see fetches this page's own clicks caused.
+        await ignoreServerEvents(page);
         const diffRequests: string[][] = [];
         page.on("request", (request) => {
             if (

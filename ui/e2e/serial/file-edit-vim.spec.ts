@@ -1,3 +1,4 @@
+// Serial: turns on the shared vim mode and wrap preferences, which change every editor.
 import { test, expect } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -11,7 +12,7 @@ import {
     API_BASE_URL,
     WEB_BASE_URL,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 test.describe.serial("File editor options", () => {
     let ctx: TestContext;
@@ -51,7 +52,7 @@ test.describe.serial("File editor options", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expect(editor).toHaveText("content1");
 
         const optionsButton = page.getByRole("button", {
@@ -98,7 +99,9 @@ test.describe.serial("File editor options", () => {
             .getByRole("button", { name: "Close editor actions" })
             .click();
         await expect(page.getByText("--NORMAL--")).toBeVisible();
-        await expect(page.getByLabel("File editor")).toHaveText("content1");
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveText("content1");
     });
 
     test("should keep the Vim mode line inside the editor", async ({
@@ -165,7 +168,7 @@ five`,
         await page
             .getByRole("button", { name: "Close editor actions" })
             .click();
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
 
         const lineHighlights = editor.locator(
             '[data-vim-yank-highlight="line"]',
@@ -223,7 +226,7 @@ five`,
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         // Long lines remain horizontally scrollable until the preference is enabled.
         await expect(editor).toHaveAttribute("data-wrap-lines", "false");
         await page.getByRole("button", { name: "Editor actions" }).click();
@@ -245,10 +248,9 @@ five`,
 
         await page.reload();
         // Reload must restore both the control state and the wrapping extension.
-        await expect(page.getByLabel("File editor")).toHaveAttribute(
-            "data-wrap-lines",
-            "true",
-        );
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveAttribute("data-wrap-lines", "true");
         await page.getByRole("button", { name: "Editor actions" }).click();
         await expect(
             page.getByRole("button", { name: "Wrap lines" }),
@@ -269,7 +271,7 @@ five`,
         await page
             .getByRole("button", { name: "Close editor actions" })
             .click();
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expect(page.getByText("--NORMAL--")).toBeVisible();
         await editor.focus();
         await expect(editor).toBeFocused();
@@ -309,7 +311,7 @@ five`,
         await page
             .getByRole("button", { name: "Close editor actions" })
             .click();
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expect(page.getByText("--NORMAL--")).toBeVisible();
         await editor.focus();
         await page.keyboard.press("i");

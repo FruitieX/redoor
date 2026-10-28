@@ -1,3 +1,4 @@
+// Serial: changes the shared diff wrap preference and asserts on it.
 import { expect, test, type Locator } from "@playwright/test";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -10,7 +11,7 @@ import {
     setupTestDir,
     teardownTestDir,
     WEB_BASE_URL,
-} from "./helpers";
+} from "../helpers";
 
 /** Whether the diff table is wider than its box, so the reader would scroll it sideways. */
 async function scrollsSideways(table: Locator) {

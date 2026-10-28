@@ -373,6 +373,10 @@ test.describe.serial("File Operations", () => {
             )
             .click();
         await page.getByRole("link", { name: "subdir3", exact: true }).click();
+        // The toolbar remounts when the route changes, which would close a menu opened earlier.
+        await expect(page).toHaveURL(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "subdir3"))}`,
+        );
 
         await page.getByRole("button", { name: "New", exact: true }).click();
         await page

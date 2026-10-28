@@ -1,3 +1,4 @@
+// Serial: saves the device order and asserts the exact number of devices.
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 
@@ -9,8 +10,8 @@ import {
     teardownTestDir,
     WEB_BASE_URL,
     type TestContext,
-} from "./helpers";
-import { dragReorderRow, waitForKeyboardSensor } from "./reorder";
+} from "../helpers";
+import { dragReorderRow, waitForKeyboardSensor } from "../reorder";
 
 test.describe.serial("Device order", () => {
     let ctx: TestContext;

@@ -75,7 +75,7 @@ Do not leave agents, relays, or files behind. A later test on the same host will
 ## Existing coverage
 
 - `tests/real-ssh.test.ts`: named relays and TOML-managed SSH agents via key auth.
-- `ui/e2e/agent-management.spec.ts`: form-created SSH agent through `redoor-ssh-test` as `redoor`.
+- `ui/e2e/serial/agent-management.spec.ts`: form-created SSH agent through `redoor-ssh-test` as `redoor`.
 
 Prefer extending those files over adding another live-SSH suite unless the new behavior is unrelated.
 

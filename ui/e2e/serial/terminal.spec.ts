@@ -1,3 +1,4 @@
+// Serial: switches the shared theme to dark and resets every user setting after each test.
 import {
     expect,
     test,
@@ -5,7 +6,7 @@ import {
 } from "@playwright/test";
 import { z } from "zod";
 import { ApiClient } from "#ui/api-client";
-import { dragReorderRow } from "./reorder";
+import { dragReorderRow } from "../reorder";
 import {
     API_BASE_URL,
     expectTerminalFocused,
@@ -14,7 +15,7 @@ import {
     teardownTestDir,
     WEB_BASE_URL,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 const terminalFrameSchema = z.union([
     z.string(),
@@ -71,7 +72,7 @@ test.describe.serial("Terminal panel lifecycle", () => {
         await page
             .getByRole("link", { name: "file1.txt", exact: true })
             .click();
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
 
         const openTerminal = page.getByRole("button", {
             name: "Open terminal",
@@ -528,7 +529,9 @@ test.describe.serial("Terminal panel lifecycle", () => {
             .getByRole("link", { name: "file1.txt", exact: true })
             .click();
         // The editor proves the file loader has committed before cwd is captured.
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         await page.getByRole("tab", { name: "Terminal" }).click();
         await page
             .getByRole("button", { name: "New terminal", exact: true })

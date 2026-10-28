@@ -100,7 +100,9 @@ test.describe.serial("File Browser Listing", () => {
             .click();
         // Reloading must not discard the inactive tab's remembered file.
         await expect(page).toHaveURL(agent2FileUrl);
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
 
         await page
             .getByRole("link", {

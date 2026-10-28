@@ -183,6 +183,16 @@ export async function confirmSelectedTransfer(
         .click();
 }
 
+/**
+ * Keeps the page's server event stream open but silent. Uploads and edits by specs running
+ * in parallel broadcast `routes_changed` to every UI, which refetches all cached agent data,
+ * so a test that counts requests would otherwise also count refetches it did not cause.
+ */
+export async function ignoreServerEvents(page: Page): Promise<void> {
+    // Not connecting to the server leaves a mocked socket that opens and never sends.
+    await page.routeWebSocket("**/api/v1/ui/ws", () => {});
+}
+
 /** Fires the same visibility/focus events the listing and editor listen for. */
 export async function simulateTabRefocus(page: Page): Promise<void> {
     await page.evaluate(() => {

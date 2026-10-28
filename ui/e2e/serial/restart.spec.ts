@@ -1,9 +1,10 @@
+// Serial: restarts the server and agent1_src, which nearly every other spec uses.
 import fs from "node:fs/promises";
 import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
-import { WEB_BASE_URL } from "./helpers";
+import { WEB_BASE_URL } from "../helpers";
 
 const SERVER_LOG_PATH = path.resolve("log/playwright-redoor.log");
 

@@ -155,7 +155,9 @@ test.describe.serial("Transfer Path Links", () => {
                     `/agents/${ctx.agentName}/browser/.*${uploadFileName}$`,
                 ),
             );
-            await expect(page.getByLabel("File editor")).toBeVisible();
+            await expect(
+                page.getByLabel("File editor", { exact: true }),
+            ).toBeVisible();
         } finally {
             await fs.rm(uploadSourceDir, { force: true, recursive: true });
         }

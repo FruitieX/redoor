@@ -69,7 +69,7 @@ test.describe("Open diff line", () => {
         );
         await expect(page).not.toHaveURL(/\bview=git\b/);
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         const targetLine = editor.getByText(TARGET_TEXT, { exact: true });
         await expect(targetLine).toBeVisible();
         await expect(page.getByLabel("Editor caret line")).toHaveText(

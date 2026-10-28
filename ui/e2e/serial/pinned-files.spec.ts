@@ -1,3 +1,4 @@
+// Serial: replaces the shared user settings to seed pins and asserts on the saved list.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -5,10 +6,10 @@ import {
     dragReorderRow,
     keyboardReorder,
     waitForKeyboardSensor,
-} from "./reorder";
+} from "../reorder";
 
 import { ApiClient } from "#ui/api-client";
-import { BackgroundTabs } from "./background-tabs";
+import { BackgroundTabs } from "../background-tabs";
 import {
     API_BASE_URL,
     WEB_BASE_URL,
@@ -16,7 +17,7 @@ import {
     setupTestDir,
     teardownTestDir,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 test.describe.serial("Pinned files", () => {
     let ctx: TestContext;
@@ -277,7 +278,9 @@ test.describe.serial("Pinned files", () => {
         await firstLink.click();
         // Navigating must replace the file content while retaining the full-window presentation.
         await expect(page).toHaveURL(firstUrl);
-        await expect(panel.getByLabel("File editor")).toHaveText("content1");
+        await expect(
+            panel.getByLabel("File editor", { exact: true }),
+        ).toHaveText("content1");
         await expect(firstLink).toHaveAttribute("aria-current", "page");
         await expect(panel).toHaveCSS("position", "fixed");
         await expect(
@@ -287,7 +290,9 @@ test.describe.serial("Pinned files", () => {
         await secondLink.click();
         // Switching back proves the row remains usable after the keyed editor remounts.
         await expect(page).toHaveURL(secondUrl);
-        await expect(panel.getByLabel("File editor")).toHaveText("content2");
+        await expect(
+            panel.getByLabel("File editor", { exact: true }),
+        ).toHaveText("content2");
         await expect(secondLink).toHaveAttribute("aria-current", "page");
         await expect(panel).toHaveCSS("position", "fixed");
         await panel
@@ -342,7 +347,7 @@ test.describe.serial("Pinned files", () => {
             pins.getByRole("link", { name: "file1.txt", exact: true }),
         ).toHaveCount(0);
 
-        const editor = panel.getByLabel("File editor");
+        const editor = panel.getByLabel("File editor", { exact: true });
         await editor.click();
         await page.keyboard.press("ControlOrMeta+End");
         await page.keyboard.type(" draft");
@@ -400,7 +405,7 @@ test.describe.serial("Pinned files", () => {
             "Pin file. A file is pinned automatically the first time it is edited.",
         );
 
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await editor.click();
         await page.keyboard.type("x");
         // The first change away from the saved text pins the file without using the button.
@@ -546,7 +551,7 @@ test.describe.serial("Pinned files", () => {
         const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         await page.goto(fileUrl);
         const panel = page.getByRole("article", { name: "Editing panel" });
-        const editor = panel.getByLabel("File editor");
+        const editor = panel.getByLabel("File editor", { exact: true });
         await editor.click();
         await page.keyboard.press("ControlOrMeta+End");
         await page.keyboard.type(" draft");
@@ -675,7 +680,7 @@ test.describe.serial("Pinned files", () => {
             .poll(linkNames)
             .toEqual(["file3.txt", "file1.txt", "file2.txt"]);
         await expect(handle).toBeFocused();
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
         );

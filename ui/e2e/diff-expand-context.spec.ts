@@ -4,6 +4,7 @@ import path from "node:path";
 import { $ } from "zx";
 import {
     encodeFilesystemPath,
+    ignoreServerEvents,
     setupTestDir,
     teardownTestDir,
     WEB_BASE_URL,
@@ -44,6 +45,8 @@ test.describe("Diff context expansion", () => {
         await $`git -C ${repositoryPath} commit -m baseline`;
         await fs.writeFile(filePath, numberedLines(60, 30));
 
+        // The request count below must only see fetches this page's own clicks caused.
+        await ignoreServerEvents(page);
         let diffRequests = 0;
 
         page.on("request", (request) => {

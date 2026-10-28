@@ -1,10 +1,11 @@
+// Serial: adds, renames, starts and removes devices, including the managed lazy/failing agents.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import type { AgentListResponse } from "#bindings/AgentListResponse";
 import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
-import { encodeFilesystemPath, WEB_BASE_URL } from "./helpers";
+import { encodeFilesystemPath, WEB_BASE_URL } from "../helpers";
 
 const VALID_AGENT = "lazy_managed";
 

@@ -1,6 +1,7 @@
+// Serial: cycles the shared color theme, which other specs' colour assertions depend on.
 import { expect, test } from "@playwright/test";
 
-import { WEB_BASE_URL } from "./helpers";
+import { WEB_BASE_URL } from "../helpers";
 
 test.describe("Application navigation", () => {
     test("resizes both sidebars independently and remembers their widths", async ({

@@ -1,3 +1,4 @@
+// Serial: seeds the shared pinned files list and asserts on what the menu shows.
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -9,7 +10,7 @@ import {
     setupTestDir,
     teardownTestDir,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 test.describe.serial("Application menu layout", () => {
     let ctx: TestContext;

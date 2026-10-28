@@ -1,3 +1,4 @@
+// Serial: renames devices and creates local agents in the shared device list.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -9,7 +10,7 @@ import {
     deviceBrowserUrl,
     simulateTabRefocus,
     WEB_BASE_URL,
-} from "./helpers";
+} from "../helpers";
 
 const HOME_ROOT = path.resolve(".test-playwright-home/device-names");
 

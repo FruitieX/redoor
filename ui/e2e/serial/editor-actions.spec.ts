@@ -1,3 +1,4 @@
+// Serial: rewrites the whole shared user settings document to drop its pins afterwards.
 import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs/promises";
 import { ApiClient } from "#ui/api-client";
@@ -10,7 +11,7 @@ import {
     WEB_BASE_URL,
     API_BASE_URL,
     type TestContext,
-} from "./helpers";
+} from "../helpers";
 
 /** Opens the overflow menu by its public name so renames stay covered. */
 async function openEditorActions(page: Page) {

@@ -82,6 +82,8 @@ Do dot use class names in the playwright tests. Add accessibility aria attribute
 
 When adding a completely new UI feature, always add a Playwright test that covers its primary user workflow.
 
+Playwright specs that mutate state shared by all specs (server or agent restarts, the device list, user settings/preferences such as theme, the hidden-file filter, bookmarks or pins, ...) go in `ui/e2e/serial/` with a top comment saying why; they run one at a time after the parallel specs. Everything else in `ui/e2e/` runs in parallel and must use its own fixtures and directories.
+
 Never use ! to fix nullish issues in typescript. Always handle nullish values properly.
 
 Reuse the overlay components in `ui/src/components`: `Toast` for transient live-region feedback, `Dialog` for modal workflows, and `Tooltip` for hover and keyboard-focus descriptions. Do not use the native `<dialog>` element for toasts or tooltips because they must remain non-modal.

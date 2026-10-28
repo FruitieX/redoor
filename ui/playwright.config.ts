@@ -2,12 +2,24 @@ import { defineConfig, devices } from "@playwright/test";
 import { testPorts } from "#test-ports";
 
 /**
- * Read environment variables from file.
- * https://github.com/motdotla/dotenv
+ * Specs in `e2e/serial/` change state every other spec shares: the one server process and
+ * its agents, the device list, or the single user's server-side settings document
+ * (`PUT /api/v1/user/state` replaces the whole document from the page's cached copy, so one
+ * spec's write also clobbers keys another spec just set). They run one at a time after all
+ * other specs, each with a comment at its top saying why it is serial.
+ *
+ * Every other spec runs in parallel, so it may only touch its own `setupTestDir` directory
+ * and uniquely named files. Editing a file auto-pins it and deleting a path unpins it; those
+ * incidental settings writes are fine because no parallel spec asserts on pins. Parallel
+ * specs that count requests use `ignoreServerEvents`, since other specs' uploads and edits
+ * make every open page refetch. To keep most of a file parallel, move only its shared-state
+ * tests to a spec in `e2e/serial/`.
  */
-// import dotenv from 'dotenv';
-// import path from 'path';
-// dotenv.config({ path: path.resolve(__dirname, '.env') });
+const serialSpecPattern = /\/e2e\/serial\//;
+
+// Server log history is a 500-line window; this file must run before the rest of the
+// suite evicts the startup fixtures.
+const earlyLogSpecPattern = /\/server-logs\.spec\.ts$/;
 
 /**
  * See https://playwright.dev/docs/test-configuration.
@@ -15,15 +27,18 @@ import { testPorts } from "#test-ports";
 export default defineConfig({
     testDir: "./e2e",
     globalSetup: "./e2e/global-setup.ts",
-    /* Run tests in files in parallel */
-    fullyParallel: true,
+    // Files run in parallel, but the tests of one file stay in one worker in order: many
+    // files share a `beforeAll`/`beforeEach` test directory between their tests.
+    fullyParallel: false,
     /* Fail the build on CI if you accidentally left test.only in the source code. */
     forbidOnly: !!process.env.CI,
     /* Retry on CI only */
     retries: process.env.CI ? 2 : 0,
-    // One worker: restart self-execs the shared server and would race
-    // other files if they hit the API while the process is restarting.
-    workers: 1,
+    // Each worker drives its own Chromium against the one shared server. `pn test` runs this
+    // suite next to the vitest integration suite on an 8-core / 8 GB machine, and more
+    // workers mostly add memory pressure and timing flakiness there, while most specs finish
+    // in under two seconds so three workers already keep the CPU busy.
+    workers: 3,
     /* Reporter to use. See https://playwright.dev/docs/test-reporters */
     reporter: "html",
     /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
@@ -36,51 +51,30 @@ export default defineConfig({
         storageState: ".test-playwright-auth.json",
     },
 
-    /* Configure projects for major browsers */
+    // The projects run one after another: early logs, then everything isolated in parallel,
+    // then the shared-state specs one at a time so they never overlap with anything. The
+    // chain also means a failure in an earlier project skips the later ones.
     projects: [
         {
-            // Server log history is a 500-line window; this file must run before
-            // the rest of the suite evicts the startup fixtures.
             name: "chromium-early-logs",
             use: { ...devices["Desktop Chrome"] },
-            testMatch: /server-logs\.spec\.ts/,
+            testMatch: earlyLogSpecPattern,
+            workers: 1,
         },
         {
-            name: "chromium",
+            name: "chromium-parallel",
             use: { ...devices["Desktop Chrome"] },
-            testIgnore: /server-logs\.spec\.ts/,
+            testIgnore: [earlyLogSpecPattern, serialSpecPattern],
             dependencies: ["chromium-early-logs"],
         },
-
-        // {
-        //   name: 'firefox',
-        //   use: { ...devices['Desktop Firefox'] },
-        // },
-
-        // {
-        //   name: 'webkit',
-        //   use: { ...devices['Desktop Safari'] },
-        // },
-
-        /* Test against mobile viewports. */
-        // {
-        //   name: 'Mobile Chrome',
-        //   use: { ...devices['Pixel 5'] },
-        // },
-        // {
-        //   name: 'Mobile Safari',
-        //   use: { ...devices['iPhone 12'] },
-        // },
-
-        /* Test against branded browsers. */
-        // {
-        //   name: 'Microsoft Edge',
-        //   use: { ...devices['Desktop Edge'], channel: 'msedge' },
-        // },
-        // {
-        //   name: 'Google Chrome',
-        //   use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-        // },
+        {
+            name: "chromium-serial",
+            use: { ...devices["Desktop Chrome"] },
+            testDir: "./e2e/serial",
+            // Runs after the parallel project so restarts and settings changes cannot race it.
+            dependencies: ["chromium-parallel"],
+            workers: 1,
+        },
     ],
 
     /* Run your local dev server before starting the tests */
@@ -91,6 +85,9 @@ export default defineConfig({
         env: {
             // The server and its agents inherit this to avoid flashing the developer's desktop.
             REDOOR_AGENT_NOTIFICATION: "off",
+            // Agents reconnect after a fixed short delay instead of the production 2-5 s
+            // jitter, so restart.spec.ts and other reconnects do not stall the suite.
+            REDOOR_RECONNECT_DELAY: "200ms",
         },
     },
 });

@@ -17,7 +17,7 @@ async function openFileDetails(
     fileName: string,
 ) {
     await page.getByRole("link", { name: fileName, exact: true }).click();
-    await expect(page.getByLabel("File editor")).toBeVisible();
+    await expect(page.getByLabel("File editor", { exact: true })).toBeVisible();
     await page.getByRole("link", { name: "Details", exact: true }).click();
 }
 
@@ -286,7 +286,9 @@ test.describe.serial("File Detail View", () => {
         await expect(page).toHaveURL(
             `${WEB_BASE_URL}/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(destinationPath)}`,
         );
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
     });
 
     test("should copy the same home-relative path between differing agent homes", async ({
