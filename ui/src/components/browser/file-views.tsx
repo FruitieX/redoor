@@ -1,7 +1,7 @@
 import React from "react";
 import { useAtom, useAtomValue } from "jotai";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ShouldBlockFn, useBlocker } from "@tanstack/react-router";
+import { getRouteApi } from "@tanstack/react-router";
 import {
     ClipboardCopy,
     Download,
@@ -30,9 +30,9 @@ import { ViewCardHeader } from "#ui/components/view-card-header";
 import { Button } from "#ui/components/button";
 import { BookmarkMenuButton } from "#ui/components/browser/bookmark-action";
 import {
-    PinButton,
-    usePinOnFirstEdit,
-} from "#ui/components/browser/pin-action";
+    KeepOpenButton,
+    useOpenOnFirstEdit,
+} from "#ui/components/browser/open-file-actions";
 import {
     CodeEditor,
     type EditorSelection,
@@ -46,9 +46,8 @@ import { getImmediateParentPath } from "#ui/components/browser/utils";
 import { getErrorMessage } from "#ui/utils/error";
 import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
 import { Checkbox } from "#ui/components/checkbox";
-import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { FullWindowToggle } from "#ui/components/full-window-toggle";
-import { EditorPinnedFiles } from "#ui/components/browser/editor-pinned-files";
+import { EditorOpenFiles } from "#ui/components/browser/editor-open-files";
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
 import { ToggleButton } from "#ui/components/toggle-button";
@@ -59,13 +58,19 @@ import {
 import { useAgentSearchNavigation } from "#ui/search-navigation";
 import { useEditorRefreshRegistration } from "#ui/components/browser/refresh";
 import { isTerminalInputTarget } from "#ui/utils/keyboard";
-import { useUserState } from "#ui/user-state";
+import { getOpenFileKey, useUserState } from "#ui/user-state";
+import {
+    editorBufferQueryOptions,
+    type StoredBuffer,
+} from "#ui/editor/stored-buffer";
 import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
 import { MarkdownPreview } from "#ui/components/browser/markdown-preview";
 
+const rootRouteApi = getRouteApi("__root__");
+
 /** Keeps save state and editor mutations inside the representation they affect. */
 function FileEditActions(props: {
-    /** A committed revision cannot be saved or pinned as a working file. */
+    /** A committed revision cannot be saved or kept open as a working file. */
     readOnly: boolean;
     statusMessage: string | null;
     hasError: boolean;
@@ -119,7 +124,7 @@ ${props.selection.text}
                     >
                         <Save className="h-4 w-4" aria-hidden="true" />
                     </Button>
-                    <PinButton
+                    <KeepOpenButton
                         file={{
                             agentId: props.bookmark.agentId,
                             path: props.bookmark.path,
@@ -462,14 +467,49 @@ function useFileSaveShortcut(onSave: () => void) {
     });
 }
 
-/** Selects the editor body without coupling its loading states to draft ownership. */
+/**
+ * Warns that the device changed under unsaved browser edits. The browser version wins until
+ * the user decides, so the device text is only loaded when they discard their changes;
+ * saving instead overwrites the device.
+ */
+function DeviceChangedBanner(props: {
+    deviceName: string;
+    onDiscard: () => void;
+}) {
+    return (
+        <div
+            role="alert"
+            aria-label="File changed on device"
+            className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
+        >
+            <span>
+                This file changed on {props.deviceName} after your unsaved edits
+                started. Saving overwrites the device version.
+            </span>
+            <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                tooltip="Throw away the unsaved browser changes and load the file from the device"
+                onClick={props.onDiscard}
+            >
+                Discard my changes
+            </Button>
+        </div>
+    );
+}
+
+/** Selects the editor body without coupling its loading states to buffer ownership. */
 function FileEditorSurface(props: {
     deviceName: string;
     filePath: string;
     repositoryRoot: string | null;
     isPending: boolean;
     error?: Error;
-    content: string;
+    bufferKey: string;
+    deviceContent: string;
+    stored: StoredBuffer | null;
+    previewContent: string;
     fileName: string;
     editable: boolean;
     vimMode: boolean;
@@ -479,7 +519,7 @@ function FileEditorSurface(props: {
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
     isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
-    onChange: (content: string) => void;
+    onBecameDirty: () => void;
     onFocus: () => void;
     onSave: () => void;
     onSelectionChange: (selection: EditorSelection | null) => void;
@@ -504,13 +544,15 @@ function FileEditorSurface(props: {
                 className={props.preview ? "hidden" : "flex min-h-0 flex-1"}
             >
                 <CodeEditor
-                    value={props.content}
+                    bufferKey={props.bufferKey}
+                    deviceContent={props.deviceContent}
+                    stored={props.stored}
                     fileName={props.fileName}
                     editable={props.editable}
                     vimMode={props.vimMode}
                     wrapLines={props.wrapLines}
                     scrollToLine={props.scrollToLine}
-                    onChange={props.onChange}
+                    onBecameDirty={props.onBecameDirty}
                     onFocus={props.onFocus}
                     onSave={props.onSave}
                     onSelectionChange={props.onSelectionChange}
@@ -527,7 +569,7 @@ function FileEditorSurface(props: {
                 }
             >
                 <MarkdownPreview
-                    content={props.content}
+                    content={props.previewContent}
                     deviceName={props.deviceName}
                     filePath={props.filePath}
                     repositoryRoot={props.repositoryRoot}
@@ -578,7 +620,6 @@ function EditorDeleteDialog(props: {
     fileName: string;
     isDirty: boolean;
     onClose: () => void;
-    onDeleted: () => void;
 }) {
     return (
         <DeletePathDialog
@@ -588,7 +629,6 @@ function EditorDeleteDialog(props: {
             entryType="file"
             leaveToParent
             onClose={props.onClose}
-            onDeleted={props.onDeleted}
         >
             {props.isDirty ? (
                 <p className="mt-3 text-sm text-amber-300">
@@ -596,37 +636,6 @@ function EditorDeleteDialog(props: {
                 </p>
             ) : null}
         </DeletePathDialog>
-    );
-}
-
-/** Presents reload and navigation discard decisions without conflating their callbacks. */
-function EditorConfirmations(props: {
-    reloadOpen: boolean;
-    navigationOpen: boolean;
-    onCloseReload: () => void;
-    onConfirmReload: () => void;
-    onCloseNavigation: () => void;
-    onConfirmNavigation: () => void;
-}) {
-    return (
-        <>
-            <ConfirmationDialog
-                isOpen={props.reloadOpen}
-                title="Discard unsaved changes?"
-                description="Your edits have not been saved. Reloading this file will lose them."
-                confirmLabel="Discard changes"
-                onClose={props.onCloseReload}
-                onConfirm={props.onConfirmReload}
-            />
-            <ConfirmationDialog
-                isOpen={props.navigationOpen}
-                title="Discard unsaved changes?"
-                description="Your edits have not been saved. Leaving this page will lose them."
-                confirmLabel="Discard changes"
-                onClose={props.onCloseNavigation}
-                onConfirm={props.onConfirmNavigation}
-            />
-        </>
     );
 }
 
@@ -728,56 +737,103 @@ function FileEditHeader(props: {
 }
 
 /**
- * Edits file contents in a viewport-bounded CodeMirror with explicit save/reload.
- * scrollToLine is inbound-only so a ?line= URL can move the caret without writing back.
+ * Joins a file's device text, its server copy and its buffer in the editor workspace. The
+ * buffer's document is the draft: dirty tracking and saving read it, so there is no second
+ * copy of the text in React state.
  */
-export function FileEditView(props: FileEditViewProps) {
+function useFileBuffer(props: FileEditViewProps) {
+    const { api, editor } = rootRouteApi.useRouteContext();
     const queryClient = useQueryClient();
-
-    const [deleteConfirmationOpen, setDeleteConfirmationOpen] =
-        React.useState(false);
-
-    const isDeletedRef = React.useRef(false);
     const [userState] = useUserState();
     const readOnly = props.revision !== undefined;
     const fileQuery = fileContentQueryOptions(props.agent, props.filePath);
     const contentQuery = useEditorContentQuery(props);
-    const [draft, setDraft] = React.useState<string | null>(null);
+
+    // A revision is a read-only preview of other text, so it never shares the file's buffer.
+    const bufferKey = readOnly
+        ? `revision:${props.revision ?? ""}:${props.agent.id}:${props.filePath}`
+        : getOpenFileKey({ agentId: props.agent.id, path: props.filePath });
+
+    const storedQuery = useQuery({
+        ...editorBufferQueryOptions(api, bufferKey),
+        enabled: !readOnly,
+    });
+
+    const statuses = React.useSyncExternalStore(
+        editor.subscribe,
+        editor.getSnapshot,
+    );
+
+    const status = statuses.get(bufferKey);
+    const openFiles = userState.openFiles;
+
+    // Tells the workspace which buffers to keep and write, before the editor activates.
+    React.useLayoutEffect(() => {
+        editor.setOpenKeys(openFiles.map((file) => getOpenFileKey(file)));
+    }, [editor, openFiles]);
+
+    const saveMutation = useMutation({
+        mutationFn: async (nextContent: string) => {
+            await props.agent.editFile(
+                props.filePath,
+                new globalThis.File([nextContent], props.fileName, {
+                    type: props.mimeType || "text/plain",
+                }),
+            );
+
+            return nextContent;
+        },
+        onSuccess: async (nextContent) => {
+            // A read that started before the write would bring back the old text as if the
+            // device had changed it, and a clean buffer would follow it.
+            await queryClient.cancelQueries({ queryKey: fileQuery.queryKey });
+            // The buffer learns its new base before the cache update reaches it as device text.
+            editor.markSaved(bufferKey, nextContent);
+            queryClient.setQueryData(fileQuery.queryKey, nextContent);
+        },
+    });
+
+    return {
+        editor,
+        readOnly,
+        bufferKey,
+        contentQuery,
+        storedQuery,
+        saveMutation,
+        isDirty: status?.isDirty === true,
+        conflict: status?.conflict ?? null,
+        // A failed server read must not keep the file from opening from the device.
+        isStoredReady: readOnly || !storedQuery.isPending,
+    };
+}
+
+/**
+ * Edits file contents in a viewport-bounded CodeMirror with explicit save and reload.
+ * scrollToLine is inbound-only so a ?line= URL can move the caret without writing back.
+ * There is no unsaved-changes prompt on leaving: an edited file is open, and its buffer is
+ * kept on the server until the file is closed from the open files list.
+ */
+export function FileEditView(props: FileEditViewProps) {
+    const [deleteConfirmationOpen, setDeleteConfirmationOpen] =
+        React.useState(false);
+
+    const [userState] = useUserState();
+    const buffer = useFileBuffer(props);
+    const contentQuery = buffer.contentQuery;
+    const saveMutation = buffer.saveMutation;
+    const isDirty = buffer.isDirty;
 
     const [selection, setSelection] = React.useState<EditorSelection | null>(
         null,
     );
 
-    const [reloadConfirmationOpen, setReloadConfirmationOpen] =
-        React.useState(false);
-
     const [isSearchOpen, setIsSearchOpen] = React.useState(false);
     const searchHandleRef = React.useRef<EditorSearchHandle | null>(null);
     const reloadPromiseRef = React.useRef<Promise<unknown> | null>(null);
+    const isSavingRef = React.useRef(false);
 
-    const saveMutation = useMutation({
-        mutationFn: (nextContent: string) =>
-            props.agent.editFile(
-                props.filePath,
-                new globalThis.File([nextContent], props.fileName, {
-                    type: props.mimeType || "text/plain",
-                }),
-            ),
-        onSuccess: (_, nextContent) => {
-            queryClient.setQueryData(fileQuery.queryKey, nextContent);
-            // Keep a newer draft so a save cannot wipe keystrokes typed during the edit.
-            setDraft((current) =>
-                current === null || current === nextContent ? null : current,
-            );
-        },
-    });
-
-    const savedContent = contentQuery.data ?? "";
-    const content = draft ?? savedContent;
-    const isDirty = draft !== null && draft !== savedContent;
-
-    // Opening a file must not pin it; only the first change away from the saved text does.
-    const pinOnFirstEdit = usePinOnFirstEdit({
+    // Viewing a file does not open it; only the first change away from the device text does.
+    const openOnFirstEdit = useOpenOnFirstEdit({
         file: {
             agentId: props.agent.id,
             path: props.filePath,
@@ -787,59 +843,67 @@ export function FileEditView(props: FileEditViewProps) {
     });
 
     // Saving must not flip CodeMirror read-only, or Mod-s and :w steal editor focus.
-    const canEdit = contentQuery.isSuccess && !readOnly;
+    const canEdit = contentQuery.isSuccess && !buffer.readOnly;
 
     const isMarkdown =
         syntaxLanguageFromFileName(props.fileName) === "markdown";
 
+    const isPreviewShown = isMarkdown && props.preview;
+
+    const previewContent = React.useSyncExternalStore(
+        buffer.editor.subscribeDocument,
+        () => (isPreviewShown ? buffer.editor.text(buffer.bufferKey) : ""),
+    );
+
     useEditorRefreshRegistration({
         agentId: props.agent.id,
         path: props.filePath,
-        isDirty,
     });
 
-    const navigationBlocker = useUnsavedEditorNavigationGuard(
-        isDirty,
-        isDeletedRef,
-    );
-
+    // Fetches the device text and the server copy. Neither replaces unsaved edits: a dirty
+    // buffer only reports a conflict, and a newer server copy is adopted only when clean.
     const reloadFile = React.useCallback(() => {
-        if (!canEdit || saveMutation.isPending || reloadPromiseRef.current) {
+        // `:w` refocuses the editor in the same tick it starts saving, before isPending renders.
+        if (
+            !canEdit ||
+            saveMutation.isPending ||
+            isSavingRef.current ||
+            reloadPromiseRef.current
+        ) {
             return;
         }
 
-        setDraft(null);
-        saveMutation.reset();
-
-        const reloadPromise = contentQuery
-            .refetch({ cancelRefetch: false })
-            .finally(() => {
-                reloadPromiseRef.current = null;
-            });
+        const reloadPromise = Promise.all([
+            contentQuery.refetch({ cancelRefetch: false }),
+            buffer.storedQuery.refetch({ cancelRefetch: false }),
+        ]).finally(() => {
+            reloadPromiseRef.current = null;
+        });
 
         reloadPromiseRef.current = reloadPromise;
-    }, [canEdit, contentQuery, saveMutation]);
-
-    // A dirty buffer asks before its edits are replaced.
-    const handleReload = () =>
-        isDirty ? setReloadConfirmationOpen(true) : reloadFile();
+    }, [buffer.storedQuery, canEdit, contentQuery, saveMutation.isPending]);
 
     const handleSave = React.useCallback(() => {
         if (!canEdit || saveMutation.isPending || !isDirty) {
             return;
         }
 
-        saveMutation.mutate(content);
-    }, [canEdit, content, isDirty, saveMutation]);
+        isSavingRef.current = true;
+        saveMutation.mutate(buffer.editor.text(buffer.bufferKey), {
+            onSettled: () => {
+                isSavingRef.current = false;
+            },
+        });
+    }, [buffer.bufferKey, buffer.editor, canEdit, isDirty, saveMutation]);
 
     useFileSaveShortcut(handleSave);
 
     const statusMessage = getFileEditorStatus({
-        readOnly,
+        readOnly: buffer.readOnly,
         isLoading: contentQuery.isPending,
         loadError: contentQuery.isError ? contentQuery.error : undefined,
         isSaving: saveMutation.isPending,
-        isSaved: saveMutation.isSuccess,
+        isSaved: saveMutation.isSuccess && !isDirty,
         saveError: saveMutation.isError ? saveMutation.error : undefined,
         isDirty,
     });
@@ -854,17 +918,17 @@ export function FileEditView(props: FileEditViewProps) {
                 }`}
             >
                 {props.isFullWindow ? (
-                    <EditorPinnedFiles
+                    <EditorOpenFiles
                         agentId={props.agent.id}
                         filePath={props.filePath}
                     />
                 ) : null}
                 <FileEditHeader
-                    readOnly={readOnly}
+                    readOnly={buffer.readOnly}
                     fileName={props.fileName}
                     statusMessage={statusMessage}
                     hasError={contentQuery.isError || saveMutation.isError}
-                    isSaved={saveMutation.isSuccess}
+                    isSaved={saveMutation.isSuccess && !isDirty}
                     canEdit={canEdit}
                     isDirty={isDirty}
                     isSaving={saveMutation.isPending}
@@ -886,43 +950,54 @@ export function FileEditView(props: FileEditViewProps) {
                         isMarkdown ? props.onPreviewChange : undefined
                     }
                     onToggleFullWindow={props.onToggleFullWindow}
-                    onReload={handleReload}
+                    onReload={reloadFile}
                     onDelete={() => setDeleteConfirmationOpen(true)}
                 />
+                {buffer.conflict === null ? null : (
+                    <DeviceChangedBanner
+                        deviceName={props.agent.name}
+                        onDiscard={() => {
+                            if (buffer.conflict !== null) {
+                                buffer.editor.discard(
+                                    buffer.bufferKey,
+                                    buffer.conflict,
+                                );
+                            }
+                        }}
+                    />
+                )}
 
                 <div className="flex min-h-0 flex-1 flex-col">
                     <FileEditorSurface
                         deviceName={props.agent.name}
                         filePath={props.filePath}
                         repositoryRoot={props.repositoryRoot}
-                        isPending={contentQuery.isPending}
+                        isPending={
+                            contentQuery.isPending || !buffer.isStoredReady
+                        }
                         error={
                             contentQuery.isError
                                 ? contentQuery.error
                                 : undefined
                         }
-                        content={content}
+                        bufferKey={buffer.bufferKey}
+                        deviceContent={contentQuery.data ?? ""}
+                        stored={buffer.storedQuery.data ?? null}
+                        previewContent={previewContent}
                         fileName={props.fileName}
                         editable={canEdit}
                         vimMode={userState.vimMode}
                         wrapLines={userState.wrapEditorLines}
-                        preview={isMarkdown && props.preview}
+                        preview={isPreviewShown}
                         scrollToLine={props.scrollToLine}
-                        onChange={(nextContent) => {
-                            const startingEdit =
-                                !isDirty && nextContent !== savedContent;
-
-                            setDraft(nextContent);
-
+                        onBecameDirty={() => {
                             if (saveMutation.isSuccess) saveMutation.reset();
 
-                            if (startingEdit) {
-                                pinOnFirstEdit();
+                            if (!buffer.readOnly) {
+                                openOnFirstEdit();
                             }
                         }}
-                        onFocus={() => {
-                            if (!isDirty) reloadFile();
-                        }}
+                        onFocus={reloadFile}
                         onSave={handleSave}
                         onSelectionChange={setSelection}
                         searchHandleRef={searchHandleRef}
@@ -939,24 +1014,8 @@ export function FileEditView(props: FileEditViewProps) {
                     fileName={props.fileName}
                     isDirty={isDirty}
                     onClose={() => setDeleteConfirmationOpen(false)}
-                    onDeleted={() => {
-                        // Deletion already confirms losing the buffer; do not ask again while leaving.
-                        isDeletedRef.current = true;
-                        setDraft(null);
-                    }}
                 />
             ) : null}
-            <EditorConfirmations
-                reloadOpen={reloadConfirmationOpen}
-                navigationOpen={navigationBlocker.status === "blocked"}
-                onCloseReload={() => setReloadConfirmationOpen(false)}
-                onConfirmReload={() => {
-                    setReloadConfirmationOpen(false);
-                    reloadFile();
-                }}
-                onCloseNavigation={() => navigationBlocker.reset?.()}
-                onConfirmNavigation={() => navigationBlocker.proceed?.()}
-            />
         </div>
     );
 }
@@ -988,63 +1047,6 @@ function useEditorContentQuery(props: {
     });
 
     return readOnly ? revisionContentQuery : worktreeContentQuery;
-}
-
-/**
- * Blocks in-app navigation and tab close/refresh so a dirty buffer cannot disappear silently.
- */
-function useUnsavedEditorNavigationGuard(
-    isDirty: boolean,
-    isDeletedRef: React.RefObject<boolean>,
-) {
-    const isDirtyRef = React.useRef(isDirty);
-    isDirtyRef.current = isDirty;
-
-    const shouldBlockFn: ShouldBlockFn = React.useCallback(
-        (args) =>
-            isDirtyRef.current &&
-            !isDeletedRef.current &&
-            !isPreviewOnlyNavigation(args.current, args.next),
-        [isDeletedRef],
-    );
-
-    const enableBeforeUnload = React.useCallback(
-        () => isDirtyRef.current && !isDeletedRef.current,
-        [isDeletedRef],
-    );
-
-    return useBlocker({
-        shouldBlockFn,
-        enableBeforeUnload,
-        withResolver: true,
-    });
-}
-
-/** Lets a dirty markdown buffer change representation without treating it as leaving the file. */
-function isPreviewOnlyNavigation(
-    current: { pathname: string; search: object },
-    next: { pathname: string; search: object },
-) {
-    if (current.pathname !== next.pathname) {
-        return false;
-    }
-
-    const currentSearch = JSON.stringify(current.search);
-    const nextSearch = JSON.stringify(next.search);
-
-    const currentWithoutPreview = JSON.stringify(
-        current.search,
-        (key, value) => (key === "preview" ? undefined : value),
-    );
-
-    const nextWithoutPreview = JSON.stringify(next.search, (key, value) =>
-        key === "preview" ? undefined : value,
-    );
-
-    return (
-        currentSearch !== nextSearch &&
-        currentWithoutPreview === nextWithoutPreview
-    );
 }
 
 /** Renders agent-verified images through the authenticated raw download URL. */

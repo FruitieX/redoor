@@ -4,101 +4,91 @@ import { X } from "lucide-react";
 
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
+import { useCloseOpenFiles } from "#ui/components/browser/open-file-actions";
 import { IconButton } from "#ui/components/icon-button";
 import { SortableItem, SortableList } from "#ui/components/sortable-list";
 import { Tooltip } from "#ui/components/tooltip";
+import { cn } from "#ui/utils/cn";
 import {
-    getPinnedFileKey,
-    reorderPinnedFiles,
-    unpinFile,
+    getOpenFileKey,
+    reorderOpenFiles,
     useUserState,
+    type OpenFile,
 } from "#ui/user-state";
 import { useAgents } from "#ui/use-agents";
 
-/** Keeps pinned destinations reachable when the full-window editor covers the sidebar. */
-export function EditorPinnedFiles(props: {
-    agentId: string;
-    filePath: string;
-}) {
+/** Keeps open files reachable when the full-window editor covers the sidebar. */
+export function EditorOpenFiles(props: { agentId: string; filePath: string }) {
     const [userState, setUserState] = useUserState();
     const agents = useAgents();
     const listRef = React.useRef<HTMLElement>(null);
+    const closer = useCloseOpenFiles();
 
-    if (userState.pinnedFiles.length === 0) {
-        return null;
+    if (userState.openFiles.length === 0) {
+        return closer.dialog;
     }
 
     return (
-        <SortableList
-            itemIds={userState.pinnedFiles.map((file) =>
-                getPinnedFileKey(file),
-            )}
-            orientation="horizontal"
-            label="Editor pinned files"
-            listRef={listRef}
-            getItemLabel={(itemId) =>
-                userState.pinnedFiles.find(
-                    (file) => getPinnedFileKey(file) === itemId,
-                )?.name ?? itemId
-            }
-            onMove={(move) => {
-                setUserState((current) => {
-                    const pinnedFiles = reorderPinnedFiles(
-                        current.pinnedFiles,
-                        move,
-                    );
+        <>
+            <SortableList
+                itemIds={userState.openFiles.map((file) =>
+                    getOpenFileKey(file),
+                )}
+                orientation="horizontal"
+                label="Editor open files"
+                listRef={listRef}
+                getItemLabel={(itemId) =>
+                    userState.openFiles.find(
+                        (file) => getOpenFileKey(file) === itemId,
+                    )?.name ?? itemId
+                }
+                onMove={(move) => {
+                    setUserState((current) => {
+                        const openFiles = reorderOpenFiles(
+                            current.openFiles,
+                            move,
+                        );
 
-                    if (pinnedFiles === current.pinnedFiles) {
-                        return current;
-                    }
+                        if (openFiles === current.openFiles) {
+                            return current;
+                        }
 
-                    return { ...current, pinnedFiles };
-                });
-            }}
-        >
-            <nav
-                ref={listRef}
-                aria-label="Editor pinned files"
-                className="shrink-0 overflow-x-auto border-b border-slate-800 px-3 py-2"
+                        return { ...current, openFiles };
+                    });
+                }}
             >
-                <ul className="flex w-max min-w-full items-center gap-2">
-                    {userState.pinnedFiles.map((file) => (
-                        <EditorPin
-                            key={getPinnedFileKey(file)}
-                            file={file}
-                            agent={agents.find(
-                                (agent) => agent.id === file.agentId,
-                            )}
-                            isActive={
-                                file.agentId === props.agentId &&
-                                file.path === props.filePath
-                            }
-                            onClose={() => {
-                                setUserState((current) => ({
-                                    ...current,
-                                    pinnedFiles: unpinFile(
-                                        current.pinnedFiles,
-                                        file,
-                                    ),
-                                }));
-                            }}
-                        />
-                    ))}
-                </ul>
-            </nav>
-        </SortableList>
+                <nav
+                    ref={listRef}
+                    aria-label="Editor open files"
+                    className="shrink-0 overflow-x-auto border-b border-slate-800 px-3 py-2"
+                >
+                    <ul className="flex w-max min-w-full items-center gap-2">
+                        {userState.openFiles.map((file) => (
+                            <EditorOpenFile
+                                key={getOpenFileKey(file)}
+                                file={file}
+                                agent={agents.find(
+                                    (agent) => agent.id === file.agentId,
+                                )}
+                                isActive={
+                                    file.agentId === props.agentId &&
+                                    file.path === props.filePath
+                                }
+                                onClose={() => closer.requestClose([file])}
+                            />
+                        ))}
+                    </ul>
+                </nav>
+            </SortableList>
+            {closer.dialog}
+        </>
     );
 }
 
-/** Leaves the open editor and its unsaved buffer intact when a pin is closed. */
-function EditorPin(props: {
-    file: {
-        agentId: string;
-        path: string;
-        name: string;
-        agentName: string;
-    };
-    /** The pinned file's device, or undefined while it is absent from the inventory. */
+/** One tab of the strip; closing it asks first when the file has unsaved edits. */
+function EditorOpenFile(props: {
+    file: OpenFile;
+    /** The open file's device, or undefined while it is absent from the inventory. */
     agent: Agent | undefined;
     isActive: boolean;
     onClose: () => void;
@@ -107,24 +97,23 @@ function EditorPin(props: {
     const deviceName = props.agent?.name ?? props.file.agentName;
 
     return (
-        <SortableItem id={getPinnedFileKey(props.file)}>
+        <SortableItem id={getOpenFileKey(props.file)}>
             {(item) => (
                 <li
                     {...item.dragProps}
-                    aria-label={`Pinned file ${props.file.name} on ${deviceName}`}
+                    aria-label={`Open file ${props.file.name} on ${deviceName}`}
                     ref={item.setNodeRef}
                     style={item.style}
-                    className={`flex items-center rounded ${
-                        item.isDragging ? "opacity-70" : ""
-                    } ${
-                        item.isOver && !item.isDragging
-                            ? "ring-1 ring-blue-400/60"
-                            : ""
-                    } ${
+                    className={cn(
+                        "flex items-center rounded",
+                        item.isDragging && "opacity-70",
+                        item.isOver &&
+                            !item.isDragging &&
+                            "ring-1 ring-blue-400/60",
                         props.isActive
                             ? "bg-white/10 text-slate-100"
-                            : "text-slate-300 hover:bg-tint hover:text-slate-100"
-                    }`}
+                            : "text-slate-300 hover:bg-tint hover:text-slate-100",
+                    )}
                 >
                     <Tooltip
                         content={
@@ -134,7 +123,7 @@ function EditorPin(props: {
                         }
                     >
                         {/* Links follow the device id, never the stored name, which another
-                            device may have taken since the file was pinned. */}
+                            device may have taken since the file was opened. */}
                         {props.agent ? (
                             <Link
                                 {...browserRoute(props.agent, props.file.path)}
@@ -159,8 +148,8 @@ function EditorPin(props: {
                     </Tooltip>
                     <IconButton
                         type="button"
-                        label={`Close pinned file ${props.file.name}`}
-                        tooltip={`Unpin ${props.file.name}`}
+                        label={`Close open file ${props.file.name}`}
+                        tooltip={`Close ${props.file.name}`}
                         onClick={props.onClose}
                         variant="quiet"
                         size="xs"

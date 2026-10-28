@@ -17,11 +17,10 @@ import {
 } from "./refresh";
 
 /** Exercises focus events through the same refresh hooks used by the browser. */
-function RefreshHarness(props: { isDirty: boolean }) {
+function RefreshHarness() {
     useEditorRefreshRegistration({
         agentId: "agent-1",
         path: "/workspace/file.txt",
-        isDirty: props.isDirty,
     });
     useBrowserRefreshTriggers("agent-1");
 
@@ -37,7 +36,7 @@ function RefreshHarness(props: { isDirty: boolean }) {
 }
 
 /** Real providers keep query and router behavior in the test while spies observe refresh coordination. */
-async function renderRefreshHarness(isDirty: boolean) {
+async function renderRefreshHarness() {
     const queryClient = new QueryClient();
 
     const router = createRouter({
@@ -61,7 +60,7 @@ async function renderRefreshHarness(isDirty: boolean) {
     const view = render(
         <QueryClientProvider client={queryClient}>
             <RouterContextProvider router={router}>
-                <RefreshHarness isDirty={isDirty} />
+                <RefreshHarness />
             </RouterContextProvider>
         </QueryClientProvider>,
     );
@@ -69,8 +68,8 @@ async function renderRefreshHarness(isDirty: boolean) {
     return { view, mocks };
 }
 
-test("refreshes the listing and a clean editor when terminal focus leaves", async () => {
-    const { view, mocks } = await renderRefreshHarness(false);
+test("refreshes the listing and the editor's device text when terminal focus leaves", async () => {
+    const { view, mocks } = await renderRefreshHarness();
 
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",
@@ -91,7 +90,8 @@ test("refreshes the listing and a clean editor when terminal focus leaves", asyn
             cancelRefetch: false,
         },
     );
-    // A clean editor must pull new bytes before route invalidation reloads the listing.
+    // The editor pulls new device bytes before route invalidation reloads the listing; even a
+    // dirty editor needs them to warn that the device changed, and never lets them replace edits.
     expect(mocks.refetchQueries).toHaveBeenCalledWith(
         {
             queryKey: [
@@ -111,46 +111,8 @@ test("refreshes the listing and a clean editor when terminal focus leaves", asyn
     );
 });
 
-test("keeps an unsaved editor while refreshing the listing", async () => {
-    const { view, mocks } = await renderRefreshHarness(true);
-
-    const terminalInput = view.getByRole("textbox", {
-        name: "Terminal input",
-    });
-
-    const editor = view.getByRole("button", { name: "Editor" });
-
-    fireEvent.focusOut(terminalInput, { relatedTarget: editor });
-
-    // A dirty editor must still allow the directory listing to refresh.
-    await waitFor(() => expect(mocks.invalidateRoute).toHaveBeenCalledOnce());
-    // Git still refreshes for a dirty editor, but must not abort an in-flight loader fetch.
-    expect(mocks.invalidateQueries).toHaveBeenCalledWith(
-        {
-            queryKey: ["server-state", "agent", "agent-1", "git"],
-        },
-        {
-            cancelRefetch: false,
-        },
-    );
-    // Unsaved text must never be replaced by the automatic terminal-blur refresh.
-    expect(mocks.refetchQueries).not.toHaveBeenCalledWith(
-        expect.objectContaining({
-            queryKey: [
-                "server-state",
-                "agent",
-                "agent-1",
-                "filesystem",
-                "content",
-                "/workspace/file.txt",
-            ],
-        }),
-        expect.anything(),
-    );
-});
-
 test("ignores focus movement within the terminal", async () => {
-    const { view, mocks } = await renderRefreshHarness(false);
+    const { view, mocks } = await renderRefreshHarness();
 
     const terminalInput = view.getByRole("textbox", {
         name: "Terminal input",

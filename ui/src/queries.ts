@@ -50,8 +50,8 @@ export async function fetchQueryUncancelled<
 export type QueryContext = { api: ApiClient; queryClient: QueryClient };
 
 /**
- * Tags query data that is a user's working copy rather than a mirror of the server.
- * Agent-wide invalidation skips it so a refresh can never overwrite unsaved editor text.
+ * Tags the editor's device text, which only the editor refetches (on focus and reload).
+ * Agent-wide invalidation skips it so unrelated mutations do not download open files again.
  */
 const EDITOR_BUFFER_META = { editorBuffer: true } as const;
 
@@ -151,6 +151,9 @@ export const queryKeys = {
     protocolMismatches: () =>
         [...queryKeys.all, "protocol-mismatches"] as const,
     userState: () => [...queryKeys.all, "user-state"] as const,
+    /** An open file's stored editor buffer, keyed like the open files list. */
+    editorBuffer: (key: string) =>
+        [...queryKeys.all, "editor-buffer", key] as const,
     accessTokens: () => [...queryKeys.all, "access-tokens"] as const,
     serverLoggingLevel: () =>
         [...queryKeys.all, "server-logging-level"] as const,
@@ -463,10 +466,10 @@ export function agentLoggingLevelQueryOptions(agent: Agent) {
 }
 
 /**
- * Reads editable text once so the loader and textarea share a cached buffer.
+ * Reads a file's device text once so the loader and the editor share it.
  * Infinite staleTime keeps later fetchQuery/preload/invalidation off the wire.
- * The editor opts into window-focus refetch while clean; Save writes the cache.
- * The editor-buffer meta keeps agent-wide invalidation from replacing unsaved text.
+ * The editor refetches it on focus and reload; Save writes the cache. It is only the device
+ * side: the editor workspace decides what new device text may do to the file's buffer.
  */
 export function fileContentQueryOptions(agent: Agent, path: string) {
     return queryOptions({

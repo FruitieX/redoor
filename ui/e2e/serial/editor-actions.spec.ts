@@ -34,7 +34,7 @@ test.describe.serial("Editor file actions", () => {
         await api.updateUserState({
             state: {
                 ...state,
-                pinnedFiles: state.pinnedFiles.filter(
+                openFiles: state.openFiles.filter(
                     (file) => !file.path.startsWith(ctx.testDirPath + "/"),
                 ),
             },
@@ -129,7 +129,7 @@ test.describe.serial("Editor file actions", () => {
                 })
                 .click();
             await deletion;
-            // Successful removal returns directly to the parent without a second discard prompt.
+            // Successful removal returns directly to the parent without any discard prompt.
             await expect(page).toHaveURL(
                 `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(ctx.testDirPath)}`,
             );
@@ -198,13 +198,18 @@ test.describe.serial("Editor file actions", () => {
             .getByRole("button", { name: "Cancel", exact: true })
             .click();
         await expect(editor).toHaveText("unsaved content");
-        // A failed removal must not disable the existing unsaved-navigation protection.
-        await page
-            .getByLabel("File view")
-            .getByRole("link", { name: "Details", exact: true })
-            .click();
-        await expect(
-            page.getByRole("dialog", { name: "Discard unsaved changes?" }),
-        ).toBeVisible();
+
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+        // A failed removal keeps the file open, so its unsaved buffer stays on the server.
+        await expect
+            .poll(async () => {
+                const state = userStateSchema.parse(
+                    (await api.getUserState()).state,
+                );
+
+                return state.openFiles.some((file) => file.path === filePath);
+            })
+            .toBe(true);
     });
 });

@@ -1,4 +1,4 @@
-// Serial: changes the shared user settings (hidden files, theme, search, pins) and asserts on them.
+// Serial: changes the shared user settings (hidden files, theme, search, open files) and asserts on them.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, expect } from "@playwright/test";
@@ -264,7 +264,7 @@ test.describe.serial("User state", () => {
         ).toBeVisible();
     });
 
-    test("keeps a reordered pin when saving settings fails", async ({
+    test("keeps a reordered open file when saving settings fails", async ({
         page,
     }) => {
         const names = ["file1.txt", "file2.txt", "file3.txt"];
@@ -272,7 +272,7 @@ test.describe.serial("User state", () => {
         await api.login("test-user", "test-password");
         await api.updateUserState({
             state: {
-                pinnedFiles: names.map((name) => ({
+                openFiles: names.map((name) => ({
                     agentId: ctx.agentId,
                     path: path.join(ctx.testDirPath, name),
                     name,
@@ -297,16 +297,16 @@ test.describe.serial("User state", () => {
         });
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const pinnedFiles = page
+        const openFiles = page
             .getByRole("navigation", { name: "Application" })
-            .getByRole("list", { name: "Pinned files" });
+            .getByRole("list", { name: "Open files" });
 
         await dragReorderRow(
             page,
-            pinnedFiles.getByRole("listitem", {
-                name: `Pinned file file3.txt on ${ctx.agentName}`,
+            openFiles.getByRole("listitem", {
+                name: `Open file file3.txt on ${ctx.agentName}`,
             }),
-            pinnedFiles.getByRole("link", { name: "file1.txt", exact: true }),
+            openFiles.getByRole("link", { name: "file1.txt", exact: true }),
         );
         // The optimistic order stays visible even though the write failed.
         await expect(page.getByRole("alert")).toHaveText(
@@ -314,7 +314,7 @@ test.describe.serial("User state", () => {
         );
         await expect
             .poll(() =>
-                pinnedFiles
+                openFiles
                     .getByRole("link")
                     .evaluateAll((elements) =>
                         elements.map((element) =>

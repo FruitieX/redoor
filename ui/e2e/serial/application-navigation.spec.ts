@@ -17,7 +17,7 @@ test.describe("Application navigation", () => {
             name: "Device menu",
         });
 
-        // The application menu starts wider so pinned file names have room beside its rail.
+        // The application menu starts wider so open file names have room beside its rail.
         for (const [panel, label, delta, start] of [
             [application, "Resize application menu", 80, 260],
             [devices, "Resize device menu", -100, 224],

@@ -1,4 +1,4 @@
-// Serial: replaces the shared user settings to seed pins and asserts on the saved list.
+// Serial: replaces the shared user settings to seed open files and asserts on the saved list.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -9,21 +9,23 @@ import {
 } from "../reorder";
 
 import { ApiClient } from "#ui/api-client";
+import { parseStoredBuffer } from "#ui/editor/stored-buffer";
 import { BackgroundTabs } from "../background-tabs";
 import {
     API_BASE_URL,
     WEB_BASE_URL,
     encodeFilesystemPath,
+    simulateTabRefocus,
     setupTestDir,
     teardownTestDir,
     type TestContext,
 } from "../helpers";
 
-test.describe.serial("Pinned files", () => {
+test.describe.serial("Open files", () => {
     let ctx: TestContext;
 
     test.beforeAll(async () => {
-        ctx = await setupTestDir("pinned-files");
+        ctx = await setupTestDir("open-files");
     });
 
     test.afterAll(async () => {
@@ -31,23 +33,23 @@ test.describe.serial("Pinned files", () => {
     });
 
     test.beforeEach(async () => {
-        await resetPinnedFileState();
+        await resetOpenFileState();
     });
 
     test.afterEach(async () => {
-        await resetPinnedFileState();
+        await resetOpenFileState();
     });
 
-    async function resetPinnedFileState() {
+    async function resetOpenFileState() {
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
-        // Editor tests pin on first edit, so this file must not inherit that shared list.
+        // Editor tests open files on first edit, so this file must not inherit that shared list.
         await api.updateUserState({
             state: {
                 showHiddenFiles: true,
                 theme: "system",
                 bookmarks: [],
-                pinnedFiles: [],
+                openFiles: [],
                 vimMode: false,
                 wrapEditorLines: false,
                 recursiveSearchTimeoutSeconds: 5,
@@ -59,23 +61,23 @@ test.describe.serial("Pinned files", () => {
     }
 
     /**
-     * Pins the open file and waits for the background user-state write, because a following
-     * page.goto() aborts a write still in flight and the reloaded page would miss the pin.
+     * Keeps the shown file open and waits for the background user-state write, because a
+     * following page.goto() aborts a write still in flight and the reloaded page would miss it.
      */
-    async function pinOpenFile(page: Page) {
-        const pinPersisted = page.waitForResponse(
+    async function keepOpen(page: Page) {
+        const openPersisted = page.waitForResponse(
             (response) =>
                 response.request().method() === "PUT" &&
                 response.url().includes("/api/v1/user/state"),
         );
 
         await page
-            .getByRole("button", { name: "Pin file", exact: true })
+            .getByRole("button", { name: "Keep file open", exact: true })
             .click();
-        await pinPersisted;
+        await openPersisted;
     }
 
-    test("pins editor files beside the navigation rail and keeps newer pins at the bottom", async ({
+    test("keeps editor files open beside the navigation rail with newer files at the bottom", async ({
         page,
         browser,
     }) => {
@@ -94,26 +96,26 @@ test.describe.serial("Pinned files", () => {
 
         const saveButton = page.getByRole("button", { name: "Save file" });
 
-        const pinButton = page.getByRole("button", {
-            name: "Pin file",
+        const keepOpenButton = page.getByRole("button", {
+            name: "Keep file open",
             exact: true,
         });
 
         const saveBox = await saveButton.boundingBox();
-        const pinBox = await pinButton.boundingBox();
-        // The pin control must sit immediately after save, not among later editor tools.
-        expect(pinBox?.x ?? 0).toBeGreaterThan(saveBox?.x ?? 1);
-        await pinButton.click();
+        const keepOpenBox = await keepOpenButton.boundingBox();
+        // The keep-open control must sit immediately after save, not among later editor tools.
+        expect(keepOpenBox?.x ?? 0).toBeGreaterThan(saveBox?.x ?? 1);
+        await keepOpenButton.click();
 
-        const pinnedFiles = applicationNavigation.getByRole("list", {
-            name: "Pinned files",
+        const openFiles = applicationNavigation.getByRole("list", {
+            name: "Open files",
         });
 
-        const firstItem = pinnedFiles.getByRole("listitem").filter({
+        const firstItem = openFiles.getByRole("listitem").filter({
             hasText: firstName,
         });
 
-        // The left menu must show the pin beside the destinations, not in the device sidebar.
+        // The left menu must show the open file beside the destinations, not in the device sidebar.
         await expect(
             firstItem.getByRole("link", { name: firstName, exact: true }),
         ).toBeVisible();
@@ -126,7 +128,7 @@ test.describe.serial("Pinned files", () => {
             .getByRole("link", { name: firstName, exact: true })
             .boundingBox();
 
-        // Pins own the column to the right of the icon rail, so they start above its last icons.
+        // Open files own the column to the right of the icon rail, so they start above its last icons.
         expect(firstLinkBox?.x ?? 0).toBeGreaterThan(
             (transfersBox?.x ?? 1) + (transfersBox?.width ?? 0),
         );
@@ -142,10 +144,10 @@ test.describe.serial("Pinned files", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
         );
         await page
-            .getByRole("button", { name: "Pin file", exact: true })
+            .getByRole("button", { name: "Keep file open", exact: true })
             .click();
 
-        const secondItem = pinnedFiles.getByRole("listitem").filter({
+        const secondItem = openFiles.getByRole("listitem").filter({
             hasText: secondName,
         });
 
@@ -153,7 +155,7 @@ test.describe.serial("Pinned files", () => {
             .getByRole("link", { name: secondName, exact: true })
             .boundingBox();
 
-        // A newly pinned file must append, not jump above files pinned earlier.
+        // A newly opened file must append, not jump above files opened earlier.
         expect(secondLinkBox?.y ?? 0).toBeGreaterThan(
             (
                 await firstItem
@@ -168,7 +170,7 @@ test.describe.serial("Pinned files", () => {
         await expect
             .poll(async () => (await api.getUserState()).state)
             .toMatchObject({
-                pinnedFiles: [
+                openFiles: [
                     {
                         agentId: ctx.agentId,
                         path: firstPath,
@@ -188,7 +190,7 @@ test.describe.serial("Pinned files", () => {
         await firstItem
             .getByRole("link", { name: firstName, exact: true })
             .click({ button: "middle" });
-        // Middle-click must open the pinned destination while preserving both pins and the current page.
+        // Middle-click must open the destination while preserving both open files and the current page.
         await expect
             .poll(() => backgroundTabs.urls())
             .toEqual([
@@ -196,7 +198,7 @@ test.describe.serial("Pinned files", () => {
             ]);
         await backgroundTabs.close();
         await expect(
-            pinnedFiles.getByRole("link", { name: firstName, exact: true }),
+            openFiles.getByRole("link", { name: firstName, exact: true }),
         ).toBeVisible();
         await expect(page).toHaveURL(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
@@ -204,55 +206,55 @@ test.describe.serial("Pinned files", () => {
         await expect
             .poll(async () => (await api.getUserState()).state)
             .toMatchObject({
-                pinnedFiles: [{ path: firstPath }, { path: secondPath }],
+                openFiles: [{ path: firstPath }, { path: secondPath }],
             });
 
         await secondItem
             .getByRole("link", { name: secondName, exact: true })
             .click();
-        // The sidebar entry must open that exact pinned path.
+        // The sidebar entry must open that exact open path.
         await expect(page).toHaveURL(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
         );
 
         await applicationNavigation
-            .getByRole("button", { name: "Clear all pinned files" })
+            .getByRole("button", { name: "Close all open files" })
             .click();
         // Clear must remove the whole list, not only the open file.
-        await expect(pinnedFiles).toHaveCount(0);
-        // The emptied section stays and says how to pin again, since pins are the column's content.
+        await expect(openFiles).toHaveCount(0);
+        // The emptied section stays and says how to open files again, since they are the column's content.
         await expect(
             applicationNavigation.getByText(
-                "No pinned files — open a file and use Pin to keep it here",
+                "No open files — edit a file or use Keep open to list it here",
             ),
         ).toBeVisible();
     });
 
-    test("switches pinned files above the toolbar while keeping the editor full window", async ({
+    test("switches open files above the toolbar while keeping the editor full window", async ({
         page,
     }) => {
         const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
         await page.goto(firstUrl);
-        await pinOpenFile(page);
+        await keepOpen(page);
         await page.goto(secondUrl);
-        await pinOpenFile(page);
+        await keepOpen(page);
         await page
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
 
         const panel = page.getByRole("article", { name: "Editing panel" });
 
-        const pins = panel.getByRole("navigation", {
-            name: "Editor pinned files",
+        const strip = panel.getByRole("navigation", {
+            name: "Editor open files",
         });
 
-        const firstLink = pins.getByRole("link", {
+        const firstLink = strip.getByRole("link", {
             name: "file1.txt",
             exact: true,
         });
 
-        const secondLink = pins.getByRole("link", {
+        const secondLink = strip.getByRole("link", {
             name: "file2.txt",
             exact: true,
         });
@@ -268,7 +270,7 @@ test.describe.serial("Pinned files", () => {
             .boundingBox();
 
         if (!firstBox || !secondBox || !saveBox) {
-            throw new Error("Expected pinned row and toolbar measurements");
+            throw new Error("Expected open row and toolbar measurements");
         }
 
         expect(firstBox.y).toBe(secondBox.y);
@@ -298,82 +300,93 @@ test.describe.serial("Pinned files", () => {
         await panel
             .getByRole("button", { name: "Restore editor size" })
             .click();
-        // Restoring the editor returns pinned navigation to the normal sidebar presentation.
+        // Restoring the editor returns open navigation to the normal sidebar presentation.
         await expect(panel).toHaveCSS("position", "static");
-        await expect(pins).toHaveCount(0);
+        await expect(strip).toHaveCount(0);
     });
 
-    test("opens full-window pins in background tabs and closes them with the close button", async ({
+    test("opens full-window open files in background tabs and closes them with the close button", async ({
         page,
         browser,
     }) => {
         const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`;
         const secondUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`;
         await page.goto(firstUrl);
-        await pinOpenFile(page);
+        await keepOpen(page);
         await page.goto(secondUrl);
-        await pinOpenFile(page);
+        await keepOpen(page);
         await page
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
 
         const panel = page.getByRole("article", { name: "Editing panel" });
 
-        const pins = panel.getByRole("navigation", {
-            name: "Editor pinned files",
+        const strip = panel.getByRole("navigation", {
+            name: "Editor open files",
         });
 
         const backgroundTabs = await BackgroundTabs.watch(browser);
-        await pins
+        await strip
             .getByRole("link", { name: "file1.txt", exact: true })
             .click({ button: "middle" });
-        // Native navigation must open the pin in its own tab and leave the pins and the expanded
+        // Native navigation must open the file in its own tab and leave the strip and the expanded
         // editor on the original page intact.
         await expect.poll(() => backgroundTabs.urls()).toEqual([firstUrl]);
         await backgroundTabs.close();
         await expect(
-            pins.getByRole("link", { name: "file1.txt", exact: true }),
+            strip.getByRole("link", { name: "file1.txt", exact: true }),
         ).toBeVisible();
         await expect(page).toHaveURL(secondUrl);
         await expect(panel).toHaveCSS("position", "fixed");
-        await pins
+        await strip
             .getByRole("button", {
-                name: "Close pinned file file1.txt",
+                name: "Close open file file1.txt",
                 exact: true,
             })
             .click();
-        // The explicit close button remains the way to remove an inactive pin.
+        // The explicit close button remains the way to remove an inactive open file.
         await expect(
-            pins.getByRole("link", { name: "file1.txt", exact: true }),
+            strip.getByRole("link", { name: "file1.txt", exact: true }),
         ).toHaveCount(0);
 
         const editor = panel.getByLabel("File editor", { exact: true });
         await editor.click();
         await page.keyboard.press("ControlOrMeta+End");
         await page.keyboard.type(" draft");
-        await pins
+        await strip
             .getByRole("button", {
-                name: "Close pinned file file2.txt",
+                name: "Close open file file2.txt",
                 exact: true,
             })
             .click();
-        // Closing the active pin must preserve its unsaved contents and expanded editor.
-        await expect(pins).toHaveCount(0);
-        await expect(editor).toHaveText("content2 draft");
+
+        const confirmation = page.getByRole("dialog", {
+            name: "Discard unsaved changes?",
+        });
+
+        // Closing a file with unsaved edits discards them, so it asks first.
+        await expect(confirmation).toBeVisible();
+        await confirmation
+            .getByRole("button", { name: "Discard changes" })
+            .click();
+        // Confirming closes the file and its editor falls back to the device text.
+        await expect(strip).toHaveCount(0);
+        await expect(editor).toHaveText("content2");
+        // The editor stays on the file and keeps the expanded presentation.
         await expect(page).toHaveURL(secondUrl);
         await expect(panel).toHaveCSS("position", "fixed");
         await expect(
-            panel.getByRole("button", { name: "Pin file", exact: true }),
+            panel.getByRole("button", { name: "Keep file open", exact: true }),
         ).toBeVisible();
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
         // Both close buttons must persist removal in the shared user state.
         await expect
             .poll(async () => (await api.getUserState()).state)
-            .toMatchObject({ pinnedFiles: [] });
+            .toMatchObject({ openFiles: [] });
     });
 
-    test("pins a file on its first edit and explains that in the pin tooltip", async ({
+    test("opens a file on its first edit and asks before closing it with unsaved edits", async ({
         page,
     }) => {
         const fileName = "file1.txt";
@@ -387,40 +400,93 @@ test.describe.serial("Pinned files", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        const pinnedFiles = applicationNavigation.getByRole("list", {
-            name: "Pinned files",
+        const openFiles = applicationNavigation.getByRole("list", {
+            name: "Open files",
         });
 
-        // Opening the editor must not pin a file that has not been changed.
-        await expect(pinnedFiles).toHaveCount(0);
+        // Viewing a file in the editor must not open a file that has not been changed.
+        await expect(openFiles).toHaveCount(0);
 
-        const pinButton = page.getByRole("button", {
-            name: "Pin file",
+        const keepOpenButton = page.getByRole("button", {
+            name: "Keep file open",
             exact: true,
         });
 
-        await pinButton.hover();
-        // The tooltip must explain auto-pin without replacing the button's accessible name.
+        await keepOpenButton.hover();
+        // The tooltip must explain auto-open without replacing the button's accessible name.
         await expect(page.getByRole("tooltip")).toHaveText(
-            "Pin file. A file is pinned automatically the first time it is edited.",
+            "Keep file open. A file is kept open automatically the first time it is edited.",
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
         await editor.click();
         await page.keyboard.type("x");
-        // The first change away from the saved text pins the file without using the button.
+        // The first change away from the saved text opens the file without using the button.
         await expect(
-            pinnedFiles.getByRole("link", { name: fileName, exact: true }),
+            openFiles.getByRole("link", { name: fileName, exact: true }),
         ).toBeVisible();
 
-        await page.getByRole("button", { name: "Unpin file" }).click();
+        const row = openFiles.getByRole("listitem", {
+            name: `Open file ${fileName} on ${ctx.agentName}`,
+        });
+
+        const confirmation = page.getByRole("dialog", {
+            name: "Discard unsaved changes?",
+        });
+
+        await row
+            .getByRole("button", { name: `Close open file ${fileName}` })
+            .click();
+        // Unsaved edits are only ever discarded after this confirmation.
+        await expect(confirmation).toBeVisible();
+        await confirmation.getByRole("button", { name: "Cancel" }).click();
+        // Cancelling keeps both the open file and its unsaved text.
+        await expect(row).toBeVisible();
+        await expect(editor).toContainText("x");
+
+        await row
+            .getByRole("button", { name: `Close open file ${fileName}` })
+            .click();
+        await confirmation
+            .getByRole("button", { name: "Discard changes" })
+            .click();
+        // Discarding closes the file and restores the device text.
+        await expect(openFiles).toHaveCount(0);
+        await expect(editor).toHaveText("content1");
+
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+        // The server forgets the buffer of the closed file, so the draft cannot come back.
+        await expect
+            .poll(
+                async () =>
+                    (await api.getEditorBuffer(`${ctx.agentId}:${filePath}`))
+                        .buffer,
+            )
+            .toBeNull();
+
         await editor.click();
         await page.keyboard.type("y");
-        // Later keystrokes in the same edit must not put back a pin the operator removed.
-        await expect(pinnedFiles).toHaveCount(0);
+        // A new edit opens the file again, since editing is what keeps a file open.
+        await expect(
+            openFiles.getByRole("link", { name: fileName, exact: true }),
+        ).toBeVisible();
+
+        await page.getByRole("button", { name: "Close file" }).click();
+        await confirmation
+            .getByRole("button", { name: "Discard changes" })
+            .click();
+        // The toolbar button closes through the same confirmation.
+        await expect(openFiles).toHaveCount(0);
+
+        await page.getByRole("button", { name: "Keep file open" }).click();
+        await page.getByRole("button", { name: "Close file" }).click();
+        // A clean file closes at once, without a confirmation.
+        await expect(openFiles).toHaveCount(0);
+        await expect(confirmation).toBeHidden();
     });
 
-    test("reorders sidebar pins by insertion and restores that order in the editor", async ({
+    test("reorders sidebar open files by insertion and restores that order in the editor", async ({
         page,
         browser,
     }) => {
@@ -429,7 +495,7 @@ test.describe.serial("Pinned files", () => {
         await api.login("test-user", "test-password");
         await api.updateUserState({
             state: {
-                pinnedFiles: names.map((name) => ({
+                openFiles: names.map((name) => ({
                     agentId: ctx.agentId,
                     path: path.join(ctx.testDirPath, name),
                     name,
@@ -440,22 +506,22 @@ test.describe.serial("Pinned files", () => {
         });
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const pinnedFiles = page
+        const openFiles = page
             .getByRole("navigation", { name: "Application" })
-            .getByRole("list", { name: "Pinned files" });
+            .getByRole("list", { name: "Open files" });
 
-        const links = pinnedFiles.getByRole("link");
+        const links = openFiles.getByRole("link");
 
         const linkNames = () =>
             links.evaluateAll((elements) =>
                 elements.map((element) => element.getAttribute("aria-label")),
             );
 
-        // Three entries prove insertion shifts the middle item instead of swapping two.
+        // Three entries prove insertion shifts the middle item instead of swapopen fileg two.
         await expect.poll(linkNames).toEqual(names);
 
-        const lastHandle = pinnedFiles.getByRole("listitem", {
-            name: `Pinned file file3.txt on ${ctx.agentName}`,
+        const lastHandle = openFiles.getByRole("listitem", {
+            name: `Open file file3.txt on ${ctx.agentName}`,
         });
 
         await lastHandle.focus();
@@ -475,7 +541,7 @@ test.describe.serial("Pinned files", () => {
         await expect
             .poll(async () => (await api.getUserState()).state)
             .toMatchObject({
-                pinnedFiles: [
+                openFiles: [
                     {
                         name: "file3.txt",
                         path: path.join(ctx.testDirPath, "file3.txt"),
@@ -498,12 +564,12 @@ test.describe.serial("Pinned files", () => {
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
 
-        const editorPins = page
+        const editorStrip = page
             .getByRole("article", { name: "Editing panel" })
-            .getByRole("navigation", { name: "Editor pinned files" });
+            .getByRole("navigation", { name: "Editor open files" });
 
         // The editor strip reads the same account order as the sidebar.
-        await expect(editorPins.getByRole("link")).toHaveText([
+        await expect(editorStrip.getByRole("link")).toHaveText([
             "file3.txt",
             "file1.txt",
             "file2.txt",
@@ -520,7 +586,7 @@ test.describe.serial("Pinned files", () => {
             .poll(() =>
                 fresh
                     .getByRole("navigation", { name: "Application" })
-                    .getByRole("list", { name: "Pinned files" })
+                    .getByRole("list", { name: "Open files" })
                     .getByRole("link")
                     .evaluateAll((elements) =>
                         elements.map((element) =>
@@ -532,7 +598,7 @@ test.describe.serial("Pinned files", () => {
         await fresh.close();
     });
 
-    test("reorders editor pins horizontally without resetting the draft", async ({
+    test("reorders the editor strip horizontally without resetting the draft", async ({
         page,
     }) => {
         const names = ["file1.txt", "file2.txt", "file3.txt"];
@@ -540,7 +606,7 @@ test.describe.serial("Pinned files", () => {
         await api.login("test-user", "test-password");
         await api.updateUserState({
             state: {
-                pinnedFiles: names.map((name) => ({
+                openFiles: names.map((name) => ({
                     agentId: ctx.agentId,
                     path: path.join(ctx.testDirPath, name),
                     name,
@@ -559,34 +625,34 @@ test.describe.serial("Pinned files", () => {
             .getByRole("button", { name: "Expand editor to full window" })
             .click();
 
-        const pins = panel.getByRole("navigation", {
-            name: "Editor pinned files",
+        const strip = panel.getByRole("navigation", {
+            name: "Editor open files",
         });
 
         await dragReorderRow(
             page,
-            pins.getByRole("listitem", {
-                name: `Pinned file file3.txt on ${ctx.agentName}`,
+            strip.getByRole("listitem", {
+                name: `Open file file3.txt on ${ctx.agentName}`,
             }),
-            pins.getByRole("link", { name: "file2.txt", exact: true }),
+            strip.getByRole("link", { name: "file2.txt", exact: true }),
         );
-        // The horizontal pointer move must insert the pin without navigating away from the draft.
-        await expect(pins.getByRole("link")).toHaveText([
+        // The horizontal pointer move must insert the file without navigating away from the draft.
+        await expect(strip.getByRole("link")).toHaveText([
             "file1.txt",
             "file3.txt",
             "file2.txt",
         ]);
         await keyboardReorder(
             page,
-            pins.getByRole("listitem", {
-                name: `Pinned file file3.txt on ${ctx.agentName}`,
+            strip.getByRole("listitem", {
+                name: `Open file file3.txt on ${ctx.agentName}`,
             }),
             { key: "ArrowRight", times: 1 },
         );
         await keyboardReorder(
             page,
-            pins.getByRole("listitem", {
-                name: `Pinned file file3.txt on ${ctx.agentName}`,
+            strip.getByRole("listitem", {
+                name: `Open file file3.txt on ${ctx.agentName}`,
             }),
             { key: "ArrowLeft", times: 1 },
         );
@@ -594,7 +660,7 @@ test.describe.serial("Pinned files", () => {
         await expect(page).toHaveURL(fileUrl);
         await expect(panel).toHaveCSS("position", "fixed");
         await expect(editor).toHaveText("content1 draft");
-        await expect(pins.getByRole("link")).toHaveText([
+        await expect(strip.getByRole("link")).toHaveText([
             "file1.txt",
             "file3.txt",
             "file2.txt",
@@ -606,7 +672,7 @@ test.describe.serial("Pinned files", () => {
             .poll(() =>
                 page
                     .getByRole("navigation", { name: "Application" })
-                    .getByRole("list", { name: "Pinned files" })
+                    .getByRole("list", { name: "Open files" })
                     .getByRole("link")
                     .evaluateAll((elements) =>
                         elements.map((element) =>
@@ -617,7 +683,7 @@ test.describe.serial("Pinned files", () => {
             .toEqual(["file1.txt", "file3.txt", "file2.txt"]);
     });
 
-    test("reorders pins from the keyboard and cancels without writing", async ({
+    test("reorders open files from the keyboard and cancels without writing", async ({
         page,
     }) => {
         const names = ["file1.txt", "file2.txt", "file3.txt"];
@@ -625,7 +691,7 @@ test.describe.serial("Pinned files", () => {
         await api.login("test-user", "test-password");
         await api.updateUserState({
             state: {
-                pinnedFiles: names.map((name) => ({
+                openFiles: names.map((name) => ({
                     agentId: ctx.agentId,
                     path: path.join(ctx.testDirPath, name),
                     name,
@@ -635,12 +701,12 @@ test.describe.serial("Pinned files", () => {
         });
         await page.goto(`${WEB_BASE_URL}/`);
 
-        const pinnedFiles = page
+        const openFiles = page
             .getByRole("navigation", { name: "Application" })
-            .getByRole("list", { name: "Pinned files" });
+            .getByRole("list", { name: "Open files" });
 
-        const handle = pinnedFiles.getByRole("listitem", {
-            name: `Pinned file file3.txt on ${ctx.agentName}`,
+        const handle = openFiles.getByRole("listitem", {
+            name: `Open file file3.txt on ${ctx.agentName}`,
         });
 
         let puts = 0;
@@ -656,7 +722,7 @@ test.describe.serial("Pinned files", () => {
         await page.keyboard.press("Space");
         await expect(handle).toHaveAttribute("data-dragging", "true");
         await expect(
-            page.getByLabel("Pinned files reorder announcement"),
+            page.getByLabel("Open files reorder announcement"),
         ).toContainText("Picked up file3.txt");
         await waitForKeyboardSensor(page);
         await page.keyboard.press("Escape");
@@ -664,7 +730,7 @@ test.describe.serial("Pinned files", () => {
         await expect(handle).toBeFocused();
 
         const linkNames = () =>
-            pinnedFiles
+            openFiles
                 .getByRole("link")
                 .evaluateAll((elements) =>
                     elements.map((element) =>
@@ -686,31 +752,31 @@ test.describe.serial("Pinned files", () => {
         );
         await editor.click();
         await page.keyboard.press("ArrowUp");
-        // Editor arrows must type or move the caret, not reorder pins.
+        // Editor arrows must type or move the caret, not reorder open files.
         await expect
             .poll(linkNames)
             .toEqual(["file3.txt", "file1.txt", "file2.txt"]);
     });
-    test("removes the pin and the selection of a file deleted from its details view", async ({
+    test("removes the open file and the selection of a file deleted from its details view", async ({
         page,
     }) => {
         const fileName = `delete-pinned-${Date.now()}.txt`;
         const filePath = path.join(ctx.testDirPath, fileName);
         await fs.writeFile(filePath, "pinned, selected, then deleted");
 
-        const pinnedFiles = page
+        const openFiles = page
             .getByRole("navigation", { name: "Application" })
-            .getByRole("list", { name: "Pinned files" });
+            .getByRole("list", { name: "Open files" });
 
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
         await page
-            .getByRole("button", { name: "Pin file", exact: true })
+            .getByRole("button", { name: "Keep file open", exact: true })
             .click();
-        // The sidebar entry proves the file is pinned before the delete starts.
+        // The sidebar entry proves the file is open before the delete starts.
         await expect(
-            pinnedFiles.getByRole("link", { name: fileName, exact: true }),
+            openFiles.getByRole("link", { name: fileName, exact: true }),
         ).toBeVisible();
 
         await page
@@ -759,7 +825,7 @@ test.describe.serial("Pinned files", () => {
         });
         // A deleted file must not stay in the sidebar, where its link would lead to a missing path.
         await expect(
-            pinnedFiles.getByRole("link", { name: fileName, exact: true }),
+            openFiles.getByRole("link", { name: fileName, exact: true }),
         ).toHaveCount(0);
         // A deleted file must not stay selected, where Copy or Move would act on a missing source.
         await expect(
@@ -768,9 +834,205 @@ test.describe.serial("Pinned files", () => {
 
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
-        // The server's copy proves the unpin was persisted, not only hidden from the sidebar.
+        // The server's copy proves the close was persisted, not only hidden from the sidebar.
         await expect
             .poll(async () => (await api.getUserState()).state)
-            .toMatchObject({ pinnedFiles: [] });
+            .toMatchObject({ openFiles: [] });
+    });
+
+    /** Reads the document of a file's buffer as stored on the server, or null without one. */
+    async function storedDocument(filePath: string) {
+        const api = new ApiClient(API_BASE_URL);
+        await api.login("test-user", "test-password");
+
+        const stored = parseStoredBuffer(
+            await api.getEditorBuffer(`${ctx.agentId}:${filePath}`),
+        );
+
+        return stored === null ? null : String(stored.data.state.doc);
+    }
+
+    /** Writes a tall file, so restoring the scroll position is observable. */
+    async function writeTallFile(name: string, prefix: string) {
+        const filePath = path.join(ctx.testDirPath, name);
+
+        await fs.writeFile(
+            filePath,
+            Array.from(
+                { length: 300 },
+                (_, index) => `${prefix} line ${index + 1}`,
+            ).join("\n"),
+        );
+
+        return filePath;
+    }
+
+    test("restores caret, selection, scroll and undo of each open file when switching", async ({
+        page,
+    }) => {
+        const firstPath = await writeTallFile("switch-a.txt", "alpha");
+        const secondPath = await writeTallFile("switch-b.txt", "beta");
+        const firstUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`;
+        const editor = page.getByLabel("File editor", { exact: true });
+        const caretLine = page.getByLabel("Editor caret line");
+        const selectedText = page.getByLabel("Editor selected text");
+
+        const openFiles = page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("list", { name: "Open files" });
+
+        await page.goto(firstUrl);
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+End");
+        await page.keyboard.type(" first");
+        await page.keyboard.press("Shift+Home");
+        // The edit opens the file and the selection covers the edited last line.
+        await expect(selectedText).toHaveText("alpha line 300 first");
+        await expect(
+            openFiles.getByRole("link", { name: "switch-a.txt", exact: true }),
+        ).toBeVisible();
+
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
+        );
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+Home");
+        await page.keyboard.type("second ");
+        // The other file has its own caret near the top.
+        await expect(caretLine).toHaveText("1");
+
+        await openFiles
+            .getByRole("link", { name: "switch-a.txt", exact: true })
+            .click();
+        // Switching back restores the selection and caret of the first file.
+        await expect(selectedText).toHaveText("alpha line 300 first");
+        await expect(caretLine).toHaveText("300");
+        // The first file comes back scrolled to where it was, at its end.
+        await expect(
+            editor.getByText("alpha line 300 first", { exact: true }),
+        ).toBeInViewport();
+
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+z");
+        // Undo reverts the first file's own edit.
+        await expect(editor).not.toContainText("first");
+        await expect(editor).not.toContainText("second");
+
+        await openFiles
+            .getByRole("link", { name: "switch-b.txt", exact: true })
+            .click();
+        // The second file kept its edit, which undo in the first file must not touch.
+        await expect(editor).toContainText("second beta line 1");
+        await expect(caretLine).toHaveText("1");
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+z");
+        // The second file has its own undo history.
+        await expect(editor).not.toContainText("second");
+        // Its undo also makes the buffer clean again.
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeDisabled();
+    });
+
+    test("keeps unsaved edits with their undo history across a reload and on another computer", async ({
+        page,
+        browser,
+    }) => {
+        const filePath = await writeTallFile("reload-draft.txt", "gamma");
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`;
+        const editor = page.getByLabel("File editor", { exact: true });
+
+        await page.goto(fileUrl);
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+End");
+        await page.keyboard.type(" unsaved");
+        // The debounced write reaches the server before the page goes away.
+        await expect
+            .poll(() => storedDocument(filePath))
+            .toContain("gamma line 300 unsaved");
+
+        await page.reload();
+        // The unsaved text survives the reload.
+        await expect(editor).toContainText("gamma line 300 unsaved");
+        // It is still unsaved, so it can be saved or undone.
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeEnabled();
+        // The caret came back on the edited line.
+        await expect(page.getByLabel("Editor caret line")).toHaveText("300");
+
+        const other = await browser.newContext({
+            storageState: ".test-playwright-auth.json",
+        });
+
+        const otherPage = await other.newPage();
+        await otherPage.goto(fileUrl);
+        // Another computer continues with the same unsaved buffer.
+        await expect(
+            otherPage.getByLabel("File editor", { exact: true }),
+        ).toContainText("gamma line 300 unsaved");
+        // The caret follows, so the user picks up exactly where they left off.
+        await expect(otherPage.getByLabel("Editor caret line")).toHaveText(
+            "300",
+        );
+        await other.close();
+
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+z");
+        // The undo history survived the reload too.
+        await expect(editor).not.toContainText("unsaved");
+        // Undoing to the device text leaves nothing to save.
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeDisabled();
+        // The device file was never written.
+        expect(await fs.readFile(filePath, "utf8")).not.toContain("unsaved");
+    });
+
+    test("keeps unsaved edits over a device change until the user discards them", async ({
+        page,
+    }) => {
+        const filePath = path.join(ctx.testDirPath, "device-changed.txt");
+        await fs.writeFile(filePath, "device original");
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`;
+        const editor = page.getByLabel("File editor", { exact: true });
+
+        const banner = page.getByRole("alert", {
+            name: "File changed on device",
+        });
+
+        await page.goto(fileUrl);
+        await expect(editor).toHaveText("device original");
+        await editor.focus();
+        await page.keyboard.press("ControlOrMeta+End");
+        await page.keyboard.type(" browser");
+        await expect
+            .poll(() => storedDocument(filePath))
+            .toBe("device original browser");
+
+        await fs.writeFile(filePath, "device rewrote this");
+        await simulateTabRefocus(page);
+        // The device change is reported while the browser edits stay on screen.
+        await expect(banner).toBeVisible();
+        await expect(editor).toHaveText("device original browser");
+
+        await page.reload();
+        // After a reload the stored buffer still wins and the warning comes back.
+        await expect(editor).toHaveText("device original browser");
+        await expect(banner).toBeVisible();
+
+        await banner
+            .getByRole("button", { name: "Discard my changes" })
+            .click();
+        // Discarding loads the device version and leaves nothing unsaved.
+        await expect(editor).toHaveText("device rewrote this");
+        await expect(banner).toBeHidden();
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeDisabled();
+        // The discarded buffer is written back, so another reload shows the device text.
+        await expect
+            .poll(() => storedDocument(filePath))
+            .toBe("device rewrote this");
     });
 });

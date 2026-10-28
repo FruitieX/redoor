@@ -485,43 +485,66 @@ test.describe.serial("File Edit View", () => {
         await fs.writeFile(filePath, "changed while dirty");
         await editor.focus();
 
-        // Refocusing a dirty editor must not download or replace its local draft.
+        // A dirty editor still checks the device, so it can warn that the file changed there.
+        await expect(
+            page.getByRole("alert", { name: "File changed on device" }),
+        ).toBeVisible();
+        expect(rawGets).toBe(downloadsAfterOpen + 2);
+        // The browser version always wins: refocusing never replaces the local draft.
         await expectEditorText(editor, "unsaved local edit");
-        expect(rawGets).toBe(downloadsAfterOpen + 1);
     });
 
-    test("should reload unsaved edits after confirmation", async ({ page }) => {
+    test("should keep unsaved edits on reload and offer the device version when it changed", async ({
+        page,
+    }) => {
+        const filePath = path.join(ctx.testDirPath, "reload-dirty.txt");
+        await fs.writeFile(filePath, "original buffer");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(`${ctx.testDirPath}/file1.txt`)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
         const editor = page.getByLabel("File editor", { exact: true });
-        await expectEditorText(editor, "content1");
-
+        await expectEditorText(editor, "original buffer");
         await fillEditor(editor, "temporary unsaved text");
-        await expectEditorText(editor, "temporary unsaved text");
-        // Reload must not discard the draft before the existing confirmation is accepted.
+
+        const banner = page.getByRole("alert", {
+            name: "File changed on device",
+        });
+
         let editorActions = await openEditorActions(page);
         await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
-
-        const confirmDialog = page.getByRole("dialog", {
-            name: "Discard unsaved changes?",
-        });
-
-        await expect(confirmDialog).toBeVisible();
-        await confirmDialog.getByRole("button", { name: "Cancel" }).click();
+        // Reloading an unchanged device file asks nothing and keeps the unsaved text.
+        await expect(
+            page.getByRole("dialog", { name: "Discard unsaved changes?" }),
+        ).toBeHidden();
         await expectEditorText(editor, "temporary unsaved text");
+        // Nothing changed on the device, so there is nothing to warn about.
+        await expect(banner).toBeHidden();
 
+        await fs.writeFile(filePath, "written on the device");
         editorActions = await openEditorActions(page);
         await editorActions
             .getByRole("button", { name: "Reload", exact: true })
             .click();
-        await confirmDialog
-            .getByRole("button", { name: "Discard changes" })
+        // A device change under unsaved edits is announced instead of applied.
+        await expect(banner).toBeVisible();
+        await expectEditorText(editor, "temporary unsaved text");
+        // Saving stays possible and would overwrite the device version.
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeEnabled();
+
+        await banner
+            .getByRole("button", { name: "Discard my changes" })
             .click();
-        await expectEditorText(editor, "content1");
+        // Discarding loads what the device holds now and makes the buffer clean.
+        await expectEditorText(editor, "written on the device");
+        await expect(banner).toBeHidden();
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeDisabled();
     });
 
     test("should reload a clean editor from the agent", async ({ page }) => {
@@ -880,10 +903,10 @@ gamma
         await expectEditorText(editor, "keep this draft");
     });
 
-    test("should keep unsaved edits when in-app navigation is cancelled", async ({
+    test("should keep unsaved edits across in-app navigation without asking", async ({
         page,
     }) => {
-        const filePath = path.join(ctx.testDirPath, "leave-cancel.txt");
+        const filePath = path.join(ctx.testDirPath, "leave-and-return.txt");
         await fs.writeFile(filePath, "original buffer");
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
@@ -896,148 +919,36 @@ gamma
             page.getByRole("button", { name: "Save file" }),
         ).toBeEnabled();
 
-        await page
-            .getByLabel("File view")
+        const fileView = page.getByLabel("File view");
+        await fileView
             .getByRole("link", { name: "Details", exact: true })
             .click();
-
-        const confirmDialog = page.getByRole("dialog", {
-            name: "Discard unsaved changes?",
-        });
-
-        // In-app links must not drop the draft without an explicit confirm.
-        await expect(confirmDialog).toBeVisible();
-        await confirmDialog.getByRole("button", { name: "Cancel" }).click();
-        await expect(confirmDialog).toBeHidden();
-        await expect(page).not.toHaveURL(/[?&]view=/);
-        await expectEditorText(editor, "keep this draft");
-    });
-
-    test("should discard unsaved edits when leaving is confirmed", async ({
-        page,
-    }) => {
-        const filePath = path.join(ctx.testDirPath, "leave-confirm.txt");
-        await fs.writeFile(filePath, "original buffer");
-        await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
-        );
-
-        const editor = page.getByLabel("File editor", { exact: true });
-        await expectEditorText(editor, "original buffer");
-        await fillEditor(editor, "throw this draft away");
-        await expect(
-            page.getByRole("button", { name: "Save file" }),
-        ).toBeEnabled();
-
-        await page
-            .getByLabel("File view")
-            .getByRole("link", { name: "Details", exact: true })
-            .click();
-
-        const confirmDialog = page.getByRole("dialog", {
-            name: "Discard unsaved changes?",
-        });
-
-        await expect(confirmDialog).toBeVisible();
-        await confirmDialog
-            .getByRole("button", { name: "Discard changes" })
-            .click();
-
-        // Confirming leave must complete the Details navigation after the user accepts data loss.
-        await expect(confirmDialog).toBeHidden();
-        await expect(
-            page
-                .getByLabel("File view")
-                .getByRole("link", { name: "Details", exact: true }),
-        ).toHaveAttribute("aria-current", "page");
-        await expect
-            .poll(async () => fs.readFile(filePath, "utf8"))
-            .toBe("original buffer");
-    });
-
-    test("should allow navigation after reloading unsaved edits", async ({
-        page,
-    }) => {
-        const filePath = path.join(ctx.testDirPath, "leave-after-restore.txt");
-        await fs.writeFile(filePath, "original buffer");
-        await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
-        );
-
-        const editor = page.getByLabel("File editor", { exact: true });
-        await fillEditor(editor, "temporary draft");
-        const editorActions = await openEditorActions(page);
-        await editorActions
-            .getByRole("button", { name: "Reload", exact: true })
-            .click();
-        await page
-            .getByRole("dialog", { name: "Discard unsaved changes?" })
-            .getByRole("button", { name: "Discard changes" })
-            .click();
-        await expectEditorText(editor, "original buffer");
-
-        await page
-            .getByLabel("File view")
-            .getByRole("link", { name: "Details", exact: true })
-            .click();
-
-        // A clean buffer must not prompt, otherwise Reload would not actually clear the guard.
+        // Edited files stay open with their buffer, so leaving needs no confirmation.
         await expect(
             page.getByRole("dialog", { name: "Discard unsaved changes?" }),
         ).toBeHidden();
         await expect(
-            page
-                .getByLabel("File view")
-                .getByRole("link", { name: "Details", exact: true }),
+            fileView.getByRole("link", { name: "Details", exact: true }),
         ).toHaveAttribute("aria-current", "page");
-    });
 
-    test("should warn before reload when the editor is dirty", async ({
-        page,
-    }) => {
-        const filePath = path.join(ctx.testDirPath, "reload-guard.txt");
-        await fs.writeFile(filePath, "original buffer");
-        await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
-        );
-
-        const editor = page.getByLabel("File editor", { exact: true });
-        await expectEditorText(editor, "original buffer");
-        await fillEditor(editor, "do not lose this");
+        await fileView.getByRole("link", { name: "Edit", exact: true }).click();
+        // Coming back shows the unsaved text, still unsaved.
+        await expectEditorText(editor, "keep this draft");
         await expect(
             page.getByRole("button", { name: "Save file" }),
         ).toBeEnabled();
+        // The device file was never touched by leaving.
+        expect(await fs.readFile(filePath, "utf8")).toBe("original buffer");
 
-        // Playwright auto-accepts beforeunload, so assert the same window listener the browser uses.
-        const dirtyReloadBlocked = await page.evaluate(() => {
+        const unloadBlocked = await page.evaluate(() => {
             const event = new Event("beforeunload", { cancelable: true });
             window.dispatchEvent(event);
 
             return event.defaultPrevented;
         });
 
-        expect(dirtyReloadBlocked).toBe(true);
-        await expectEditorText(editor, "do not lose this");
-
-        const editorActions = await openEditorActions(page);
-        await editorActions
-            .getByRole("button", { name: "Reload", exact: true })
-            .click();
-        await page
-            .getByRole("dialog", { name: "Discard unsaved changes?" })
-            .getByRole("button", { name: "Discard changes" })
-            .click();
-        await expectEditorText(editor, "original buffer");
-
-        const cleanReloadBlocked = await page.evaluate(() => {
-            const event = new Event("beforeunload", { cancelable: true });
-            window.dispatchEvent(event);
-
-            return event.defaultPrevented;
-        });
-
-        // A clean buffer must not trap refresh or tab close.
-        expect(cleanReloadBlocked).toBe(false);
+        // Unsaved edits are kept on the server, so closing or reloading the tab is not blocked.
+        expect(unloadBlocked).toBe(false);
     });
 
     test("should move focus between the editor and terminal with alt shortcuts", async ({

@@ -23,22 +23,25 @@ export const bookmarkSchema = z.object({
 
 export type Bookmark = z.infer<typeof bookmarkSchema>;
 
-/** One editor file kept in the left menu so it can be reopened without browsing. */
-export const pinnedFileSchema = z.object({
+/**
+ * One open editor file, listed in the left menu so it can be reopened without browsing. Its
+ * buffer (unsaved text, caret, undo history) is kept on the server while it stays open.
+ */
+export const openFileSchema = z.object({
     agentId: z.string(),
     path: z.string(),
     name: z.string(),
     agentName: z.string(),
 });
 
-export type PinnedFile = z.infer<typeof pinnedFileSchema>;
+export type OpenFile = z.infer<typeof openFileSchema>;
 
 /** Known UI preferences; extra server keys are ignored until they have a schema. */
 export const userStateSchema = z.object({
     showHiddenFiles: z.boolean().catch(true),
     theme: z.enum(["system", "dark", "light"]).catch("system"),
     bookmarks: z.array(bookmarkSchema).catch([]),
-    pinnedFiles: z.array(pinnedFileSchema).catch([]),
+    openFiles: z.array(openFileSchema).catch([]),
     vimMode: z.boolean().catch(false),
     wrapEditorLines: z.boolean().catch(false),
     wrapDiffLines: z.boolean().catch(false),
@@ -72,46 +75,49 @@ export function isPathBookmarked(
     return bookmarks.some((bookmark) => getBookmarkKey(bookmark) === targetKey);
 }
 
-/** Identifies one pinned file so the same path cannot be stored twice. */
-export function getPinnedFileKey(file: Pick<PinnedFile, "agentId" | "path">) {
+/**
+ * Identifies one open file so the same path cannot be listed twice. It is also the key of
+ * the file's editor buffer, which the server derives the same way from the open files list.
+ */
+export function getOpenFileKey(file: Pick<OpenFile, "agentId" | "path">) {
     return `${file.agentId}:${file.path}`;
 }
 
 /** Lets the editor button and the left menu share one membership check. */
-export function isFilePinned(
-    pinnedFiles: PinnedFile[],
-    target: Pick<PinnedFile, "agentId" | "path">,
+export function isFileOpen(
+    openFiles: OpenFile[],
+    target: Pick<OpenFile, "agentId" | "path">,
 ) {
-    const targetKey = getPinnedFileKey(target);
+    const targetKey = getOpenFileKey(target);
 
-    return pinnedFiles.some((file) => getPinnedFileKey(file) === targetKey);
+    return openFiles.some((file) => getOpenFileKey(file) === targetKey);
 }
 
 /**
- * Appends a new pin so later pins stay below earlier ones.
- * Re-pinning an existing path keeps its place instead of jumping to the bottom.
+ * Appends a newly opened file so later files stay below earlier ones.
+ * Opening a file that is already open keeps its place instead of jumping to the bottom.
  */
-export function pinFile(pinnedFiles: PinnedFile[], file: PinnedFile) {
-    if (isFilePinned(pinnedFiles, file)) {
-        return pinnedFiles;
+export function openFile(openFiles: OpenFile[], file: OpenFile) {
+    if (isFileOpen(openFiles, file)) {
+        return openFiles;
     }
 
-    return [...pinnedFiles, file];
+    return [...openFiles, file];
 }
 
-/** Drops one pin without reordering the files that remain. */
-export function unpinFile(
-    pinnedFiles: PinnedFile[],
-    target: Pick<PinnedFile, "agentId" | "path">,
+/** Drops one open file without reordering the files that remain. */
+export function closeFile(
+    openFiles: OpenFile[],
+    target: Pick<OpenFile, "agentId" | "path">,
 ) {
-    const targetKey = getPinnedFileKey(target);
+    const targetKey = getOpenFileKey(target);
 
-    return pinnedFiles.filter((file) => getPinnedFileKey(file) !== targetKey);
+    return openFiles.filter((file) => getOpenFileKey(file) !== targetKey);
 }
 
-/** Shares pin order between the sidebar and the full-window editor strip. */
-export function reorderPinnedFiles(pinnedFiles: PinnedFile[], move: ItemMove) {
-    return moveKeyedItems(pinnedFiles, getPinnedFileKey, move);
+/** Shares open file order between the sidebar and the full-window editor strip. */
+export function reorderOpenFiles(openFiles: OpenFile[], move: ItemMove) {
+    return moveKeyedItems(openFiles, getOpenFileKey, move);
 }
 
 /**

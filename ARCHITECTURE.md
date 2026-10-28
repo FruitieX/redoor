@@ -162,6 +162,8 @@ The agent runtime and the implementation of every command.
   - `agent_client`: `AgentClient::call` for any protocol request that is also an
     `AgentCall`, which adds its deadline; all deadlines are defined in one place.
   - `error.rs`: `ApiError`, which owns all HTTP status mapping.
+  - `user_state` and `editor_buffers`: per-account files in the account's private data
+    directory (the preference document and one file per open file's editor buffer).
   - `git/`: Git REST handlers split by the same feature areas as the protocol, sharing
     path and revision validation in `git/mod.rs`.
   - `services/`: `TransferService` (copy and move), `OutputStream` (downloads, diffs, exec)
@@ -1193,10 +1195,12 @@ invalidating query keys, so a view never needs a separate reload signal.
   buffers). The inventory list is a sibling key, so refreshing it does not touch any agent's
   files. `invalidateAgentData` is the single entry point mutations and events use after
   changing an agent.
-- **Editor buffers are not server mirrors.** The editor's file content is tagged with query
-  `meta: { editorBuffer: true }`. `invalidateAgentData` and `invalidateAllAgentData` skip it,
-  so an agent-wide refresh can never replace unsaved text. Only the editor refetches it, and
-  only while clean.
+- **The editor's device text is refetched by the editor only.** The file content query is
+  tagged with `meta: { editorBuffer: true }`, and `invalidateAgentData` and
+  `invalidateAllAgentData` skip it, so unrelated mutations do not download open files again.
+  The editor refetches it on focus, window focus and Reload, also while the buffer is dirty:
+  the query only ever holds device text, and the editor workspace decides what that text may
+  do to the buffer (see "Editor buffers and open files").
 - **Stale times follow the events.** The inventory is trusted for 30 s because
   `agents_changed` invalidates it, and it polls every second only while a managed agent is
   starting, which pushes no event. Listings, git state and metadata never go stale on their
@@ -1319,6 +1323,8 @@ context (`useTerminals`, `useUploads`).
   directory. Rename rewrites the top-level path component, and Merge sends `merge` with every
   file. Because uploads go file by file, Replace first trashes (or deletes) a conflicting
   directory and then uploads with `override`.
+- **`EditorWorkspace` owns the editor.** It holds the page's only CodeMirror `EditorView` and
+  the buffers of open files; see "Editor buffers and open files".
 - **`ShortcutRegistry` owns every window shortcut.** There is one capture and one bubble
   `keydown` listener, attached while something is registered. A binding declares its phase,
   a priority tier, a key matcher, whether it skips text controls, the terminal and the editor,
@@ -1333,8 +1339,82 @@ context (`useTerminals`, `useUploads`).
   register with `useShortcut`, which reads `match` and `run` through a ref, so it
   subscribes once and never on every render.
 - **No module-level singletons for per-instance state.** The editor's `:w` finds its save
-  handler in a CodeMirror facet of the editor that ran it. The open editor's path and dirty
-  flag, which refresh triggers read, are an atom in the application's store.
+  handler in a CodeMirror facet of the state that ran it, which resolves to the mounted
+  editor component through the workspace. The open editor's path, which refresh triggers
+  read, is an atom in the application's store.
+
+### Editor buffers and open files
+
+A file becomes *open* when it is first edited or when the user presses Keep open; any other
+file shown in the editor is a *preview*. The open files list (`openFiles` in the user state)
+is shown in the application menu and, in full-window mode, as a strip above the editor.
+
+- **One view, one buffer per open file.** `EditorWorkspace` (`ui/src/editor`), created in
+  `main.tsx` and reached through the router context, owns the single `EditorView` and a
+  buffer per open file plus the current preview. A buffer is the file's `EditorState` (text,
+  selection, undo history), its scroll snapshot, the device text it is based on and the
+  server revision it was last written as. Switching files stashes the outgoing `view.state`
+  and `view.scrollSnapshot()` in its buffer, `setState`s the incoming one and dispatches its
+  scroll snapshot, so each open file keeps its caret, selection, scroll and undo history
+  (Vim's `u` and `Ctrl-r` use the same CodeMirror history). The view's DOM moves into
+  whichever `CodeEditor` is mounted. Showing another file drops the previous preview's buffer.
+- **Preferences are compartments.** Vim mode, line wrapping, theme and editability are
+  compartments of every buffer's state, so a restored state built under older preferences is
+  reconfigured on activation without losing its history. Callbacks (update, focus, `:w`)
+  reach the mounted component through a handlers ref, never a captured file.
+- **The buffer is the draft.** Dirty tracking and Save read the buffer's document; there is
+  no second copy of the text in React state. The first edit of a clean buffer opens the file.
+- **Device text never replaces unsaved edits.** When the file content query brings new device
+  text (focus, window focus, Reload, after a reload), a clean buffer takes it as a minimal
+  change outside the undo history (`Transaction.addToHistory` false), so the caret and history
+  stay. A dirty buffer keeps its text; if the device moved away from the text the edits are
+  based on, the editor shows a "changed on device" banner with Discard my changes (which loads
+  the device text and starts the history over). Saving overwrites the device.
+- **Buffers are stored on the server per user.** The goal is to edit a file on one computer,
+  walk to another and continue exactly where you left off. `GET`, `PUT` and `DELETE
+  /api/v1/user/editor-buffers/{key}` (`http/editor_buffers.rs`, session only) keep one file per
+  buffer in the account's private `editor-buffers/` directory, named by the SHA-256 of the key
+  (`<agentId>:<path>`, sent base64url-encoded), so no key can escape the directory, and written
+  atomically. The payload is opaque to the server: CodeMirror's state JSON with history, the
+  hash of the device text it is based on, a scroll anchor, the `?line=` history entry already
+  applied and a dirty flag. Buffers live outside the user state document because that is
+  replaced whole on every preference change, so buffers there would be rewritten on each
+  keystroke.
+- **Last writer wins, with versions.** Buffers belong to one user, who works from one computer
+  at a time, so there are no revision checks. Every `PUT` gets a new server-assigned version
+  (milliseconds, always above the previous one), which `PUT` and `GET` return.
+- **Writes.** The workspace writes an open buffer about a second after the last document or
+  selection change, one request at a time per key (a change during a write is written after
+  it), through a `MutationObserver`; a failed write is retried. Scrolling never schedules a
+  write: the scroll position is read from the view whenever a buffer is serialized, and on
+  `pagehide` or when the page becomes hidden every pending buffer is written at once
+  (`keepalive` when under 64 KiB), plus the shown one if only its scroll moved. That is what
+  carries the scroll position to the next computer. The version a write returns becomes the
+  buffer's `lastSeenVersion`.
+- **Reads are the only thing that may move the caret.** The stored buffer query goes stale
+  immediately, so it is read when a file is first shown in the tab (and on page load), when
+  switching back to a loaded file, and when the window is focused or becomes visible. The
+  copy is adopted only when its version is newer than `lastSeenVersion` and the buffer has no
+  unwritten changes and no write in flight. A user who typed or moved the caret before the
+  response arrived keeps their state (their next write wins), a refocus of the same window
+  gets back its own write and changes nothing, and a slow read that lands after a newer own
+  write is older than it and ignored.
+- **Closing deletes the stored copy.** Closing a file deletes its buffer (after a write still
+  in flight), and replacing the user state deletes the buffer files of files no longer in
+  `openFiles`, under the same lock as buffer writes, so a file closed in another browser does
+  not leave its buffer behind either.
+- **Closing asks only for unsaved edits.** There is no unsaved-changes prompt on navigation
+  or page unload, since edits survive both. Closing an open file (the list's X, Clear, or the
+  toolbar button) asks for confirmation when the buffer is dirty, reading the stored copy for
+  a file not visited since the reload, and confirming discards the edits.
+- **Limits.** Undo history keeps at least 100 events per buffer (`HISTORY_DEPTH`). A stored
+  buffer may be 8 MiB (`MAX_EDITOR_BUFFER_BYTES`, enforced as the route's body limit); the
+  browser drops the undo history from a payload above 7 MiB and skips storing one that is
+  still too large. Only open files and one preview are kept in memory. Editable files are at
+  most 2 MiB.
+- **`?line=` applies once per history entry.** The applied entry is stored with the buffer,
+  so returning to a file or reloading the page restores the user's place instead of jumping
+  back to the linked line.
 
 ### Browser component library and theme
 
@@ -1395,9 +1475,10 @@ cache, so Back, reload and shared links all land on the same screen.
   new file, new directory) share `PathNameDialog` and `validatePathComponent`, which rejects
   empty names, `.` and `..`, and separators. Directory creation alone opts in to nested names
   (`a/b`), because the agent creates every missing parent. `DeletePathDialog` owns what must
-  follow any delete: leave the path's own page for its parent, unselect it, unpin it and
-  refresh the agent's data, so the list, details and editor cannot drift apart. Dialogs are
-  mounted only while open, which replaces effects that reset their state.
+  follow any delete: leave the path's own page for its parent, unselect it, close it (with
+  its editor buffer) and refresh the agent's data, so the list, details and editor cannot
+  drift apart. Dialogs are mounted only while open, which replaces effects that reset their
+  state.
 - **Waiting on a transfer uses the transfers query.** Duplicate, batch copy and move, and the
   Sync view all follow transfers they started through `transfers_changed` plus a short poll on
   the same cache entry (`watchedTransfersQueryOptions`). `waitForTransfers` is an observer on
@@ -1838,8 +1919,8 @@ to the scope.
 - **Default deny.** A route missing from the table is session-only, so a new route is not
   reachable with a token until someone classifies it.
 - **Session-only routes.** Server and agent configuration, creating SSH or local agents,
-  restart, log levels, terminals, log streams, the UI websocket, user state and token
-  management are never grantable. A token could otherwise widen its own access, for
+  restart, log levels, terminals, log streams, the UI websocket, user state, editor buffers
+  and token management are never grantable. A token could otherwise widen its own access, for
   example by adding a local agent or minting a broader token. The exception is
   `/api/v1/tokens/current`, where a token reads or deletes itself.
 - **Limit of the model.** Permissions describe what a token may do through redoor, not

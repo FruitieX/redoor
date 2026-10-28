@@ -6,6 +6,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import type { ApiClient } from "#ui/api-client";
 import type { TerminalSessions } from "#ui/terminal/terminal-sessions";
 import type { UploadQueue } from "#ui/upload-queue";
+import type { EditorWorkspace } from "#ui/editor/editor-workspace";
 
 interface AppRouterContext {
     api: ApiClient;
@@ -14,6 +15,8 @@ interface AppRouterContext {
     terminals: TerminalSessions;
     /** Owns the upload queue, so uploads continue while the user navigates. */
     uploads: UploadQueue;
+    /** Owns the single editor view and open files' buffers, so they outlive the editor route. */
+    editor: EditorWorkspace;
 }
 
 /**

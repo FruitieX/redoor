@@ -41,7 +41,7 @@ export const sidebarModeAtom = atomWithSessionStorage<SidebarMode>(
 );
 
 /**
- * Starting width of each edge. The application menu starts wider because pinned file names
+ * Starting width of each edge. The application menu starts wider because open file names
  * share its width with the navigation rail, and the names are what the user scans for.
  */
 export const defaultSidebarWidths = { left: 260, right: 224 };

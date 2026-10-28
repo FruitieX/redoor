@@ -1,41 +1,26 @@
 import React from "react";
-import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { bbedit } from "@uiw/codemirror-theme-bbedit";
-import { tokyoNight } from "@uiw/codemirror-theme-tokyo-night";
-import { search } from "@codemirror/search";
-import { Facet, type EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
-import { vim, Vim } from "@replit/codemirror-vim";
+import type { EditorState } from "@codemirror/state";
+import type { EditorView, ViewUpdate } from "@codemirror/view";
+import { getRouteApi, useRouterState } from "@tanstack/react-router";
 import {
     EditorSearch,
     type EditorSearchHandle,
 } from "#ui/components/browser/editor-search";
-import { vimYankHighlightExtension } from "./vim-yank-highlight";
-import { languageFromFileName } from "#ui/utils/editor-language";
+import type { EditorHandlers, LineTarget } from "#ui/editor/editor-workspace";
+import type { StoredBuffer } from "#ui/editor/stored-buffer";
+import { historyEntryKey } from "#ui/history-entry-state";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { useTerminals } from "#ui/use-terminals";
 import { isTerminalInputTarget, isUnmodifiedAltKey } from "#ui/utils/keyboard";
-import { getBaseName } from "#ui/utils/path";
 import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
+
+const rootRouteApi = getRouteApi("__root__");
 
 /** Carries only the editor selection details needed by actions outside CodeMirror. */
 export type EditorSelection = {
     text: string;
     startLine: number;
 };
-
-/**
- * Carries each editor's save handler in its own CodeMirror state. Vim's `:w` is registered
- * once for the whole page, so it finds the handler of the editor that ran it through that
- * editor's state, rather than through a shared variable that assumes only one editor exists.
- */
-const vimWriteHandler = Facet.define<() => void, (() => void) | null>({
-    combine: (handlers) => handlers[0] ?? null,
-});
-
-Vim.defineEx("write", "w", (cm) => {
-    cm.cm6.state.facet(vimWriteHandler)?.();
-});
 
 /**
  * Reclaims editor focus from an active shell with Alt-e, and drops a pending delayed
@@ -96,23 +81,6 @@ function useFocusEditorShortcut(view: EditorView | null) {
     );
 }
 
-/** Selects the inbound ?line= target and centers it so the opened location is obvious in a tall buffer. */
-function moveCaretToLine(view: EditorView, line: number) {
-    const lineCount = view.state.doc.lines;
-
-    // Empty documents have no real line to reveal; clamping would still dispatch a no-op caret.
-    if (view.state.doc.length === 0 || lineCount < 1) {
-        return;
-    }
-
-    const clamped = Math.min(Math.max(line, 1), lineCount);
-    const docLine = view.state.doc.line(clamped);
-    view.dispatch({
-        selection: { anchor: docLine.from, head: docLine.to },
-        effects: EditorView.scrollIntoView(docLine.from, { y: "center" }),
-    });
-}
-
 /** Reads the current range so chrome and tests can follow the editor selection. */
 function editorSelectionFromState(state: EditorState): EditorSelection | null {
     const selection = state.selection.main;
@@ -127,133 +95,163 @@ function editorSelectionFromState(state: EditorState): EditorSelection | null {
     };
 }
 
-/** Applies inbound ?line= once the view exists so typing and saves do not re-scroll. */
-function useInboundScrollToLine(
-    view: EditorView | null,
-    scrollToLine: number | undefined,
-) {
-    React.useLayoutEffect(() => {
-        if (view === null || scrollToLine === undefined) {
-            return;
-        }
-
-        moveCaretToLine(view, scrollToLine);
-    }, [view, scrollToLine]);
-}
-
-/**
- * Presentational CodeMirror surface so FileEditView can keep query/draft ownership.
- * A bounded height lets CodeMirror virtualize the viewport instead of growing the page.
- * Extensions are memoized on the file name and keymap because recreating them remounts the editor.
- */
-export function CodeEditor(props: {
-    value: string;
+/** The props the shared view reads when a file is shown, kept in a ref between renders. */
+type CodeEditorProps = {
+    /** Identifies the file's buffer, the same key as its entry in the open files list. */
+    bufferKey: string;
     fileName: string;
+    /** The device text; a clean buffer follows it, a dirty one only reports a conflict. */
+    deviceContent: string;
+    /** The buffer stored on the server, which restores unsaved edits after a reload. */
+    stored: StoredBuffer | null;
     editable: boolean;
     vimMode: boolean;
     wrapLines: boolean;
     scrollToLine?: number;
-    onChange: (value: string) => void;
     onFocus: () => void;
     onSave: () => void;
+    /** The first edit of a clean buffer, which opens the file. */
+    onBecameDirty: () => void;
     onSelectionChange: (selection: EditorSelection | null) => void;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
     isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
     /** Leaves find keys to the browser while the editor is hidden behind a preview. */
     captureFindKeys: boolean;
-}) {
+};
+
+/**
+ * Shows one file in the page's single CodeMirror view. The view and the file's buffer belong
+ * to the editor workspace, so this component only attaches the view while mounted and feeds
+ * it the file's device text, server copy and preferences. A bounded height lets CodeMirror
+ * virtualize the viewport instead of growing the page.
+ */
+export function CodeEditor(props: CodeEditorProps) {
+    const { editor: workspace } = rootRouteApi.useRouteContext();
     const resolvedTheme = useResolvedTheme();
-    const onSaveRef = React.useRef(props.onSave);
-    onSaveRef.current = props.onSave;
-    const editorRef = React.useRef<ReactCodeMirrorRef>(null);
 
-    /** Saves without leaving CodeMirror so :w cannot dump the user into chrome. */
-    const saveFromEditor = React.useCallback(() => {
-        onSaveRef.current();
-        editorRef.current?.view?.focus();
-    }, []);
+    // The resolved entry, not the live one: a navigation away changes the live location while
+    // this file is still mounted, which would re-apply its `?line=` target on the way out.
+    const lineEntry = useRouterState({
+        select: (state) =>
+            historyEntryKey(state.resolvedLocation ?? state.location),
+    });
 
-    const onFocusRef = React.useRef(props.onFocus);
-    onFocusRef.current = props.onFocus;
+    const containerRef = React.useRef<HTMLDivElement>(null);
+    const propsRef = React.useRef(props);
+    propsRef.current = props;
     const hasReceivedFocusRef = React.useRef(false);
     const [view, setView] = React.useState<EditorView | null>(null);
     const [documentRevision, setDocumentRevision] = React.useState(0);
     const [caretLine, setCaretLine] = React.useState<number | null>(null);
     const [selectedText, setSelectedText] = React.useState<string | null>(null);
-    const firstLineEnd = props.value.indexOf("\n");
 
-    const firstLine = props.value.slice(
-        0,
-        firstLineEnd === -1 ? props.value.length : firstLineEnd,
-    );
+    const settings = {
+        vimMode: props.vimMode,
+        wrapLines: props.wrapLines,
+        theme: resolvedTheme,
+        editable: props.editable,
+    };
 
-    const baseName = getBaseName(props.fileName);
+    const settingsRef = React.useRef(settings);
+    settingsRef.current = settings;
 
-    const languageContent =
-        baseName.lastIndexOf(".") <= 0 && firstLine.startsWith("#!")
-            ? firstLine
-            : "";
+    const lineTarget: LineTarget | null =
+        props.scrollToLine === undefined
+            ? null
+            : { line: props.scrollToLine, entry: lineEntry };
 
-    const extensions = React.useMemo(() => {
-        const language = languageFromFileName(props.fileName, languageContent);
+    const lineTargetRef = React.useRef(lineTarget);
+    lineTargetRef.current = lineTarget;
 
-        return [
-            // Vim must precede both its observer and other keymaps so its adapter exists and normal-mode keys win.
-            ...(props.vimMode
-                ? [
-                      vim({ status: true }),
-                      vimYankHighlightExtension,
-                      vimWriteHandler.of(saveFromEditor),
-                  ]
-                : []),
-            ...(props.wrapLines ? [EditorView.lineWrapping] : []),
-            search(),
-            EditorView.contentAttributes.of({
-                "aria-label": "File editor",
-                "data-file-editor": "",
-                "data-vim-mode": props.vimMode ? "true" : "false",
-                "data-wrap-lines": props.wrapLines ? "true" : "false",
-            }),
-            EditorView.domEventHandlers({
-                focus: () => {
-                    // The initial load is already fresh, so only later focus entries refetch.
-                    if (hasReceivedFocusRef.current) {
-                        onFocusRef.current();
-                    } else {
-                        hasReceivedFocusRef.current = true;
-                    }
-                },
-            }),
-            EditorView.theme({
-                "&": {
-                    height: "100%",
-                },
-                "&.cm-focused": {
-                    outline: "none",
-                },
-                ".cm-scroller": {
-                    overflow: "auto",
-                },
-                ".cm-content": {
-                    padding: "0",
-                },
-                ".cm-line": {
-                    padding: "0",
-                },
-            }),
-            ...(language === undefined ? [] : [language]),
-        ];
+    /** Mirrors the editor's caret and selection into the chrome and the accessible spans. */
+    const syncFromState = React.useCallback((state: EditorState) => {
+        setDocumentRevision((revision) => revision + 1);
+        setCaretLine(state.doc.lineAt(state.selection.main.head).number);
+        const nextSelection = editorSelectionFromState(state);
+        setSelectedText(nextSelection?.text ?? null);
+        propsRef.current.onSelectionChange(nextSelection);
+    }, []);
+
+    // The workspace calls these for whichever file is shown, so they read the latest props.
+    const handlersRef = React.useRef<EditorHandlers>({
+        onUpdate: (update: ViewUpdate) => {
+            if (update.docChanged || update.selectionSet) {
+                syncFromState(update.state);
+            }
+        },
+        onFocus: () => {
+            // The initial load is already fresh, so only later focus entries refetch.
+            if (hasReceivedFocusRef.current) {
+                propsRef.current.onFocus();
+            } else {
+                hasReceivedFocusRef.current = true;
+            }
+        },
+        onSave: () => propsRef.current.onSave(),
+        onBecameDirty: () => propsRef.current.onBecameDirty(),
+    });
+
+    // Swaps this file's buffer into the shared view; leaving stashes it with its scroll.
+    React.useLayoutEffect(() => {
+        const container = containerRef.current;
+
+        if (container === null) {
+            return;
+        }
+
+        const current = propsRef.current;
+
+        const shown = workspace.activate({
+            container,
+            key: current.bufferKey,
+            fileName: current.fileName,
+            deviceContent: current.deviceContent,
+            stored: current.stored,
+            settings: settingsRef.current,
+            lineTarget: lineTargetRef.current,
+            handlers: handlersRef,
+        });
+
+        setView(shown);
+        syncFromState(shown.state);
+
+        return () => workspace.deactivate(container);
+    }, [props.bufferKey, syncFromState, workspace]);
+
+    React.useLayoutEffect(() => {
+        workspace.applyDeviceContent(props.bufferKey, props.deviceContent);
+    }, [props.bufferKey, props.deviceContent, workspace]);
+
+    React.useLayoutEffect(() => {
+        workspace.receiveStored(props.bufferKey, props.stored);
+    }, [props.bufferKey, props.stored, workspace]);
+
+    React.useLayoutEffect(() => {
+        workspace.applySettings({
+            vimMode: props.vimMode,
+            wrapLines: props.wrapLines,
+            theme: resolvedTheme,
+            editable: props.editable,
+        });
     }, [
-        languageContent,
-        props.fileName,
+        props.editable,
         props.vimMode,
         props.wrapLines,
-        saveFromEditor,
+        resolvedTheme,
+        workspace,
     ]);
 
+    React.useLayoutEffect(() => {
+        if (props.scrollToLine !== undefined) {
+            workspace.goToLine(props.bufferKey, {
+                line: props.scrollToLine,
+                entry: lineEntry,
+            });
+        }
+    }, [lineEntry, props.bufferKey, props.scrollToLine, workspace]);
+
     useFocusEditorShortcut(view);
-    useInboundScrollToLine(view, props.scrollToLine);
 
     return (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -284,43 +282,7 @@ export function CodeEditor(props: {
                         {selectedText}
                     </span>
                 )}
-                <CodeMirror
-                    ref={editorRef}
-                    value={props.value}
-                    height="100%"
-                    width="100%"
-                    theme={resolvedTheme === "light" ? bbedit : tokyoNight}
-                    editable={props.editable}
-                    basicSetup={{ searchKeymap: false }}
-                    extensions={extensions}
-                    onCreateEditor={(editorView) => {
-                        setView(editorView);
-                        setCaretLine(
-                            editorView.state.doc.lineAt(
-                                editorView.state.selection.main.head,
-                            ).number,
-                        );
-                    }}
-                    onChange={props.onChange}
-                    onUpdate={(update) => {
-                        if (update.docChanged || update.selectionSet) {
-                            setDocumentRevision((revision) => revision + 1);
-                            setCaretLine(
-                                update.state.doc.lineAt(
-                                    update.state.selection.main.head,
-                                ).number,
-                            );
-
-                            const nextSelection = editorSelectionFromState(
-                                update.state,
-                            );
-
-                            setSelectedText(nextSelection?.text ?? null);
-                            props.onSelectionChange(nextSelection);
-                        }
-                    }}
-                    className="h-full min-h-0"
-                />
+                <div ref={containerRef} className="h-full min-h-0" />
             </div>
         </div>
     );

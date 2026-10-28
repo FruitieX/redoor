@@ -5,16 +5,15 @@ import { useRouter, type RegisteredRouter } from "@tanstack/react-router";
 import { queryKeys } from "#ui/queries";
 import { invalidateDeviceViews } from "#ui/use-active-agent";
 
-/** Names the open editor buffer and whether it holds unsaved text. */
+/** Names the file shown in the editor. */
 type EditorRefreshState = {
     agentId: string;
     path: string;
-    isDirty: boolean;
 };
 
 /**
  * Holds the editor that is open, so refresh triggers fired from anywhere (window focus,
- * leaving the terminal, the More menu) know whether a buffer must be refetched or protected.
+ * leaving the terminal, the More menu) know which file's device text to refetch.
  * It is an atom rather than a module variable, so it belongs to the store the application
  * renders with and every test gets a fresh one.
  */
@@ -22,7 +21,8 @@ const editorRefreshStateAtom = atom<EditorRefreshState | null>(null);
 
 /**
  * Lets the mounted editor opt into shared browser reload triggers without a second listener.
- * Dirty buffers stay out of the refetch so unsaved text cannot be overwritten.
+ * Its device text is refetched even with unsaved edits: the editor never lets device text
+ * replace them, and needs the fresh text to warn that the device changed.
  */
 export function useEditorRefreshRegistration(state: EditorRefreshState) {
     const setEditorState = useSetAtom(editorRefreshStateAtom);
@@ -31,7 +31,6 @@ export function useEditorRefreshRegistration(state: EditorRefreshState) {
         setEditorState({
             agentId: state.agentId,
             path: state.path,
-            isDirty: state.isDirty,
         });
 
         return () =>
@@ -42,13 +41,13 @@ export function useEditorRefreshRegistration(state: EditorRefreshState) {
                     ? null
                     : current,
             );
-    }, [setEditorState, state.agentId, state.path, state.isDirty]);
+    }, [setEditorState, state.agentId, state.path]);
 }
 
 /**
  * Reloads the route, whose loader refetches the listing and metadata, plus the agent's git
- * state, and the editor buffer only when the editor is still clean. Automatic triggers and
- * the More menu share this so dirty edits are never overwritten. The route is reloaded
+ * state and the editor's device text. Automatic triggers and the More menu share this. The
+ * editor decides what device text may do to its buffer, so unsaved edits are never replaced. The route is reloaded
  * because the query cache cannot tell whether the entry at this URL changed kind, such as a
  * missing path that now exists.
  */
@@ -63,10 +62,8 @@ async function refreshBrowserPath(options: {
             ? undefined
             : { agentId: options.editor.agentId, path: options.editor.path };
 
-    const isEditorDirty = options.editor?.isDirty === true;
-
     // Pull editor bytes before invalidate so a remount cannot drop an inactive refetch.
-    if (fileContent && !isEditorDirty) {
+    if (fileContent) {
         await options.queryClient.refetchQueries(
             {
                 queryKey: queryKeys.fileContent(

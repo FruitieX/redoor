@@ -8,7 +8,7 @@ import {
     KeyRound,
     LoaderCircle,
     LogOut,
-    Pin,
+    FileText,
     RefreshCw,
     ScrollText,
     Users,
@@ -33,12 +33,12 @@ import { useBrowserLocation } from "#ui/use-browser-location";
 import { useWaitForServerRestart } from "#ui/use-server-restart";
 import { cn } from "#ui/utils/cn";
 import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
+import { useCloseOpenFiles } from "#ui/components/browser/open-file-actions";
 import {
-    getPinnedFileKey,
-    reorderPinnedFiles,
-    unpinFile,
+    getOpenFileKey,
+    reorderOpenFiles,
     useUserState,
-    type PinnedFile,
+    type OpenFile,
 } from "#ui/user-state";
 
 const rootRouteApi = getRouteApi("__root__");
@@ -114,10 +114,11 @@ export function ApplicationNavigation() {
 }
 
 /**
- * Gives pinned files the menu's space and compresses the destinations into icons. Wide
- * windows put them in a rail beside the pins; phones put them in a bar along the bottom,
+ * Gives open files the menu's space and compresses the destinations into icons. Wide
+ * windows put them in a rail beside the open files; phones put them in a bar along the
+ * bottom,
  * within thumb reach, with restart and logout behind a menu so a stray tap cannot hit them.
- * One tree switches between the two, so both share the destinations and the pinned list.
+ * One tree switches between the two, so both share the destinations and the open files list.
  */
 function ApplicationMenu() {
     const isCompact = useIsBelowBreakpoint("lg");
@@ -146,7 +147,7 @@ function ApplicationMenu() {
                         <SidebarModeToggle />
                         <SideMenuCloseButton />
                     </div>
-                    <PinnedFiles isCompact className="px-3" />
+                    <OpenFiles isCompact className="px-3" />
                     <NavigationBar onRestart={openRestart} />
                 </>
             ) : (
@@ -162,7 +163,7 @@ function ApplicationMenu() {
                             <SidebarModeToggle />
                             <SideMenuCloseButton />
                         </div>
-                        <PinnedFiles isCompact={false} />
+                        <OpenFiles isCompact={false} />
                     </div>
                 </>
             )}
@@ -368,38 +369,28 @@ function useLogout() {
 }
 
 /**
- * Lists pinned files so they stay available from every route. The section stays visible
- * while empty because pins are the column's main content, and a blank column would not
- * tell the user how to fill it.
+ * Lists open files so they stay available from every route. The section stays visible
+ * while empty because open files are the column's main content, and a blank column would
+ * not tell the user how to fill it. Closing a file with unsaved edits asks first.
  */
-function PinnedFiles(props: { isCompact: boolean; className?: string }) {
+function OpenFiles(props: { isCompact: boolean; className?: string }) {
     const [userState, setUserState] = useUserState();
     const agents = useAgents();
     const listRef = React.useRef<HTMLUListElement>(null);
-    const pinnedFiles = userState.pinnedFiles;
+    const openFiles = userState.openFiles;
     const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
-
-    const remove = (file: PinnedFile) => {
-        setUserState((current) => ({
-            ...current,
-            pinnedFiles: unpinFile(current.pinnedFiles, file),
-        }));
-    };
+    const closer = useCloseOpenFiles();
 
     const move = (itemMove: { activeId: string; overId: string }) => {
         setUserState((current) => {
-            const reordered = reorderPinnedFiles(current.pinnedFiles, itemMove);
+            const reordered = reorderOpenFiles(current.openFiles, itemMove);
 
-            if (reordered === current.pinnedFiles) {
+            if (reordered === current.openFiles) {
                 return current;
             }
 
-            return { ...current, pinnedFiles: reordered };
+            return { ...current, openFiles: reordered };
         });
-    };
-
-    const clear = () => {
-        setUserState((current) => ({ ...current, pinnedFiles: [] }));
     };
 
     return (
@@ -408,78 +399,82 @@ function PinnedFiles(props: { isCompact: boolean; className?: string }) {
         >
             <div className="flex min-h-7 items-center justify-between gap-2 py-1 pl-1">
                 <span className="flex items-center gap-1.5 text-xs font-medium tracking-wide text-slate-500 uppercase">
-                    Pinned
-                    {pinnedFiles.length > 0 ? (
+                    Open files
+                    {openFiles.length > 0 ? (
                         <span
                             className="rounded-full bg-tint-strong px-1.5 text-[10px] leading-4 tracking-normal text-slate-300"
-                            aria-label={`${pinnedFiles.length} pinned`}
+                            aria-label={`${openFiles.length} open`}
                         >
-                            {pinnedFiles.length}
+                            {openFiles.length}
                         </span>
                     ) : null}
                 </span>
-                {pinnedFiles.length > 0 ? (
+                {openFiles.length > 0 ? (
                     <Button
                         type="button"
                         variant="subtle"
-                        aria-label="Clear all pinned files"
-                        onClick={clear}
+                        aria-label="Close all open files"
+                        tooltip="Close all open files"
+                        onClick={() => closer.requestClose(openFiles)}
                         className="px-1 py-0.5 text-xs font-normal text-slate-500 hover:text-slate-200"
                     >
                         Clear
                     </Button>
                 ) : null}
             </div>
-            {pinnedFiles.length === 0 ? (
+            {openFiles.length === 0 ? (
                 <p className="mt-1 flex flex-col items-center gap-2 rounded-lg border border-dashed border-slate-700 px-3 py-4 text-center text-xs text-slate-500">
-                    <Pin
+                    <FileText
                         className="h-4 w-4 text-slate-400"
                         aria-hidden="true"
                     />
-                    No pinned files — open a file and use Pin to keep it here
+                    No open files — edit a file or use Keep open to list it here
                 </p>
             ) : (
                 <SortableList
-                    itemIds={pinnedFiles.map((file) => getPinnedFileKey(file))}
+                    itemIds={openFiles.map((file) => getOpenFileKey(file))}
                     orientation="vertical"
-                    label="Pinned files"
+                    label="Open files"
                     listRef={listRef}
                     getItemLabel={(itemId) =>
-                        pinnedFiles.find(
-                            (file) => getPinnedFileKey(file) === itemId,
+                        openFiles.find(
+                            (file) => getOpenFileKey(file) === itemId,
                         )?.name ?? itemId
                     }
                     onMove={move}
                 >
                     <ul
                         ref={listRef}
-                        aria-label="Pinned files"
+                        aria-label="Open files"
                         className="mt-1 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto"
                     >
-                        {pinnedFiles.map((file) => (
-                            <PinnedFileRow
-                                key={getPinnedFileKey(file)}
+                        {openFiles.map((file) => (
+                            <OpenFileRow
+                                key={getOpenFileKey(file)}
                                 file={file}
                                 agent={agentsById.get(file.agentId)}
                                 isCompact={props.isCompact}
-                                onRemove={remove}
+                                onClose={(closed) =>
+                                    closer.requestClose([closed])
+                                }
                             />
                         ))}
                     </ul>
                 </SortableList>
             )}
+            {closer.dialog}
         </div>
     );
 }
 
 /** Lets the row sort after a deliberate drag while a normal click still opens the file. */
-function PinnedFileRow(props: {
-    file: PinnedFile;
-    /** The pinned file's device, or undefined while it is absent from the inventory. */
+function OpenFileRow(props: {
+    file: OpenFile;
+    /** The open file's device, or undefined while it is absent from the inventory. */
     agent: Agent | undefined;
     /** Phones get taller rows, because a finger needs a bigger target than a pointer. */
     isCompact: boolean;
-    onRemove: (file: PinnedFile) => void;
+    onClose: (file: OpenFile) => void;
 }) {
     const closeMenu = useCloseSideMenu();
     const browser = useBrowserLocation();
@@ -492,7 +487,7 @@ function PinnedFileRow(props: {
         browser?.agentId === props.file.agentId &&
         browser.path === props.file.path;
 
-    const itemId = getPinnedFileKey(props.file);
+    const itemId = getOpenFileKey(props.file);
 
     const label = (
         <span className={cn("block min-w-0", isOffline && "opacity-60")}>
@@ -528,7 +523,7 @@ function PinnedFileRow(props: {
             {(item) => (
                 <li
                     {...item.dragProps}
-                    aria-label={`Pinned file ${props.file.name} on ${deviceName}`}
+                    aria-label={`Open file ${props.file.name} on ${deviceName}`}
                     ref={item.setNodeRef}
                     style={item.style}
                     className={cn(
@@ -551,7 +546,7 @@ function PinnedFileRow(props: {
                         }
                     >
                         {/* Links follow the device id, never the stored name, which another
-                            device may have taken since the file was pinned. */}
+                            device may have taken since the file was opened. */}
                         {props.agent ? (
                             <Link
                                 {...browserRoute(props.agent, props.file.path)}
@@ -575,9 +570,9 @@ function PinnedFileRow(props: {
                     </Tooltip>
                     <IconButton
                         type="button"
-                        label="Remove pinned file"
-                        tooltip={`Remove ${props.file.name}`}
-                        onClick={() => props.onRemove(props.file)}
+                        label={`Close open file ${props.file.name}`}
+                        tooltip={`Close ${props.file.name}`}
+                        onClick={() => props.onClose(props.file)}
                         variant="quiet"
                         size="xs"
                         className="mr-1 shrink-0"

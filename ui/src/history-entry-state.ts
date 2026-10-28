@@ -16,7 +16,7 @@ import {
  * view state and scroll come back together. `__TSR_key` is only read here, so a rename in
  * TanStack changes one line, and the `href` fallback then keeps state per URL instead.
  */
-function historyEntryKey(location: ParsedLocation) {
+export function historyEntryKey(location: ParsedLocation) {
     return location.state.__TSR_key ?? location.href;
 }
 

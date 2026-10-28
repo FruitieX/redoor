@@ -32,7 +32,7 @@ test.describe.serial("Device order", () => {
                 showHiddenFiles: true,
                 theme: "system",
                 bookmarks: [],
-                pinnedFiles: [],
+                openFiles: [],
                 vimMode: false,
                 wrapEditorLines: false,
                 recursiveSearchTimeoutSeconds: 5,

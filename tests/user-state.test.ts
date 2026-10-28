@@ -119,7 +119,7 @@ describe("user state", () => {
         expect(readBack.state).toEqual(document);
 
         const ordered = {
-            pinnedFiles: [
+            openFiles: [
                 {
                     agentId: "b",
                     path: "/b",

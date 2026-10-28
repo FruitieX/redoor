@@ -1,4 +1,4 @@
-// Serial: seeds the shared pinned files list and asserts on what the menu shows.
+// Serial: seeds the shared open files list and asserts on what the menu shows.
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -23,24 +23,24 @@ test.describe.serial("Application menu layout", () => {
         await teardownTestDir(ctx.testDirPath);
     });
 
-    // Playwright has no onTestFinished; afterEach is its per-test cleanup hook. Pins live in
+    // Playwright has no onTestFinished; afterEach is its per-test cleanup hook. Open files live in
     // the shared account state, so later files must not inherit the ones seeded here.
     test.afterEach(async () => {
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
-        await api.updateUserState({ state: { pinnedFiles: [] } });
+        await api.updateUserState({ state: { openFiles: [] } });
     });
 
     /**
-     * Seeds two pins on a connected device and one on a device the inventory does not know,
+     * Seeds two open files on a connected device and one on a device the inventory does not know,
      * so the rows show both a live device and an unavailable one.
      */
-    async function seedPins() {
+    async function seedOpenFiles() {
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
         await api.updateUserState({
             state: {
-                pinnedFiles: [
+                openFiles: [
                     ...["file1.txt", "file2.txt"].map((name) => ({
                         agentId: ctx.agentId,
                         path: path.join(ctx.testDirPath, name),
@@ -58,21 +58,21 @@ test.describe.serial("Application menu layout", () => {
         });
     }
 
-    /** Reads the pinned names in display order from the row links' accessible names. */
-    function pinnedNames(page: Page) {
+    /** Reads the open file names in display order from the row links' accessible names. */
+    function openFileNames(page: Page) {
         return page
             .getByRole("navigation", { name: "Application" })
-            .getByRole("list", { name: "Pinned files" })
+            .getByRole("list", { name: "Open files" })
             .getByRole("listitem")
             .evaluateAll((elements) =>
                 elements.map((element) => element.getAttribute("aria-label")),
             );
     }
 
-    test("puts pins and the sidebar mode beside an icon rail on desktop", async ({
+    test("puts open files and the sidebar mode beside an icon rail on desktop", async ({
         page,
     }) => {
-        await seedPins();
+        await seedOpenFiles();
         await page.setViewportSize({ width: 1280, height: 800 });
         await page.goto(`${WEB_BASE_URL}/`);
 
@@ -80,17 +80,17 @@ test.describe.serial("Application menu layout", () => {
             name: "Application",
         });
 
-        // Pins are the column's main content, listed with their device in the stored order.
+        // Open files are the column's main content, listed with their device in the stored order.
         await expect
-            .poll(() => pinnedNames(page))
+            .poll(() => openFileNames(page))
             .toEqual([
-                `Pinned file file1.txt on ${ctx.agentName}`,
-                `Pinned file file2.txt on ${ctx.agentName}`,
-                "Pinned file app.log on retired-device",
+                `Open file file1.txt on ${ctx.agentName}`,
+                `Open file file2.txt on ${ctx.agentName}`,
+                "Open file app.log on retired-device",
             ]);
-        // The count beside the label tells how many pins there are without counting rows.
-        await expect(navigation.getByLabel("3 pinned")).toBeVisible();
-        // A pin on a device the server no longer lists cannot be opened, so it is not a link.
+        // The count beside the label tells how many open files there are without counting rows.
+        await expect(navigation.getByLabel("3 open")).toBeVisible();
+        // An open file on a device the server no longer lists cannot be opened, so it is not a link.
         await expect(
             navigation.getByLabel("app.log", { exact: true }),
         ).toHaveAttribute("aria-disabled", "true");
@@ -103,7 +103,7 @@ test.describe.serial("Application menu layout", () => {
             .getByRole("link", { name: "Server logs" })
             .boundingBox();
 
-        const pinBox = await navigation
+        const openFileBox = await navigation
             .getByRole("link", { name: "file1.txt", exact: true })
             .boundingBox();
 
@@ -111,8 +111,8 @@ test.describe.serial("Application menu layout", () => {
         expect(logsBox?.x).toBe(homeBox?.x);
         expect(logsBox?.y ?? 0).toBeGreaterThan(homeBox?.y ?? 1);
         expect(homeBox?.width ?? 100).toBeLessThan(48);
-        // Pins fill the column to the right of the rail instead of sitting below it.
-        expect(pinBox?.x ?? 0).toBeGreaterThan(
+        // Open files fill the column to the right of the rail instead of sitting below it.
+        expect(openFileBox?.x ?? 0).toBeGreaterThan(
             (homeBox?.x ?? 1) + (homeBox?.width ?? 0),
         );
 
@@ -129,7 +129,7 @@ test.describe.serial("Application menu layout", () => {
         await navigation
             .getByRole("link", { name: "file2.txt", exact: true })
             .click();
-        // Clicking a pinned row opens that exact file and marks the row as current.
+        // Clicking an open file row opens that exact file and marks the row as current.
         await expect(page).toHaveURL(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file2.txt"))}`,
         );
@@ -165,7 +165,7 @@ test.describe.serial("Application menu layout", () => {
     test("puts destinations in a bottom bar with restart and logout behind More on phones", async ({
         page,
     }) => {
-        await seedPins();
+        await seedOpenFiles();
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(`${WEB_BASE_URL}/`);
 
@@ -177,13 +177,13 @@ test.describe.serial("Application menu layout", () => {
 
         const drawer = page.getByRole("dialog", { name: "Application menu" });
 
-        // The drawer shows the same pins and the mode toggle as the desktop column.
+        // The drawer shows the same open files and the mode toggle as the desktop column.
         await expect
-            .poll(() => pinnedNames(page))
+            .poll(() => openFileNames(page))
             .toEqual([
-                `Pinned file file1.txt on ${ctx.agentName}`,
-                `Pinned file file2.txt on ${ctx.agentName}`,
-                "Pinned file app.log on retired-device",
+                `Open file file1.txt on ${ctx.agentName}`,
+                `Open file file2.txt on ${ctx.agentName}`,
+                "Open file app.log on retired-device",
             ]);
         await expect(
             drawer.getByRole("group", { name: "Sidebar mode" }),
@@ -231,15 +231,15 @@ test.describe.serial("Application menu layout", () => {
             .getByRole("button", { name: "More" })
             .boundingBox();
 
-        const lastPinBox = await drawer
+        const lastOpenFileBox = await drawer
             .getByLabel("app.log", { exact: true })
             .boundingBox();
 
-        // All six buttons share one row along the bottom, below the pinned list.
+        // All six buttons share one row along the bottom, below the open files list.
         expect(tokensBox?.y).toBe(homeBox?.y);
         expect(moreBox?.y).toBe(homeBox?.y);
         expect(moreBox?.x ?? 0).toBeGreaterThan(tokensBox?.x ?? 1);
-        expect(homeBox?.y ?? 0).toBeGreaterThan(lastPinBox?.y ?? 1);
+        expect(homeBox?.y ?? 0).toBeGreaterThan(lastOpenFileBox?.y ?? 1);
         expect((homeBox?.y ?? 0) + (homeBox?.height ?? 0)).toBeGreaterThan(780);
 
         await drawer.getByRole("link", { name: "Server logs" }).click();
@@ -271,17 +271,19 @@ test.describe.serial("Application menu layout", () => {
         await drawer
             .getByRole("link", { name: "file1.txt", exact: true })
             .click();
-        // Opening a pin from the drawer navigates and gets the drawer out of the way.
+        // Opening a file from the drawer navigates and gets the drawer out of the way.
         await expect(page).toHaveURL(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
         );
         await expect(drawer).toBeHidden();
     });
 
-    test("explains how to pin when the list is empty", async ({ page }) => {
+    test("explains how to open files when the list is empty", async ({
+        page,
+    }) => {
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
-        await api.updateUserState({ state: { pinnedFiles: [] } });
+        await api.updateUserState({ state: { openFiles: [] } });
         await page.goto(`${WEB_BASE_URL}/`);
 
         const navigation = page.getByRole("navigation", {
@@ -291,12 +293,12 @@ test.describe.serial("Application menu layout", () => {
         // The section stays as a hint instead of leaving the column blank.
         await expect(
             navigation.getByText(
-                "No pinned files — open a file and use Pin to keep it here",
+                "No open files — edit a file or use Keep open to list it here",
             ),
         ).toBeVisible();
         // There is nothing to clear, so the action is not offered.
         await expect(
-            navigation.getByRole("button", { name: "Clear all pinned files" }),
+            navigation.getByRole("button", { name: "Close all open files" }),
         ).toHaveCount(0);
     });
 });

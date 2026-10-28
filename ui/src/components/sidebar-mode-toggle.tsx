@@ -30,7 +30,7 @@ const sidebarModeOptions = [
 
 /**
  * Lets the user pick the persistent-sidebar preference directly from the application menu.
- * It is icon-only so it fits beside the menu title and leaves the column to pinned files;
+ * It is icon-only so it fits beside the menu title and leaves the column to open files;
  * the tooltips start with the mode name because the icons alone do not say which is which.
  */
 export function SidebarModeToggle() {
