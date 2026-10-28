@@ -296,6 +296,7 @@ describe("resumable transfers", () => {
             transfer.state,
             "resume must publish rather than merely finish streaming",
         ).toBe("completed");
+
         // Hashing both files concurrently keeps the full byte-exact check at half the wall time.
         const [destDigest, sourceDigest] = await Promise.all([
             digest(destPath),
@@ -478,6 +479,7 @@ describe("resumable transfers", () => {
         expect(transfer?.resumed_bytes).toBeGreaterThanOrEqual(
             64 * 1024 * 1024,
         );
+
         const [destDigest, sourceDigest] = await Promise.all([
             digest(run.destPath),
             digest(run.sourcePath),

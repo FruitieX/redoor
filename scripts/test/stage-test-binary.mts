@@ -16,13 +16,16 @@ const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
  */
 export async function stageTestBinary(destination: string): Promise<void> {
     const source = join(PROJECT_ROOT, "target/debug/redoor");
+
     // `-S` strips only debug sections on both GNU and BSD strip.
     const stripped = await $`strip -S -o ${destination} ${source}`
         .quiet()
         .nothrow();
+
     if (stripped.exitCode !== 0) {
         // A missing or incompatible strip only costs speed, so fall back to the full binary.
         await copyFile(source, destination);
     }
+
     await chmod(destination, 0o755);
 }

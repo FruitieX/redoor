@@ -637,6 +637,7 @@ describe("Addressing a device by name or id", () => {
         expect(unknown.body).toContain("Device not found: ids-no-such-device");
 
         const unknownId = generateDeviceId();
+
         const unknownById = await rawRequest({
             bearer: null,
             method: "GET",

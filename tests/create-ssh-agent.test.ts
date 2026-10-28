@@ -7,7 +7,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type AddressInfo, type Socket } from "node:net";
+import { createServer, type Socket } from "node:net";
 
 import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
 import type { UpdateSshAgentRequest } from "#bindings/UpdateSshAgentRequest";
@@ -21,6 +21,7 @@ import {
     TEST_USERNAME,
     VITEST_SERVER_PORT,
     DEVICE_ID_REGEXP,
+    getAvailablePort,
     restartServerAndWait,
     waitForPort,
     waitForValue,
@@ -147,7 +148,8 @@ describe("SSH agent configuration API", () => {
             inventory.find((agent) => agent.name === AGENT_NAME)?.sshTarget,
         ).toBe("example-host");
         expect(
-            inventory.find((agent) => agent.name === LOCAL_AGENT_NAME)?.sshTarget,
+            inventory.find((agent) => agent.name === LOCAL_AGENT_NAME)
+                ?.sshTarget,
         ).toBeNull();
 
         const editedConfig = readFileSync(configPath, "utf8");
@@ -262,7 +264,9 @@ describe("SSH agent configuration API", () => {
             status: "stopped",
         });
         const inventory = await apiClient.listAgents();
-        expect(inventory.some((agent) => agent.name === AGENT_NAME)).toBe(false);
+        expect(inventory.some((agent) => agent.name === AGENT_NAME)).toBe(
+            false,
+        );
         expect(inventory.some((agent) => agent.name === renamed)).toBe(true);
         const afterUpdate = await apiClient.getSshAgentConfiguration(renamed);
         // Clearing optional paths on PUT must persist as omitted settings, not leftover values.
@@ -353,7 +357,9 @@ describe("SSH agent configuration API", () => {
                 sshUpdateRequest({ target: "nobody", name: missing }),
             ),
         ).rejects.toMatchObject({ status: 404 } satisfies Partial<ApiError>);
-        await expect(apiClient.deleteManagedAgent(missing, "ssh")).rejects.toMatchObject({
+        await expect(
+            apiClient.deleteManagedAgent(missing, "ssh"),
+        ).rejects.toMatchObject({
             status: 404,
         } satisfies Partial<ApiError>);
         // Local agents are managed but SSH GET/PUT must not convert them into SSH rows.
@@ -582,6 +588,7 @@ describe("SSH agent configuration API", () => {
         // the test needs, without waiting out ssh's connect timeout on an unroutable address.
         const pendingSockets = new Set<Socket>();
         let answering = true;
+
         const silentServer = createServer((socket) => {
             if (answering) {
                 pendingSockets.add(socket);
@@ -589,8 +596,11 @@ describe("SSH agent configuration API", () => {
                 socket.destroy();
             }
         });
+
+        const port = await getAvailablePort();
+
         await new Promise<void>((resolve) =>
-            silentServer.listen(0, "127.0.0.1", resolve),
+            silentServer.listen(port, "127.0.0.1", resolve),
         );
         onTestFinished(async () => {
             for (const socket of pendingSockets) socket.destroy();
@@ -598,7 +608,6 @@ describe("SSH agent configuration API", () => {
                 silentServer.close(() => resolve()),
             );
         });
-        const { port } = silentServer.address() as AddressInfo;
 
         await apiClient.createSshAgent(
             sshRequest({ target: "127.0.0.1", ssh_port: port, name }),
@@ -620,9 +629,11 @@ describe("SSH agent configuration API", () => {
 
         const sniffing = await waitForValue({
             timeoutMs: 10_000,
-            description: "SSH sniffing status while ssh waits on the silent target",
+            description:
+                "SSH sniffing status while ssh waits on the silent target",
             predicate: async () => {
                 if (pendingSockets.size === 0) return undefined;
+
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.name === name,
                 );
@@ -644,6 +655,7 @@ describe("SSH agent configuration API", () => {
 
         // Hanging up now makes the sniff fail, as a target that times out eventually would.
         answering = false;
+
         for (const socket of pendingSockets) socket.destroy();
 
         const failed = await waitForValue({
