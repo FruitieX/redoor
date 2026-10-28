@@ -384,7 +384,7 @@ function GitDiffSection(props: {
         >
             <div
                 className={cn(
-                    "git-diff-sticky-header sticky z-10 flex min-w-0 items-center gap-3 bg-surface px-3 py-2",
+                    "git-diff-sticky-header sticky z-10 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 bg-surface px-3 py-2 sm:flex-nowrap",
                     !props.collapsed && "border-b border-slate-800",
                 )}
             >
@@ -431,42 +431,53 @@ function GitDiffSection(props: {
                         </span>
                     )}
                 </h3>
-                {background === null ? null : (
-                    <OpenInBackgroundButton
-                        target={background}
-                        // Matches the height of the copy menu beside it.
-                        className="h-7 w-7"
-                    />
-                )}
-                <GitDiffCopyPathMenu file={file} name={parts.name} />
-                {/* A collapsed file shows no patch, so it has no layout or wrapping to switch. */}
-                {props.collapsed ? null : (
-                    <div className="flex shrink-0 items-center gap-2">
-                        <DiffLayoutSwitch
-                            label={`Diff layout for ${file.relativePath}`}
-                            iconOnly
-                            inline={props.view.mergeModifiedLines}
-                            onChange={(inline) => props.onChoose({ inline })}
-                        />
-                        <WrapDiffLinesToggle
-                            label={`Wrap diff lines for ${file.relativePath}`}
-                            wrap={props.view.wrapLines}
-                            onChange={(wrapLines) =>
-                                props.onChoose({ wrapLines })
-                            }
-                            // Matches the height of the icon-only layout switch beside it.
+                {/* On a phone the actions take their own row so the name and directory keep
+                    the full width. A collapsed file has only two small actions that fit beside it. */}
+                <div
+                    className={cn(
+                        "flex shrink-0 items-center justify-end gap-3",
+                        !props.collapsed && "basis-full sm:basis-auto",
+                    )}
+                >
+                    {background === null ? null : (
+                        <OpenInBackgroundButton
+                            target={background}
+                            // Matches the height of the copy menu beside it.
                             className="h-7 w-7"
                         />
-                        <WholeFileToggle
-                            label={`Show whole file ${file.relativePath}`}
-                            shown={props.view.wholeFile === true}
-                            onChange={(wholeFile) =>
-                                props.onChoose({ wholeFile })
-                            }
-                            className="h-7 w-7"
-                        />
-                    </div>
-                )}
+                    )}
+                    <GitDiffCopyPathMenu file={file} name={parts.name} />
+                    {/* A collapsed file shows no patch, so it has no layout or wrapping to switch. */}
+                    {props.collapsed ? null : (
+                        <div className="flex shrink-0 items-center gap-2">
+                            <DiffLayoutSwitch
+                                label={`Diff layout for ${file.relativePath}`}
+                                iconOnly
+                                inline={props.view.mergeModifiedLines}
+                                onChange={(inline) =>
+                                    props.onChoose({ inline })
+                                }
+                            />
+                            <WrapDiffLinesToggle
+                                label={`Wrap diff lines for ${file.relativePath}`}
+                                wrap={props.view.wrapLines}
+                                onChange={(wrapLines) =>
+                                    props.onChoose({ wrapLines })
+                                }
+                                // Matches the height of the icon-only layout switch beside it.
+                                className="h-7 w-7"
+                            />
+                            <WholeFileToggle
+                                label={`Show whole file ${file.relativePath}`}
+                                shown={props.view.wholeFile === true}
+                                onChange={(wholeFile) =>
+                                    props.onChoose({ wholeFile })
+                                }
+                                className="h-7 w-7"
+                            />
+                        </div>
+                    )}
+                </div>
             </div>
             {props.collapsed ? null : (
                 <div

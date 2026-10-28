@@ -174,6 +174,38 @@ test.describe("Git diff list", () => {
         expect(await scrollsSideways(serverTestTable)).toBe(true);
     });
 
+    test("puts the file actions on their own row on a phone", async ({
+        page,
+    }) => {
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${agentName}/browser/${encodeFilesystemPath(repositoryPath)}?view=git`,
+        );
+
+        await page.getByRole("button", { name: "Expand all" }).click();
+
+        const helpers = page.getByRole("region", {
+            name: `Git diff for ${path.join(repositoryPath, "src/my-test/helpers.ts")}`,
+        });
+
+        const heading = helpers.getByRole("heading", { name: /helpers\.ts/ });
+
+        const layout = helpers.getByRole("group", {
+            name: "Diff layout for src/my-test/helpers.ts",
+        });
+
+        await expect(layout).toBeVisible();
+        const headingBox = await heading.boundingBox();
+        const layoutBox = await layout.boundingBox();
+
+        // The actions start below the name, so they no longer squeeze it into a narrow column.
+        expect(layoutBox?.y ?? 0).toBeGreaterThanOrEqual(
+            (headingBox?.y ?? 0) + (headingBox?.height ?? 0),
+        );
+        // With the row to itself the name gets most of the phone's width.
+        expect(headingBox?.width ?? 0).toBeGreaterThan(390 / 2);
+    });
+
     test("filters files by name and excludes dashed words", async ({
         page,
     }) => {
