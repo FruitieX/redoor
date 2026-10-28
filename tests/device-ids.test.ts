@@ -39,6 +39,7 @@ import {
     VITEST_SERVER_PORT,
     agentDataDir,
     createAccessToken,
+    generateDeviceId,
     getAvailablePort,
     remoteEnv,
     removeAgentDataDir,
@@ -634,6 +635,17 @@ describe("Addressing a device by name or id", () => {
         // An unknown device is a 404 that names the value, not a server error.
         expect(unknown.status).toBe(404);
         expect(unknown.body).toContain("Device not found: ids-no-such-device");
+
+        const unknownId = generateDeviceId();
+        const unknownById = await rawRequest({
+            bearer: null,
+            method: "GET",
+            path: devicePath(unknownId),
+        });
+
+        // A well-formed id resolves through the id lookup, which must also end in a 404.
+        expect(unknownById.status).toBe(404);
+        expect(unknownById.body).toContain(`Device not found: ${unknownId}`);
     });
 
     it("accepts a name or an id in request body device fields", async () => {

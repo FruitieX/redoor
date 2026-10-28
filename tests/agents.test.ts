@@ -1322,15 +1322,6 @@ describe("Agents API", () => {
         expect((await echo).message).toBe("genuine");
     });
 
-    it("should echo message back from connected agent", async () => {
-        const testAgent = await getConnectedTestAgent();
-
-        const testMessage = "Hello, World!";
-        const result = await testAgent.echo(testMessage);
-        // Verify message is echoed back correctly
-        expect(result.message).toBe(testMessage);
-    });
-
     it("should handle concurrent echo requests with random sleep", async () => {
         const testAgent = await getConnectedTestAgent();
 
@@ -1353,43 +1344,5 @@ describe("Agents API", () => {
             // Each response must retain its matching request payload despite completion reordering.
             expect(result.message).toBe(uniqueMessages[index]);
         }
-    });
-
-    it("should return 404 for non-existent agent details", async () => {
-        const nonExistentAgentId = generateDeviceId();
-
-        const agent = new Agent(
-            apiClient.baseUrl,
-            {
-                id: nonExistentAgentId,
-                name: "non-existent",
-                cwd: "/tmp",
-                managed: false,
-                configuration_editable: false,
-                ssh_target: null,
-                status: "disconnected",
-                connected_at: null,
-                connection_id: null,
-                last_seen_at: null,
-                connection_issue: null,
-                provisioning_status: [],
-                binary: null,
-                supports_native_open: false,
-                supports_move_to_trash: false,
-                supports_trash: false,
-                uid: null,
-                is_root: false,
-                duplicate_id: null,
-            },
-            {
-                getSessionCookie: () =>
-                    apiClient.getAuthHeaders().Cookie ?? null,
-            },
-        );
-
-        // A well-formed id that no device has is reported as an unknown device, not a crash.
-        await expect(agent.getDetails()).rejects.toThrow(
-            `Device not found: ${nonExistentAgentId}`,
-        );
     });
 });
