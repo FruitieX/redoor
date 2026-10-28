@@ -7,6 +7,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 
 import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
 import type { UpdateSshAgentRequest } from "#bindings/UpdateSshAgentRequest";
@@ -575,10 +576,32 @@ describe("SSH agent configuration API", () => {
         );
     });
 
-    it("publishes sniffing progress for an unreachable SSH target", async () => {
+    it("publishes sniffing progress for an SSH target that never answers", async () => {
         const name = "unreachable-ssh-progress";
+        // Accepting TCP but never sending an SSH banner keeps the sniff pending for as long as
+        // the test needs, without waiting out ssh's connect timeout on an unroutable address.
+        const pendingSockets = new Set<Socket>();
+        let answering = true;
+        const silentServer = createServer((socket) => {
+            if (answering) {
+                pendingSockets.add(socket);
+            } else {
+                socket.destroy();
+            }
+        });
+        await new Promise<void>((resolve) =>
+            silentServer.listen(0, "127.0.0.1", resolve),
+        );
+        onTestFinished(async () => {
+            for (const socket of pendingSockets) socket.destroy();
+            await new Promise<void>((resolve) =>
+                silentServer.close(() => resolve()),
+            );
+        });
+        const { port } = silentServer.address() as AddressInfo;
+
         await apiClient.createSshAgent(
-            sshRequest({ target: "192.0.2.1", name }),
+            sshRequest({ target: "127.0.0.1", ssh_port: port, name }),
         );
         onTestFinished(async () => {
             try {
@@ -597,8 +620,9 @@ describe("SSH agent configuration API", () => {
 
         const sniffing = await waitForValue({
             timeoutMs: 10_000,
-            description: "SSH sniffing status on the unreachable target",
+            description: "SSH sniffing status while ssh waits on the silent target",
             predicate: async () => {
+                if (pendingSockets.size === 0) return undefined;
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.name === name,
                 );
@@ -611,14 +635,20 @@ describe("SSH agent configuration API", () => {
             },
         });
 
-        // Progress must appear on inventory before the TCP connect times out.
+        // Progress must appear on inventory while the SSH connection is still pending.
         expect(
             sniffing.provisioningStatus.map((step) => step.message),
         ).toContain("Sniffing the SSH target");
+        // No connection issue yet: the sniff is still waiting for the target to answer.
+        expect(sniffing.connectionIssue).toBeFalsy();
+
+        // Hanging up now makes the sniff fail, as a target that times out eventually would.
+        answering = false;
+        for (const socket of pendingSockets) socket.destroy();
 
         const failed = await waitForValue({
-            timeoutMs: 25_000,
-            description: "connection_issue after unreachable SSH sniff",
+            timeoutMs: 10_000,
+            description: "connection_issue after the silent SSH target hung up",
             predicate: async () => {
                 const agent = (await apiClient.listAgents()).find(
                     (entry) => entry.name === name,
@@ -634,5 +664,5 @@ describe("SSH agent configuration API", () => {
 
         // Failures stay on connection_issue rather than replacing the progress list.
         expect(failed.connectionIssue).toBeTruthy();
-    }, 40_000);
+    });
 });
