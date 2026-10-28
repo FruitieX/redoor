@@ -35,6 +35,7 @@
 - Run `pn test` only after real code changes, including changes to executable scripts, tests, or configuration that affects application or build behavior. Use a timeout of at least 1200 seconds so cargo, integration, and Playwright can finish without the runner aborting mid-suite.
 - Do not run tests or builds for changes limited to documentation, plans, or code comments. If those edits accompany real code changes, run the checks required for the code changes.
 - If the changes are purely visual, running `pn build-and-restart` is enough instead of `pn test`; it builds the UI and server binary and restarts the `redoor-dev` systemd unit
+- Purely visual changes (layout, spacing, wrapping, responsive breakpoints, colors) must not have tests. Do not assert element positions, sizes or styles in Playwright or unit tests
 - Always add `| cat` to git commands to avoid getting stuck in interactive pager
 - Do all work and commits directly on the `main` branch; do not create feature branches
 - When making git commits always add description explaining why the change was made, not what it does
@@ -80,7 +81,7 @@ After modifying the routes run `cd ui && pnpm run build` to regenerate the route
 
 Do dot use class names in the playwright tests. Add accessibility aria attributes if there are no text to select with.
 
-When adding a completely new UI feature, always add a Playwright test that covers its primary user workflow.
+When adding a completely new UI feature, always add a Playwright test that covers its primary user workflow. Purely visual tweaks to existing UI are not new features and get no tests.
 
 Playwright specs that mutate state shared by all specs (server or agent restarts, the device list, user settings/preferences such as theme, the hidden-file filter, bookmarks or pins, ...) go in `ui/e2e/serial/` with a top comment saying why; they run one at a time after the parallel specs. Everything else in `ui/e2e/` runs in parallel and must use its own fixtures and directories.
 
