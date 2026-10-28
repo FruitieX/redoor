@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
+import { hostname } from "node:os";
 
 import { join } from "node:path";
 
@@ -110,6 +111,8 @@ describe("HTTP authentication", () => {
             serverInfo.external_ip === null ||
                 serverInfo.external_ip.length > 0,
         ).toBe(true);
+        // The UI titles every tab with the hostname of the machine running the server.
+        expect(serverInfo.hostname).toBe(hostname());
         // Package version is baked at compile time for the home page identity card.
         expect(serverInfo.version).toMatch(/^\d+\.\d+\.\d+/);
         // Git revision comes from build.rs so operators can map a binary to source.

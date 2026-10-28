@@ -32,6 +32,8 @@ pub struct ServerInfoResponse {
     pub auth_mode: ServerAuthMode,
     /// Primary non-loopback IP selected from the server's local routing table.
     pub external_ip: Option<String>,
+    /// Hostname of the server machine, so browser tabs of different servers can be told apart.
+    pub hostname: String,
     /// Operating system of the running server executable.
     pub os: String,
     /// CPU architecture of the running server executable.
