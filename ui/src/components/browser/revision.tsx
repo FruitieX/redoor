@@ -50,8 +50,8 @@ import type { LsEntry } from "#bindings/LsEntry";
 /**
  * Marks the page as a read-only view of history, directly below the breadcrumbs, so it is
  * impossible to mistake committed content for the working files. It also offers the way
- * back to the working tree, which drops only the revision from the URL. On phones it keeps to
- * one row: the summary already heads the page's own views, and the links show their icons.
+ * back to the working tree, which drops only the revision from the URL. In a narrow column it
+ * keeps to one row: the summary already heads the page's own views, and the links show their icons.
  */
 export function RevisionBanner(props: {
     agent: Agent;
@@ -109,7 +109,7 @@ export function RevisionBanner(props: {
                 ) : null}
             </span>
             {commit === null ? null : (
-                <span className="min-w-0 flex-1 truncate text-slate-300 max-sm:hidden">
+                <span className="min-w-0 flex-1 truncate text-slate-300 @max-xl:hidden">
                     <span title={commit.summary}>{commit.summary}</span>
                     <span className="text-slate-500">
                         {" "}
@@ -127,7 +127,7 @@ export function RevisionBanner(props: {
                     </span>
                 </span>
             )}
-            <span className="text-xs text-amber-200/80 max-sm:hidden">
+            <span className="text-xs text-amber-200/80 @max-xl:hidden">
                 Read-only
             </span>
             <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -136,13 +136,13 @@ export function RevisionBanner(props: {
                         <Link
                             {...browserRoute(props.agent, props.path)}
                             search={{ view: "git", rev: props.rev }}
-                            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 max-sm:p-2"
+                            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 @max-xl:p-2"
                         >
                             <GitCommitHorizontal
                                 className="h-3.5 w-3.5"
                                 aria-hidden="true"
                             />
-                            <span className="max-sm:sr-only">
+                            <span className="@max-xl:sr-only">
                                 Commit changes
                             </span>
                         </Link>
@@ -154,10 +154,10 @@ export function RevisionBanner(props: {
                     <Link
                         {...browserRoute(props.agent, props.path)}
                         search={(previous) => ({ ...previous, rev: undefined })}
-                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 max-sm:p-2"
+                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-amber-100 hover:bg-amber-900/50 @max-xl:p-2"
                     >
                         <Undo2 className="h-3.5 w-3.5" aria-hidden="true" />
-                        <span className="max-sm:sr-only">Working tree</span>
+                        <span className="@max-xl:sr-only">Working tree</span>
                     </Link>
                 </Tooltip>
             </div>
@@ -232,7 +232,7 @@ export function RevisionListingNotice(props: {
     return (
         <div
             role="status"
-            className="m-2 grid gap-1 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-sm text-amber-200 lg:m-4"
+            className="m-2 grid gap-1 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-sm text-amber-200 @4xl:m-4"
         >
             {props.entry.truncated ? (
                 <p className="flex items-center gap-2">
@@ -322,7 +322,7 @@ function CommitStepLink(props: {
     );
 
     const cell =
-        "flex w-full min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 sm:px-3";
+        "flex w-full min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2 @xl:px-3";
 
     if (commit === null) {
         return (
@@ -376,7 +376,7 @@ function CommitStepper(props: {
     return (
         <nav
             aria-label="Commit navigation"
-            className="grid grid-cols-2 gap-2 sm:grid-cols-[minmax(0,20rem)_minmax(0,20rem)] sm:justify-between"
+            className="grid grid-cols-2 gap-2 @xl:grid-cols-[minmax(0,20rem)_minmax(0,20rem)] @xl:justify-between"
         >
             <CommitStepLink
                 agent={props.agent}
@@ -492,7 +492,7 @@ export function GitCommitView(props: {
 
     return (
         <>
-            <header className="grid gap-3 border-b border-slate-800 px-4 py-3 sm:px-5 sm:py-4">
+            <header className="grid gap-3 border-b border-slate-800 px-4 py-3 @xl:px-5 @xl:py-4">
                 <div className="min-w-0">
                     <h2 className="break-words text-base font-semibold leading-snug text-slate-50">
                         {commit.summary || "(no message)"}
@@ -506,7 +506,9 @@ export function GitCommitView(props: {
                             {commit.author_name}
                         </span>
                         <span>
-                            <span className="hidden sm:inline">committed </span>
+                            <span className="hidden @xl:inline">
+                                committed{" "}
+                            </span>
                             <CommitAge
                                 authoredAt={commit.authored_at}
                                 now={now}
@@ -557,7 +559,7 @@ export function GitCommitView(props: {
                 <span className="font-medium text-slate-100">
                     {diff.files.length}
                     {diff.truncated ? "+" : ""}
-                    <span className="hidden sm:inline"> changed</span>
+                    <span className="hidden @xl:inline"> changed</span>
                     {diff.files.length === 1 ? " file" : " files"}
                 </span>
                 {countChanges(diff).map((entry) => (
@@ -567,17 +569,17 @@ export function GitCommitView(props: {
                     >
                         <ChangeBadge kind={entry.kind} />
                         {entry.count}
-                        <span className="hidden sm:inline">
+                        <span className="hidden @xl:inline">
                             {changeLabel(entry.kind).toLowerCase()}
                         </span>
                     </span>
                 ))}
             </GitPanelBar>
-            <div className="grid grid-cols-[minmax(0,1fr)] gap-3 px-2 py-3 sm:gap-4 sm:px-5 sm:py-4">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-3 px-2 py-3 @xl:gap-4 @xl:px-5 @xl:py-4">
                 {diff.files.length === 0 ? (
                     <p
                         role="status"
-                        className="px-2 text-sm text-slate-300 sm:px-0"
+                        className="px-2 text-sm text-slate-300 @xl:px-0"
                     >
                         This commit changed nothing below this path.
                     </p>

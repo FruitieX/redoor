@@ -351,8 +351,8 @@ function BrowserRouteShell(props: {
         <div
             className={
                 props.fillAvailableHeight === true
-                    ? "absolute inset-x-0 top-[var(--top-chrome-height,0px)] bottom-[var(--bottom-chrome-height,0px)] flex min-h-0 flex-col overflow-hidden p-2 lg:p-4"
-                    : "flex min-h-full flex-col p-2 lg:p-4"
+                    ? "absolute inset-x-0 top-[var(--top-chrome-height,0px)] bottom-[var(--bottom-chrome-height,0px)] flex min-h-0 flex-col overflow-hidden p-2 @4xl:p-4"
+                    : "flex min-h-full flex-col p-2 @4xl:p-4"
             }
         >
             <BrowserHeader
@@ -371,8 +371,8 @@ function BrowserRouteShell(props: {
             <div
                 className={
                     props.fillAvailableHeight === true
-                        ? "-mx-2 -mb-2 flex min-h-0 flex-1 flex-col overflow-hidden lg:-mx-4 lg:-mb-4"
-                        : "-mx-2 -mb-2 lg:-mx-4 lg:-mb-4"
+                        ? "-mx-2 -mb-2 flex min-h-0 flex-1 flex-col overflow-hidden @4xl:-mx-4 @4xl:-mb-4"
+                        : "-mx-2 -mb-2 @4xl:-mx-4 @4xl:-mb-4"
                 }
             >
                 {props.children}
@@ -507,7 +507,7 @@ function RevisionFileBrowser(props: {
                 {pathError === null ? (
                     <p
                         role="alert"
-                        className="m-2 rounded-lg border border-red-900/60 bg-red-950/20 p-4 text-sm text-red-200 lg:m-4"
+                        className="m-2 rounded-lg border border-red-900/60 bg-red-950/20 p-4 text-sm text-red-200 @4xl:m-4"
                     >
                         {data.error.message}
                     </p>

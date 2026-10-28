@@ -95,7 +95,7 @@ export function MissingPathCreationForm(props: { agent: Agent; path: string }) {
 
     return (
         <BrowserViewCard>
-            <section className="p-6 lg:p-8">
+            <section className="p-6 @4xl:p-8">
                 <h1 className="text-xl font-semibold text-slate-100">
                     File or directory does not exist
                 </h1>

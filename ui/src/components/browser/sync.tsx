@@ -54,7 +54,7 @@ function AgentPathFields(props: {
     onPathChange: (path: string) => void;
 }) {
     return (
-        <div className="grid items-end gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
+        <div className="grid items-end gap-4 @2xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
             <label className="grid gap-2 text-sm font-medium text-slate-200">
                 Device
                 <Select
@@ -689,7 +689,7 @@ function SyncDirectionFields(props: {
             }
             disabled={workspace.isBusy}
             legendClassName="text-sm font-medium text-slate-200"
-            optionsClassName="md:grid-cols-2"
+            optionsClassName="@2xl:grid-cols-2"
         >
             <RadioCardOption
                 name="sync-direction"
@@ -891,7 +891,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
         return (
             <p
                 role="status"
-                className="border-t border-slate-800 p-4 text-sm text-emerald-300 sm:p-5"
+                className="border-t border-slate-800 p-4 text-sm text-emerald-300 @xl:p-5"
             >
                 {outcome.label} completed successfully.{" "}
                 {formatSize(outcome.transferredBytes)} transferred from{" "}
@@ -903,7 +903,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
     return (
         <p
             role="alert"
-            className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
+            className="border-t border-slate-800 p-4 text-sm text-red-300 @xl:p-5"
         >
             {outcome.label} failed: {outcome.message}
         </p>
@@ -920,7 +920,7 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
         return (
             <p
                 role="alert"
-                className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
+                className="border-t border-slate-800 p-4 text-sm text-red-300 @xl:p-5"
             >
                 {diff.errorMessage}
             </p>
@@ -934,7 +934,7 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     return (
         <section
             aria-label="File diff"
-            className="w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 sm:p-5"
+            className="w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 @xl:p-5"
         >
             <div className="mb-3 flex justify-end">
                 <DiffLayoutControl />
@@ -992,7 +992,7 @@ export function SyncView(props: {
                 </p>
             </ViewCardHeader>
 
-            <div className="grid gap-4 p-4 sm:p-5">
+            <div className="grid gap-4 p-4 @xl:p-5">
                 <SyncDirectionFields
                     workspace={workspace}
                     currentAgent={props.sourceAgent}

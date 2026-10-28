@@ -29,7 +29,7 @@ export function DiffLayoutSwitch(props: {
         <SegmentedControl
             label={props.label}
             className={props.className}
-            iconOnlyOnPhones
+            iconOnlyWhenNarrow
             iconOnly={props.iconOnly}
             value={props.inline ? "inline" : "separate"}
             onChange={(value) => props.onChange(value === "inline")}
@@ -117,9 +117,9 @@ export function WholeFileToggle(props: {
 
 /**
  * The layout and wrap controls of a view that shows a single diff. Its switches set the
- * stored preferences, which are also what every file of a diff list starts with. On
- * phones it shrinks to its icons, so it fits one bar with the change counts and leaves the
- * screen to the patch.
+ * stored preferences, which are also what every file of a diff list starts with. In a
+ * narrow content column it shrinks to its icons, so it fits one bar with the change counts
+ * and leaves the screen to the patch.
  */
 export function DiffLayoutControl() {
     const [inlineChanges, setInlineChanges] = useAtom(inlineDiffChangesAtom);
@@ -129,7 +129,7 @@ export function DiffLayoutControl() {
         <div className="flex shrink-0 items-center gap-2">
             <DiffLayoutSwitch
                 label="Diff layout"
-                className="w-18 sm:w-64"
+                className="w-18 @xl:w-64"
                 inline={inlineChanges}
                 onChange={setInlineChanges}
             />

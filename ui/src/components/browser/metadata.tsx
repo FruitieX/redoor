@@ -600,7 +600,7 @@ export function MetadataSectionsLayout(props: {
     const headingIdPrefix = props.headingPrefix.toLowerCase();
 
     return (
-        <div className="grid gap-4 p-4 sm:p-5 lg:grid-cols-[minmax(0,1fr)_minmax(21rem,0.72fr)]">
+        <div className="grid gap-4 p-4 @xl:p-5 @4xl:grid-cols-[minmax(0,1fr)_minmax(21rem,0.72fr)]">
             <section aria-labelledby={`${headingIdPrefix}-metadata-heading`}>
                 <div className="mb-4">
                     <h2
@@ -613,7 +613,7 @@ export function MetadataSectionsLayout(props: {
                         {props.description}
                     </p>
                 </div>
-                <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <dl className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
                     {props.items}
                 </dl>
             </section>
@@ -912,7 +912,7 @@ export function ShareableLinksSection(props: {
     return (
         <section
             aria-labelledby="shareable-links-heading"
-            className="border-t border-slate-800 bg-slate-950/15 p-4 sm:p-5"
+            className="border-t border-slate-800 bg-slate-950/15 p-4 @xl:p-5"
         >
             <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
@@ -1015,7 +1015,7 @@ function ShareableLinkCard(props: {
                     )}
                 </IconButton>
             </div>
-            <div className="mt-3 grid min-w-0 gap-3 lg:grid-cols-2">
+            <div className="mt-3 grid min-w-0 gap-3 @4xl:grid-cols-2">
                 <CopyableCodeRow
                     label="wget"
                     value={wgetCommand}

@@ -33,10 +33,10 @@ function SelectedFilesPanelActions(props: {
                 variant="ghost"
                 aria-label="Clear all selected items"
                 onClick={props.onClearSelectedFiles}
-                className="h-8 rounded-md px-2 text-xs text-slate-400 sm:px-2.5"
+                className="h-8 rounded-md px-2 text-xs text-slate-400 @xl:px-2.5"
             >
-                <X className="h-4 w-4 sm:hidden" aria-hidden="true" />
-                <span className="hidden sm:inline">Clear all</span>
+                <X className="h-4 w-4 @xl:hidden" aria-hidden="true" />
+                <span className="hidden @xl:inline">Clear all</span>
             </Button>
         </div>
     );
@@ -96,7 +96,7 @@ function SelectedFilesTable(props: {
 }) {
     return (
         <div className="h-full overflow-auto bg-surface">
-            <ul className="divide-y divide-slate-800/70 md:hidden">
+            <ul className="divide-y divide-slate-800/70 @2xl:hidden">
                 {props.selectedFiles.map((file) => (
                     <li
                         key={getSelectedFileKey(file)}
@@ -130,7 +130,7 @@ function SelectedFilesTable(props: {
                     </li>
                 ))}
             </ul>
-            <table className="hidden min-w-[44rem] w-full md:table">
+            <table className="hidden min-w-[44rem] w-full @2xl:table">
                 <thead className="sticky top-0 bg-surface-raised">
                     <tr className="border-b border-slate-800">
                         <th className="p-3 text-left text-sm font-medium text-slate-400">

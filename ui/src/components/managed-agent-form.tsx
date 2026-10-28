@@ -385,11 +385,11 @@ export function ManagedAgentForm(props: {
     const isDisabled = props.isSubmitting || props.isDisabled === true;
 
     return (
-        <div className="min-h-full bg-canvas px-4 py-8 sm:px-8">
+        <div className="min-h-full bg-canvas px-4 py-8 @xl:px-8">
             <main className="mx-auto max-w-4xl overflow-hidden rounded-xl border border-slate-800 bg-surface shadow-2xl shadow-black/20">
                 <FormHeader mode={props.mode} kind={kind} />
                 {props.beforeForm}
-                <form onSubmit={submit} className="space-y-7 p-6 sm:p-8">
+                <form onSubmit={submit} className="space-y-7 p-6 @xl:p-8">
                     {isEdit ? null : (
                         <KindFields
                             kind={kind}
@@ -467,7 +467,7 @@ export function ManagedAgentForm(props: {
 /** Keeps the shared chrome title aligned with the selected transport. */
 function FormHeader(props: { mode: "add" | "edit"; kind: ManagedAgentKind }) {
     return (
-        <div className="border-b border-slate-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent px-6 py-6 sm:px-8">
+        <div className="border-b border-slate-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent px-6 py-6 @xl:px-8">
             <div className="flex items-center gap-3">
                 <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-2 text-blue-300">
                     <Server className="h-5 w-5" aria-hidden="true" />
@@ -512,7 +512,7 @@ function FormActions(props: {
             : "Add this device to the server configuration using SSH";
 
     return (
-        <div className="flex flex-col gap-4 border-t border-slate-800 pt-6 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex flex-col gap-4 border-t border-slate-800 pt-6 @xl:flex-row @xl:items-end @xl:justify-between">
             <p className="min-w-0 text-xs text-slate-500">
                 Device connection settings will be saved to
                 <code className="mt-1 block break-all text-slate-400">
@@ -565,7 +565,7 @@ function KindFields(props: {
                 </p>
             }
             legendClassName="text-sm font-semibold uppercase tracking-wider text-slate-300"
-            optionsClassName="sm:grid-cols-2"
+            optionsClassName="@xl:grid-cols-2"
         >
             <RadioCardOption
                 name="managed-agent-kind"
@@ -601,7 +601,7 @@ function LocalFields(props: {
                 <TerminalSquare className="h-4 w-4" aria-hidden="true" />
                 Local agent
             </h2>
-            <div className="mt-4 grid gap-5 sm:grid-cols-2">
+            <div className="mt-4 grid gap-5 @xl:grid-cols-2">
                 <TextField
                     label="Device name"
                     value={props.form.name}
@@ -645,7 +645,7 @@ function ConnectionFields(props: {
                 <TerminalSquare className="h-4 w-4" aria-hidden="true" />
                 Connection
             </h2>
-            <div className="mt-4 grid gap-5 sm:grid-cols-2">
+            <div className="mt-4 grid gap-5 @xl:grid-cols-2">
                 <TextField
                     label="SSH target"
                     value={props.form.target}
@@ -732,7 +732,7 @@ function SshAuthFields(props: {
                     placeholder="Leave empty to try this server's SSH keys"
                     description="Used once to install the dedicated key, then discarded. Leave empty when this server can already log in with its own SSH keys or ssh-agent."
                     autoComplete="current-password"
-                    className="sm:col-span-2"
+                    className="@xl:col-span-2"
                     required={false}
                     disabled={props.disabled}
                     onChange={(value) => props.onChange("password", value)}
@@ -762,7 +762,7 @@ function SshAuthFields(props: {
                                   : "Password input is disabled because key mode uses a preconfigured SSH key or ssh-agent."
                         }
                         autoComplete="current-password"
-                        className="sm:col-span-2"
+                        className="@xl:col-span-2"
                         required={passwordMode && !props.hasStoredPassword}
                         disabled={props.disabled || !passwordMode}
                         onChange={(value) => props.onChange("password", value)}
@@ -782,7 +782,7 @@ function ManagedKeyOption(props: {
     const descriptionId = React.useId();
 
     return (
-        <div className="sm:col-span-2">
+        <div className="@xl:col-span-2">
             <Checkbox
                 role="checkbox"
                 label="Create a dedicated SSH key (recommended)"
@@ -808,7 +808,7 @@ function ManagedKeyOption(props: {
 /** Replaces the password controls while a managed key exists, because the server refuses both. */
 function ManagedKeyAuthNotice() {
     return (
-        <p className="flex items-start gap-2 rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-300 sm:col-span-2">
+        <p className="flex items-start gap-2 rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-300 @xl:col-span-2">
             <KeyRound
                 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400"
                 aria-hidden="true"
@@ -894,9 +894,9 @@ function AuthModeFields(props: {
                     ssh-agent.
                 </p>
             }
-            className="sm:col-span-2"
+            className="@xl:col-span-2"
             legendClassName="text-sm font-medium text-slate-300"
-            optionsClassName="sm:grid-cols-2"
+            optionsClassName="@xl:grid-cols-2"
         >
             <RadioCardOption
                 name="ssh-auth-mode"
@@ -931,7 +931,7 @@ function AdvancedFields(props: {
             <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
                 Advanced
             </h2>
-            <div className="mt-4 grid gap-5 sm:grid-cols-2">
+            <div className="mt-4 grid gap-5 @xl:grid-cols-2">
                 <TextField
                     label="Remote binary"
                     value={props.form.remoteBin}

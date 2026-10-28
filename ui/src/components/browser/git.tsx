@@ -309,7 +309,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
                     label="untracked"
                 />
             </GitPanelBar>
-            <div className="grid grid-cols-[minmax(0,1fr)] gap-4 px-4 py-4 sm:px-5">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-4 px-4 py-4 @xl:px-5">
                 {status.truncated ? (
                     <p
                         role="status"
@@ -472,7 +472,7 @@ export function GitFileView(props: {
             </GitPanelBar>
             <section
                 aria-label={`${props.mode === "full" ? "Full" : "Staged"} Git diff`}
-                className="w-full min-w-0 overflow-x-hidden bg-slate-950/30 [&>p]:p-4 sm:[&>p]:p-5"
+                className="w-full min-w-0 overflow-x-hidden bg-slate-950/30 [&>p]:p-4 @xl:[&>p]:p-5"
             >
                 {diffQuery.isPending ? (
                     <p role="status" className="p-4 text-sm text-slate-400">

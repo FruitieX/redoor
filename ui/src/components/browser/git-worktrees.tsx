@@ -81,7 +81,7 @@ export function GitWorktreeList(props: {
                     This repository has no worktrees.
                 </ListMessage>
             ) : (
-                <div className="px-4 py-4 sm:px-5">
+                <div className="px-4 py-4 @xl:px-5">
                     <ul
                         aria-label="Worktrees"
                         className="divide-y divide-slate-800 overflow-hidden rounded-lg border border-slate-800"
@@ -98,7 +98,7 @@ export function GitWorktreeList(props: {
                 </div>
             )}
             {query.data.truncated ? (
-                <p className="px-4 pb-5 text-center text-xs text-slate-500 sm:px-5">
+                <p className="px-4 pb-5 text-center text-xs text-slate-500 @xl:px-5">
                     {`Only the first ${worktrees.length} worktrees are shown.`}
                 </p>
             ) : null}
@@ -214,7 +214,7 @@ function WorktreeRow(props: {
                     )}
                 </p>
             </div>
-            <span className="flex shrink-0 flex-col items-end gap-1.5 sm:flex-row sm:items-center">
+            <span className="flex shrink-0 flex-col items-end gap-1.5 @xl:flex-row @xl:items-center">
                 <ChangesSummary agent={props.agent} worktree={worktree} />
                 {worktree.missing ? null : (
                     <span className="flex items-center gap-1.5">

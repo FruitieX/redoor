@@ -58,7 +58,9 @@ export function ActionMenu(props: {
             {hideLabel ? null : (
                 <span
                     className={
-                        props.hideLabelOnMobile ? "hidden sm:inline" : undefined
+                        props.hideLabelOnMobile
+                            ? "hidden @xl:inline"
+                            : undefined
                     }
                 >
                     {props.label}

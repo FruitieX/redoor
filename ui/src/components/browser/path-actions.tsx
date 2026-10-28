@@ -674,7 +674,7 @@ export function PersistentPathActions(props: {
             className={downloadClassName}
         >
             <Download className="h-4 w-4" aria-hidden="true" />
-            <span className="hidden sm:inline">Download</span>
+            <span className="hidden @xl:inline">Download</span>
         </Button>
     ) : (
         <Button
@@ -686,7 +686,7 @@ export function PersistentPathActions(props: {
             className={downloadClassName}
         >
             <Download className="h-4 w-4" aria-hidden="true" />
-            <span className="hidden sm:inline">Download</span>
+            <span className="hidden @xl:inline">Download</span>
         </Button>
     );
 

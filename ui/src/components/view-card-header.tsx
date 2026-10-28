@@ -18,7 +18,7 @@ export function ViewCardHeader(props: {
     children?: React.ReactNode;
 }) {
     return (
-        <header className="overflow-hidden border-b border-slate-800 p-4 sm:p-5">
+        <header className="overflow-hidden border-b border-slate-800 p-4 @xl:p-5">
             <div className="flex min-w-0 items-start gap-2">
                 {props.icon ? (
                     <div className="flex h-9 w-9 shrink-0 items-center justify-center text-blue-400">

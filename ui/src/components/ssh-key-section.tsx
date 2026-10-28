@@ -54,7 +54,7 @@ export function SshKeySection(props: {
     return (
         <section
             aria-labelledby="ssh-key-heading"
-            className="border-b border-slate-800 px-6 py-6 sm:px-8"
+            className="border-b border-slate-800 px-6 py-6 @xl:px-8"
         >
             <h2
                 id="ssh-key-heading"

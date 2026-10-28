@@ -22,10 +22,12 @@ export function SegmentedControl<Value extends string>(props: {
     onChange: (value: Value) => void;
     className?: string;
     /**
-     * Shows only the icons on phones, for a control that shares a crowded bar there. The
-     * labels still name each segment to assistive technology and in the tooltips.
+     * Shows only the icons in a narrow content column, for a control that shares a crowded
+     * bar there. The labels still name each segment to assistive technology and in the
+     * tooltips. The query names the `main` container because this control is its own
+     * container for the sidebar layout.
      */
-    iconOnlyOnPhones?: boolean;
+    iconOnlyWhenNarrow?: boolean;
     /**
      * Shows only the icons at every width, for a control tucked into a header where its
      * labels would crowd out the content beside it. The labels still name each segment to
@@ -68,7 +70,8 @@ export function SegmentedControl<Value extends string>(props: {
                         <Icon
                             className={cn(
                                 "hidden h-3.5 w-3.5 shrink-0 @[15rem]:block",
-                                props.iconOnlyOnPhones && "max-sm:block",
+                                props.iconOnlyWhenNarrow &&
+                                    "@max-xl/main:block",
                                 props.iconOnly && "block",
                             )}
                             aria-hidden="true"
@@ -77,7 +80,8 @@ export function SegmentedControl<Value extends string>(props: {
                             <span
                                 className={cn(
                                     "truncate",
-                                    props.iconOnlyOnPhones && "max-sm:hidden",
+                                    props.iconOnlyWhenNarrow &&
+                                        "@max-xl/main:hidden",
                                 )}
                             >
                                 {option.label}

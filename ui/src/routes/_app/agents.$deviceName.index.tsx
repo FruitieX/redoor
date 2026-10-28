@@ -103,7 +103,7 @@ function LastProvisioningCard(props: {
     }
 
     return (
-        <div className="md:col-span-2">
+        <div className="@2xl:col-span-2">
             <DetailCard
                 title="provisioning history"
                 icon={<ListOrdered className="h-5 w-5" />}
@@ -206,7 +206,7 @@ function AgentDetailsContent(props: {
                     agent={props.agent}
                     details={props.details}
                 />
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="grid grid-cols-1 gap-4 @2xl:grid-cols-2">
                     <DetailCard
                         title="Redoor agent"
                         icon={<Cpu className="h-5 w-5" />}
@@ -334,7 +334,7 @@ function AgentUpgradeControls(props: {
     const { waitForAgentUpgrade } = useAgentReconnect(props.agent);
 
     return (
-        <div className="md:col-span-2">
+        <div className="@2xl:col-span-2">
             <UpgradeButton
                 target={`agent ${props.agent.name}`}
                 agentOs={props.details.os}
@@ -364,7 +364,7 @@ function MountPoints(props: {
     return (
         <section
             aria-labelledby="mount-points-heading"
-            className="overflow-hidden rounded-lg border border-slate-800 bg-surface md:col-span-2"
+            className="overflow-hidden rounded-lg border border-slate-800 bg-surface @2xl:col-span-2"
         >
             <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3 font-semibold text-slate-300">
                 <HardDrive className="h-5 w-5" />
@@ -457,7 +457,7 @@ function AgentDetailsHeader(props: {
 }) {
     return (
         <div className="mb-6">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 @xl:flex-row @xl:items-center @xl:justify-between">
                 <h1
                     aria-label="Device name"
                     className="flex min-w-0 items-center gap-3 text-2xl font-bold text-slate-100"

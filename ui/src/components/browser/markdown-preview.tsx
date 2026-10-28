@@ -280,7 +280,7 @@ export function MarkdownPreview(props: {
         <section
             role="region"
             aria-label="Markdown preview"
-            className="min-h-0 max-w-none flex-1 overflow-auto px-5 py-6 sm:px-8 sm:py-8"
+            className="min-h-0 max-w-none flex-1 overflow-auto px-5 py-6 @xl:px-8 @xl:py-8"
         >
             {frontmatter !== null && frontmatter.headers.length > 0 ? (
                 <YamlFrontmatterTable
@@ -288,7 +288,7 @@ export function MarkdownPreview(props: {
                     values={frontmatter.values}
                 />
             ) : null}
-            <div className="syntax-highlight prose prose-invert max-sm:prose-sm max-w-none prose-a:text-blue-400 prose-blockquote:border-slate-700 prose-code:rounded prose-code:bg-slate-800 prose-code:px-1 prose-code:py-0.5 prose-headings:tracking-tight prose-hr:border-slate-700 prose-pre:border prose-pre:border-slate-700 prose-pre:bg-slate-900 prose-table:block prose-table:overflow-x-auto">
+            <div className="syntax-highlight prose prose-invert @max-xl:prose-sm max-w-none prose-a:text-blue-400 prose-blockquote:border-slate-700 prose-code:rounded prose-code:bg-slate-800 prose-code:px-1 prose-code:py-0.5 prose-headings:tracking-tight prose-hr:border-slate-700 prose-pre:border prose-pre:border-slate-700 prose-pre:bg-slate-900 prose-table:block prose-table:overflow-x-auto">
                 <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{

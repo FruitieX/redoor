@@ -1098,7 +1098,7 @@ export function FileImageView(props: {
                 }
             />
 
-            <div className="flex items-center justify-center p-4 md:p-6">
+            <div className="flex items-center justify-center p-4 @2xl:p-6">
                 <img
                     src={props.downloadUrl}
                     alt={props.fileName}

@@ -182,7 +182,7 @@ export function GitPanelBar(props: {
     actions?: React.ReactNode;
 }) {
     return (
-        <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-800 px-4 py-2 sm:px-5">
+        <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-800 px-4 py-2 @xl:px-5">
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-300">
                 {props.children}
             </div>
@@ -205,7 +205,7 @@ export function ListMessage(props: {
         <p
             role={props.role}
             className={cn(
-                "px-4 py-10 text-center text-sm sm:px-5",
+                "px-4 py-10 text-center text-sm @xl:px-5",
                 props.role === "alert" ? "text-red-300" : "text-slate-400",
             )}
         >

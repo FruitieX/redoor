@@ -272,7 +272,7 @@ function TrashInventoryPage(props: { agent: Agent }) {
         );
 
     return (
-        <main className="h-full overflow-y-auto p-3 sm:p-5 lg:p-7">
+        <main className="h-full overflow-y-auto p-3 @xl:p-5 @4xl:p-7">
             <div className="mx-auto w-full max-w-6xl">
                 <div className="mb-5 flex items-end justify-between gap-4">
                     <div>
@@ -321,7 +321,7 @@ function TrashInventoryPage(props: { agent: Agent }) {
                     </section>
                 ) : (
                     <div className="overflow-hidden rounded-lg border border-slate-800 bg-surface">
-                        <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_10rem_7rem] gap-4 border-b border-slate-800 bg-slate-900/50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 md:grid">
+                        <div className="hidden grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_10rem_7rem] gap-4 border-b border-slate-800 bg-slate-900/50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 @2xl:grid">
                             <span>Name</span>
                             <span>Original path</span>
                             <span>Deleted</span>
@@ -331,7 +331,7 @@ function TrashInventoryPage(props: { agent: Agent }) {
                             <article
                                 key={`${item.locationId}:${item.id}`}
                                 aria-label={`Trashed item ${item.name}`}
-                                className="grid gap-3 border-b border-slate-800 px-4 py-3 last:border-b-0 md:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_10rem_7rem] md:items-center md:gap-4"
+                                className="grid gap-3 border-b border-slate-800 px-4 py-3 last:border-b-0 @2xl:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_10rem_7rem] @2xl:items-center @2xl:gap-4"
                             >
                                 <Link
                                     {...browserRoute(

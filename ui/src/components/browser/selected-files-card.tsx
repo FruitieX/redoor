@@ -49,7 +49,7 @@ import {
     type SelectedFilesTransferTriggerApi,
 } from "#ui/components/browser/selected-files-transfer-dialog";
 import { activateBottomDrawerTabAtom } from "#ui/bottom-drawer-state";
-import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
+import { useIsContentBelow } from "#ui/utils/use-breakpoint";
 import { AffectedPathsList } from "#ui/components/browser/affected-paths-list";
 import { CreateArchiveDialog } from "#ui/components/browser/create-archive-dialog";
 import {
@@ -542,7 +542,7 @@ function SelectedFilesCardActions(props: {
     onClear: () => void;
 }) {
     return (
-        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+        <div className="flex shrink-0 items-center gap-1 @xl:gap-2">
             {/* Archive stays listed even when unavailable, so the menu always has content. */}
             {props.isMobile ? (
                 <ActionMenu
@@ -673,7 +673,7 @@ export function SelectedFilesCard(props: {
     ).length;
 
     const directoryCount = selectedFiles.length - fileCount;
-    const isMobile = useIsBelowBreakpoint("sm");
+    const isMobile = useIsContentBelow("xl");
     const hasSelection = selectedFiles.length > 0;
     // A commit cannot be deleted or archived by a shell in this directory, only copied.
     const selectsHistory = hasRevisionSelection(selectedFiles);
@@ -747,7 +747,7 @@ export function SelectedFilesCard(props: {
                         {(moveTrigger) => (
                             <section
                                 aria-label="Selected files actions"
-                                className="flex min-w-0 items-center gap-2 overflow-hidden border-b border-slate-800 bg-surface p-4 sm:p-5"
+                                className="flex min-w-0 items-center gap-2 overflow-hidden border-b border-slate-800 bg-surface p-4 @xl:p-5"
                             >
                                 <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center text-blue-400">
                                     <Files

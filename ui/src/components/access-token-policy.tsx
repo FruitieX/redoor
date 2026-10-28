@@ -127,8 +127,8 @@ export function AccessTokenPolicyFields(props: {
     extraField?: React.ReactNode;
 }) {
     return (
-        <div className="grid gap-6 md:grid-cols-2">
-            <div className={props.extraField ? undefined : "md:col-span-2"}>
+        <div className="grid gap-6 @2xl:grid-cols-2">
+            <div className={props.extraField ? undefined : "@2xl:col-span-2"}>
                 <TextField
                     label="Token name"
                     value={props.draft.name}

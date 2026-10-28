@@ -206,8 +206,8 @@ export function PendingFileEntry(props: { pending: PendingTransfer }) {
             className="border-b border-slate-800/60 text-slate-500 last:border-b-0"
             aria-label={`Pending file entry ${name}`}
         >
-            <td className="p-1.5 sm:p-2" />
-            <td className="p-1.5 sm:p-2">
+            <td className="p-1.5 @xl:p-2" />
+            <td className="p-1.5 @xl:p-2">
                 <Tooltip
                     content={
                         canceling
@@ -222,7 +222,7 @@ export function PendingFileEntry(props: { pending: PendingTransfer }) {
                     />
                 </Tooltip>
             </td>
-            <td className="p-1.5 sm:p-2">
+            <td className="p-1.5 @xl:p-2">
                 <span className="flex min-w-0 items-center gap-2">
                     <span className="truncate font-medium italic text-slate-400">
                         {name}
@@ -233,15 +233,15 @@ export function PendingFileEntry(props: { pending: PendingTransfer }) {
                 </span>
             </td>
             <td
-                className="p-1.5 text-slate-400 sm:p-2"
+                className="p-1.5 text-slate-400 @xl:p-2"
                 aria-label={`Size for ${name}`}
             >
                 <PendingTransferSize transfer={props.pending.transfer} />
             </td>
-            <td className="p-1.5 sm:p-2">-</td>
-            <td className="p-1.5 sm:p-2">-</td>
-            <td className="p-1.5 sm:p-2">-</td>
-            <td className="p-1.5 sm:p-2" />
+            <td className="p-1.5 @xl:p-2">-</td>
+            <td className="p-1.5 @xl:p-2">-</td>
+            <td className="p-1.5 @xl:p-2">-</td>
+            <td className="p-1.5 @xl:p-2" />
         </tr>
     );
 }

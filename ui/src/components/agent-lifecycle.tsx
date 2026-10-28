@@ -124,7 +124,7 @@ export function AgentLifecycle(props: {
     return (
         // Margin auto centers the section only while it fits; flex centering would push
         // tall content above the scroll origin, cutting off the spinner and the buttons.
-        <div className="flex h-full overflow-y-auto p-4 sm:p-8">
+        <div className="flex h-full overflow-y-auto p-4 @xl:p-8">
             <section
                 aria-live="polite"
                 className="m-auto w-full min-w-0 max-w-xl text-center"

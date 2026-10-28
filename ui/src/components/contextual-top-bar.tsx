@@ -45,7 +45,7 @@ export function ContextualTopBar() {
     return (
         <header
             aria-label="View navigation"
-            className="flex min-h-12 min-w-0 items-center gap-2 border-b border-slate-800 bg-chrome px-2 pt-2 md:px-3"
+            className="flex min-h-12 min-w-0 items-center gap-2 border-b border-slate-800 bg-chrome px-2 pt-2 @2xl:px-3"
         >
             {isPersistent ? null : (
                 <IconButton

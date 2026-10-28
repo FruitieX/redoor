@@ -71,7 +71,7 @@ function BrowserPageHeader(props: {
             </div>
             {props.banner ? <div className="mb-3">{props.banner}</div> : null}
             {props.viewToggle ? (
-                <div className="-mx-2 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800 px-2 lg:-mx-4 lg:px-4">
+                <div className="-mx-2 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800 px-2 @4xl:-mx-4 @4xl:px-4">
                     {props.viewToggle}
                 </div>
             ) : null}

@@ -802,7 +802,7 @@ export function Diff(props: {
             <table
                 aria-label={props.label}
                 className={cn(
-                    "syntax-highlight border-separate border-spacing-0 bg-surface font-mono text-code leading-5 text-slate-200 max-sm:leading-4",
+                    "syntax-highlight border-separate border-spacing-0 bg-surface font-mono text-code leading-5 text-slate-200 @max-xl:leading-4",
                     props.wrapLines ? "w-full" : "w-max min-w-full",
                 )}
             >

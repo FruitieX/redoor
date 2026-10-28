@@ -68,7 +68,7 @@ function LoadMore(props: {
     }
 
     return (
-        <div className="flex flex-col items-center gap-2 px-4 pb-5 sm:px-5">
+        <div className="flex flex-col items-center gap-2 px-4 pb-5 @xl:px-5">
             <Button
                 type="button"
                 size="sm"
@@ -209,7 +209,7 @@ export function GitCommitList(props: {
                 <div
                     role="group"
                     aria-label="Commit history"
-                    className="grid grid-cols-[minmax(0,1fr)] gap-5 px-4 py-4 sm:px-5"
+                    className="grid grid-cols-[minmax(0,1fr)] gap-5 px-4 py-4 @xl:px-5"
                 >
                     {groupByDay(commits).map((group) => (
                         <section key={group.id} aria-label={group.day}>
@@ -262,7 +262,7 @@ function CommitRow(props: {
         <li
             aria-current={props.current ? "true" : undefined}
             className={cn(
-                "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5 transition-colors sm:flex-nowrap",
+                "flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5 transition-colors @xl:flex-nowrap",
                 props.current ? "bg-blue-400/10" : "hover:bg-tint",
             )}
         >
@@ -285,9 +285,9 @@ function CommitRow(props: {
                     />
                 </p>
             </div>
-            {/* On a phone the actions take their own row so the message is not cut off
+            {/* In a narrow column the actions take their own row so the message is not cut off
                 after a few words. */}
-            <span className="flex shrink-0 basis-full items-center justify-end gap-1.5 sm:basis-auto">
+            <span className="flex shrink-0 basis-full items-center justify-end gap-1.5 @xl:basis-auto">
                 {props.current ? (
                     <span className="rounded-full border border-blue-400/40 px-2 py-0.5 text-[11px] font-medium text-blue-300">
                         Viewing
@@ -425,7 +425,7 @@ export function GitRefList(props: {
                     {`This repository has no ${noun}.`}
                 </ListMessage>
             ) : (
-                <div className="px-4 py-4 sm:px-5">
+                <div className="px-4 py-4 @xl:px-5">
                     <ul
                         aria-label={isBranches ? "Branches" : "Tags"}
                         className="divide-y divide-slate-800 overflow-hidden rounded-lg border border-slate-800"

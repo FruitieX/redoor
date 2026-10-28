@@ -213,7 +213,7 @@ export function GitDiffFilterField(props: {
                 value={props.query}
                 placeholder='Filter files, -test excludes, "-test" is literal'
                 onChange={props.onChange}
-                className="min-w-0 flex-1 sm:max-w-md"
+                className="min-w-0 flex-1 @xl:max-w-md"
             />
             {props.filter.isActive ? (
                 <span role="status" className="text-xs text-slate-400">
@@ -228,8 +228,9 @@ export function GitDiffFilterField(props: {
 
 /**
  * Collapses or expands every diff at once, for the panel bar above a list, so a long change
- * set can be folded down to its file names and opened again without clicking each file. On
- * phones the buttons shrink to their icons so they share one bar with the file counts.
+ * set can be folded down to its file names and opened again without clicking each file.
+ * In a narrow column the buttons shrink to their icons so they share one bar with the file
+ * counts.
  */
 export function GitDiffCollapseControls(props: {
     collapsed: CollapsedGitDiffs;
@@ -252,11 +253,11 @@ export function GitDiffCollapseControls(props: {
                 variant="secondary"
                 aria-label="Collapse all"
                 tooltip="Hide every patch and show only the file names"
-                className="gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2"
+                className="gap-1.5 px-2 py-1.5 @xl:px-3 @xl:py-2"
                 onClick={props.collapsed.collapseAll}
             >
                 <ChevronsDownUp className="h-4 w-4" aria-hidden="true" />
-                <span className="hidden sm:inline">Collapse all</span>
+                <span className="hidden @xl:inline">Collapse all</span>
             </Button>
             <Button
                 type="button"
@@ -264,14 +265,14 @@ export function GitDiffCollapseControls(props: {
                 variant="secondary"
                 aria-label="Expand all"
                 tooltip="Show the patch of every file"
-                className="gap-1.5 px-2 py-1.5 sm:px-3 sm:py-2"
+                className="gap-1.5 px-2 py-1.5 @xl:px-3 @xl:py-2"
                 onClick={() => {
                     props.onExpandAll?.();
                     props.collapsed.expandAll();
                 }}
             >
                 <ChevronsUpDown className="h-4 w-4" aria-hidden="true" />
-                <span className="hidden sm:inline">Expand all</span>
+                <span className="hidden @xl:inline">Expand all</span>
             </Button>
         </>
     );
@@ -384,7 +385,7 @@ function GitDiffSection(props: {
         >
             <div
                 className={cn(
-                    "git-diff-sticky-header sticky z-10 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 bg-surface px-3 py-2 sm:flex-nowrap",
+                    "git-diff-sticky-header sticky z-10 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 bg-surface px-3 py-2 @xl:flex-nowrap",
                     !props.collapsed && "border-b border-slate-800",
                 )}
             >
@@ -409,8 +410,8 @@ function GitDiffSection(props: {
                     )}
                 </IconButton>
                 <ChangeBadge kind={file.change} />
-                {/* The directory sits below the name, so on a phone it gets the full width
-                    left of the controls instead of being cut off right after the name. */}
+                {/* The directory sits below the name, so in a narrow column it gets the full
+                    width left of the controls instead of being cut off right after the name. */}
                 <h3 className="flex min-w-0 flex-1 flex-col text-sm">
                     <Link
                         {...browserRoute(props.agent, file.path)}
@@ -431,12 +432,13 @@ function GitDiffSection(props: {
                         </span>
                     )}
                 </h3>
-                {/* On a phone the actions take their own row so the name and directory keep
-                    the full width. A collapsed file has only two small actions that fit beside it. */}
+                {/* In a narrow column the actions take their own row so the name and directory
+                    keep the full width. A collapsed file has only two small actions that fit
+                    beside it. */}
                 <div
                     className={cn(
                         "flex shrink-0 items-center justify-end gap-3",
-                        !props.collapsed && "basis-full sm:basis-auto",
+                        !props.collapsed && "basis-full @xl:basis-auto",
                     )}
                 >
                     {background === null ? null : (

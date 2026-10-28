@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp } from "lucide-react";
 import type { BottomDrawerTabId } from "#ui/bottom-drawer-state";
 import { Tab, TabList } from "#ui/components/tabs";
 import { IconButton } from "#ui/components/icon-button";
-import { useIsBelowBreakpoint } from "#ui/utils/use-breakpoint";
+import { useIsContentBelow } from "#ui/utils/use-breakpoint";
 
 /** Describes one mounted pane and its compact representation in the drawer tab strip. */
 export type BottomDrawerTab = {
@@ -91,7 +91,7 @@ export function TabbedBottomDrawer(props: {
                     />
                 ) : null}
                 <div
-                    className={`flex min-h-0 max-w-full flex-col ${props.isFullWindow ? "h-full" : "px-2 sm:px-4"} ${isContentVisible ? (props.isFullWindow ? "flex-1" : "flex-1 py-2") : "py-1.5"}`}
+                    className={`flex min-h-0 max-w-full flex-col ${props.isFullWindow ? "h-full" : "px-2 @xl:px-4"} ${isContentVisible ? (props.isFullWindow ? "flex-1" : "flex-1 py-2") : "py-1.5"}`}
                 >
                     <div
                         ref={resize.headerRef}
@@ -236,32 +236,35 @@ function tabDetails(tab: BottomDrawerTab): React.ReactNode {
     );
 }
 
-/** Hides label text on small screens while keeping the tab name available to assistive tech. */
+/**
+ * Hides label text in a narrow content column while keeping the tab name available to
+ * assistive tech.
+ */
 function BottomDrawerTabButton(props: {
     tab: BottomDrawerTab;
     isActive: boolean;
     onActivate: () => void;
 }) {
-    const isBelowSm = useIsBelowBreakpoint("sm");
+    const isNarrow = useIsContentBelow("xl");
 
     return (
         <Tab
             id={`bottom-drawer-tab-${props.tab.id}`}
             selected={props.isActive}
             aria-controls={`bottom-drawer-panel-${props.tab.id}`}
-            tooltip={isBelowSm ? <>Show {tabDetails(props.tab)}</> : undefined}
+            tooltip={isNarrow ? <>Show {tabDetails(props.tab)}</> : undefined}
             tooltipClassName="shrink-0"
             onClick={props.onActivate}
-            className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors sm:px-3 ${
+            className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors @xl:px-3 ${
                 props.isActive
                     ? "bg-slate-800 text-slate-100"
                     : "text-slate-400 hover:bg-tint hover:text-slate-200"
             }`}
         >
             {props.tab.icon}
-            <span className="sr-only sm:not-sr-only">{props.tab.label}</span>
+            <span className="sr-only @xl:not-sr-only">{props.tab.label}</span>
             {props.tab.badge ? (
-                <span className="sr-only sm:not-sr-only sm:max-w-32 sm:truncate sm:rounded sm:bg-slate-950/60 sm:px-1.5 sm:py-0.5 sm:text-[10px] sm:tabular-nums sm:text-slate-400 sm:max-w-48">
+                <span className="sr-only @xl:not-sr-only @xl:max-w-32 @xl:truncate @xl:rounded @xl:bg-slate-950/60 @xl:px-1.5 @xl:py-0.5 @xl:text-[10px] @xl:tabular-nums @xl:text-slate-400 @xl:max-w-48">
                     {props.tab.badge}
                 </span>
             ) : null}

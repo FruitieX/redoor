@@ -281,7 +281,7 @@ function LogRecordRow(props: {
         <>
             <time
                 dateTime={props.entry.record.timestamp}
-                className="text-slate-500 sm:shrink-0"
+                className="text-slate-500 @xl:shrink-0"
             >
                 {props.entry.record.timestamp}
             </time>
@@ -309,7 +309,7 @@ function LogRecordRow(props: {
                     props.onOpenError(props.entry.record, event.currentTarget)
                 }
                 className={cn(
-                    "flex w-full flex-col items-start justify-start gap-x-3 gap-y-0 rounded px-2 py-1 text-left text-red-200 hover:bg-red-950/40 focus-visible:outline-2 focus-visible:outline-red-400 sm:flex-row",
+                    "flex w-full flex-col items-start justify-start gap-x-3 gap-y-0 rounded px-2 py-1 text-left text-red-200 hover:bg-red-950/40 focus-visible:outline-2 focus-visible:outline-red-400 @xl:flex-row",
                     LOG_ROW_TEXT_CLASS,
                 )}
             >
@@ -321,7 +321,7 @@ function LogRecordRow(props: {
     return (
         <div
             className={cn(
-                "flex flex-col gap-x-3 gap-y-0 px-2 py-1 sm:flex-row",
+                "flex flex-col gap-x-3 gap-y-0 px-2 py-1 @xl:flex-row",
                 LOG_ROW_TEXT_CLASS,
                 props.entry.record.level === "warning" && "text-amber-100",
             )}

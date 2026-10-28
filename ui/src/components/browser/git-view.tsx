@@ -111,12 +111,12 @@ export function GitView(props: {
                 aria-label="Git repository"
                 className="border-b border-slate-800"
             >
-                {/* Phones keep the badge beside the name, so the header costs one row there. */}
-                <div className="flex items-center gap-3 px-4 pt-3 sm:flex-wrap sm:gap-x-4 sm:gap-y-3 sm:px-5 sm:pt-4">
-                    <div className="flex min-w-0 flex-1 items-center gap-3 sm:basis-72">
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-blue-400/30 bg-blue-400/10 text-blue-300 sm:h-10 sm:w-10">
+                {/* Narrow columns keep the badge beside the name, so the header costs one row there. */}
+                <div className="flex items-center gap-3 px-4 pt-3 @xl:flex-wrap @xl:gap-x-4 @xl:gap-y-3 @xl:px-5 @xl:pt-4">
+                    <div className="flex min-w-0 flex-1 items-center gap-3 @xl:basis-72">
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-blue-400/30 bg-blue-400/10 text-blue-300 @xl:h-10 @xl:w-10">
                             <FolderGit2
-                                className="h-4 w-4 sm:h-5 sm:w-5"
+                                className="h-4 w-4 @xl:h-5 @xl:w-5"
                                 aria-hidden="true"
                             />
                         </span>
@@ -261,7 +261,7 @@ function ReferenceBadge(props: { reference: GitViewReference }) {
     const reference = props.reference;
 
     const pill =
-        "inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-medium max-sm:max-w-1/2 max-sm:shrink-0 max-sm:px-2.5";
+        "inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-medium @max-xl:max-w-1/2 @max-xl:shrink-0 @max-xl:px-2.5";
 
     if (reference.type === "revision") {
         const showsId = !reference.commit.id.startsWith(reference.rev);
@@ -377,7 +377,7 @@ function GitViewNav(props: {
             label: "Changes",
             icon: (
                 <FileDiff
-                    className="hidden h-4 w-4 sm:block"
+                    className="hidden h-4 w-4 @xl:block"
                     aria-hidden="true"
                 />
             ),
@@ -387,7 +387,7 @@ function GitViewNav(props: {
             label: "Commits",
             icon: (
                 <History
-                    className="hidden h-4 w-4 sm:block"
+                    className="hidden h-4 w-4 @xl:block"
                     aria-hidden="true"
                 />
             ),
@@ -397,7 +397,7 @@ function GitViewNav(props: {
             label: "Branches",
             icon: (
                 <GitBranch
-                    className="hidden h-4 w-4 sm:block"
+                    className="hidden h-4 w-4 @xl:block"
                     aria-hidden="true"
                 />
             ),
@@ -406,7 +406,7 @@ function GitViewNav(props: {
             tab: "tags",
             label: "Tags",
             icon: (
-                <Tag className="hidden h-4 w-4 sm:block" aria-hidden="true" />
+                <Tag className="hidden h-4 w-4 @xl:block" aria-hidden="true" />
             ),
         },
         {
@@ -414,7 +414,7 @@ function GitViewNav(props: {
             label: "Worktrees",
             icon: (
                 <FolderTree
-                    className="hidden h-4 w-4 sm:block"
+                    className="hidden h-4 w-4 @xl:block"
                     aria-hidden="true"
                 />
             ),
@@ -424,9 +424,9 @@ function GitViewNav(props: {
     return (
         <nav
             aria-label="Git view"
-            className="overflow-x-auto overscroll-x-contain px-4 py-3 sm:px-5 sm:pb-4"
+            className="overflow-x-auto overscroll-x-contain px-4 py-3 @xl:px-5 @xl:pb-4"
         >
-            <div className="flex w-full gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1 sm:inline-flex sm:w-auto">
+            <div className="flex w-full gap-1 rounded-lg border border-slate-800 bg-slate-900/60 p-1 @xl:inline-flex @xl:w-auto">
                 {items.map((item) => {
                     const active = item.tab === props.tab;
 
@@ -443,8 +443,8 @@ function GitViewNav(props: {
                             aria-current={active ? "page" : undefined}
                             className={
                                 active
-                                    ? "inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-surface-active px-2.5 py-1.5 text-sm font-medium sm:flex-none sm:px-3 text-slate-50 shadow-sm ring-1 ring-slate-700 [&_svg]:text-blue-400"
-                                    : "inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium sm:flex-none sm:px-3 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
+                                    ? "inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-surface-active px-2.5 py-1.5 text-sm font-medium @xl:flex-none @xl:px-3 text-slate-50 shadow-sm ring-1 ring-slate-700 [&_svg]:text-blue-400"
+                                    : "inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium @xl:flex-none @xl:px-3 text-slate-400 transition-colors hover:bg-tint hover:text-slate-100"
                             }
                         >
                             {item.icon}

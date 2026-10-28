@@ -239,7 +239,7 @@ export function FileList(props: {
     return (
         <div className="overflow-hidden bg-surface">
             {props.actions}
-            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800 bg-slate-900/35 p-1.5 sm:gap-2 sm:p-2">
+            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800 bg-slate-900/35 p-1.5 @xl:gap-2 @xl:p-2">
                 <label className="relative min-w-0 flex-1">
                     <span className="sr-only">Filter files</span>
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
@@ -251,7 +251,7 @@ export function FileList(props: {
                         onChange={(event) => setFilter(event.target.value)}
                         onKeyDown={handleFilterKeyDown}
                         placeholder="Filter files (f)"
-                        className="w-full bg-slate-900 py-1.5 pl-9 text-sm placeholder:text-slate-500 focus:ring-1 focus:ring-blue-500 sm:py-2"
+                        className="w-full bg-slate-900 py-1.5 pl-9 text-sm placeholder:text-slate-500 focus:ring-1 focus:ring-blue-500 @xl:py-2"
                     />
                 </label>
             </div>
@@ -328,7 +328,7 @@ function FileTable(props: {
             <table ref={tableRef} className="w-full min-w-[55rem]">
                 <thead>
                     <tr className="border-b border-slate-800 bg-surface-raised">
-                        <th className="p-1.5 text-left text-sm font-medium text-slate-400 sm:p-2">
+                        <th className="p-1.5 text-left text-sm font-medium text-slate-400 @xl:p-2">
                             Select
                         </th>
                         <SortableFileColumnHeader
@@ -367,7 +367,7 @@ function FileTable(props: {
                             sort={props.sort}
                             onSort={props.onSort}
                         />
-                        <th className="p-1.5 text-right text-sm font-medium text-slate-400 sm:p-2">
+                        <th className="p-1.5 text-right text-sm font-medium text-slate-400 @xl:p-2">
                             Actions
                         </th>
                     </tr>
@@ -620,7 +620,7 @@ function FileEntryActions(props: {
                 onUnarchive={() => setIsUnarchiveDialogOpen(true)}
                 onCreateArchive={() => setIsCreateArchiveDialogOpen(true)}
                 onDelete={() => setIsDeleteDialogOpen(true)}
-                triggerClassName="max-sm:h-7 max-sm:w-7"
+                triggerClassName="@max-xl:h-7 @max-xl:w-7"
                 revision={
                     revision === undefined
                         ? undefined
@@ -725,10 +725,10 @@ function FileEntry(props: {
 
     return (
         <tr
-            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint max-sm:text-sm"
+            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint @max-xl:text-sm"
             aria-label={`${isDirectory ? "Directory" : "File"} entry ${entry.name}`}
         >
-            <td className="px-1.5 py-0.5 sm:p-2" aria-label="">
+            <td className="px-1.5 py-0.5 @xl:p-2" aria-label="">
                 <Checkbox
                     role="checkbox"
                     label={
@@ -750,14 +750,14 @@ function FileEntry(props: {
                     }
                 />
             </td>
-            <td className="px-1.5 py-0.5 sm:p-2">
+            <td className="px-1.5 py-0.5 @xl:p-2">
                 {isDirectory ? (
-                    <Folder className="h-4 w-4 text-blue-400 sm:h-5 sm:w-5" />
+                    <Folder className="h-4 w-4 text-blue-400 @xl:h-5 @xl:w-5" />
                 ) : (
-                    <File className="h-4 w-4 text-slate-500 sm:h-5 sm:w-5" />
+                    <File className="h-4 w-4 text-slate-500 @xl:h-5 @xl:w-5" />
                 )}
             </td>
-            <td className="px-1.5 py-0.5 sm:p-2">
+            <td className="px-1.5 py-0.5 @xl:p-2">
                 <Link
                     {...browserRoute(props.agent, fullPath)}
                     data-keyboard-focus-entry="true"
@@ -769,15 +769,15 @@ function FileEntry(props: {
             <td
                 className={
                     isDirectory
-                        ? "px-1.5 py-0.5 text-slate-600 sm:p-2"
-                        : "px-1.5 py-0.5 text-slate-400 sm:p-2"
+                        ? "px-1.5 py-0.5 text-slate-600 @xl:p-2"
+                        : "px-1.5 py-0.5 text-slate-400 @xl:p-2"
                 }
                 aria-label={`Size for ${entry.name}`}
             >
                 {isDirectory ? "-" : formatSize(entry.size)}
             </td>
             <td
-                className="px-1.5 py-0.5 text-slate-400 sm:p-2"
+                className="px-1.5 py-0.5 text-slate-400 @xl:p-2"
                 aria-label={`Modified ${entry.name}`}
             >
                 {readOnly ? (
@@ -802,13 +802,13 @@ function FileEntry(props: {
                     </Tooltip>
                 )}
             </td>
-            <td className="px-1.5 py-0.5 text-slate-400 sm:p-2">
+            <td className="px-1.5 py-0.5 text-slate-400 @xl:p-2">
                 {entry.owner || "-"}
             </td>
-            <td className="px-1.5 py-0.5 text-slate-400 sm:p-2">
+            <td className="px-1.5 py-0.5 text-slate-400 @xl:p-2">
                 {entry.group || "-"}
             </td>
-            <td className="px-1.5 py-0.5 text-right sm:p-2">
+            <td className="px-1.5 py-0.5 text-right @xl:p-2">
                 <FileEntryActions
                     agent={props.agent}
                     entryName={entry.name}

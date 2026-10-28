@@ -339,7 +339,7 @@ export function DirectoryFilesActions(props: {
     return (
         <div
             aria-label="Files view actions"
-            className="flex flex-wrap items-center justify-between gap-1 border-b border-slate-800 bg-slate-900/35 p-1.5 sm:gap-2 sm:p-2"
+            className="flex flex-wrap items-center justify-between gap-1 border-b border-slate-800 bg-slate-900/35 p-1.5 @xl:gap-2 @xl:p-2"
         >
             <ToggleButton
                 onClick={props.onToggleHiddenFiles}
@@ -362,7 +362,7 @@ export function DirectoryFilesActions(props: {
                 ) : (
                     <Eye className="h-4 w-4" />
                 )}
-                <span className="hidden sm:inline">
+                <span className="hidden @xl:inline">
                     {props.showHiddenFiles ? "Hide hidden" : "Show hidden"}
                 </span>
             </ToggleButton>
@@ -378,7 +378,7 @@ export function DirectoryFilesActions(props: {
                     className="rounded-md"
                 >
                     <ClipboardPaste className="h-4 w-4 text-slate-400" />
-                    <span className="hidden sm:inline">Paste</span>
+                    <span className="hidden @xl:inline">Paste</span>
                 </Button>
                 <DirectoryNewAction
                     agent={props.agent}
@@ -432,7 +432,7 @@ export function DirectoryFilesActions(props: {
                             className="rounded-md"
                         >
                             <RefreshCw className="h-4 w-4 text-slate-400" />
-                            <span className="hidden sm:inline">
+                            <span className="hidden @xl:inline">
                                 {isReloading ? "Reloading..." : "Reload"}
                             </span>
                         </Button>
