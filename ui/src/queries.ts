@@ -533,34 +533,32 @@ export function gitDiffQueryOptions(
 /** The most files one diff request may name, matching the server's `GitDiffRequest::MAX_FILES`. */
 const GIT_DIFF_MAX_FILES = 128;
 
-/**
- * Fetches many files' comparisons in as few requests as the server accepts and files each
- * result under that file's own single-file diff query, the one a file fetches when it is
- * expanded alone. Files already cached or loading are skipped, so expanding every file after
- * opening a few requests only the rest, and the expanded files then find their diffs loading
- * instead of each starting a request of its own.
- */
-export function prefetchGitDiffs(options: {
+/** Which files of a diff list to fetch, and in which comparison mode. */
+type GitDiffBatchOptions = {
     queryClient: QueryClient;
     agent: Agent;
     files: string[];
     mode: GitDiffMode;
-}) {
-    const missing = options.files.filter((path) => {
-        const state = options.queryClient.getQueryState(
-            queryKeys.gitDiff(options.agent.id, [path], options.mode),
-        );
+};
 
-        return state?.data === undefined && state?.fetchStatus !== "fetching";
-    });
-
-    for (let start = 0; start < missing.length; start += GIT_DIFF_MAX_FILES) {
-        const batch = missing.slice(start, start + GIT_DIFF_MAX_FILES);
+/**
+ * Fetches many files' comparisons in as few requests as the server accepts and files each
+ * result under that file's own single-file diff query, the one a file fetches when it is
+ * expanded alone. A file's cached diff stays on screen while it is refetched.
+ */
+function fetchGitDiffBatches(options: GitDiffBatchOptions, staleTime: number) {
+    for (
+        let start = 0;
+        start < options.files.length;
+        start += GIT_DIFF_MAX_FILES
+    ) {
+        const batch = options.files.slice(start, start + GIT_DIFF_MAX_FILES);
         const response = options.agent.gitDiff(batch, options.mode);
 
         batch.forEach((path, index) => {
             void options.queryClient.prefetchQuery({
                 ...gitDiffQueryOptions(options.agent, [path], options.mode),
+                staleTime,
                 // The response keeps the request order, so the file's position finds its diff.
                 queryFn: async () => {
                     const diff = (await response).diffs[index];
@@ -570,6 +568,48 @@ export function prefetchGitDiffs(options: {
             });
         });
     }
+}
+
+/** Reads the cache state of one file's single-file diff query. */
+function gitDiffQueryState(options: GitDiffBatchOptions, path: string) {
+    return options.queryClient.getQueryState(
+        queryKeys.gitDiff(options.agent.id, [path], options.mode),
+    );
+}
+
+/**
+ * Fetches the diffs of files not cached yet in batches. Files already cached or loading are
+ * skipped, so expanding every file after opening a few requests only the rest, and the
+ * expanded files then find their diffs loading instead of each starting a request of its own.
+ */
+export function prefetchGitDiffs(options: GitDiffBatchOptions) {
+    const missing = options.files.filter((path) => {
+        const state = gitDiffQueryState(options, path);
+
+        return state?.data === undefined && state?.fetchStatus !== "fetching";
+    });
+
+    fetchGitDiffBatches(
+        { ...options, files: missing },
+        Number.POSITIVE_INFINITY,
+    );
+}
+
+/**
+ * Refetches the cached diffs of the given files in batches. Worktree diffs never go stale on
+ * their own, so without this, coming back to a list after editing a file would show its patch
+ * from before the edit. Only cached files are refetched, because a file without a cached diff
+ * fetches it when it is expanded, and the cached patches stay on screen meanwhile, so the
+ * list keeps the height the restored scroll position was measured in until the new ones land.
+ */
+export function refreshCachedGitDiffs(options: GitDiffBatchOptions) {
+    const cached = options.files.filter((path) => {
+        const state = gitDiffQueryState(options, path);
+
+        return state?.data !== undefined && state.fetchStatus !== "fetching";
+    });
+
+    fetchGitDiffBatches({ ...options, files: cached }, 0);
 }
 
 /**

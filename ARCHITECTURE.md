@@ -1201,7 +1201,10 @@ invalidating query keys, so a view never needs a separate reload signal.
   `agents_changed` invalidates it, and it polls every second only while a managed agent is
   starting, which pushes no event. Listings, git state and metadata never go stale on their
   own; the loaders force a refetch on navigation, events and mutations invalidate them, and
-  the window-focus refresh reloads the route and invalidates git state.
+  the window-focus refresh reloads the route and invalidates git state. A directory's Git
+  view also refetches the worktree diffs it already has cached, in batches and without
+  waiting, so coming back to a list shows the cached patches at once and then the edits
+  made while away.
 - **What still reloads the route.** A loader also decides which kind of entry lives at a URL
   and applies redirects, which the cache cannot express. The route is therefore reloaded
   (`router.invalidate`) only when that can have changed: the window-focus refresh, creating

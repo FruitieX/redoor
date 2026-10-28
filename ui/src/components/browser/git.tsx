@@ -134,7 +134,8 @@ function CleanState(props: { message: string }) {
 
 /**
  * One file's patch in the worktree diff list. It mounts only when the file is expanded, so
- * a diff is fetched the first time its file is opened, and then comes from the cache.
+ * a diff is fetched the first time its file is opened, and then comes from the cache, which
+ * the route loader refreshes on every navigation to the list.
  */
 function WorktreeDiffBody(props: {
     agent: Agent;

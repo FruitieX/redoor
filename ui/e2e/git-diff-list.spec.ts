@@ -366,4 +366,38 @@ test.describe("Git diff list", () => {
             .poll(() => main.evaluate((element) => element.scrollTop))
             .toBe(scrollTop);
     });
+
+    test("shows a file's new edits when coming back to its expanded diff", async ({
+        page,
+    }) => {
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${agentName}/browser/${encodeFilesystemPath(repositoryPath)}?view=git`,
+        );
+
+        await page
+            .getByRole("button", { name: "Expand diff for src/server.ts" })
+            .click();
+
+        const server = page.getByRole("region", {
+            name: `Git diff for ${path.join(repositoryPath, "src/server.ts")}`,
+        });
+
+        await expect(server).toContainText("edited");
+
+        await server.getByRole("link", { name: "server.ts" }).click();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
+
+        // The file changes while the reader is away, like after saving it in the editor.
+        await fs.writeFile(
+            path.join(repositoryPath, "src/server.ts"),
+            'export const mode = "rewritten";\n',
+        );
+
+        await page.goBack();
+
+        // The cached patch is refetched on the way back instead of showing the old edit.
+        await expect(server).toContainText("rewritten");
+    });
 });

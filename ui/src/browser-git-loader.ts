@@ -6,6 +6,7 @@ import {
     gitDiffQueryOptions,
     gitStatusQueryOptions,
     prefetchGitList,
+    refreshCachedGitDiffs,
     type QueryContext,
 } from "#ui/queries";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
@@ -13,7 +14,8 @@ import type { GitContextResponse } from "#bindings/GitContextResponse";
 /**
  * Loads what the worktree Git view is about to show: a list when a Git tab is open,
  * otherwise the directory's status or the file's diff. Status and diffs refetch on every
- * navigation because the worktree changes under the page.
+ * navigation because the worktree changes under the page, including the diffs a directory's
+ * list already shows.
  */
 export async function prefetchWorktreeGitView(options: {
     context: QueryContext;
@@ -37,9 +39,18 @@ export async function prefetchWorktreeGitView(options: {
             refSort: deps.refSort,
         });
     } else if (options.isDirectory) {
-        await fetchQueryUncancelled(context.queryClient, {
+        const status = await fetchQueryUncancelled(context.queryClient, {
             ...gitStatusQueryOptions(agent, path),
             staleTime: 0,
+        });
+
+        // Not awaited: the cached patches show at once and update in place, so the list
+        // opens without waiting for every expanded file's diff.
+        refreshCachedGitDiffs({
+            queryClient: context.queryClient,
+            agent,
+            files: status.entries.map((entry) => entry.path),
+            mode: "full",
         });
     } else {
         await fetchQueryUncancelled(context.queryClient, {
