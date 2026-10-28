@@ -26,7 +26,21 @@ import {
     createAccessToken,
 } from "./test-utils";
 
-const size = 512 * 1024 * 1024;
+/** Mirrors `SEGMENT_SIZE` in crates/redoor-core/src/partials.rs: resume reuses whole segments only. */
+const SEGMENT_SIZE = 64 * 1024 * 1024;
+
+/**
+ * Cross-agent copies stream at roughly 200 MB/s on a dev machine, so four segments leave a
+ * multi-segment tail (~1 s) after the just-over-one-segment pause threshold. That keeps the
+ * pause landing mid-stream with a wide margin while halving the bytes copied and hashed.
+ */
+const CROSS_AGENT_SIZE = 4 * SEGMENT_SIZE;
+
+/**
+ * Same-agent copies run at several GB/s and were observed ~170 MB in by the time the pause
+ * arrived, so they keep eight segments to stay well clear of publishing before the pause.
+ */
+const LOCAL_SIZE = 8 * SEGMENT_SIZE;
 
 /** Streaming digest checks exact content without allocating the large test file. */
 async function digest(file: string) {
@@ -161,7 +175,7 @@ describe("resumable transfers", () => {
         const sourcePath = path.join(root, `source-${crypto.randomUUID()}`);
         const destPath = `${sourcePath}-dest`;
         const file = await fs.open(sourcePath, "w");
-        await file.truncate(size);
+        await file.truncate(local ? LOCAL_SIZE : CROSS_AGENT_SIZE);
         await file.write(Buffer.from("source marker"), 0, 13, 0);
         await file.close();
 
@@ -282,10 +296,16 @@ describe("resumable transfers", () => {
             transfer.state,
             "resume must publish rather than merely finish streaming",
         ).toBe("completed");
+        // Hashing both files concurrently keeps the full byte-exact check at half the wall time.
+        const [destDigest, sourceDigest] = await Promise.all([
+            digest(destPath),
+            digest(sourcePath),
+        ]);
+
         expect(
-            await digest(destPath),
+            destDigest,
             "prefix and tail must match the source byte for byte",
-        ).toBe(await digest(sourcePath));
+        ).toBe(sourceDigest);
         expect(
             (await api.listPartials()).partials.some(
                 (partial) => partial.dest.path === destPath,
@@ -458,10 +478,14 @@ describe("resumable transfers", () => {
         expect(transfer?.resumed_bytes).toBeGreaterThanOrEqual(
             64 * 1024 * 1024,
         );
-        expect(
-            await digest(run.destPath),
-            "MCP publication verifies the entire file",
-        ).toBe(await digest(run.sourcePath));
+        const [destDigest, sourceDigest] = await Promise.all([
+            digest(run.destPath),
+            digest(run.sourcePath),
+        ]);
+
+        expect(destDigest, "MCP publication verifies the entire file").toBe(
+            sourceDigest,
+        );
     });
 
     it("resumes a local copy after an agent crash", async () => {
@@ -629,7 +653,7 @@ describe("resumable transfers", () => {
         const run = await paused(true, true);
         const originalHash = await digest(run.sourcePath);
         // Pausing a move must retain its source until verified publication completes.
-        expect((await fs.stat(run.sourcePath)).size).toBe(size);
+        expect((await fs.stat(run.sourcePath)).size).toBe(LOCAL_SIZE);
         const resumed = await api.resumePartial(run.partial);
 
         const transfer = await waitForValue({
