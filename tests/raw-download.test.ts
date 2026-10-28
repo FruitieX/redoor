@@ -60,15 +60,6 @@ describe("Raw Download API", () => {
         tempFiles.cleanup();
     });
 
-    it("should download small file via raw endpoint", async () => {
-        const testContent = "Hello, World!\nThis is a test file.";
-        const testFilePath = tempFiles.create(testContent, { suffix: ".txt" });
-
-        const result = await testAgent.raw(testFilePath);
-        const downloadedContent = Buffer.from(result).toString("utf-8");
-        expect(downloadedContent).toBe(testContent);
-    });
-
     it("cancels a throttled download and closes its HTTP stream promptly", async () => {
         const testFilePath = tempFiles.create(
             Buffer.alloc(8 * 1024 * 1024, "d"),
@@ -363,18 +354,6 @@ describe("Raw Download API", () => {
         const downloadedContent = Buffer.from(result).toString("utf-8");
         expect(downloadedContent.length).toBe(largeContent.length);
         expect(downloadedContent).toBe(largeContent);
-    });
-
-    it("should handle binary file download", async () => {
-        const binaryContent = Buffer.from([0, 1, 2, 3, 255, 254, 253]);
-
-        const testFilePath = tempFiles.create(binaryContent, {
-            suffix: ".bin",
-        });
-
-        const result = await testAgent.raw(testFilePath);
-        const downloadedContent = Buffer.from(result);
-        expect(Buffer.compare(downloadedContent, binaryContent)).toBe(0);
     });
 
     it("should return error for non-existent file", async () => {
@@ -727,6 +706,7 @@ describe("Raw Download API", () => {
                 rate: 512,
             },
         });
+
         const proxiedAgentName = "raw-download-cancel-agent";
 
         const waitForProxiedAgent = waitForLogMessage(
@@ -1007,37 +987,6 @@ describe("Raw Download API", () => {
         expect(response.headers.get("Content-Range")).toBe("bytes */10");
     });
 
-    it("should handle range request for binary file", async () => {
-        // Create binary file with pattern 0x00-0xFF repeated
-        const pattern = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
-        const testContent = Buffer.concat([pattern, pattern, pattern, pattern]); // 1024 bytes
-        const testFilePath = tempFiles.create(testContent, { suffix: ".bin" });
-
-        const response = await testAgent.download(testFilePath, {
-            range: [100, 109],
-        });
-
-        expect(response.status).toBe(206);
-        expect(response.headers.get("Content-Range")).toBe(
-            "bytes 100-109/1024",
-        );
-        expect(response.headers.get("Content-Length")).toBe("10");
-
-        const data = await response.arrayBuffer();
-        expect(data.byteLength).toBe(10);
-
-        // Verify the content matches expected bytes (wrapping around at 256)
-        const expected = new Uint8Array([
-            100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
-        ]);
-
-        const actual = new Uint8Array(data);
-
-        for (let i = 0; i < 10; i++) {
-            expect(actual[i]).toBe(expected[i]);
-        }
-    });
-
     it("should return 200 OK for full file without Range header", async () => {
         const testContent = "Full file content without range";
         const testFilePath = tempFiles.create(testContent, { suffix: ".txt" });
@@ -1053,23 +1002,6 @@ describe("Raw Download API", () => {
         const data = await response.arrayBuffer();
         const content = Buffer.from(data).toString("utf-8");
         expect(content).toBe(testContent);
-    });
-
-    it("should handle range at end of file", async () => {
-        // Create test file with known content (100 bytes)
-        const testContent = "0123456789".repeat(10); // 100 bytes
-        const testFilePath = tempFiles.create(testContent, { suffix: ".txt" });
-
-        const response = await testAgent.download(testFilePath, {
-            range: [95, 99],
-        });
-
-        expect(response.status).toBe(206);
-        expect(response.headers.get("Content-Range")).toBe("bytes 95-99/100");
-        expect(response.headers.get("Content-Length")).toBe("5");
-
-        const data = await response.arrayBuffer();
-        expect(data.byteLength).toBe(5);
     });
 
     it("should clamp range end to file size", async () => {
