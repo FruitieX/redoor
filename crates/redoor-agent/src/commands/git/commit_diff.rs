@@ -15,7 +15,7 @@ use redoor_protocol::{
 
 use super::{
     GitFailure,
-    diff::{DiffSource, MAX_BATCH_DIFF_BYTES, compare_sources, json_encoded_len, read_object_blob},
+    diff::{DiffBudget, DiffSource, read_object_blob},
     internal_failure,
     revision::{RevisionPath, commit_summary, tree_entry},
     run_blocking,
@@ -82,7 +82,7 @@ fn commit_diff_blocking(
     changes.truncate(GitDiffRequest::MAX_FILES);
     changes.sort_by(|left, right| left.relative.cmp(&right.relative));
 
-    let mut remaining = MAX_BATCH_DIFF_BYTES;
+    let mut budget = DiffBudget::new();
     let mut files = Vec::with_capacity(changes.len());
     for change in changes {
         if interrupt.load(Ordering::Acquire) {
@@ -94,16 +94,12 @@ fn commit_diff_blocking(
         let result = if change.relative.chars().any(char::is_control) {
             GitDiffResult::UnsupportedEntry
         } else {
-            compare_sources(
+            budget.compare(
                 side_source(repo, change.old)?,
                 side_source(repo, change.new)?,
                 &change.relative,
-                remaining,
             )?
         };
-        if let GitDiffResult::Text { unified_diff } = &result {
-            remaining -= json_encoded_len(unified_diff.as_bytes());
-        }
         files.push(GitCommitFileChange {
             path: target.worktree_path(&change.relative).display().to_string(),
             change: change_state(change.old, change.new),

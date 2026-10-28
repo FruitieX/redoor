@@ -134,7 +134,12 @@ The agent runtime and the implementation of every command.
     whole objects and the reply is a single control frame. Object kinds and sizes are read
     from headers before inflating, commit diffs visit changes one at a time and stop at the
     file limit, and patch budgets count JSON-encoded bytes, since escaping can grow control
-    characters sixfold inside the frame.
+    characters sixfold inside the frame. Text patches carry their whole file
+    (`full_context: true`) when the patch is at most 256 KiB, so the UI can expand context
+    without another request. Each batch charges the default-context (3-line) patch to the
+    8 MiB patch budget and only the extra unchanged lines to a separate 4 MiB context
+    budget. Sending files whole therefore never turns a later file into `too_large`; a
+    file whose whole patch does not fit falls back to default context.
 - `transfers/`: shared upload and download drivers.
   - `UploadSink` covers raw files, tar directories and file edits. `ByteSource` covers file
     ranges and tar archives.

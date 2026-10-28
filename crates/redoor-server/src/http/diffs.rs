@@ -7,6 +7,7 @@ use redoor_protocol::{
     api::{
         diffs::{DiffEndpoint, DiffFilesRequest, DiffFilesResponse},
         files::MetadataResponse,
+        git::MAX_FULL_CONTEXT_PATCH_BYTES,
         tokens::Permission,
     },
     wire::command::Command,
@@ -16,6 +17,10 @@ use super::{
     access::Principal, agent_client::Metadata, agent_helpers::require_absolute_path,
     error::ApiError, services::output::OutputStream, state::ServerState,
 };
+
+/// The unchanged lines kept around each change when the files are too large to send whole,
+/// matching `git diff`.
+const DEFAULT_CONTEXT_LINES: usize = 3;
 
 /// Route: `POST /api/v1/diff`; reads both files, so it needs read on both devices.
 pub(crate) async fn diff_files_handler(
@@ -52,11 +57,28 @@ pub(crate) async fn diff_files_handler(
         download_editable_file(&state, &right, right_metadata.file_size)
     );
     let (left_content, right_content) = (left_content?, right_content?);
-    let unified_diff = similar::TextDiff::from_lines(&left_content, &right_content)
-        .unified_diff()
-        .header(&left.path, &right.path)
+    let text_diff = similar::TextDiff::from_lines(&left_content, &right_content);
+    let mut patch = text_diff.unified_diff();
+    patch.header(&left.path, &right.path);
+    // A file has no more lines than bytes, so this radius keeps every unchanged line without
+    // the overflow `usize::MAX` would cause inside `similar`.
+    let whole = patch
+        .context_radius(left_content.len().max(right_content.len()))
         .to_string();
-    Ok(Json(DiffFilesResponse { unified_diff }))
+    // Both files are already in memory, so formatting them whole before checking the size
+    // costs little more than the patch the UI would otherwise get.
+    let response = if whole.len() <= MAX_FULL_CONTEXT_PATCH_BYTES {
+        DiffFilesResponse {
+            unified_diff: whole,
+            full_context: true,
+        }
+    } else {
+        DiffFilesResponse {
+            unified_diff: patch.context_radius(DEFAULT_CONTEXT_LINES).to_string(),
+            full_context: false,
+        }
+    };
+    Ok(Json(response))
 }
 
 /// Reuses agent metadata so diff eligibility cannot drift from the file editor's gate.

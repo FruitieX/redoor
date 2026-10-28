@@ -11,7 +11,7 @@ use gix::bstr::ByteSlice;
 
 use redoor_protocol::{
     api::git::{
-        GitDiffResult,
+        GitDiffResult, MAX_FULL_CONTEXT_PATCH_BYTES,
         worktree::{GitDiffMode, GitDiffRequest, GitDiffResponse, GitFileDiff, GitTrackingState},
     },
     wire::{command::CommandErrorKind, request::CommandError},
@@ -30,7 +30,14 @@ const MAX_UNIFIED_DIFF_BYTES: usize = 4 * 1024 * 1024;
 /// Caps patch text per batch on agents with restrained memory. It is measured as JSON-encoded
 /// bytes because escaping can grow control characters sixfold, and the encoded response is
 /// what must fit in one WebSocket control frame.
-pub(super) const MAX_BATCH_DIFF_BYTES: usize = 8 * 1024 * 1024;
+const MAX_BATCH_DIFF_BYTES: usize = 8 * 1024 * 1024;
+/// Caps the unchanged lines a batch adds by sending files whole, which lets the UI expand
+/// context without another request. It is separate from the patch budget so whole files can
+/// never push a later file's changes out of the response; the frame grows by at most this.
+const MAX_BATCH_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
+/// The unchanged lines `similar` and `git diff` keep around each change by default, which is
+/// what a patch falls back to when its whole file does not fit.
+const DEFAULT_CONTEXT_LINES: usize = 3;
 
 /// Keeps size and entry-kind classifications out of the command-error channel.
 pub(super) enum DiffSource {
@@ -42,7 +49,7 @@ pub(super) enum DiffSource {
 
 /// Returns how many bytes text occupies inside a JSON string, so patch budgets bound the
 /// serialized control frame rather than the raw text.
-pub(super) fn json_encoded_len(text: &[u8]) -> usize {
+fn json_encoded_len(text: &[u8]) -> usize {
     text.iter()
         .map(|byte| match byte {
             b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
@@ -101,14 +108,15 @@ fn diff_blocking(
     request
         .normalize_files()
         .map_err(|message| GitFailure::new(CommandErrorKind::InvalidInput, message))?;
-    let mut remaining = MAX_BATCH_DIFF_BYTES;
+    let mut budget = DiffBudget::new();
     let mut diffs = Vec::with_capacity(request.files.len());
     for path in request.files {
-        let diff = diff_file_blocking(path, mode, interrupt.clone(), remaining)?;
-        if let GitDiffResult::Text { unified_diff } = &diff.result {
-            remaining -= json_encoded_len(unified_diff.as_bytes());
-        }
-        diffs.push(diff);
+        diffs.push(diff_file_blocking(
+            path,
+            mode,
+            interrupt.clone(),
+            &mut budget,
+        )?);
     }
     Ok(GitDiffResponse { diffs })
 }
@@ -118,7 +126,7 @@ fn diff_file_blocking(
     path: String,
     mode: GitDiffMode,
     interrupt: Arc<AtomicBool>,
-    remaining: usize,
+    budget: &mut DiffBudget,
 ) -> Result<GitFileDiff, GitFailure> {
     let requested = validate_absolute_path(&path)?;
     let repository = discover_repository(requested.clone())?.ok_or_else(|| {
@@ -168,7 +176,7 @@ fn diff_file_blocking(
         GitDiffMode::Full => worktree_blob(&requested)?,
         GitDiffMode::Staged => index_blob(&repository.repo, relative.as_bytes())?,
     };
-    let result = compare_sources(head_source, right_source, &relative, remaining)?;
+    let result = budget.compare(head_source, right_source, &relative)?;
     Ok(GitFileDiff { path, result })
 }
 
@@ -264,54 +272,111 @@ fn worktree_blob(path: &Path) -> Result<DiffSource, GitFailure> {
     Ok(DiffSource::Content(data))
 }
 
-/// Formats bounded UTF-8 blobs as unified text with Git-style path headers.
-pub(super) fn compare_sources(
-    left: DiffSource,
-    right: DiffSource,
+/// What is left of a batch's response budgets, shared by every file of one diff response.
+pub(super) struct DiffBudget {
+    /// JSON-encoded bytes left for the patches as they would be with default context.
+    patch: usize,
+    /// JSON-encoded bytes left for the extra unchanged lines of patches sent whole.
+    context: usize,
+}
+
+impl DiffBudget {
+    /// Starts a batch with both budgets full.
+    pub(super) fn new() -> Self {
+        Self {
+            patch: MAX_BATCH_DIFF_BYTES,
+            context: MAX_BATCH_CONTEXT_BYTES,
+        }
+    }
+
+    /// Formats bounded UTF-8 blobs as unified text with Git-style path headers and charges the
+    /// patch to the budgets. The patch carries every unchanged line when that fits, so the UI
+    /// can expand context locally, and falls back to default context when it does not.
+    pub(super) fn compare(
+        &mut self,
+        left: DiffSource,
+        right: DiffSource,
+        relative: &str,
+    ) -> Result<GitDiffResult, GitFailure> {
+        if matches!(left, DiffSource::TooLarge) || matches!(right, DiffSource::TooLarge) {
+            return Ok(GitDiffResult::TooLarge);
+        }
+        if matches!(left, DiffSource::Unsupported) || matches!(right, DiffSource::Unsupported) {
+            return Ok(GitDiffResult::UnsupportedEntry);
+        }
+        let left = match left {
+            DiffSource::Content(content) => content,
+            DiffSource::Missing => Vec::new(),
+            DiffSource::TooLarge | DiffSource::Unsupported => unreachable!("classified above"),
+        };
+        let right = match right {
+            DiffSource::Content(content) => content,
+            DiffSource::Missing => Vec::new(),
+            DiffSource::TooLarge | DiffSource::Unsupported => unreachable!("classified above"),
+        };
+        if left == right {
+            return Ok(GitDiffResult::NoChanges);
+        }
+        if left.contains(&0) || right.contains(&0) {
+            return Ok(GitDiffResult::Binary);
+        }
+        let (Ok(left), Ok(right)) = (std::str::from_utf8(&left), std::str::from_utf8(&right))
+        else {
+            return Ok(GitDiffResult::Binary);
+        };
+        let text_diff = similar::TextDiff::from_lines(left, right);
+        // The default-context patch decides whether the file fits at all, exactly as before
+        // whole files were sent, so the extra context can never turn a file into `TooLarge`.
+        let Some(compact) = format_patch(
+            &text_diff,
+            DEFAULT_CONTEXT_LINES,
+            relative,
+            MAX_UNIFIED_DIFF_BYTES.min(self.patch),
+        ) else {
+            return Ok(GitDiffResult::TooLarge);
+        };
+        self.patch -= compact.encoded;
+        // A file has no more lines than bytes, so this radius keeps every unchanged line
+        // without the overflow `usize::MAX` would cause inside `similar`.
+        let whole_radius = left.len().max(right.len());
+        let whole_limit =
+            MAX_FULL_CONTEXT_PATCH_BYTES.min(compact.encoded.saturating_add(self.context));
+        let whole = format_patch(&text_diff, whole_radius, relative, whole_limit);
+        let (patch, full_context) = match whole {
+            Some(whole) => {
+                self.context -= whole.encoded.saturating_sub(compact.encoded);
+                (whole, true)
+            }
+            None => (compact, false),
+        };
+        let unified_diff = String::from_utf8(patch.bytes)
+            .map_err(|error| internal_failure("encode unified Git diff", error))?;
+        Ok(GitDiffResult::Text {
+            unified_diff,
+            full_context,
+        })
+    }
+}
+
+/// Formats a patch with `radius` unchanged lines around each change, or returns `None` when
+/// it would exceed `limit` JSON-encoded bytes, so an oversized patch is never held whole.
+fn format_patch(
+    text_diff: &similar::TextDiff<'_, '_, str>,
+    radius: usize,
     relative: &str,
-    remaining: usize,
-) -> Result<GitDiffResult, GitFailure> {
-    if matches!(left, DiffSource::TooLarge) || matches!(right, DiffSource::TooLarge) {
-        return Ok(GitDiffResult::TooLarge);
-    }
-    if matches!(left, DiffSource::Unsupported) || matches!(right, DiffSource::Unsupported) {
-        return Ok(GitDiffResult::UnsupportedEntry);
-    }
-    let left = match left {
-        DiffSource::Content(content) => content,
-        DiffSource::Missing => Vec::new(),
-        DiffSource::TooLarge | DiffSource::Unsupported => unreachable!("classified above"),
-    };
-    let right = match right {
-        DiffSource::Content(content) => content,
-        DiffSource::Missing => Vec::new(),
-        DiffSource::TooLarge | DiffSource::Unsupported => unreachable!("classified above"),
-    };
-    if left == right {
-        return Ok(GitDiffResult::NoChanges);
-    }
-    if left.contains(&0) || right.contains(&0) {
-        return Ok(GitDiffResult::Binary);
-    }
-    let (Ok(left), Ok(right)) = (std::str::from_utf8(&left), std::str::from_utf8(&right)) else {
-        return Ok(GitDiffResult::Binary);
-    };
-    let text_diff = similar::TextDiff::from_lines(left, right);
+    limit: usize,
+) -> Option<LimitedWriter> {
     let mut unified_diff = text_diff.unified_diff();
-    unified_diff.header(&format!("a/{relative}"), &format!("b/{relative}"));
+    unified_diff
+        .context_radius(radius)
+        .header(&format!("a/{relative}"), &format!("b/{relative}"));
     let mut output = LimitedWriter {
         bytes: Vec::new(),
         encoded: 0,
-        limit: MAX_UNIFIED_DIFF_BYTES.min(remaining),
+        limit,
     };
-    if unified_diff.to_writer(&mut output).is_err() {
-        return Ok(GitDiffResult::TooLarge);
-    }
-    let patch = String::from_utf8(output.bytes)
-        .map_err(|error| internal_failure("encode unified Git diff", error))?;
-    Ok(GitDiffResult::Text {
-        unified_diff: patch,
-    })
+    unified_diff.to_writer(&mut output).ok()?;
+    Some(output)
 }
 
 /// Honors Git's built-in `-diff` binary declaration without invoking configured drivers.
@@ -345,34 +410,34 @@ mod tests {
     fn bounded_diff_formatter_classifies_content() {
         // Equal content has a semantic result instead of an empty ambiguous patch.
         assert_eq!(
-            compare_sources(
-                DiffSource::Content(b"same\n".to_vec()),
-                DiffSource::Content(b"same\n".to_vec()),
-                "file.txt",
-                MAX_BATCH_DIFF_BYTES
-            )
-            .unwrap(),
+            DiffBudget::new()
+                .compare(
+                    DiffSource::Content(b"same\n".to_vec()),
+                    DiffSource::Content(b"same\n".to_vec()),
+                    "file.txt",
+                )
+                .unwrap(),
             GitDiffResult::NoChanges
         );
         // NUL bytes identify binary data before line formatting.
         assert_eq!(
-            compare_sources(
-                DiffSource::Content(vec![0]),
-                DiffSource::Content(vec![1]),
-                "file.bin",
-                MAX_BATCH_DIFF_BYTES
-            )
-            .unwrap(),
+            DiffBudget::new()
+                .compare(
+                    DiffSource::Content(vec![0]),
+                    DiffSource::Content(vec![1]),
+                    "file.bin",
+                )
+                .unwrap(),
             GitDiffResult::Binary
         );
-        let result = compare_sources(
-            DiffSource::Content(b"old\n".to_vec()),
-            DiffSource::Content(b"new\n".to_vec()),
-            "nested/file.txt",
-            MAX_BATCH_DIFF_BYTES,
-        )
-        .unwrap();
-        let GitDiffResult::Text { unified_diff } = result else {
+        let result = DiffBudget::new()
+            .compare(
+                DiffSource::Content(b"old\n".to_vec()),
+                DiffSource::Content(b"new\n".to_vec()),
+                "nested/file.txt",
+            )
+            .unwrap();
+        let GitDiffResult::Text { unified_diff, .. } = result else {
             panic!("changed UTF-8 should produce text");
         };
         // Git-style labels let the existing renderer identify the browser path.
@@ -385,15 +450,107 @@ mod tests {
     /// Checks that the batch budget is applied before patch bytes are retained.
     #[test]
     fn formatter_respects_remaining_batch_budget() {
-        let result = compare_sources(
-            DiffSource::Missing,
-            DiffSource::Content(b"addition".to_vec()),
-            "file.txt",
-            4,
-        )
-        .unwrap();
+        let mut budget = DiffBudget {
+            patch: 4,
+            context: MAX_BATCH_CONTEXT_BYTES,
+        };
+        let result = budget
+            .compare(
+                DiffSource::Missing,
+                DiffSource::Content(b"addition".to_vec()),
+                "file.txt",
+            )
+            .unwrap();
         // An individually valid patch must still respect the remaining shared budget.
         assert_eq!(result, GitDiffResult::TooLarge);
+    }
+
+    /// Builds a file of numbered lines, so context sizes are easy to reason about.
+    fn numbered_lines(count: usize, changed: Option<usize>) -> Vec<u8> {
+        (1..=count)
+            .map(|line| {
+                if Some(line) == changed {
+                    format!("changed {line}\n")
+                } else {
+                    format!("line {line}\n")
+                }
+            })
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    /// Checks that small files are sent whole, so the UI can expand context without asking
+    /// again, and that the whole file is charged to the context budget only.
+    #[test]
+    fn formatter_sends_whole_files_that_fit() {
+        let mut budget = DiffBudget::new();
+        let result = budget
+            .compare(
+                DiffSource::Content(numbered_lines(50, None)),
+                DiffSource::Content(numbered_lines(50, Some(25))),
+                "file.txt",
+            )
+            .unwrap();
+        let GitDiffResult::Text {
+            unified_diff,
+            full_context,
+        } = result
+        else {
+            panic!("changed UTF-8 should produce text");
+        };
+        // The flag tells the UI it may fold and expand the unchanged lines itself.
+        assert!(full_context);
+        // One hunk spans the whole file, so lines far from the change are included.
+        assert!(unified_diff.contains("@@ -1,50 +1,50 @@"));
+        assert!(unified_diff.contains(" line 1\n"));
+        assert!(unified_diff.contains(" line 50\n"));
+        // The patch budget is charged as if default context had been sent, so whole files
+        // never crowd later files' changes out of a batch.
+        let compact = format_patch(
+            &similar::TextDiff::from_lines(
+                std::str::from_utf8(&numbered_lines(50, None)).unwrap(),
+                std::str::from_utf8(&numbered_lines(50, Some(25))).unwrap(),
+            ),
+            DEFAULT_CONTEXT_LINES,
+            "file.txt",
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(budget.patch, MAX_BATCH_DIFF_BYTES - compact.encoded);
+        // Only the extra unchanged lines come out of the context budget.
+        assert_eq!(
+            budget.context,
+            MAX_BATCH_CONTEXT_BYTES - (json_encoded_len(unified_diff.as_bytes()) - compact.encoded)
+        );
+    }
+
+    /// Checks that a file whose whole patch does not fit the context budget still shows its
+    /// changes with default context instead of becoming too large.
+    #[test]
+    fn formatter_falls_back_to_default_context() {
+        let mut budget = DiffBudget {
+            patch: MAX_BATCH_DIFF_BYTES,
+            context: 0,
+        };
+        let result = budget
+            .compare(
+                DiffSource::Content(numbered_lines(50, None)),
+                DiffSource::Content(numbered_lines(50, Some(25))),
+                "file.txt",
+            )
+            .unwrap();
+        let GitDiffResult::Text {
+            unified_diff,
+            full_context,
+        } = result
+        else {
+            panic!("changed UTF-8 should produce text");
+        };
+        // The UI must not offer expansion for lines the patch does not carry.
+        assert!(!full_context);
+        // Three lines of context around line 25, as `git diff` would show.
+        assert!(unified_diff.contains("@@ -22,7 +22,7 @@"));
+        assert!(!unified_diff.contains(" line 1\n"));
     }
 
     /// Protects direct agent commands from duplicate work and excessive batch metadata.
@@ -419,14 +576,14 @@ mod tests {
     /// Verifies the formatter preserves missing-final-newline markers needed for exact display.
     #[test]
     fn bounded_diff_formatter_marks_missing_final_newlines() {
-        let result = compare_sources(
-            DiffSource::Content(b"old".to_vec()),
-            DiffSource::Content(b"new".to_vec()),
-            "file.txt",
-            MAX_BATCH_DIFF_BYTES,
-        )
-        .unwrap();
-        let GitDiffResult::Text { unified_diff } = result else {
+        let result = DiffBudget::new()
+            .compare(
+                DiffSource::Content(b"old".to_vec()),
+                DiffSource::Content(b"new".to_vec()),
+                "file.txt",
+            )
+            .unwrap();
+        let GitDiffResult::Text { unified_diff, .. } = result else {
             panic!("changed UTF-8 should produce text");
         };
         // The marker tells users the visible line ending is absent rather than hidden.

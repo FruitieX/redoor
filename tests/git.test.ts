@@ -344,6 +344,53 @@ describe("Git browser REST API", () => {
         expect(bytes).toBeGreaterThan(7 * 1024 * 1024);
     });
 
+    it("sends small files whole and large files with default context", async () => {
+        const repo = tempFiles.tempDirectory({ suffix: "-git-full-context" });
+        await initRepository(repo);
+        const small = join(repo, "small.txt");
+        const large = join(repo, "large.txt");
+
+        /** Numbered lines with one of them edited, so context sizes are predictable. */
+        const numbered = (count: number, changed: number | null) =>
+            Array.from({ length: count }, (_, index) =>
+                index + 1 === changed
+                    ? `changed ${index + 1}\n`
+                    : `line ${index + 1}\n`,
+            ).join("");
+
+        await writeFile(small, numbered(50, null));
+        // Large enough that the whole patch exceeds the full-context cap.
+        await writeFile(large, numbered(40_000, null));
+        await $({ cwd: repo })`git add .`;
+        await $({ cwd: repo })`git commit -m initial`;
+        await writeFile(small, numbered(50, 25));
+        await writeFile(large, numbered(40_000, 20_000));
+
+        const response = await gitDiffFiles([small, large]);
+        const [smallDiff, largeDiff] = response.diffs.map((diff) => diff.result);
+
+        // A small file carries every unchanged line, so the UI can expand context locally.
+        expect(smallDiff).toMatchObject({
+            type: "text",
+            full_context: true,
+            unified_diff: expect.stringContaining("@@ -1,50 +1,50 @@"),
+        });
+        // Lines far from the change are part of the whole-file patch.
+        expect(smallDiff).toMatchObject({
+            unified_diff: expect.stringContaining(" line 1\n"),
+        });
+        // A large file still shows its change, with the context `git diff` would show.
+        expect(largeDiff).toMatchObject({
+            type: "text",
+            full_context: false,
+            unified_diff: expect.stringContaining("@@ -19997,7 +19997,7 @@"),
+        });
+        // The UI must not offer expansion for lines the patch left out.
+        expect(largeDiff).not.toMatchObject({
+            unified_diff: expect.stringContaining(" line 1\n"),
+        });
+    });
+
     it("handles unborn and detached HEAD plus bounded diff outcomes", async () => {
         const repo = tempFiles.tempDirectory({ suffix: "-git-edge" });
         await initRepository(repo);

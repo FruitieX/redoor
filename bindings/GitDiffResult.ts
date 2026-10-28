@@ -3,4 +3,9 @@
 /**
  * Represents every bounded single-file diff outcome explicitly.
  */
-export type GitDiffResult = { "type": "text", unified_diff: string, } | { "type": "no_changes" } | { "type": "untracked" } | { "type": "ignored" } | { "type": "binary" } | { "type": "too_large" } | { "type": "unsupported_entry" };
+export type GitDiffResult = { "type": "text", unified_diff: string, 
+/**
+ * True when the patch holds every unchanged line of the file, so the UI can fold and
+ * expand context locally. Older agents omit it and their patches stay unexpandable.
+ */
+full_context: boolean, } | { "type": "no_changes" } | { "type": "untracked" } | { "type": "ignored" } | { "type": "binary" } | { "type": "too_large" } | { "type": "unsupported_entry" };

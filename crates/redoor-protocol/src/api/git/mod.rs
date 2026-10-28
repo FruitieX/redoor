@@ -74,13 +74,24 @@ pub enum GitChangeState {
     TypeChanged,
 }
 
+/// The largest patch sent with every unchanged line of its file. Whole files let the UI expand
+/// context without another request, but past this size the rows cost more to send and render
+/// than the context is worth, so the patch falls back to default context.
+pub const MAX_FULL_CONTEXT_PATCH_BYTES: usize = 256 * 1024;
+
 /// Represents every bounded single-file diff outcome explicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(tag = "type", rename_all = "snake_case")]
 pub enum GitDiffResult {
-    Text { unified_diff: String },
+    Text {
+        unified_diff: String,
+        /// True when the patch holds every unchanged line of the file, so the UI can fold and
+        /// expand context locally. Older agents omit it and their patches stay unexpandable.
+        #[serde(default)]
+        full_context: bool,
+    },
     NoChanges,
     Untracked,
     Ignored,
