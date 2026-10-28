@@ -8,6 +8,7 @@ import { ContextualTopBar } from "#ui/components/contextual-top-bar";
 import { GlobalFileImportHandler } from "#ui/components/global-file-import-handler";
 import { OverlayChromeLayout } from "#ui/components/overlay-chrome-layout";
 import { ApplicationBottomDrawer } from "#ui/components/shell/bottom-drawer";
+import { DocumentTitle } from "#ui/components/shell/document-title";
 import { RouteLoadingIndicator } from "#ui/components/shell/route-loading-indicator";
 import { ThemeManager } from "#ui/components/theme-toggle";
 import { UserStatePersistToast } from "#ui/components/user-state-persist-toast";
@@ -37,6 +38,7 @@ export function AppShell() {
         <ShellFileImportHandler>
             <div className="flex h-dvh overflow-hidden bg-canvas">
                 <ThemeManager />
+                <DocumentTitle />
                 <RouteLoadingIndicator />
                 <UserStatePersistToast />
                 <ApplicationNavigation />
