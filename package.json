@@ -29,6 +29,8 @@
         "generate-icons": "node scripts/generate-logo-assets.mts",
         "preplaywright": "node scripts/test/ensure-test-ports.mts",
         "playwright": "playwright test --reporter=line --config ui/playwright.config.ts",
+        "audit:crates": "cargo deny check advisories",
+        "audit:npm": "pnpm audit",
         "lint": "oxlint -c .oxlintrc.json --type-aware",
         "dev": "./scripts/dev",
         "dev:vite": "vite ./ui",
