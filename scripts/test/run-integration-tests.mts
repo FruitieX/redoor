@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { $ } from "zx";
+import { stageTestBinary } from "./stage-test-binary.mts";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -17,8 +18,7 @@ async function runIntegrationTests(arguments_: string[]): Promise<void> {
     const filters = arguments_.length === 0 ? ["tests"] : arguments_;
 
     try {
-        await copyFile(join(PROJECT_ROOT, "target/debug/redoor"), stagedBinary);
-        await chmod(stagedBinary, 0o755);
+        await stageTestBinary(stagedBinary);
         await $({
             cwd: PROJECT_ROOT,
             stdio: "inherit",
