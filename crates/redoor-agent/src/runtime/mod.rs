@@ -639,13 +639,17 @@ impl AgentRuntime {
     fn schedule_reconnect(&mut self, handle: AgentHandle, reason: &str) {
         self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
         let attempt = self.reconnect_attempts;
-        let delay = reconnect_delay(attempt);
+        let delay = self
+            .profile
+            .ws_timeouts
+            .reconnect_delay
+            .unwrap_or_else(|| reconnect_delay(attempt));
         log!(
             Level::Warning,
-            "{}, scheduling reconnect attempt {} in {}s",
+            "{}, scheduling reconnect attempt {} in {:?}",
             reason,
             attempt,
-            delay.as_secs()
+            delay
         );
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;

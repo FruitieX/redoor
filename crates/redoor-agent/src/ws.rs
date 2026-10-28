@@ -447,6 +447,7 @@ mod tests {
                 keepalive: tokio::time::Duration::from_secs(60),
                 stale_timeout: tokio::time::Duration::from_nanos(1),
                 stale_check_interval: tokio::time::Duration::from_nanos(1),
+                reconnect_delay: None,
             },
         ));
 

@@ -64,6 +64,15 @@ struct Cli {
         global = true
     )]
     websocket_stale_check_interval: std::time::Duration,
+    /// Fixed delay between agent reconnect attempts instead of the jittered production backoff.
+    #[arg(
+        long,
+        env = "REDOOR_RECONNECT_DELAY",
+        value_parser = redoor_core::websocket::parse_duration_millis,
+        global = true,
+        hide = true
+    )]
+    reconnect_delay: Option<std::time::Duration>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -280,6 +289,7 @@ fn main() -> ExitCode {
             keepalive: cli.websocket_keepalive,
             stale_timeout: cli.websocket_stale_timeout,
             stale_check_interval: cli.websocket_stale_check_interval,
+            reconnect_delay: cli.reconnect_delay,
         },
     };
     let runtime = match tokio::runtime::Runtime::new() {
