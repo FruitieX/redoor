@@ -610,7 +610,9 @@ function CreateTokenDialog(props: {
             size="wide"
             onClose={close}
         >
-            <div className="mt-5">
+            {/* The fields' container queries would otherwise measure the page column behind
+                this viewport-sized modal. */}
+            <div className="@container mt-5">
                 <AccessTokenPolicyFields
                     draft={draft}
                     agents={props.agents}
