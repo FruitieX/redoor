@@ -11,6 +11,7 @@ import {
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
+import { CopyableGitRef } from "#ui/components/copyable-git-ref";
 import { IconLinkButton } from "#ui/components/icon-button";
 import {
     SegmentedControl,
@@ -162,10 +163,6 @@ export function GitCommitList(props: {
     const startCommitId = props.commitId ?? props.headCommitId;
     const branchName = props.commitId === null ? props.branchName : null;
 
-    const start =
-        branchName ??
-        (startCommitId === null ? "HEAD" : shortCommitId(startCommitId));
-
     return (
         <>
             <GitPanelBar>
@@ -175,7 +172,13 @@ export function GitCommitList(props: {
                         aria-hidden="true"
                     />
                     {branchName === null ? "History from" : "History of"}{" "}
-                    <code className="font-mono">{start}</code>
+                    {branchName !== null ? (
+                        <CopyableGitRef kind="branch" value={branchName} />
+                    ) : startCommitId !== null ? (
+                        <CopyableGitRef kind="commit" value={startCommitId} />
+                    ) : (
+                        <code className="font-mono">HEAD</code>
+                    )}
                 </span>
                 <span className="text-slate-400">
                     {relativePath === "" ? (
@@ -298,14 +301,20 @@ function CommitRow(props: {
                 >
                     <FolderOpen className="h-4 w-4" aria-hidden="true" />
                 </IconLinkButton>
-                <Link
-                    {...browserRoute(props.agent, props.path)}
-                    search={{ view: "git", rev: commit.id }}
-                    aria-label={`Changes of commit ${shortId}`}
-                    className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 font-mono text-xs text-slate-300 hover:border-blue-400/50 hover:text-blue-300"
+                <CopyableGitRef
+                    kind="commit"
+                    value={commit.id}
+                    className="text-slate-400"
                 >
-                    {shortId.slice(0, 7)}
-                </Link>
+                    <Link
+                        {...browserRoute(props.agent, props.path)}
+                        search={{ view: "git", rev: commit.id }}
+                        aria-label={`Changes of commit ${shortId}`}
+                        className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 font-mono text-xs text-slate-300 hover:border-blue-400/50 hover:text-blue-300"
+                    >
+                        {shortId.slice(0, 7)}
+                    </Link>
+                </CopyableGitRef>
             </span>
         </li>
     );
@@ -461,14 +470,20 @@ function RefRow(props: {
             </span>
             <div className="min-w-0 flex-1">
                 <span className="flex min-w-0 items-center gap-2">
-                    <Link
-                        {...browserRoute(props.agent, props.path)}
-                        search={{ rev: ref.full_name }}
-                        className="truncate font-mono text-sm font-medium text-slate-100 hover:text-blue-300 hover:underline"
-                        title={`Browse ${ref.full_name}`}
+                    <CopyableGitRef
+                        kind={ref.kind === "tag" ? "tag" : "branch"}
+                        value={ref.name}
+                        className="text-slate-400"
                     >
-                        {ref.name}
-                    </Link>
+                        <Link
+                            {...browserRoute(props.agent, props.path)}
+                            search={{ rev: ref.full_name }}
+                            className="truncate font-mono text-sm font-medium text-slate-100 hover:text-blue-300 hover:underline"
+                            title={`Browse ${ref.full_name}`}
+                        >
+                            {ref.name}
+                        </Link>
+                    </CopyableGitRef>
                     {ref.is_head ? (
                         <span className="shrink-0 rounded-full border border-emerald-400/40 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
                             HEAD
@@ -496,14 +511,20 @@ function RefRow(props: {
                     />
                 </p>
             </div>
-            <Link
-                {...browserRoute(props.agent, props.path)}
-                search={{ view: "git", rev: commit.id }}
-                aria-label={`Changes of commit ${shortId}`}
-                className="shrink-0 rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 font-mono text-xs text-slate-300 hover:border-blue-400/50 hover:text-blue-300"
+            <CopyableGitRef
+                kind="commit"
+                value={commit.id}
+                className="shrink-0 text-slate-400"
             >
-                {shortId.slice(0, 7)}
-            </Link>
+                <Link
+                    {...browserRoute(props.agent, props.path)}
+                    search={{ view: "git", rev: commit.id }}
+                    aria-label={`Changes of commit ${shortId}`}
+                    className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 font-mono text-xs text-slate-300 hover:border-blue-400/50 hover:text-blue-300"
+                >
+                    {shortId.slice(0, 7)}
+                </Link>
+            </CopyableGitRef>
         </li>
     );
 }

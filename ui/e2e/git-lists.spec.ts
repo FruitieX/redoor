@@ -175,7 +175,7 @@ test.describe.serial("Git commit, branch and tag lists", () => {
             })`git -C ${repositoryPath} commit-tree -p HEAD -m ${"Future"} HEAD^{tree}`
         ).stdout.trim();
 
-        // Later tests do not list this repository's branches, so it is left for teardown.
+        // Later tests do not count this repository's branches, so it is left for teardown.
         await $`git -C ${repositoryPath} branch zeta ${futureCommit}`;
 
         await page.goto(
@@ -259,5 +259,49 @@ test.describe.serial("Git commit, branch and tag lists", () => {
         await expect(
             page.getByRole("button", { name: "Load more commits" }),
         ).toHaveCount(0);
+    });
+
+    test("copies full commit hashes and branch names", async ({
+        page,
+        context,
+    }) => {
+        await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+        await page.goto(
+            `${deviceBrowserUrl(ctx.agentName, repositoryPath)}?view=git&gitTab=commits`,
+        );
+
+        const firstCommitRow = page
+            .getByRole("group", { name: "Commit history" })
+            .getByRole("listitem")
+            .filter({ hasText: "Initial import" });
+
+        await firstCommitRow
+            .getByRole("button", {
+                name: `Copy commit hash ${firstCommit.slice(0, 12)}`,
+            })
+            .click();
+
+        // The button confirms the copy so a phone user knows the tap worked.
+        await expect(
+            firstCommitRow.getByRole("button", { name: "Copied!" }),
+        ).toBeVisible();
+        // The row shows a short hash, but the clipboard gets the full one for the terminal.
+        await expect
+            .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+            .toBe(firstCommit);
+
+        await page.goto(
+            `${deviceBrowserUrl(ctx.agentName, repositoryPath)}?view=git&gitTab=branches`,
+        );
+
+        await page
+            .getByRole("list", { name: "Branches" })
+            .getByRole("button", { name: "Copy branch name feature" })
+            .click();
+
+        // A branch is copied by the short name people type, not its full ref.
+        await expect
+            .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+            .toBe("feature");
     });
 });

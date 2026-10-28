@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
+import { CopyableGitRef } from "#ui/components/copyable-git-ref";
 import { Tooltip } from "#ui/components/tooltip";
 import { GitDiffResultView } from "#ui/components/browser/git";
 import {
@@ -27,6 +28,7 @@ import {
     GitPanelBar,
     changeLabel,
     displayRevision,
+    revisionRefKind,
     shortCommitId,
 } from "#ui/components/browser/git-parts";
 import { formatModifiedAge } from "#ui/components/browser/utils";
@@ -61,6 +63,15 @@ export function RevisionBanner(props: {
     const commit = props.commit;
     const showsCommitId = commit !== null && !commit.id.startsWith(props.rev);
 
+    // A name is copied as people type it; a hash is copied whole, though shown short.
+    const copiedRevision =
+        commit === null || showsCommitId
+            ? {
+                  kind: revisionRefKind(props.rev),
+                  value: displayRevision(props.rev),
+              }
+            : { kind: "commit" as const, value: commit.id };
+
     return (
         <section
             aria-label="Git revision"
@@ -70,19 +81,30 @@ export function RevisionBanner(props: {
                 <History className="h-3.5 w-3.5" aria-hidden="true" />
                 History
             </span>
-            <span className="min-w-0 text-amber-100">
-                Viewing{" "}
-                <code
-                    aria-label="Revision"
-                    title={props.rev}
-                    className="rounded bg-amber-900/40 px-1 font-mono text-amber-50"
+            <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1 text-amber-100">
+                Viewing
+                <CopyableGitRef
+                    kind={copiedRevision.kind}
+                    value={copiedRevision.value}
                 >
-                    {displayRevision(props.rev)}
-                </code>
+                    <code
+                        aria-label="Revision"
+                        title={props.rev}
+                        className="truncate rounded bg-amber-900/40 px-1 font-mono text-amber-50"
+                    >
+                        {displayRevision(props.rev)}
+                    </code>
+                </CopyableGitRef>
                 {showsCommitId ? (
-                    <span className="ml-1 font-mono text-xs text-amber-200/80">
-                        ({shortCommitId(commit.id)})
-                    </span>
+                    <CopyableGitRef
+                        kind="commit"
+                        value={commit.id}
+                        className="text-amber-200/80"
+                    >
+                        <span className="font-mono text-xs">
+                            ({shortCommitId(commit.id)})
+                        </span>
+                    </CopyableGitRef>
                 ) : null}
             </span>
             {commit === null ? null : (
@@ -495,13 +517,19 @@ export function GitCommitView(props: {
                             <span aria-hidden="true" className="text-slate-600">
                                 ·{" "}
                             </span>
-                            <code
-                                aria-label="Commit id"
-                                title={commit.id}
-                                className="font-mono text-slate-300"
+                            <CopyableGitRef
+                                kind="commit"
+                                value={commit.id}
+                                className="align-middle"
                             >
-                                {shortCommitId(commit.id)}
-                            </code>
+                                <code
+                                    aria-label="Commit id"
+                                    title={commit.id}
+                                    className="font-mono text-slate-300"
+                                >
+                                    {shortCommitId(commit.id)}
+                                </code>
+                            </CopyableGitRef>
                         </span>
                     </p>
                     <CommitNotes
@@ -611,13 +639,19 @@ function CommitNotes(props: {
                 // The stepper follows the path's history, so the compared parent gets its own link.
                 <li>
                     Merge, compared with first parent{" "}
-                    <Link
-                        {...browserRoute(props.agent, props.path)}
-                        search={{ view: "git", rev: parentId }}
-                        className="font-mono text-blue-300 hover:underline"
+                    <CopyableGitRef
+                        kind="commit"
+                        value={parentId}
+                        className="align-middle"
                     >
-                        {shortCommitId(parentId)}
-                    </Link>
+                        <Link
+                            {...browserRoute(props.agent, props.path)}
+                            search={{ view: "git", rev: parentId }}
+                            className="font-mono text-blue-300 hover:underline"
+                        >
+                            {shortCommitId(parentId)}
+                        </Link>
+                    </CopyableGitRef>
                 </li>
             ) : null}
             {isScoped ? (

@@ -13,10 +13,12 @@ import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
 import type { GitTab } from "#ui/browser-search";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
+import { CopyableGitRef } from "#ui/components/copyable-git-ref";
 import { GitCommitList, GitRefList } from "#ui/components/browser/git-history";
 import { GitWorktreeList } from "#ui/components/browser/git-worktrees";
 import {
     displayRevision,
+    revisionRefKind,
     shortCommitId,
 } from "#ui/components/browser/git-parts";
 import { getBaseName } from "#ui/utils/path";
@@ -264,21 +266,42 @@ function ReferenceBadge(props: { reference: GitViewReference }) {
     if (reference.type === "revision") {
         const showsId = !reference.commit.id.startsWith(reference.rev);
 
+        const label = (
+            <span title={`Browsing ${reference.rev}`} className="truncate">
+                {displayRevision(reference.rev)}
+            </span>
+        );
+
         return (
             <span
-                title={`Browsing ${reference.rev}`}
                 className={`${pill} border-amber-400/40 bg-amber-400/10 text-amber-300`}
             >
                 <History className="h-4 w-4 shrink-0" aria-hidden="true" />
                 <span className="sr-only">Browsing revision</span>
-                <span className="truncate">
-                    {displayRevision(reference.rev)}
-                </span>
+                {/* A name is copied as people type it; a hash is copied whole, though shown short. */}
                 {showsId ? (
-                    <span className="font-mono text-xs opacity-75">
-                        {shortCommitId(reference.commit.id)}
-                    </span>
-                ) : null}
+                    <>
+                        <CopyableGitRef
+                            kind={revisionRefKind(reference.rev)}
+                            value={displayRevision(reference.rev)}
+                        >
+                            {label}
+                        </CopyableGitRef>
+                        <CopyableGitRef
+                            kind="commit"
+                            value={reference.commit.id}
+                            className="shrink-0"
+                        >
+                            <span className="font-mono text-xs opacity-75">
+                                {shortCommitId(reference.commit.id)}
+                            </span>
+                        </CopyableGitRef>
+                    </>
+                ) : (
+                    <CopyableGitRef kind="commit" value={reference.commit.id}>
+                        {label}
+                    </CopyableGitRef>
+                )}
             </span>
         );
     }
@@ -294,9 +317,15 @@ function ReferenceBadge(props: { reference: GitViewReference }) {
                 />
                 Detached
                 {reference.headCommitId === null ? null : (
-                    <span className="font-mono text-xs opacity-75">
-                        {shortCommitId(reference.headCommitId)}
-                    </span>
+                    <CopyableGitRef
+                        kind="commit"
+                        value={reference.headCommitId}
+                        className="shrink-0"
+                    >
+                        <span className="font-mono text-xs opacity-75">
+                            {shortCommitId(reference.headCommitId)}
+                        </span>
+                    </CopyableGitRef>
                 )}
             </span>
         );
@@ -308,12 +337,22 @@ function ReferenceBadge(props: { reference: GitViewReference }) {
         >
             <GitBranch className="h-4 w-4 shrink-0" aria-hidden="true" />
             <span className="sr-only">Checked out branch</span>
-            <span className="truncate">{reference.branchName}</span>
-            <span className="font-mono text-xs opacity-75">
-                {reference.headCommitId === null
-                    ? "no commits"
-                    : shortCommitId(reference.headCommitId)}
-            </span>
+            <CopyableGitRef kind="branch" value={reference.branchName}>
+                <span className="truncate">{reference.branchName}</span>
+            </CopyableGitRef>
+            {reference.headCommitId === null ? (
+                <span className="font-mono text-xs opacity-75">no commits</span>
+            ) : (
+                <CopyableGitRef
+                    kind="commit"
+                    value={reference.headCommitId}
+                    className="shrink-0"
+                >
+                    <span className="font-mono text-xs opacity-75">
+                        {shortCommitId(reference.headCommitId)}
+                    </span>
+                </CopyableGitRef>
+            )}
         </span>
     );
 }

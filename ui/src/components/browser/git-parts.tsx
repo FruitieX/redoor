@@ -1,4 +1,5 @@
 import type { GitChangeState } from "#bindings/GitChangeState";
+import type { GitRefKind } from "#ui/components/copyable-git-ref";
 import { formatModifiedAge } from "#ui/components/browser/utils";
 import { cn } from "#ui/utils/cn";
 
@@ -22,6 +23,22 @@ export function displayRevision(rev: string): string {
     );
 
     return namespace === undefined ? rev : rev.slice(namespace.length);
+}
+
+/**
+ * Tells what a browsed revision name refers to, so copying it is worded as the branch or tag
+ * people would type. Anything else, such as `HEAD~2`, is only known to be some ref.
+ */
+export function revisionRefKind(rev: string): GitRefKind {
+    if (rev.startsWith("refs/heads/") || rev.startsWith("refs/remotes/")) {
+        return "branch";
+    }
+
+    if (rev.startsWith("refs/tags/")) {
+        return "tag";
+    }
+
+    return "ref";
 }
 
 /** Every state a changed file can be listed in, worktree status and commits alike. */

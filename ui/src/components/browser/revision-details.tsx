@@ -1,6 +1,7 @@
 import type { Agent } from "#ui/api-client";
 import { Button } from "#ui/components/button";
 import { BrowserViewCard } from "#ui/components/browser-view-card";
+import { CopyableGitRef } from "#ui/components/copyable-git-ref";
 import {
     MetadataItem,
     MetadataSectionsLayout,
@@ -132,7 +133,16 @@ export function RevisionDetailView(props: {
                         {entry.type === "file" ? (
                             <MetadataItem
                                 label="Blob"
-                                value={entry.blob_id}
+                                value={
+                                    <CopyableGitRef
+                                        kind="blob"
+                                        value={entry.blob_id}
+                                    >
+                                        <span className="truncate">
+                                            {entry.blob_id}
+                                        </span>
+                                    </CopyableGitRef>
+                                }
                                 valueLabel="Blob id"
                                 mono
                             />
@@ -147,13 +157,31 @@ export function RevisionDetailView(props: {
                         {entry.type === "submodule" ? (
                             <MetadataItem
                                 label="Submodule commit"
-                                value={entry.commit_id}
+                                value={
+                                    <CopyableGitRef
+                                        kind="commit"
+                                        value={entry.commit_id}
+                                    >
+                                        <span className="truncate">
+                                            {entry.commit_id}
+                                        </span>
+                                    </CopyableGitRef>
+                                }
                                 mono
                             />
                         ) : null}
                         <MetadataItem
                             label="Commit"
-                            value={props.tree.commit.id}
+                            value={
+                                <CopyableGitRef
+                                    kind="commit"
+                                    value={props.tree.commit.id}
+                                >
+                                    <span className="truncate">
+                                        {props.tree.commit.id}
+                                    </span>
+                                </CopyableGitRef>
+                            }
                             valueLabel="Commit id"
                             mono
                         />

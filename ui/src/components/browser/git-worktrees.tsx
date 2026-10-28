@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import type { Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
+import { CopyableGitRef } from "#ui/components/copyable-git-ref";
 import { IconLinkButton } from "#ui/components/icon-button";
 import {
     CommitAge,
@@ -229,14 +230,23 @@ function WorktreeRow(props: {
                             />
                         </IconLinkButton>
                         {commit === null ? null : (
-                            <Link
-                                {...browserRoute(props.agent, worktree.path)}
-                                search={{ view: "git", rev: commit.id }}
-                                aria-label={`Changes of commit ${shortCommitId(commit.id)}`}
-                                className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 font-mono text-xs text-slate-300 hover:border-blue-400/50 hover:text-blue-300"
+                            <CopyableGitRef
+                                kind="commit"
+                                value={commit.id}
+                                className="text-slate-400"
                             >
-                                {shortCommitId(commit.id).slice(0, 7)}
-                            </Link>
+                                <Link
+                                    {...browserRoute(
+                                        props.agent,
+                                        worktree.path,
+                                    )}
+                                    search={{ view: "git", rev: commit.id }}
+                                    aria-label={`Changes of commit ${shortCommitId(commit.id)}`}
+                                    className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-0.5 font-mono text-xs text-slate-300 hover:border-blue-400/50 hover:text-blue-300"
+                                >
+                                    {shortCommitId(commit.id).slice(0, 7)}
+                                </Link>
+                            </CopyableGitRef>
                         )}
                     </span>
                 )}
@@ -266,18 +276,22 @@ function BranchPill(props: { worktree: GitWorktree }) {
         );
     }
 
+    // The pill is the copyable wrapper, so its copy button sits inside the pill's border.
     return (
-        <span
-            title={`Branch ${branchName}`}
+        <CopyableGitRef
+            kind="branch"
+            value={branchName}
             className={cn(
                 pill,
-                "min-w-0 border-emerald-400/40 bg-emerald-400/10 font-mono text-emerald-300",
+                "min-w-0 border-emerald-400/40 bg-emerald-400/10 py-0 pr-0.5 font-mono text-emerald-300",
             )}
         >
             <GitBranch className="h-3 w-3 shrink-0" aria-hidden="true" />
             <span className="sr-only">Branch</span>
-            <span className="truncate">{branchName}</span>
-        </span>
+            <span title={`Branch ${branchName}`} className="truncate">
+                {branchName}
+            </span>
+        </CopyableGitRef>
     );
 }
 
