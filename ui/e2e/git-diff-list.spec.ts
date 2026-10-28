@@ -226,4 +226,51 @@ test.describe("Git diff list", () => {
         // Clearing the filter lists every file again.
         await expect(headers).toHaveCount(3);
     });
+
+    test("copies the file name, repository path or absolute path of a diff", async ({
+        page,
+        context,
+    }) => {
+        await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+            origin: WEB_BASE_URL,
+        });
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${agentName}/browser/${encodeFilesystemPath(repositoryPath)}?view=git`,
+        );
+
+        const absolutePath = path.join(
+            repositoryPath,
+            "src/my-test/helpers.ts",
+        );
+
+        const trigger = page.getByRole("button", {
+            name: "Copy path of src/my-test/helpers.ts",
+        });
+
+        const options = [
+            { name: "Copy file name", value: "helpers.ts" },
+            { name: "Copy repository path", value: "src/my-test/helpers.ts" },
+            { name: "Copy absolute path", value: absolutePath },
+        ];
+
+        for (const option of options) {
+            // The menu is on the header, so a collapsed file can be copied without its patch.
+            await trigger.click();
+            await page
+                .getByRole("dialog", { name: "Copy path" })
+                .getByRole("button", { name: option.name })
+                .click();
+
+            // Each option puts its own form of the path on the clipboard.
+            await expect
+                .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+                .toBe(option.value);
+            // The menu closes on a pick, so the trigger confirms the async copy finished.
+            await expect(
+                page.getByRole("button", { name: "Copied!" }),
+            ).toBeVisible();
+            // The feedback resets before the next pick, so each copy is confirmed on its own.
+            await expect(trigger).toBeVisible();
+        }
+    });
 });
