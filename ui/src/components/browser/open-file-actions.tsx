@@ -1,15 +1,12 @@
 import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { getRouteApi } from "@tanstack/react-router";
-import { Pin } from "lucide-react";
 
-import { Button } from "#ui/components/button";
 import { ConfirmationDialog } from "#ui/components/confirmation-dialog";
 import { editorBufferQueryOptions } from "#ui/editor/stored-buffer";
 import { queryKeys } from "#ui/queries";
 import {
     getOpenFileKey,
-    isFileOpen,
     openFile,
     useUserState,
     type OpenFile,
@@ -18,8 +15,12 @@ import { getErrorMessage } from "#ui/utils/error";
 
 const rootRouteApi = getRouteApi("__root__");
 
-/** Opens the file on its first edit, so unsaved text is kept and listed without a click. */
-export function useOpenOnFirstEdit(props: { file: OpenFile }) {
+/**
+ * Opens the file without leaving it. The editor calls it on the first edit, so unsaved text
+ * is kept and listed without a click, and on a double click, which is how a file is kept
+ * open before it has been changed.
+ */
+export function useKeepFileOpen(props: { file: OpenFile }) {
     const [, setUserState] = useUserState();
     const file = props.file;
 
@@ -144,49 +145,4 @@ export function useCloseOpenFiles() {
         requestClose: (files: OpenFile[]) => checkMutation.mutate(files),
         dialog,
     };
-}
-
-/** Keeps the file in the open files list, or closes it, from the editor toolbar. */
-export function KeepOpenButton(props: { file: OpenFile }) {
-    const [userState, setUserState] = useUserState();
-    const closer = useCloseOpenFiles();
-    const isOpen = isFileOpen(userState.openFiles, props.file);
-    const label = isOpen ? "Close file" : "Keep file open";
-
-    // The button still toggles membership; the tooltip is where auto-open is explained.
-    const tooltip = isOpen
-        ? "Close file. Unsaved changes are discarded after confirmation."
-        : "Keep file open. A file is kept open automatically the first time it is edited.";
-
-    return (
-        <>
-            <Button
-                tooltip={tooltip}
-                type="button"
-                variant="secondary"
-                size="sm"
-                aria-label={label}
-                aria-pressed={isOpen}
-                onClick={() => {
-                    if (isOpen) {
-                        closer.requestClose([props.file]);
-
-                        return;
-                    }
-
-                    setUserState((current) => ({
-                        ...current,
-                        openFiles: openFile(current.openFiles, props.file),
-                    }));
-                }}
-                className="h-9 w-9 rounded-md p-0 font-semibold"
-            >
-                <Pin
-                    className={`h-4 w-4 ${isOpen ? "fill-current text-blue-300" : ""}`}
-                    aria-hidden="true"
-                />
-            </Button>
-            {closer.dialog}
-        </>
-    );
 }

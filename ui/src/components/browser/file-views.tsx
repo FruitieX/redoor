@@ -29,10 +29,7 @@ import { BrowserViewCard } from "#ui/components/browser-view-card";
 import { ViewCardHeader } from "#ui/components/view-card-header";
 import { Button } from "#ui/components/button";
 import { BookmarkMenuButton } from "#ui/components/browser/bookmark-action";
-import {
-    KeepOpenButton,
-    useOpenOnFirstEdit,
-} from "#ui/components/browser/open-file-actions";
+import { useKeepFileOpen } from "#ui/components/browser/open-file-actions";
 import {
     CodeEditor,
     type EditorSelection,
@@ -70,7 +67,7 @@ const rootRouteApi = getRouteApi("__root__");
 
 /** Keeps save state and editor mutations inside the representation they affect. */
 function FileEditActions(props: {
-    /** A committed revision cannot be saved or kept open as a working file. */
+    /** A committed revision cannot be saved. */
     readOnly: boolean;
     statusMessage: string | null;
     hasError: boolean;
@@ -84,7 +81,6 @@ function FileEditActions(props: {
         name: string;
         entryType: "file";
     };
-    agentName: string;
     selection: EditorSelection | null;
     preview?: boolean;
     isSearchOpen: boolean;
@@ -111,28 +107,18 @@ ${props.selection.text}
     return (
         <>
             {props.readOnly ? null : (
-                <>
-                    <Button
-                        tooltip="Save file (Ctrl+S)"
-                        type="button"
-                        aria-label="Save file"
-                        onClick={props.onSave}
-                        disabled={!props.canEdit || !props.isDirty}
-                        isLoading={props.isSaving}
-                        size="sm"
-                        className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
-                    >
-                        <Save className="h-4 w-4" aria-hidden="true" />
-                    </Button>
-                    <KeepOpenButton
-                        file={{
-                            agentId: props.bookmark.agentId,
-                            path: props.bookmark.path,
-                            name: props.bookmark.name,
-                            agentName: props.agentName,
-                        }}
-                    />
-                </>
+                <Button
+                    tooltip="Save file (Ctrl+S)"
+                    type="button"
+                    aria-label="Save file"
+                    onClick={props.onSave}
+                    disabled={!props.canEdit || !props.isDirty}
+                    isLoading={props.isSaving}
+                    size="sm"
+                    className="h-9 w-9 rounded-md p-0 font-semibold shadow-sm shadow-blue-950/30"
+                >
+                    <Save className="h-4 w-4" aria-hidden="true" />
+                </Button>
             )}
             {props.preview !== undefined && props.onPreviewChange ? (
                 <ToggleButton
@@ -532,6 +518,7 @@ function FileEditorSurface(props: {
     isSearchOpen: boolean;
     onSearchOpenChange: (open: boolean) => void;
     onBecameDirty: () => void;
+    onDoubleClick?: () => void;
     onFocus: () => void;
     onSave: () => void;
     onSelectionChange: (selection: EditorSelection | null) => void;
@@ -565,6 +552,7 @@ function FileEditorSurface(props: {
                     wrapLines={props.wrapLines}
                     scrollToLine={props.scrollToLine}
                     onBecameDirty={props.onBecameDirty}
+                    onDoubleClick={props.onDoubleClick}
                     onFocus={props.onFocus}
                     onSave={props.onSave}
                     onSelectionChange={props.onSelectionChange}
@@ -720,7 +708,6 @@ function FileEditHeader(props: {
                             name: props.fileName,
                             entryType: "file",
                         }}
-                        agentName={props.agent.name}
                         selection={props.selection}
                         preview={props.preview}
                         isSearchOpen={props.isSearchOpen}
@@ -844,8 +831,9 @@ export function FileEditView(props: FileEditViewProps) {
     const reloadPromiseRef = React.useRef<Promise<unknown> | null>(null);
     const isSavingRef = React.useRef(false);
 
-    // Viewing a file does not open it; only the first change away from the device text does.
-    const openOnFirstEdit = useOpenOnFirstEdit({
+    // Viewing a file does not open it; the first change away from the device text or a double
+    // click in the editor does.
+    const keepOpen = useKeepFileOpen({
         file: {
             agentId: props.agent.id,
             path: props.filePath,
@@ -1014,9 +1002,11 @@ export function FileEditView(props: FileEditViewProps) {
                             if (saveMutation.isSuccess) saveMutation.reset();
 
                             if (!buffer.readOnly) {
-                                openOnFirstEdit();
+                                keepOpen();
                             }
                         }}
+                        // A revision is not the working file, so there is nothing to open.
+                        onDoubleClick={buffer.readOnly ? undefined : keepOpen}
                         onFocus={reloadFile}
                         onSave={handleSave}
                         onSelectionChange={setSelection}

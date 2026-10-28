@@ -112,6 +112,11 @@ type CodeEditorProps = {
     onSave: () => void;
     /** The first edit of a clean buffer, which opens the file. */
     onBecameDirty: () => void;
+    /**
+     * A double click anywhere in the editor, which opens the file without changing it. The
+     * click still selects a word as usual, so reading is never interrupted.
+     */
+    onDoubleClick?: () => void;
     onSelectionChange: (selection: EditorSelection | null) => void;
     searchHandleRef: React.RefObject<EditorSearchHandle | null>;
     isSearchOpen: boolean;
@@ -271,6 +276,7 @@ export function CodeEditor(props: CodeEditorProps) {
                 data-wrap-lines={props.wrapLines ? "true" : "false"}
                 role="region"
                 aria-label="Editor viewport"
+                onDoubleClick={props.onDoubleClick}
                 className="relative min-h-0 flex-1 overflow-hidden after:pointer-events-none after:absolute after:inset-0 after:z-20 after:border after:border-transparent focus-within:after:border-blue-500"
             >
                 {caretLine === null ? null : (

@@ -1345,8 +1345,9 @@ context (`useTerminals`, `useUploads`).
 
 ### Editor buffers and open files
 
-A file becomes *open* when it is first edited or when the user presses Keep open; any other
-file shown in the editor is a *preview*. The open files list (`openFiles` in the user state)
+A file becomes *open* when it is first edited or double-clicked in the editor (a double click
+selects a word but changes nothing, so it opens a file without editing it); any other file
+shown in the editor is a *preview*. The open files list (`openFiles` in the user state)
 is shown in the application menu and, in full-window mode, as a strip above the editor.
 
 - **One view, one buffer per open file.** `EditorWorkspace` (`ui/src/editor`), created in
@@ -1406,8 +1407,7 @@ is shown in the application menu and, in full-window mode, as a strip above the 
   `openFiles`, under the same lock as buffer writes, so a file closed in another browser does
   not leave its buffer behind either.
 - **Closing asks only for unsaved edits.** There is no unsaved-changes prompt on navigation
-  or page unload, since edits survive both. Closing an open file (the list's X, Clear, or the
-  toolbar button) asks for confirmation when the buffer is dirty, reading the stored copy for
+  or page unload, since edits survive both. Closing an open file (the list's X or Clear) asks for confirmation when the buffer is dirty, reading the stored copy for
   a file not visited since the reload, and confirming discards the edits.
 - **Limits.** Undo history keeps at least 100 events per buffer (`HISTORY_DEPTH`). A stored
   buffer may be 8 MiB (`MAX_EDITOR_BUFFER_BYTES`, enforced as the route's body limit); the

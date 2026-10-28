@@ -61,8 +61,9 @@ test.describe.serial("Open files", () => {
     }
 
     /**
-     * Keeps the shown file open and waits for the background user-state write, because a
-     * following page.goto() aborts a write still in flight and the reloaded page would miss it.
+     * Keeps the shown file open with a double click in the editor and waits for the background
+     * user-state write, because a following page.goto() aborts a write still in flight and the
+     * reloaded page would miss it.
      */
     async function keepOpen(page: Page) {
         const openPersisted = page.waitForResponse(
@@ -71,9 +72,7 @@ test.describe.serial("Open files", () => {
                 response.url().includes("/api/v1/user/state"),
         );
 
-        await page
-            .getByRole("button", { name: "Keep file open", exact: true })
-            .click();
+        await page.getByRole("region", { name: "Editor viewport" }).dblclick();
         await openPersisted;
     }
 
@@ -94,18 +93,7 @@ test.describe.serial("Open files", () => {
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(firstPath)}`,
         );
 
-        const saveButton = page.getByRole("button", { name: "Save file" });
-
-        const keepOpenButton = page.getByRole("button", {
-            name: "Keep file open",
-            exact: true,
-        });
-
-        const saveBox = await saveButton.boundingBox();
-        const keepOpenBox = await keepOpenButton.boundingBox();
-        // The keep-open control must sit immediately after save, not among later editor tools.
-        expect(keepOpenBox?.x ?? 0).toBeGreaterThan(saveBox?.x ?? 1);
-        await keepOpenButton.click();
+        await page.getByRole("region", { name: "Editor viewport" }).dblclick();
 
         const openFiles = applicationNavigation.getByRole("list", {
             name: "Open files",
@@ -143,9 +131,7 @@ test.describe.serial("Open files", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(secondPath)}`,
         );
-        await page
-            .getByRole("button", { name: "Keep file open", exact: true })
-            .click();
+        await page.getByRole("region", { name: "Editor viewport" }).dblclick();
 
         const secondItem = openFiles.getByRole("listitem").filter({
             hasText: secondName,
@@ -225,7 +211,7 @@ test.describe.serial("Open files", () => {
         // The emptied section stays and says how to open files again, since they are the column's content.
         await expect(
             applicationNavigation.getByText(
-                "No open files — edit a file or use Keep open to list it here",
+                "No open files — edit or double-click a file in the editor to list it here",
             ),
         ).toBeVisible();
     });
@@ -375,9 +361,6 @@ test.describe.serial("Open files", () => {
         // The editor stays on the file and keeps the expanded presentation.
         await expect(page).toHaveURL(secondUrl);
         await expect(panel).toHaveCSS("position", "fixed");
-        await expect(
-            panel.getByRole("button", { name: "Keep file open", exact: true }),
-        ).toBeVisible();
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
         // Both close buttons must persist removal in the shared user state.
@@ -386,7 +369,7 @@ test.describe.serial("Open files", () => {
             .toMatchObject({ openFiles: [] });
     });
 
-    test("opens a file on its first edit and asks before closing it with unsaved edits", async ({
+    test("opens a file on its first edit or a double click and asks before closing it with unsaved edits", async ({
         page,
     }) => {
         const fileName = "file1.txt";
@@ -406,17 +389,6 @@ test.describe.serial("Open files", () => {
 
         // Viewing a file in the editor must not open a file that has not been changed.
         await expect(openFiles).toHaveCount(0);
-
-        const keepOpenButton = page.getByRole("button", {
-            name: "Keep file open",
-            exact: true,
-        });
-
-        await keepOpenButton.hover();
-        // The tooltip must explain auto-open without replacing the button's accessible name.
-        await expect(page.getByRole("tooltip")).toHaveText(
-            "Keep file open. A file is kept open automatically the first time it is edited.",
-        );
 
         const editor = page.getByLabel("File editor", { exact: true });
         await editor.click();
@@ -472,15 +444,26 @@ test.describe.serial("Open files", () => {
             openFiles.getByRole("link", { name: fileName, exact: true }),
         ).toBeVisible();
 
-        await page.getByRole("button", { name: "Close file" }).click();
+        await row
+            .getByRole("button", { name: `Close open file ${fileName}` })
+            .click();
         await confirmation
             .getByRole("button", { name: "Discard changes" })
             .click();
-        // The toolbar button closes through the same confirmation.
         await expect(openFiles).toHaveCount(0);
 
-        await page.getByRole("button", { name: "Keep file open" }).click();
-        await page.getByRole("button", { name: "Close file" }).click();
+        await page.getByRole("region", { name: "Editor viewport" }).dblclick();
+        // A double click opens the file without editing it.
+        await expect(row).toBeVisible();
+        // The double click only selects a word, so the device text stays unchanged.
+        await expect(editor).toHaveText("content1");
+        await expect(
+            page.getByRole("button", { name: "Save file" }),
+        ).toBeDisabled();
+
+        await row
+            .getByRole("button", { name: `Close open file ${fileName}` })
+            .click();
         // A clean file closes at once, without a confirmation.
         await expect(openFiles).toHaveCount(0);
         await expect(confirmation).toBeHidden();
@@ -771,9 +754,7 @@ test.describe.serial("Open files", () => {
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        await page
-            .getByRole("button", { name: "Keep file open", exact: true })
-            .click();
+        await page.getByRole("region", { name: "Editor viewport" }).dblclick();
         // The sidebar entry proves the file is open before the delete starts.
         await expect(
             openFiles.getByRole("link", { name: fileName, exact: true }),

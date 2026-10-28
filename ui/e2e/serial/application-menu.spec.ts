@@ -293,7 +293,7 @@ test.describe.serial("Application menu layout", () => {
         // The section stays as a hint instead of leaving the column blank.
         await expect(
             navigation.getByText(
-                "No open files — edit a file or use Keep open to list it here",
+                "No open files — edit or double-click a file in the editor to list it here",
             ),
         ).toBeVisible();
         // There is nothing to clear, so the action is not offered.

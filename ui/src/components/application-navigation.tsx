@@ -428,7 +428,8 @@ function OpenFiles(props: { isCompact: boolean; className?: string }) {
                         className="h-4 w-4 text-slate-400"
                         aria-hidden="true"
                     />
-                    No open files — edit a file or use Keep open to list it here
+                    No open files — edit or double-click a file in the editor to
+                    list it here
                 </p>
             ) : (
                 <SortableList
