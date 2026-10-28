@@ -27,7 +27,10 @@ function transfer(
         state: "active",
         cancelable: true,
         error: null,
-        atomic: false, pausable: false, verifying: false, resumed_bytes: 0,
+        atomic: false,
+        pausable: false,
+        verifying: false,
+        resumed_bytes: 0,
         ...overrides,
     };
 }
@@ -130,11 +133,7 @@ describe("transfer progress animation", () => {
     it("hides remaining time when size or speed cannot produce an estimate", () => {
         // Unknown totals, stalled speed, and finished states would otherwise invent a countdown.
         expect(
-            getTransferRemainingSeconds(
-                transfer({ total_bytes: 0 }),
-                0,
-                200,
-            ),
+            getTransferRemainingSeconds(transfer({ total_bytes: 0 }), 0, 200),
         ).toBeNull();
         expect(getTransferRemainingSeconds(transfer(), 400, 0)).toBeNull();
         expect(

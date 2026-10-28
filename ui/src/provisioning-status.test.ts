@@ -24,9 +24,7 @@ describe("provisioning status local storage", () => {
         // Hand-edited or leftover JSON must not crash the connected home page.
         expect(parseProvisioningStatusStore("nope")).toEqual({});
         expect(
-            parseProvisioningStatusStore(
-                JSON.stringify({ "edge-pi": "bad" }),
-            ),
+            parseProvisioningStatusStore(JSON.stringify({ "edge-pi": "bad" })),
         ).toEqual({});
         expect(
             parseProvisioningStatusStore(

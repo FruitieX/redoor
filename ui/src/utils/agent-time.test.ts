@@ -31,15 +31,15 @@ describe("provisioning step elapsed time", () => {
 
     test("tooltip diffs are the gap from the previous stamp", () => {
         // Later rows must use this-minus-previous, not this-step duration.
-        expect(
-            provisioningStepElapsedMs({ messages, index: 0, nowMs }),
-        ).toBe(30_250);
-        expect(
-            provisioningStepElapsedMs({ messages, index: 1, nowMs }),
-        ).toBe(30_250);
-        expect(
-            provisioningStepElapsedMs({ messages, index: 2, nowMs }),
-        ).toBe(14_750);
+        expect(provisioningStepElapsedMs({ messages, index: 0, nowMs })).toBe(
+            30_250,
+        );
+        expect(provisioningStepElapsedMs({ messages, index: 1, nowMs })).toBe(
+            30_250,
+        );
+        expect(provisioningStepElapsedMs({ messages, index: 2, nowMs })).toBe(
+            14_750,
+        );
     });
 
     test("missing index does not invent a duration", () => {
