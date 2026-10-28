@@ -381,17 +381,6 @@ test.describe.serial("Agent management", () => {
             page.getByRole("list", { name: "Provisioning status" }),
         ).toBeVisible({ timeout: 30_000 });
         await expect(page.getByText("Sniffing the SSH target")).toBeVisible();
-        await expect(page.getByText(/Sniff results:/)).toBeVisible({
-            timeout: 30_000,
-        });
-        // Two rows prove later steps stay sticky instead of replacing the first.
-        await expect(
-            page
-                .getByRole("list", { name: "Provisioning status" })
-                .getByRole("listitem")
-                .nth(1),
-        ).toBeVisible();
-        await expect(page.getByLabel(/from start/).nth(1)).toBeVisible();
 
         // A connected tab proves the form-created config can prepare and run as redoor.
         await expect(
@@ -412,7 +401,17 @@ test.describe.serial("Agent management", () => {
             page.getByRole("list", { name: "Provisioning status" }),
         ).toBeVisible();
         await expect(page.getByText("Sniffing the SSH target")).toBeVisible();
+        // Later steps are checked here rather than on the live page: a fast start can connect
+        // and unmount the live list before its second row renders.
         await expect(page.getByText(/Sniff results:/)).toBeVisible();
+        // Two rows prove later steps stay sticky instead of replacing the first.
+        await expect(
+            page
+                .getByRole("list", { name: "Provisioning status" })
+                .getByRole("listitem")
+                .nth(1),
+        ).toBeVisible();
+        await expect(page.getByLabel(/from start/).nth(1)).toBeVisible();
     });
 
     test("stops a running agent before renaming and accessing it again", async ({
