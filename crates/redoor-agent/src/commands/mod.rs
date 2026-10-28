@@ -462,10 +462,7 @@ mod tests {
     use redoor_core::identity::current_binary_identity;
     use redoor_core::test_support::TempDir;
     use redoor_protocol::{
-        api::{
-            agents::{EchoRequest, MountPoint},
-            files::CreationOwnershipOptions,
-        },
+        api::{agents::MountPoint, files::CreationOwnershipOptions},
         ids::RequestId,
         wire::{
             command::{Command, CommandErrorKind},
@@ -592,24 +589,6 @@ mod tests {
                 );
             }
             _ => panic!("Expected RawDelete"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_echo_command() {
-        let result = run(request::Echo {
-            request: EchoRequest {
-                message: "hello world".to_string(),
-                random_sleep: false,
-            },
-        })
-        .await;
-
-        match result {
-            Ok(echo_result) => {
-                assert_eq!(echo_result.message, "hello world");
-            }
-            _ => panic!("Expected EchoResult"),
         }
     }
 

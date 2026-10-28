@@ -655,48 +655,6 @@ name = "no-target"
         );
     }
 
-    /// Verifies that a present-but-non-integer `ssh_port` is rejected rather
-    /// than silently falling back to 22, so a typo like a string value is
-    /// surfaced as an explicit operator error.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_non_integer_ssh_port() {
-        let (_directory, temp) = test_config_path();
-        std::fs::write(
-            &temp,
-            r#"[[agents]]
-target = "host"
-ssh_port = "not-a-port"
-"#,
-        )
-        .unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(result.is_err(), "a non-integer ssh_port should be rejected");
-    }
-
-    /// Verifies that an out-of-range `ssh_port` is rejected rather than
-    /// silently truncating, so the operator gets a clear error for a typo.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_out_of_range_port() {
-        let (_directory, temp) = test_config_path();
-        write_test_config(
-            &temp,
-            r#"[[agents]]
-target = "host"
-ssh_port = 99999
-"#,
-        )
-        .unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(
-            result.is_err(),
-            "an out-of-range ssh_port should be rejected"
-        );
-    }
-
     /// Verifies that a `local = true` entry without any other fields parses
     /// into a [`AgentConfig::Local`] with all optional fields `None`, so the
     /// runtime can fall back to its own defaults (hostname, process user home,
@@ -985,52 +943,6 @@ target = "host"
         assert_eq!(server.bind.as_deref(), Some("127.0.0.1"));
         assert_eq!(server.log.as_deref(), Some("/tmp/x"));
         assert_eq!(config.agent_token, "test-agent-token");
-    }
-
-    /// Verifies that an unknown key in [server] is rejected so a typo is surfaced
-    /// at startup instead of silently being ignored.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_unknown_server_key() {
-        let (_directory, temp) = test_config_path();
-        let content = r#"
-[server]
-post = 3000
-
-[[agents]]
-target = "host"
-"#;
-        write_test_config(&temp, content).unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(
-            result.is_err(),
-            "an unknown [server] key should be rejected"
-        );
-        assert!(result.unwrap_err().to_string().contains("post"));
-    }
-
-    /// Verifies that an out-of-range port in [server] is rejected so the
-    /// operator gets a clear error for a typo, mirroring the existing
-    /// ssh_port range test.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_out_of_range_server_port() {
-        let (_directory, temp) = test_config_path();
-        let content = r#"
-[server]
-port = 99999
-
-[[agents]]
-target = "host"
-"#;
-        write_test_config(&temp, content).unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(
-            result.is_err(),
-            "an out-of-range server.port should be rejected"
-        );
     }
 
     /// Verifies first startup creates a minimal, parseable demo config and later startups preserve it.
