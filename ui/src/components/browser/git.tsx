@@ -18,6 +18,7 @@ import {
     GitDiffFilterField,
     GitDiffList,
     useCollapsedGitDiffs,
+    useGitDiffFilterQuery,
     type GitDiffBodyView,
     type GitDiffListFile,
 } from "#ui/components/browser/git-diff-list";
@@ -184,8 +185,7 @@ export function GitDirectoryView(props: { agent: Agent; path: string }) {
     // Diffs load per file on expansion, so a large change set opens without fetching any.
     const collapsed = useCollapsedGitDiffs({ scope, initiallyCollapsed: true });
 
-    // The filter outlives directory changes, so `-test` keeps hiding tests while browsing.
-    const [filterQuery, setFilterQuery] = React.useState("");
+    const [filterQuery, setFilterQuery] = useGitDiffFilterQuery(scope);
 
     if (statusQuery.isPending) {
         return (

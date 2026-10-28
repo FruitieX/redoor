@@ -18,8 +18,11 @@ export function OverlayChromeLayout(props: {
             >
                 {props.topChrome}
             </div>
+            {/* The router restores this scroll position on back and forward. The id names it
+                stably; otherwise the router finds it by its position among its siblings. */}
             <main
                 ref={touchChrome.scrollAreaRef}
+                data-scroll-restoration-id="app-main"
                 onTouchStart={touchChrome.onTouchStart}
                 onTouchMove={touchChrome.onTouchMove}
                 onTouchEnd={touchChrome.onTouchEnd}

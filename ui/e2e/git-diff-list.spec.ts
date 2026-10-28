@@ -273,4 +273,97 @@ test.describe("Git diff list", () => {
             await expect(trigger).toBeVisible();
         }
     });
+
+    test("restores expanded files, choices, filter and scroll when coming back from a file", async ({
+        page,
+    }) => {
+        // A tall patch makes the list scroll, so a wrong height would move the restored offset.
+        await fs.writeFile(
+            path.join(repositoryPath, "src/server.ts"),
+            Array.from(
+                { length: 300 },
+                (_, index) => `export const line${String(index)} = "edited";`,
+            ).join("\n") + "\n",
+        );
+
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${agentName}/browser/${encodeFilesystemPath(repositoryPath)}?view=git`,
+        );
+
+        const main = page.getByRole("main");
+
+        const filter = page.getByRole("textbox", {
+            name: "Filter files by name",
+        });
+
+        await filter.fill("server");
+        await page
+            .getByRole("button", { name: "Expand diff for src/server.ts" })
+            .click();
+
+        const server = page.getByRole("region", {
+            name: `Git diff for ${path.join(repositoryPath, "src/server.ts")}`,
+        });
+
+        await server
+            .getByRole("group", { name: "Diff layout for src/server.ts" })
+            .getByRole("button", { name: "Separate lines" })
+            .click();
+        await server
+            .getByRole("button", { name: "Wrap diff lines for src/server.ts" })
+            .click();
+        // The patch must be on screen before scrolling into it, or the offset would clamp.
+        await expect(server).toContainText("line299");
+
+        await main.evaluate((element) => {
+            element.scrollTop = 1500;
+        });
+
+        // The sticky header keeps the file link on screen while its patch scrolls under it.
+        const fileLink = server.getByRole("link", { name: "server.ts" });
+        await fileLink.scrollIntoViewIfNeeded();
+        const scrollTop = await main.evaluate((element) => element.scrollTop);
+
+        // The offset must be inside the patch, so restoring it depends on the patch's height.
+        expect(scrollTop).toBeGreaterThan(500);
+
+        await fileLink.click();
+
+        // Opening the file leaves the diff list, which unmounts it with all its state.
+        await expect(page).not.toHaveURL(/\bview=git\b/);
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
+
+        await page.goBack();
+
+        // The filter comes back, so the same files are listed.
+        await expect(filter).toHaveValue("server");
+        // The expanded file is expanded again and the collapsed one stays collapsed.
+        await expect(
+            page.getByRole("button", {
+                name: "Collapse diff for src/server.ts",
+            }),
+        ).toHaveAttribute("aria-expanded", "true");
+        await expect(
+            page.getByRole("button", {
+                name: "Expand diff for src/server.test.ts",
+            }),
+        ).toHaveAttribute("aria-expanded", "false");
+        // The file's own layout and wrapping choices come back with it.
+        await expect(
+            server
+                .getByRole("group", { name: "Diff layout for src/server.ts" })
+                .getByRole("button", { name: "Separate lines" }),
+        ).toHaveAttribute("aria-pressed", "true");
+        await expect(
+            server.getByRole("button", {
+                name: "Wrap diff lines for src/server.ts",
+            }),
+        ).toHaveAttribute("aria-pressed", "true");
+        // With the same list height the router puts the reader back at the same offset.
+        await expect
+            .poll(() => main.evaluate((element) => element.scrollTop))
+            .toBe(scrollTop);
+    });
 });

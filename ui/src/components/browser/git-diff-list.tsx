@@ -26,6 +26,10 @@ import {
     type GitChangeKind,
 } from "#ui/components/browser/git-parts";
 import { inlineDiffChangesAtom } from "#ui/diff-preferences";
+import {
+    HistoryEntryStore,
+    useHistoryEntryState,
+} from "#ui/history-entry-state";
 import { cn } from "#ui/utils/cn";
 import type { FileNameFilter } from "#ui/utils/file-name-filter";
 
@@ -67,84 +71,122 @@ export type GitDiffListFile = {
     renderBody: (view: GitDiffBodyView) => React.ReactNode;
 };
 
+/** Which diffs of a list are collapsed: a default plus the files toggled away from it. */
+type CollapsedState = {
+    collapsedByDefault: boolean;
+    toggled: ReadonlySet<string>;
+};
+
+const collapsedStates = new HistoryEntryStore<CollapsedState>();
+
 /**
  * Remembers which diffs of a list are collapsed. The state is a default plus the files toggled
  * away from it, so collapsing or expanding all is one change that also covers files the list
  * gains later. It belongs to one scope, such as one directory's changes, and starts over when
  * the scope changes, because the same view stays mounted while browsing to another directory.
+ * It is kept per history entry, so coming back from a file shows the same files expanded.
  */
 export function useCollapsedGitDiffs(options: {
     scope: string;
     initiallyCollapsed: boolean;
 }) {
-    const fresh = {
+    const [state, update] = useHistoryEntryState<CollapsedState>({
+        store: collapsedStates,
         scope: options.scope,
-        collapsedByDefault: options.initiallyCollapsed,
-        toggled: new Set<string>(),
-    };
-
-    const [state, setState] = React.useState<{
-        scope: string;
-        collapsedByDefault: boolean;
-        toggled: ReadonlySet<string>;
-    }>(fresh);
-
-    const current = state.scope === options.scope ? state : fresh;
+        initial: () => ({
+            collapsedByDefault: options.initiallyCollapsed,
+            toggled: new Set(),
+        }),
+    });
 
     return {
         isCollapsed: (path: string) =>
-            current.collapsedByDefault !== current.toggled.has(path),
+            state.collapsedByDefault !== state.toggled.has(path),
         toggle: (path: string) =>
-            setState((previous) => {
-                const base =
-                    previous.scope === options.scope ? previous : fresh;
-
-                const toggled = new Set(base.toggled);
+            update((previous) => {
+                const toggled = new Set(previous.toggled);
 
                 if (!toggled.delete(path)) {
                     toggled.add(path);
                 }
 
-                return { ...base, toggled };
+                return { ...previous, toggled };
             }),
-        collapseAll: () => setState({ ...fresh, collapsedByDefault: true }),
-        expandAll: () => setState({ ...fresh, collapsedByDefault: false }),
+        collapseAll: () =>
+            update(() => ({ collapsedByDefault: true, toggled: new Set() })),
+        expandAll: () =>
+            update(() => ({ collapsedByDefault: false, toggled: new Set() })),
     };
 }
 
 /** The collapse state a diff list and its controls share. */
 export type CollapsedGitDiffs = ReturnType<typeof useCollapsedGitDiffs>;
 
+/** What the reader chose in one file's header. Unset choices follow the defaults. */
+type GitDiffFileChoices = {
+    inline?: boolean;
+    wrapLines?: boolean;
+    wholeFile?: boolean;
+};
+
+const fileChoiceStates = new HistoryEntryStore<
+    ReadonlyMap<string, GitDiffFileChoices>
+>();
+
 /**
- * Remembers the layout chosen for each file of a list, because one file's edits read best as
- * inline word changes while a rewritten file reads best as separate lines. Files without a
- * choice follow the stored preference, and the choices start over with the scope, like the
- * collapse state, since the same paths in another commit are other edits.
+ * Remembers how each file of a list is shown, because one file's edits read best as inline
+ * word changes while a rewritten file reads best as separate lines, and only a file with long
+ * lines needs to wrap. Files without a choice follow the stored layout preference, and the
+ * choices start over with the scope, like the collapse state, since the same paths in another
+ * commit are other edits. They are kept per history entry because wrapping and whole files
+ * change the list's height, which the restored scroll position depends on.
  */
-function useGitDiffLayouts(scope: string) {
+function useGitDiffFileViews(scope: string) {
     const inlineByDefault = useAtomValue(inlineDiffChangesAtom);
 
-    const [state, setState] = React.useState<{
-        scope: string;
-        inlineByPath: ReadonlyMap<string, boolean>;
-    }>({ scope, inlineByPath: new Map() });
-
-    const inlineByPath =
-        state.scope === scope ? state.inlineByPath : new Map<string, boolean>();
+    const [choices, update] = useHistoryEntryState<
+        ReadonlyMap<string, GitDiffFileChoices>
+    >({
+        store: fileChoiceStates,
+        scope,
+        initial: () => new Map(),
+    });
 
     return {
-        isInline: (path: string) => inlineByPath.get(path) ?? inlineByDefault,
-        setInline: (path: string, inline: boolean) =>
-            setState((previous) => {
-                const next = new Map(
-                    previous.scope === scope ? previous.inlineByPath : [],
-                );
+        view: (path: string): GitDiffBodyView => {
+            const choice = choices.get(path);
 
-                next.set(path, inline);
-
-                return { scope, inlineByPath: next };
-            }),
+            return {
+                mergeModifiedLines: choice?.inline ?? inlineByDefault,
+                wrapLines: choice?.wrapLines ?? false,
+                wholeFile: choice?.wholeFile ?? false,
+            };
+        },
+        choose: (path: string, choice: GitDiffFileChoices) =>
+            update((previous) =>
+                new Map(previous).set(path, {
+                    ...previous.get(path),
+                    ...choice,
+                }),
+            ),
     };
+}
+
+const filterQueries = new HistoryEntryStore<string>();
+
+/**
+ * The file name filter of a diff list. It carries over to the next scope, so `-test` keeps
+ * hiding tests while browsing directories or stepping through commits, and it is kept per
+ * history entry because a filtered list has another height than the full one.
+ */
+export function useGitDiffFilterQuery(scope: string) {
+    const [query, update] = useHistoryEntryState<string>({
+        store: filterQueries,
+        scope,
+        initial: (previous) => previous ?? "",
+    });
+
+    return [query, (next: string) => update(() => next)] as const;
 }
 
 /**
@@ -312,15 +354,10 @@ function GitDiffSection(props: {
     file: GitDiffListFile;
     collapsed: boolean;
     onToggle: () => void;
-    inline: boolean;
-    onInlineChange: (inline: boolean) => void;
+    view: GitDiffBodyView;
+    onChoose: (choice: GitDiffFileChoices) => void;
 }) {
     const file = props.file;
-    // Only a file with long lines needs to wrap, and the choice is only for this glance at
-    // it, so it lives with the section instead of in the stored preferences.
-    const [wrapLines, setWrapLines] = React.useState(false);
-    // Reading a file whole is likewise a choice for this glance at one file.
-    const [wholeFile, setWholeFile] = React.useState(false);
     const parts = splitRelativePath(file.relativePath);
     const bodyId = React.useId();
 
@@ -385,20 +422,24 @@ function GitDiffSection(props: {
                         <DiffLayoutSwitch
                             label={`Diff layout for ${file.relativePath}`}
                             iconOnly
-                            inline={props.inline}
-                            onChange={props.onInlineChange}
+                            inline={props.view.mergeModifiedLines}
+                            onChange={(inline) => props.onChoose({ inline })}
                         />
                         <WrapDiffLinesToggle
                             label={`Wrap diff lines for ${file.relativePath}`}
-                            wrap={wrapLines}
-                            onChange={setWrapLines}
+                            wrap={props.view.wrapLines}
+                            onChange={(wrapLines) =>
+                                props.onChoose({ wrapLines })
+                            }
                             // Matches the height of the icon-only layout switch beside it.
                             className="h-7 w-7"
                         />
                         <WholeFileToggle
                             label={`Show whole file ${file.relativePath}`}
-                            shown={wholeFile}
-                            onChange={setWholeFile}
+                            shown={props.view.wholeFile === true}
+                            onChange={(wholeFile) =>
+                                props.onChoose({ wholeFile })
+                            }
                             className="h-7 w-7"
                         />
                     </div>
@@ -409,11 +450,7 @@ function GitDiffSection(props: {
                     id={bodyId}
                     className="git-diff-list-body w-full min-w-0 overflow-x-hidden [&>p]:p-3"
                 >
-                    {file.renderBody({
-                        mergeModifiedLines: props.inline,
-                        wrapLines,
-                        wholeFile,
-                    })}
+                    {file.renderBody(props.view)}
                 </div>
             )}
         </section>
@@ -431,7 +468,7 @@ export function GitDiffList(props: {
     /** The list's identity for remembering each file's layout, such as one commit. */
     scope: string;
 }) {
-    const layouts = useGitDiffLayouts(props.scope);
+    const fileViews = useGitDiffFileViews(props.scope);
 
     return (
         <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
@@ -442,10 +479,8 @@ export function GitDiffList(props: {
                     file={file}
                     collapsed={props.collapsed.isCollapsed(file.path)}
                     onToggle={() => props.collapsed.toggle(file.path)}
-                    inline={layouts.isInline(file.path)}
-                    onInlineChange={(inline) =>
-                        layouts.setInline(file.path, inline)
-                    }
+                    view={fileViews.view(file.path)}
+                    onChoose={(choice) => fileViews.choose(file.path, choice)}
                 />
             ))}
         </div>

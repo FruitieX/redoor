@@ -19,6 +19,7 @@ import {
     GitDiffFilterField,
     GitDiffList,
     useCollapsedGitDiffs,
+    useGitDiffFilterQuery,
     type GitDiffListFile,
 } from "#ui/components/browser/git-diff-list";
 import {
@@ -424,8 +425,7 @@ export function GitCommitView(props: {
         initiallyCollapsed: false,
     });
 
-    // The filter outlives stepping through commits, so `-test` keeps hiding tests in each.
-    const [filterQuery, setFilterQuery] = React.useState("");
+    const [filterQuery, setFilterQuery] = useGitDiffFilterQuery(scope);
 
     if (diffQuery.isPending) {
         return (
