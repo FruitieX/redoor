@@ -13,6 +13,11 @@ import {
 
 const AGENT_NAME = "git-revision-rest-test-agent";
 
+/** A multi-paragraph body, so the response must keep blank lines between paragraphs. */
+const secondCommitBody = `Explains the change.
+
+Across paragraphs.`;
+
 describe("Git revision REST API", () => {
     const processManager = new ProcessManager();
     const tempFiles = new TempFileManager();
@@ -55,7 +60,7 @@ describe("Git revision REST API", () => {
         await rm(join(repo, "docs", "removed.txt"));
         await writeFile(join(repo, "docs", "added.txt"), "new file\n");
         await $({ cwd: repo })`git add -A`;
-        await $({ cwd: repo })`git commit -m ${"Second commit"}`;
+        await $({ cwd: repo })`git commit -m ${"Second commit"} -m ${secondCommitBody}`;
         secondCommit = (
             await $({ cwd: repo })`git rev-parse HEAD`
         ).stdout.trim();
@@ -216,6 +221,8 @@ describe("Git revision REST API", () => {
 
         // The commit is compared with its only parent.
         expect(whole.parent_id).toBe(firstCommit);
+        // The body is the message below the summary, trimmed and with its paragraphs kept.
+        expect(whole.body).toBe(secondCommitBody);
         // Every changed file is listed in path order with its change kind.
         expect(
             whole.files.map((file) => [
@@ -267,6 +274,8 @@ describe("Git revision REST API", () => {
 
         // A root commit has no parent and adds every file.
         expect(root.parent_id).toBeNull();
+        // A summary-only message has an empty body rather than a missing one.
+        expect(root.body).toBe("");
         expect(root.files.every((file) => file.change === "added")).toBe(true);
 
         const binary = root.files.find(

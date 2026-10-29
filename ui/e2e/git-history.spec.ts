@@ -51,7 +51,7 @@ test.describe.serial("Git history browsing", () => {
             "second notes\n",
         );
         await $`git -C ${repositoryPath} add -A`;
-        await $`git -C ${repositoryPath} commit -m ${"Bump version"}`;
+        await $`git -C ${repositoryPath} commit -m ${"Bump version"} -m ${"Raises the version for the release."}`;
         secondCommit = (
             await $`git -C ${repositoryPath} rev-parse HEAD`
         ).stdout.trim();
@@ -224,6 +224,10 @@ test.describe.serial("Git history browsing", () => {
 
         const modifiedRow = modified.locator('tr[data-line-kind="modified"]');
 
+        // The message body is shown under the title, not just the summary line.
+        await expect(
+            page.getByText("Raises the version for the release."),
+        ).toBeVisible();
         // The commit's own patch is shown against its parent, as one edited line.
         await expect(modifiedRow).toContainText("export const version");
         await expect(modifiedRow.getByRole("deletion")).toHaveText("first");

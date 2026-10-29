@@ -35,6 +35,9 @@ pub struct GitCommitFileChange {
 #[ts(export)]
 pub struct GitCommitDiffResponse {
     pub commit: GitCommitSummary,
+    /// The message after the summary line, empty when there is none. It lives here rather
+    /// than in the summary because history lists repeat summaries and never show bodies.
+    pub body: String,
     /// The compared parent; absent for a root commit, whose files all count as added.
     pub parent_id: Option<String>,
     pub repository_root: String,

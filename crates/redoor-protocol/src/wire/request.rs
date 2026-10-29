@@ -750,7 +750,7 @@ mod tests {
             "blob_id": "def"}}));
         assert_round_trip::<GitRevisionContent>(json!({"path": "/repo/a", "commit_id": "abc",
             "content": "a\n"}));
-        assert_round_trip::<GitCommitDiff>(json!({"commit": commit, "parent_id": null,
+        assert_round_trip::<GitCommitDiff>(json!({"commit": commit, "body": "", "parent_id": null,
             "repository_root": "/repo", "repository_relative_path": "", "files": [],
             "truncated": false}));
         assert_round_trip::<GitLog>(json!({"repository_root": "/repo",

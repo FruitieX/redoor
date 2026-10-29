@@ -497,6 +497,12 @@ export function GitCommitView(props: {
                     <h2 className="break-words text-base font-semibold leading-snug text-slate-50">
                         {commit.summary || "(no message)"}
                     </h2>
+                    {/* The body keeps its own line breaks, since commit messages are wrapped by hand. */}
+                    {diff.body ? (
+                        <p className="mt-1.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-slate-300">
+                            {diff.body}
+                        </p>
+                    ) : null}
                     <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-slate-400">
                         <AuthorAvatar name={commit.author_name} size="xs" />
                         <span

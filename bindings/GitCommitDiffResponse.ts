@@ -7,6 +7,11 @@ import type { GitCommitSummary } from "./GitCommitSummary";
  */
 export type GitCommitDiffResponse = { commit: GitCommitSummary, 
 /**
+ * The message after the summary line, empty when there is none. It lives here rather
+ * than in the summary because history lists repeat summaries and never show bodies.
+ */
+body: string, 
+/**
  * The compared parent; absent for a root commit, whose files all count as added.
  */
 parent_id: string | null, repository_root: string, repository_relative_path: string, files: Array<GitCommitFileChange>, 

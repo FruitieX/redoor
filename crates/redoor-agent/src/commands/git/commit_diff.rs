@@ -110,12 +110,25 @@ fn commit_diff_blocking(
 
     Ok(GitCommitDiffResponse {
         commit: commit_summary(&commit)?,
+        body: commit_body(&commit)?,
         parent_id: parent.map(|parent| parent.id.to_string()),
         repository_root: target.repository.root.display().to_string(),
         repository_relative_path: target.relative.clone(),
         files,
         truncated,
     })
+}
+
+/// Reads the message below the summary line, trimmed so a trailing newline or blank
+/// padding does not render as empty space under the title.
+fn commit_body(commit: &gix::Commit<'_>) -> Result<String, GitFailure> {
+    let message = commit
+        .message()
+        .map_err(|error| internal_failure("read Git commit message", error))?;
+    Ok(message
+        .body
+        .map(|body| body.trim().to_str_lossy().into_owned())
+        .unwrap_or_default())
 }
 
 /// Finds the files that differ below `relative`, diffing only the selected subtree so a
