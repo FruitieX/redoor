@@ -29,6 +29,7 @@ import {
     type StateEffect,
 } from "@codemirror/state";
 import {
+    Decoration,
     drawSelection,
     dropCursor,
     EditorView,
@@ -40,6 +41,7 @@ import {
     rectangularSelection,
     type ViewUpdate,
 } from "@codemirror/view";
+import { tagHighlighter, tags } from "@lezer/highlight";
 import { vim, Vim } from "@replit/codemirror-vim";
 import { bbedit } from "@uiw/codemirror-theme-bbedit";
 import { tokyoNight } from "@uiw/codemirror-theme-tokyo-night";
@@ -78,6 +80,27 @@ Vim.defineEx("write", "w", (cm) => {
  */
 export const HISTORY_DEPTH = 100;
 
+/**
+ * Marks the selected text itself, because the selection is drawn as a layer behind the
+ * text and CSS cannot otherwise tell which characters lie on it. Native `::selection`
+ * covers only the main range and is gone while the editor is unfocused.
+ */
+const selectedTextMarks = EditorView.decorations.compute(
+    ["selection"],
+    (state) =>
+        Decoration.set(
+            state.selection.ranges
+                .filter((range) => !range.empty)
+                .map((range) =>
+                    Decoration.mark({ class: "cm-selectedText" }).range(
+                        range.from,
+                        range.to,
+                    ),
+                ),
+            true,
+        ),
+);
+
 /** The editor callbacks that must reach whichever file is shown, not the one first opened. */
 export type EditorCallbacks = {
     onUpdate: (update: ViewUpdate) => void;
@@ -110,8 +133,9 @@ export class EditorConfiguration {
      * Tokyo Night paints selection matches darker than its own background, so search hits
      * all but vanish, and its grey selection barely stands out either. The matches use the
      * amber tones of the light theme, which readers already spot easily, and the selection
-     * the theme's own blue, each at a strength that keeps the light text legible. High
-     * precedence makes them win over Tokyo Night's equally specific rules.
+     * the theme's own blue, each at a strength that keeps the light text legible. Its
+     * comments are as dark as that selection, so selected comments get a lighter colour. High
+     * precedence makes the overrides win over Tokyo Night's equally specific rules.
      */
     private readonly darkTheme: Extension = [
         Prec.high(
@@ -121,6 +145,11 @@ export class EditorConfiguration {
                     "&.cm-focused .cm-selectionBackground, & .cm-selectionLayer .cm-selectionBackground":
                         {
                             background: "rgb(122 162 247 / 0.35) !important",
+                        },
+                    // The marks nest either way round depending on their precedence.
+                    ".cm-selectedText .cm-comment, .cm-comment .cm-selectedText":
+                        {
+                            color: "#9aa5ce",
                         },
                     ".cm-selectionMatch": {
                         backgroundColor: "rgb(250 204 21 / 0.3)",
@@ -134,6 +163,10 @@ export class EditorConfiguration {
                 },
                 { dark: true },
             ),
+        ),
+        selectedTextMarks,
+        syntaxHighlighting(
+            tagHighlighter([{ tag: tags.comment, class: "cm-comment" }]),
         ),
         tokyoNight,
     ];
