@@ -174,16 +174,6 @@ describe("resumable transfers", () => {
     }> {
         const sourcePath = path.join(root, `source-${crypto.randomUUID()}`);
         const destPath = `${sourcePath}-dest`;
-        const file = await fs.open(sourcePath, "w");
-        await file.truncate(local ? LOCAL_SIZE : CROSS_AGENT_SIZE);
-        await file.write(Buffer.from("source marker"), 0, 13, 0);
-        await file.close();
-
-        if (local && move) {
-            // Merge requires an existing destination to force the copy-and-delete branch.
-            await fs.writeFile(destPath, "existing destination");
-        }
-
         const destination = local ? source : dest;
         let id: number | undefined;
         onTestFinished(async () => {
@@ -198,34 +188,71 @@ describe("resumable transfers", () => {
             await fs.rm(sourcePath, { force: true });
             await fs.rm(destPath, { force: true });
         });
-        id = move
-            ? (
-                  await source.moveTo(
-                      { agent: destination.id, path: destPath },
-                      sourcePath,
-                      { on_existing: "merge" },
-                  )
-              ).move_request_id
-            : (
-                  await source.copyTo(
-                      { agent: destination.id, path: destPath },
-                      sourcePath,
-                  )
-              ).copy_request_id;
-        const transferId = id;
-        await waitForValue({
-            description: "copy has a durable prefix",
-            intervalMs: 1,
-            predicate: async () =>
-                (await api.getTransferProgress()).transfers.find(
-                    (transfer) =>
-                        transfer.request_id === transferId &&
-                        transfer.state === "active" &&
+
+        // A same-agent copy finishes about 170 ms after crossing the pause threshold, so one
+        // progress poll stalled by suite load can miss the whole mid-stream window. Finishing
+        // before it was seen is not a fault of the feature under test, so such an attempt starts
+        // over with fresh fixtures.
+        for (let attempt = 1; ; attempt += 1) {
+            await fs.rm(destPath, { force: true });
+            const file = await fs.open(sourcePath, "w");
+            await file.truncate(local ? LOCAL_SIZE : CROSS_AGENT_SIZE);
+            await file.write(Buffer.from("source marker"), 0, 13, 0);
+            await file.close();
+
+            if (local && move) {
+                // Merge requires an existing destination to force the copy-and-delete branch.
+                await fs.writeFile(destPath, "existing destination");
+            }
+
+            id = move
+                ? (
+                      await source.moveTo(
+                          { agent: destination.id, path: destPath },
+                          sourcePath,
+                          { on_existing: "merge" },
+                      )
+                  ).move_request_id
+                : (
+                      await source.copyTo(
+                          { agent: destination.id, path: destPath },
+                          sourcePath,
+                      )
+                  ).copy_request_id;
+            const transferId = id;
+            const observed = await waitForValue({
+                description: "copy has a durable prefix",
+                intervalMs: 1,
+                predicate: async () => {
+                    const transfer = (
+                        await api.getTransferProgress()
+                    ).transfers.find(
+                        (entry) => entry.request_id === transferId,
+                    );
+
+                    if (transfer?.state === "completed") {
+                        return "finished";
+                    }
+
+                    return transfer?.state === "active" &&
                         transfer.transferred_bytes >= 70 * 1024 * 1024 &&
                         transfer.pausable &&
-                        transfer.cancelable,
-                ),
-        });
+                        transfer.cancelable
+                        ? "mid-stream"
+                        : undefined;
+                },
+            });
+
+            if (observed === "mid-stream") {
+                break;
+            }
+
+            // Repeatedly finishing first would mean the copy can no longer be interrupted at all.
+            expect(
+                attempt,
+                "copy kept finishing before it was seen mid-stream",
+            ).toBeLessThan(3);
+        }
 
         if (options?.checkBusy) {
             // Concurrent admission must leave the first attempt's private staging untouched.
