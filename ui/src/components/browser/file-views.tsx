@@ -45,6 +45,7 @@ import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
 import { Checkbox } from "#ui/components/checkbox";
 import { FullWindowToggle } from "#ui/components/full-window-toggle";
 import { EditorOpenFiles } from "#ui/components/browser/editor-open-files";
+import { useEditorFullWindow } from "#ui/components/browser/editor-full-window";
 import { IconButton } from "#ui/components/icon-button";
 import { Toast } from "#ui/components/toast";
 import { ToggleButton } from "#ui/components/toggle-button";
@@ -664,8 +665,6 @@ type FileEditViewProps = {
     scrollToLine?: number;
     preview: boolean;
     onPreviewChange: (preview: boolean) => void;
-    isFullWindow: boolean;
-    onToggleFullWindow: () => void;
 };
 
 /** Groups editor toolbar actions so the edit view can stay focused on buffer state. */
@@ -828,6 +827,8 @@ export function FileEditView(props: FileEditViewProps) {
     const [deleteConfirmationOpen, setDeleteConfirmationOpen] =
         React.useState(false);
 
+    const fullWindow = useEditorFullWindow();
+
     const [userState] = useUserState();
     const buffer = useFileBuffer(props);
     const contentQuery = buffer.contentQuery;
@@ -924,12 +925,12 @@ export function FileEditView(props: FileEditViewProps) {
         <div className="flex min-h-0 flex-1 flex-col">
             <article
                 aria-label="Editing panel"
-                data-editor-full-window={props.isFullWindow}
+                data-editor-full-window={fullWindow.isFullWindow}
                 className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-surface shadow-2xl shadow-black/20 ${
-                    props.isFullWindow ? "fixed inset-0 z-[60]" : ""
+                    fullWindow.isFullWindow ? "fixed inset-0 z-[60]" : ""
                 }`}
             >
-                {props.isFullWindow ? (
+                {fullWindow.isFullWindow ? (
                     <EditorOpenFiles
                         agentId={props.agent.id}
                         filePath={props.filePath}
@@ -951,7 +952,7 @@ export function FileEditView(props: FileEditViewProps) {
                     isSearchOpen={isSearchOpen}
                     isReloading={contentQuery.isFetching}
                     downloadUrl={props.downloadUrl}
-                    isFullWindow={props.isFullWindow}
+                    isFullWindow={fullWindow.isFullWindow}
                     onSave={handleSave}
                     onToggleSearch={() => {
                         if (!searchHandleRef.current?.close()) {
@@ -961,7 +962,7 @@ export function FileEditView(props: FileEditViewProps) {
                     onPreviewChange={
                         isMarkdown ? props.onPreviewChange : undefined
                     }
-                    onToggleFullWindow={props.onToggleFullWindow}
+                    onToggleFullWindow={fullWindow.toggle}
                     onReload={reloadFile}
                     onDelete={() => setDeleteConfirmationOpen(true)}
                 />

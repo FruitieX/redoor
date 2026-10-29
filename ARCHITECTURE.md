@@ -1355,7 +1355,9 @@ selects a word but changes nothing, so it opens a file without editing it); any 
 shown in the editor is a *preview*. Diff file headers, diff rows and search results also
 have a small button that opens a file without going to it (`OpenInBackgroundButton`). The
 open files list (`openFiles` in the user state) is shown in the application menu and, in
-full-window mode, as a strip above the editor.
+full-window mode, as a strip above the editor. Full-window mode is the `fullWindow` search
+key, retained by the browser route like `rev`, so switching files keeps it, Back leaves it
+and a link or reload opens straight into it.
 
 - **One view, one buffer per open file.** `EditorWorkspace` (`ui/src/editor`), created in
   `main.tsx` and reached through the router context, owns the single `EditorView` and a
@@ -1518,7 +1520,7 @@ of that revision. The URL path stays the worktree path, because a revision is on
 way of looking at the same repository location, and paths deleted since are still reachable.
 
 - **The revision travels with every link.** The browser route declares
-  `retainSearchParams(["rev"])`, so breadcrumbs, listings, view tabs, diff links and even
+  `retainSearchParams(["rev", "fullWindow"])`, so breadcrumbs, listings, view tabs, diff links and even
   links from the shell keep `rev` without each link passing it. Leaving history sets
   `rev: undefined` explicitly, which the middleware respects.
 - **A separate loader branch and page.** With `rev` set the loader asks the agent for the

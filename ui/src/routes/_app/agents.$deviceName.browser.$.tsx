@@ -5,7 +5,7 @@ import {
     retainSearchParams,
     useRouter,
 } from "@tanstack/react-router";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
 import { agentStartStatesAtom } from "#ui/agent-start-state";
 import { type ApiClient, type Agent } from "#ui/api-client";
@@ -156,7 +156,8 @@ export const Route = createFileRoute("/_app/agents/$deviceName/browser/$")({
     validateSearch: browserSearchSchema,
     // Every link into the browser keeps the browsed revision, so the tree, details and diffs
     // of history can be navigated like the worktree. Leaving history removes it explicitly.
-    search: { middlewares: [retainSearchParams(["rev"])] },
+    // The full-window editor is kept the same way, so switching open files stays in it.
+    search: { middlewares: [retainSearchParams(["rev", "fullWindow"])] },
     loaderDeps: ({ search }) => ({
         view: search.view,
         diffMode: search.diffMode,
@@ -432,7 +433,6 @@ function RevisionFileBrowser(props: {
     const agent = props.agent;
     const search = Route.useSearch();
     const navigate = Route.useNavigate();
-    const [isEditorFullWindow, setIsEditorFullWindow] = useState(false);
     useBrowserRefreshTriggers(agent.id);
 
     const parentPath = getImmediateParentPath(data.path);
@@ -572,10 +572,6 @@ function RevisionFileBrowser(props: {
         ) : editable ? (
             <FileEditView
                 key={`${agent.id}:${tree.commit.id}:${data.path}`}
-                isFullWindow={isEditorFullWindow}
-                onToggleFullWindow={() =>
-                    setIsEditorFullWindow((current) => !current)
-                }
                 agent={agent}
                 fileName={fileName}
                 filePath={data.path}
@@ -638,8 +634,6 @@ function ConnectedFileBrowser(props: {
     const { path, lsResult, pathError } = data;
     const search = Route.useSearch();
     const diffMode = useGitDiffMode();
-    // Keep the presentation mode while keyed editors reset their per-file buffers.
-    const [isEditorFullWindow, setIsEditorFullWindow] = useState(false);
     useBrowserRefreshTriggers(agent.id);
 
     // The loader primed this, and refreshes replace it in place without reloading the route.
@@ -737,10 +731,6 @@ function ConnectedFileBrowser(props: {
                 parentPath={parentPath}
                 loadedListing={lsResult}
                 gitContext={gitContext}
-                isEditorFullWindow={isEditorFullWindow}
-                onToggleEditorFullWindow={() =>
-                    setIsEditorFullWindow((current) => !current)
-                }
             />
         );
     }
@@ -793,8 +783,6 @@ function FileBrowserPage(props: {
     parentPath: string | null;
     loadedListing: LsFileResponse;
     gitContext: GitContextResponse;
-    isEditorFullWindow: boolean;
-    onToggleEditorFullWindow: () => void;
 }) {
     const agent = props.agent;
     const path = props.path;
@@ -851,8 +839,6 @@ function FileBrowserPage(props: {
         ) : activeView === "view" && editable ? (
             <FileEditView
                 key={`${agent.id}:${lsResult.path}`}
-                isFullWindow={props.isEditorFullWindow}
-                onToggleFullWindow={props.onToggleEditorFullWindow}
                 agent={agent}
                 fileName={fileName}
                 filePath={lsResult.path}

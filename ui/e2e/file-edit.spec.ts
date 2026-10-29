@@ -334,6 +334,39 @@ test.describe.serial("File Edit View", () => {
         ).toHaveText("full window content");
     });
 
+    test("should keep the full-window editor in the URL so Back leaves it", async ({
+        page,
+    }) => {
+        const filePath = path.join(ctx.testDirPath, "full-window-url.txt");
+        await fs.writeFile(filePath, "full window url content");
+        const fileUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`;
+        await page.goto(fileUrl);
+
+        const editorPanel = page.getByRole("article", {
+            name: "Editing panel",
+        });
+
+        await page
+            .getByRole("button", { name: "Expand editor to full window" })
+            .click();
+
+        // Entering full window is a new history entry, so it can be linked to and left with Back.
+        await expect(page).toHaveURL(`${fileUrl}?fullWindow=true`);
+        await expect(editorPanel).toHaveCSS("position", "fixed");
+
+        await page.reload();
+        // A reload, like opening a shared link, starts in the full-window editor.
+        await expect(editorPanel).toHaveCSS("position", "fixed");
+
+        await page.goBack();
+        // Back returns to the normal layout without leaving the file.
+        await expect(page).toHaveURL(fileUrl);
+        await expect(editorPanel).toHaveCSS("position", "static");
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveText("full window url content");
+    });
+
     test("should select the open file from the editor options menu", async ({
         page,
     }) => {

@@ -265,7 +265,7 @@ test.describe.serial("Open files", () => {
 
         await firstLink.click();
         // Navigating must replace the file content while retaining the full-window presentation.
-        await expect(page).toHaveURL(firstUrl);
+        await expect(page).toHaveURL(`${firstUrl}?fullWindow=true`);
         await expect(
             panel.getByLabel("File editor", { exact: true }),
         ).toHaveText("content1");
@@ -277,7 +277,7 @@ test.describe.serial("Open files", () => {
 
         await secondLink.click();
         // Switching back proves the row remains usable after the keyed editor remounts.
-        await expect(page).toHaveURL(secondUrl);
+        await expect(page).toHaveURL(`${secondUrl}?fullWindow=true`);
         await expect(
             panel.getByLabel("File editor", { exact: true }),
         ).toHaveText("content2");
@@ -317,12 +317,14 @@ test.describe.serial("Open files", () => {
             .click({ button: "middle" });
         // Native navigation must open the file in its own tab and leave the strip and the expanded
         // editor on the original page intact.
-        await expect.poll(() => backgroundTabs.urls()).toEqual([firstUrl]);
+        await expect
+            .poll(() => backgroundTabs.urls())
+            .toEqual([`${firstUrl}?fullWindow=true`]);
         await backgroundTabs.close();
         await expect(
             strip.getByRole("link", { name: "file1.txt", exact: true }),
         ).toBeVisible();
-        await expect(page).toHaveURL(secondUrl);
+        await expect(page).toHaveURL(`${secondUrl}?fullWindow=true`);
         await expect(panel).toHaveCSS("position", "fixed");
         await strip
             .getByRole("button", {
@@ -359,7 +361,7 @@ test.describe.serial("Open files", () => {
         await expect(strip).toHaveCount(0);
         await expect(editor).toHaveText("content2");
         // The editor stays on the file and keeps the expanded presentation.
-        await expect(page).toHaveURL(secondUrl);
+        await expect(page).toHaveURL(`${secondUrl}?fullWindow=true`);
         await expect(panel).toHaveCSS("position", "fixed");
         const api = new ApiClient(API_BASE_URL);
         await api.login("test-user", "test-password");
@@ -640,7 +642,7 @@ test.describe.serial("Open files", () => {
             { key: "ArrowLeft", times: 1 },
         );
         // Sorting must not navigate, exit full window, or drop the unsaved buffer.
-        await expect(page).toHaveURL(fileUrl);
+        await expect(page).toHaveURL(`${fileUrl}?fullWindow=true`);
         await expect(panel).toHaveCSS("position", "fixed");
         await expect(editor).toHaveText("content1 draft");
         await expect(strip.getByRole("link")).toHaveText([
