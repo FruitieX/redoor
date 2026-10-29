@@ -108,14 +108,20 @@ export class EditorConfiguration {
 
     /**
      * Tokyo Night paints selection matches darker than its own background, so search hits
-     * all but vanish. The overrides use the amber tones of the light theme, which readers
-     * already spot easily, at a strength that keeps the light text legible. High precedence
-     * makes them win over Tokyo Night's equally specific rules.
+     * all but vanish, and its grey selection barely stands out either. The matches use the
+     * amber tones of the light theme, which readers already spot easily, and the selection
+     * the theme's own blue, each at a strength that keeps the light text legible. High
+     * precedence makes them win over Tokyo Night's equally specific rules.
      */
     private readonly darkTheme: Extension = [
         Prec.high(
             EditorView.theme(
                 {
+                    // Tokyo Night marks its faint selection important, so this must be too.
+                    "&.cm-focused .cm-selectionBackground, & .cm-selectionLayer .cm-selectionBackground":
+                        {
+                            background: "rgb(122 162 247 / 0.35) !important",
+                        },
                     ".cm-selectionMatch": {
                         backgroundColor: "rgb(250 204 21 / 0.3)",
                     },
