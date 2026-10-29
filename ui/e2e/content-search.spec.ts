@@ -663,6 +663,139 @@ last line`,
             `Current folder: ${gitRootOutsidePath}`,
         );
     });
+
+    test("restores results and the place in them on back without searching again", async ({
+        page,
+    }) => {
+        const directory = path.join(ctx.testDirPath, "restore-search");
+        await fs.mkdir(directory);
+        // Enough results that the dialog scrolls and the opened one starts out of view.
+        await Promise.all(
+            Array.from({ length: 60 }, (_, index) =>
+                fs.writeFile(
+                    path.join(directory, `restore-scroll-${index + 10}.txt`),
+                    "restore-scroll-value\n",
+                ),
+            ),
+        );
+
+        // The test sends the page's server events itself, so edits by parallel specs cannot
+        // refresh the search, and the refresh that every finished edit sends is under test.
+        let sendRoutesChanged = () => {};
+
+        await page.routeWebSocket("**/api/v1/ui/ws", (ws) => {
+            sendRoutesChanged = () => {
+                ws.send(JSON.stringify({ type: "routes_changed" }));
+            };
+        });
+
+        let searchRequests = 0;
+        page.on("request", (request) => {
+            const url = new URL(request.url());
+
+            if (
+                url.pathname.includes("/find/") ||
+                url.pathname.includes("/grep/")
+            ) {
+                searchRequests += 1;
+            }
+        });
+
+        const dialog = page.getByRole("dialog", { name: "Search device" });
+
+        // Content search types its query, so opening a result first replaces the entry to
+        // write q, while path search starts from a q already in the URL.
+        const modes = [
+            {
+                search: "mode=content&q=",
+                typed: true,
+                query: "restore-scroll-value",
+                input: "Search file contents",
+            },
+            {
+                search: "q=restore-scroll",
+                typed: false,
+                query: "restore-scroll",
+                input: "Search file paths",
+            },
+        ];
+
+        for (const mode of modes) {
+            await page.goto(
+                `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directory)}?${mode.search}`,
+            );
+
+            const input = dialog.getByRole("searchbox", { name: mode.input });
+
+            if (mode.typed) {
+                await input.fill(mode.query);
+            }
+
+            const links = dialog.getByRole("link", {
+                name: /restore-scroll-\d+\.txt/,
+            });
+
+            await expect(links).toHaveCount(60);
+
+            const opened = links.nth(40);
+            await opened.scrollIntoViewIfNeeded();
+
+            const scrollTop = await dialog.evaluate(
+                (element) => element.scrollTop,
+            );
+
+            // The opened result must start out of view, or restoring the scroll proves nothing.
+            expect(scrollTop).toBeGreaterThan(0);
+
+            const openedName = (await opened.getAttribute("aria-label")) ?? "";
+            const requestsBeforeOpening = searchRequests;
+            await opened.click();
+            await expect(dialog).toBeHidden();
+
+            await page.goBack();
+            await expect(dialog).toBeVisible();
+            // The restored view must follow the entry that replaced the typed search's entry.
+            await expect(input).toHaveValue(mode.query);
+            // Focus on the opened result lets arrow keys continue from where the reader was.
+            await expect(
+                dialog.getByRole("link", { name: openedName, exact: true }),
+            ).toBeFocused();
+            // The dialog scrolls itself, so its own scroll position must come back.
+            await expect
+                .poll(() => dialog.evaluate((element) => element.scrollTop))
+                .toBe(scrollTop);
+            // Back shows the kept results instead of searching again.
+            expect(searchRequests).toBe(requestsBeforeOpening);
+
+            const listingRefreshed = page.waitForRequest((request) =>
+                new URL(request.url()).pathname.includes("/ls/"),
+            );
+
+            // A finished upload or edit refreshes all agent data; the listing behind the
+            // dialog refetching shows the page handled it.
+            sendRoutesChanged();
+            await listingRefreshed;
+
+            const changedQueryAnswered = page.waitForResponse(
+                (response) =>
+                    response
+                        .request()
+                        .postData()
+                        ?.includes(`"query":"${mode.query}-"`) === true,
+            );
+
+            await input.fill(`${mode.query}-`);
+            await changedQueryAnswered;
+            // Only the changed query searched: a refresh of the kept results would have gone
+            // out when the event arrived, well before this answer.
+            expect(searchRequests).toBe(requestsBeforeOpening + 1);
+            await input.fill(mode.query);
+            // Typing the restored query again searches too instead of showing the kept results.
+            await expect
+                .poll(() => searchRequests)
+                .toBe(requestsBeforeOpening + 2);
+        }
+    });
 });
 
 test.describe("Mobile agent search", () => {

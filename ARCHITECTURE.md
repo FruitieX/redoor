@@ -1272,6 +1272,10 @@ The route tree separates the authenticated application from the public login for
   Its key mirrors the router's scroll key (`__TSR_key`), read once when the view mounts or
   changes scope: the live location already points at the next entry while the old view is
   still on screen. A new visit to the same URL is a new entry and starts from the defaults.
+  The search dialog keeps its results, scroll position and opened result per entry the same
+  way, so back from a result shows the search as it was without asking the agent again. It
+  scrolls inside its own `<dialog>`, which the router cannot restore, and it mounts only
+  while open, so its entry is the one it opened on and never the result's that follows.
 - **Menus own their open state.** `SideMenu` reads and closes the `openSideMenuAtom` itself
   and returns focus to whatever opened it, so the shell passes no props, refs or callbacks
   to the menus or the top bar.

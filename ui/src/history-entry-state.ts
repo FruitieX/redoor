@@ -32,6 +32,9 @@ const MAX_ENTRIES = 100;
 export class HistoryEntryStore<T> {
     private values = new Map<string, T>();
 
+    /** A store of large values, such as search results, passes a smaller limit. */
+    constructor(private readonly maxEntries = MAX_ENTRIES) {}
+
     get(key: string) {
         return this.values.get(key);
     }
@@ -41,7 +44,7 @@ export class HistoryEntryStore<T> {
         this.values.delete(key);
         this.values.set(key, value);
 
-        if (this.values.size > MAX_ENTRIES) {
+        if (this.values.size > this.maxEntries) {
             const oldest = this.values.keys().next();
 
             if (oldest.done !== true) {
