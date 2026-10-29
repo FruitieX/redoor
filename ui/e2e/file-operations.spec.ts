@@ -372,11 +372,16 @@ test.describe.serial("File Operations", () => {
                 `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
+        // The parent listing shows the sibling whose disappearance marks the subdir3 listing below.
+        await expect(page.getByLabel("Directory entry subdir1")).toBeVisible();
         await page.getByRole("link", { name: "subdir3", exact: true }).click();
-        // The toolbar remounts when the route changes, which would close a menu opened earlier.
         await expect(page).toHaveURL(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "subdir3"))}`,
         );
+        // The URL changes before the subdir3 listing loads, and the toolbar remounts when that
+        // listing renders, which would close a menu opened on the parent's toolbar. A sibling
+        // entry of the parent listing disappearing proves the subdir3 toolbar is in place.
+        await expect(page.getByLabel("Directory entry subdir1")).toHaveCount(0);
 
         await page.getByRole("button", { name: "New", exact: true }).click();
         await page
