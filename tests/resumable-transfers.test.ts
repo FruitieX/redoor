@@ -220,6 +220,7 @@ describe("resumable transfers", () => {
                       )
                   ).copy_request_id;
             const transferId = id;
+
             const observed = await waitForValue({
                 description: "copy has a durable prefix",
                 intervalMs: 1,
