@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 import {
-    chmod,
-    copyFile,
     glob,
     mkdir,
     readFile,
@@ -12,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, type ProcessPromise } from "zx";
 import { z } from "zod";
+import { stageTestBinary } from "./stage-test-binary.mts";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -75,8 +74,7 @@ async function prepareFixtures(): Promise<number> {
     await rm(HOME_DIRECTORY, { recursive: true, force: true });
     await mkdir(join(HOME_DIRECTORY, "lazy-agent"), { recursive: true });
     await mkdir(join(PROJECT_ROOT, "dev_agents/agent2"), { recursive: true });
-    await copyFile(join(PROJECT_ROOT, "target/debug/redoor"), STAGED_BINARY);
-    await chmod(STAGED_BINARY, 0o755);
+    await stageTestBinary(STAGED_BINARY);
     await clearPlaywrightLogs();
     await seedLogFixtures();
     await writeFile(

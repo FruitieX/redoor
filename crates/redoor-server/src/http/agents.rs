@@ -2,11 +2,8 @@
 //! restart), plus the per-agent filesystem routes in its submodules.
 
 use crate::actors;
-use axum::{
-    Extension, Json,
-    extract::{Path, State as AxumState},
-    http::StatusCode,
-};
+use crate::http::access::ResolvedDevice;
+use axum::{Extension, Json, extract::State as AxumState, http::StatusCode};
 use redoor_protocol::{
     api::{
         agents::{
@@ -102,7 +99,7 @@ pub(super) fn managed_watchdog(
 ) -> Result<WatchdogHandle, ApiError> {
     state
         .watchdog_registry
-        .lookup(&agent.name)
+        .lookup(agent.id.as_str())
         .ok_or_else(|| ApiError::internal(format!("Managed supervisor unavailable: {}", agent.id)))
 }
 
@@ -161,13 +158,12 @@ pub(super) async fn current_agent_snapshot(
 
 /// Route: `POST /api/v1/agents/{agent}/start` accepts desired-running without waiting for connection.
 pub(crate) async fn start_agent_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<StartAgentResponse>, ApiError> {
     // Configuration edits hold this lock through shutdown and runtime replacement, so a
     // delayed tab start cannot land behind shutdown and revive the old supervisor.
     let _edit_guard = state.config_edit_lock.lock().await;
-    let agent_id = AgentId::from(agent);
     let mut snapshot = managed_agent_snapshot(&state, &agent_id).await?;
     let watchdog = managed_watchdog(&state, &snapshot)?;
     watchdog.start().await?;
@@ -184,13 +180,12 @@ pub(crate) async fn start_agent_handler(
 
 /// Route: `POST /api/v1/agents/{agent}/shutdown` waits for owned child cleanup with a bound.
 pub(crate) async fn shutdown_agent_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<ShutdownAgentResponse>, ApiError> {
     // Configuration replacement also mutates this supervisor; sharing the lock prevents
     // shutdown from racing a persist-then-register and reviving the outgoing identity.
     let _edit_guard = state.config_edit_lock.lock().await;
-    let agent_id = AgentId::from(agent);
     let snapshot = managed_agent_snapshot(&state, &agent_id).await?;
     let watchdog = managed_watchdog(&state, &snapshot)?;
     tokio::time::timeout(std::time::Duration::from_secs(10), watchdog.shutdown())
@@ -209,24 +204,21 @@ pub(crate) async fn shutdown_agent_handler(
 
 /// Route: `GET /api/v1/agents/{agent}`
 pub(crate) async fn get_agent_details_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<AgentDetailsResponse>, ApiError> {
-    let details = state
-        .agents
-        .agent_details(&AgentId::from(agent.as_str()))
-        .await?;
+    let details = state.agents.agent_details(&agent_id).await?;
     if details.name.is_empty() {
-        return Err(ApiError::not_found(format!("Agent not found: {agent}")));
+        return Err(ApiError::not_found(format!("Agent not found: {agent_id}")));
     }
     Ok(Json(details))
 }
 
 /// Route: `POST /api/v1/agents/{agent}/restart` asks the process to exec itself in place.
 pub(crate) async fn restart_agent_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<RestartResponse>, ApiError> {
-    state.agents.call(&AgentId::from(agent), Restart {}).await?;
+    state.agents.call(&agent_id, Restart {}).await?;
     Ok(Json(RestartResponse { restarting: true }))
 }

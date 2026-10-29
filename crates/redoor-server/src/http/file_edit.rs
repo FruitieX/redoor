@@ -1,5 +1,6 @@
 //! REST endpoint that saves editor content over an existing file.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     body::Body,
@@ -7,7 +8,7 @@ use axum::{
 };
 use headers::HeaderMap;
 use redoor_protocol::wire::request;
-use redoor_protocol::{api::files::FileEditResponse, ids::AgentId, wire::command::Command};
+use redoor_protocol::{api::files::FileEditResponse, wire::command::Command};
 
 use super::{
     agent_helpers::{AgentFilePath, absolute_path_from_url},
@@ -19,7 +20,8 @@ use super::{
 
 /// Route: `PUT /api/v1/agents/{agent}/edit/{*path}`.
 pub(crate) async fn file_edit_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
     headers: HeaderMap,
     body: Body,
@@ -28,7 +30,7 @@ pub(crate) async fn file_edit_handler(
     let total_bytes = required_content_length(&headers, "file edits")?;
     let upload = AgentUpload::start(
         &state.router_ref,
-        AgentId::from(agent),
+        agent_id,
         Command::EditFile(request::EditFile { path: path.clone() }),
         path.clone(),
         total_bytes,

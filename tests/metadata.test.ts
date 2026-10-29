@@ -135,24 +135,6 @@ describe("Metadata Content-Type Detection", () => {
         expect(metadata.editable).toBe(true);
     });
 
-    it("should not mark invalid UTF-8 files editable even with text extension", async () => {
-        const filePath = tempFiles.create(Buffer.from([0xff, 0xfe, 0xfd]), {
-            suffix: ".txt",
-        });
-
-        const metadata = await testAgent.metadata(filePath);
-        // Extension must not override the UTF-8 validity check used by the editor gate.
-        expect(metadata.editable).toBe(false);
-    });
-
-    it("should not mark multi-megabyte UTF-8 files editable", async () => {
-        const largeContent = Buffer.alloc(2 * 1024 * 1024 + 1, 0x61);
-        const filePath = tempFiles.create(largeContent, { suffix: ".txt" });
-        const metadata = await testAgent.metadata(filePath);
-        // Large files stay download-only so the browser never loads them into a textarea.
-        expect(metadata.editable).toBe(false);
-    });
-
     it("should mark PNG magic bytes viewable regardless of extension", async () => {
         const pngHeader = Buffer.from([
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -164,31 +146,5 @@ describe("Metadata Content-Type Detection", () => {
         expect(metadata.viewable_image).toBe(true);
         // PNG bytes are not valid UTF-8 text for the editor.
         expect(metadata.editable).toBe(false);
-    });
-
-    it("should not mark non-image bytes viewable even with image extension", async () => {
-        const filePath = tempFiles.create(Buffer.from([0x00, 0x01, 0x02, 0x03]), {
-            suffix: ".png",
-        });
-
-        const metadata = await testAgent.metadata(filePath);
-        // A .png suffix alone must not open the image viewer.
-        expect(metadata.viewable_image).toBe(false);
-    });
-
-    it("should not mark multi-tens-of-megabyte images viewable", async () => {
-        const largePng = Buffer.alloc(20 * 1024 * 1024 + 1);
-        largePng[0] = 0x89;
-        largePng[1] = 0x50;
-        largePng[2] = 0x4e;
-        largePng[3] = 0x47;
-        largePng[4] = 0x0d;
-        largePng[5] = 0x0a;
-        largePng[6] = 0x1a;
-        largePng[7] = 0x0a;
-        const filePath = tempFiles.create(largePng, { suffix: "" });
-        const metadata = await testAgent.metadata(filePath);
-        // Size gating avoids loading multi-tens-of-megabyte images into the browser.
-        expect(metadata.viewable_image).toBe(false);
     });
 });

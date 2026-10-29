@@ -218,6 +218,24 @@ test.describe.serial("Server logs", () => {
             name: new RegExp(`Open error details: .*${marker}`),
         });
 
+        const fontMetrics = (element: Element) => {
+            const style = getComputedStyle(element);
+
+            return {
+                fontSize: style.fontSize,
+                fontWeight: style.fontWeight,
+                lineHeight: style.lineHeight,
+            };
+        };
+
+        const plainRowMetrics = await logRegion
+            .locator(":scope > div")
+            .first()
+            .evaluate(fontMetrics);
+
+        // Clickable error rows are buttons, but they must not inherit button typography that makes them stand out from plain rows.
+        expect(await errorRow.evaluate(fontMetrics)).toEqual(plainRowMetrics);
+
         // Error records must expose keyboard-operable semantics rather than relying on color.
         await errorRow.focus();
         await errorRow.press("Enter");

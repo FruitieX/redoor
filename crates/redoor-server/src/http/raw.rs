@@ -1,5 +1,6 @@
 //! Streamed raw file downloads (with single-range resume) and one-time download tokens.
 
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     body::Body,
@@ -101,13 +102,13 @@ fn parse_range_header(range: &RangeHeader, file_size: u64) -> Option<(u64, u64)>
 /// download path so the browser can save a folder as an archive without a
 /// separate copy endpoint.
 pub(crate) async fn raw_agent_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     Query(params): Query<RawQueryParams>,
     AxumState(state): AxumState<ServerState>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent);
     let token_download = if let Some(one_time_token) = params.one_time_token.as_ref() {
         if !state
             .one_time_token_registry
@@ -128,13 +129,18 @@ pub(crate) async fn raw_agent_handler(
         .await?;
 
     if metadata.is_dir {
-        return stream_directory_archive(
-            state,
-            agent_id,
-            path,
-            headers.typed_get::<RangeHeader>().is_some(),
-        )
-        .await;
+        // Tar size is unknown until the agent finishes walking the tree, so byte ranges
+        // cannot be satisfied the way they are for fixed-length file downloads.
+        if headers.typed_get::<RangeHeader>().is_some() {
+            return Err(ApiError::bad_request(
+                "Range requests are not supported for directory archive downloads",
+            ));
+        }
+        let command = Command::TarDownload(request::TarDownload {
+            path: path.clone(),
+            include_root: true,
+        });
+        return stream_directory_archive(state, agent_id, path, command).await;
     }
 
     let range_option = headers.typed_get::<RangeHeader>();
@@ -215,10 +221,8 @@ pub(crate) async fn raw_agent_handler(
 
     if token_download || params.download.as_deref() == Some("1") {
         let filename = path.split('/').next_back().unwrap_or("file");
-        response_builder = response_builder.header(
-            "Content-Disposition",
-            format!("attachment; filename=\"{}\"", filename),
-        );
+        response_builder =
+            response_builder.header("Content-Disposition", attachment_disposition(filename));
     }
 
     Ok(response_builder
@@ -227,31 +231,21 @@ pub(crate) async fn raw_agent_handler(
         .into_response())
 }
 
-/// Streams a directory as gzip-compressed tar using the existing agent tar download worker.
+/// Streams a directory as gzip-compressed tar from an agent command that emits plain tar: a
+/// worktree `TarDownload` or a `GitDownload` of a committed directory.
 ///
 /// Compression stays on the REST edge so agent↔agent copy can keep piping plain tar without
 /// gunzip support or a second transfer payload kind.
-async fn stream_directory_archive(
+pub(crate) async fn stream_directory_archive(
     state: ServerState,
     agent_id: AgentId,
     path: String,
-    has_range_header: bool,
+    command: Command,
 ) -> Result<Response, ApiError> {
-    // Tar size is unknown until the agent finishes walking the tree, so byte ranges
-    // cannot be satisfied the way they are for fixed-length file downloads.
-    if has_range_header {
-        return Err(ApiError::bad_request(
-            "Range requests are not supported for directory archive downloads",
-        ));
-    }
-
     let mut output = OutputStream::open(
         &state.router_ref,
         agent_id,
-        Command::TarDownload(request::TarDownload {
-            path: path.clone(),
-            include_root: true,
-        }),
+        command,
         OutputStreamTracking::Download {
             path: path.clone(),
             // Archive length is unknown at start so the body can begin immediately without
@@ -283,48 +277,80 @@ async fn stream_directory_archive(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/gzip")
-        .header(
-            "Content-Disposition",
-            format!("attachment; filename=\"{archive_name}\""),
-        )
+        .header("Content-Disposition", attachment_disposition(&archive_name))
         .body(Body::from_stream(gzipped_stream))
         .unwrap()
         .into_response())
 }
 
+/// Builds an attachment `Content-Disposition` for any file name.
+///
+/// File names may hold quotes, backslashes, control characters such as newlines, and
+/// non-ASCII text, none of which fit a quoted header value; an unencoded one would either
+/// corrupt the name or make the response unbuildable. The quoted form gets an ASCII stand-in
+/// for old clients, and RFC 6266 `filename*` carries the exact name percent-encoded.
+pub(crate) fn attachment_disposition(filename: &str) -> String {
+    let fallback: String = filename
+        .chars()
+        .map(|c| match c {
+            ' '..='~' if c != '"' && c != '\\' => c,
+            _ => '_',
+        })
+        .collect();
+    let mut encoded = String::with_capacity(filename.len());
+    for byte in filename.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'&'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~' => encoded.push(char::from(byte)),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
 /// Waits for the first agent frame so an immediate failure can still be answered with a JSON
 /// error and a fitting status; once the body starts, failures can only abort the stream.
-async fn ensure_download_started(output: &mut OutputStream, path: &str) -> Result<(), ApiError> {
+pub(crate) async fn ensure_download_started(
+    output: &mut OutputStream,
+    path: &str,
+) -> Result<(), ApiError> {
     let first = output
         .peek()
         .await
         .ok_or_else(|| ApiError::internal("No data received"))?;
-    let Err(AgentStreamError(message)) = first else {
+    let Err(AgentStreamError(error)) = first else {
         return Ok(());
     };
-    let message = if message.is_empty() {
-        format!("File error: {path}")
-    } else {
-        message.clone()
-    };
-    // Download workers report I/O failures as text, so classify the common cases by message.
-    let status = if message.contains("No such file") || message.contains("not found") {
-        StatusCode::NOT_FOUND
-    } else if message.contains("Permission denied") {
-        StatusCode::FORBIDDEN
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-    Err(ApiError::status(status, message))
+    Err(ApiError::Command {
+        kind: error.kind.clone(),
+        message: if error.message.is_empty() {
+            format!("File error: {path}")
+        } else {
+            error.message.clone()
+        },
+    })
 }
 
 /// Route: `POST /api/v1/agents/{agent}/one-time-token/{*path}`
 pub(crate) async fn create_one_time_token_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<CreateOneTimeTokenResponse>, ApiError> {
     let path = absolute_path_from_url(path.unwrap_or_default());
-    let agent_id = AgentId::from(agent);
     let metadata = state.agents.call(&agent_id, Metadata { path }).await?;
     if !metadata.is_file {
         return Err(ApiError::bad_request(
@@ -418,5 +444,66 @@ mod tests {
             .expect("download progress retained");
         // Terminal progress proves router state no longer remains indefinitely active.
         assert!(matches!(transfer.state, TransferProgressState::Errored));
+    }
+
+    /// Download status mapping must depend on the wire kind, never words in the message.
+    #[tokio::test]
+    async fn download_errors_preserve_command_status() {
+        use redoor_protocol::wire::{command::CommandErrorKind, request::CommandOutcome};
+
+        for (kind, expected) in [
+            (CommandErrorKind::InvalidInput, StatusCode::BAD_REQUEST),
+            (CommandErrorKind::NotFound, StatusCode::NOT_FOUND),
+            (CommandErrorKind::PermissionDenied, StatusCode::FORBIDDEN),
+            (
+                CommandErrorKind::Internal,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let mut agent = FakeAgent::connect().await;
+            let path = "/tmp/history-file".to_string();
+            let mut output = OutputStream::open(
+                &agent.router,
+                agent.agent_id.clone(),
+                Command::GitDownload(request::GitDownload {
+                    path: path.clone(),
+                    rev: "HEAD".to_string(),
+                    include_root: false,
+                }),
+                OutputStreamTracking::Download {
+                    path: path.clone(),
+                    total_bytes: 0,
+                    full_size: None,
+                    resume_offset: None,
+                },
+            )
+            .await
+            .unwrap();
+            let (id, _) = agent.next_command().await;
+            agent
+                .respond(
+                    id,
+                    CommandOutcome::error(kind, "not found or Permission denied"),
+                )
+                .await;
+            let error = ensure_download_started(&mut output, &path)
+                .await
+                .unwrap_err();
+            // Misleading or localized text cannot change the typed HTTP status.
+            assert_eq!(error.status_code(), expected);
+        }
+    }
+
+    /// Header-breaking and non-ASCII names still produce a valid header naming the file.
+    #[test]
+    fn attachment_disposition_encodes_any_file_name() {
+        let header = attachment_disposition("a \"b\"\\\nä.txt");
+        // Only visible ASCII may appear in the header, or building the response fails.
+        assert!(axum::http::HeaderValue::from_str(&header).is_ok());
+        // Old clients get a stand-in and current ones the exact UTF-8 name.
+        assert_eq!(
+            header,
+            "attachment; filename=\"a _b____.txt\"; filename*=UTF-8''a%20%22b%22%5C%0A%C3%A4.txt"
+        );
     }
 }

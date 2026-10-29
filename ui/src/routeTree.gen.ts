@@ -15,15 +15,15 @@ import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppSplatRouteImport } from './routes/_app/$'
 import { Route as AppLogsRouteImport } from './routes/_app/logs'
 import { Route as AppAgentsIndexRouteImport } from './routes/_app/agents.index'
-import { Route as AppAgentsAgentIdRouteImport } from './routes/_app/agents.$agentId'
+import { Route as AppAgentsDeviceNameRouteImport } from './routes/_app/agents.$deviceName'
 import { Route as AppAgentsNewRouteImport } from './routes/_app/agents.new'
 import { Route as AppTransfersIndexRouteImport } from './routes/_app/transfers.index'
-import { Route as AppAgentsAgentIdIndexRouteImport } from './routes/_app/agents.$agentId.index'
-import { Route as AppAgentsAgentIdEditRouteImport } from './routes/_app/agents.$agentId.edit'
-import { Route as AppAgentsAgentIdLogsRouteImport } from './routes/_app/agents.$agentId.logs'
-import { Route as AppAgentsAgentIdTrashRouteImport } from './routes/_app/agents.$agentId.trash'
+import { Route as AppAgentsDeviceNameIndexRouteImport } from './routes/_app/agents.$deviceName.index'
+import { Route as AppAgentsDeviceNameEditRouteImport } from './routes/_app/agents.$deviceName.edit'
+import { Route as AppAgentsDeviceNameLogsRouteImport } from './routes/_app/agents.$deviceName.logs'
+import { Route as AppAgentsDeviceNameTrashRouteImport } from './routes/_app/agents.$deviceName.trash'
 import { Route as AppSettingsTokensIndexRouteImport } from './routes/_app/settings.tokens.index'
-import { Route as AppAgentsAgentIdBrowserSplatRouteImport } from './routes/_app/agents.$agentId.browser.$'
+import { Route as AppAgentsDeviceNameBrowserSplatRouteImport } from './routes/_app/agents.$deviceName.browser.$'
 import { Route as AppSettingsTokensTokenIdEditRouteImport } from './routes/_app/settings.tokens.$tokenId.edit'
 
 const AppRoute = AppRouteImport.update({
@@ -55,9 +55,9 @@ const AppAgentsIndexRoute = AppAgentsIndexRouteImport.update({
   path: '/agents/',
   getParentRoute: () => AppRoute,
 } as any)
-const AppAgentsAgentIdRoute = AppAgentsAgentIdRouteImport.update({
-  id: '/agents/$agentId',
-  path: '/agents/$agentId',
+const AppAgentsDeviceNameRoute = AppAgentsDeviceNameRouteImport.update({
+  id: '/agents/$deviceName',
+  path: '/agents/$deviceName',
   getParentRoute: () => AppRoute,
 } as any)
 const AppAgentsNewRoute = AppAgentsNewRouteImport.update({
@@ -70,36 +70,38 @@ const AppTransfersIndexRoute = AppTransfersIndexRouteImport.update({
   path: '/transfers/',
   getParentRoute: () => AppRoute,
 } as any)
-const AppAgentsAgentIdIndexRoute = AppAgentsAgentIdIndexRouteImport.update({
-  id: '/',
-  path: '/',
-  getParentRoute: () => AppAgentsAgentIdRoute,
-} as any)
-const AppAgentsAgentIdEditRoute = AppAgentsAgentIdEditRouteImport.update({
+const AppAgentsDeviceNameIndexRoute =
+  AppAgentsDeviceNameIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => AppAgentsDeviceNameRoute,
+  } as any)
+const AppAgentsDeviceNameEditRoute = AppAgentsDeviceNameEditRouteImport.update({
   id: '/edit',
   path: '/edit',
-  getParentRoute: () => AppAgentsAgentIdRoute,
+  getParentRoute: () => AppAgentsDeviceNameRoute,
 } as any)
-const AppAgentsAgentIdLogsRoute = AppAgentsAgentIdLogsRouteImport.update({
+const AppAgentsDeviceNameLogsRoute = AppAgentsDeviceNameLogsRouteImport.update({
   id: '/logs',
   path: '/logs',
-  getParentRoute: () => AppAgentsAgentIdRoute,
+  getParentRoute: () => AppAgentsDeviceNameRoute,
 } as any)
-const AppAgentsAgentIdTrashRoute = AppAgentsAgentIdTrashRouteImport.update({
-  id: '/trash',
-  path: '/trash',
-  getParentRoute: () => AppAgentsAgentIdRoute,
-} as any)
+const AppAgentsDeviceNameTrashRoute =
+  AppAgentsDeviceNameTrashRouteImport.update({
+    id: '/trash',
+    path: '/trash',
+    getParentRoute: () => AppAgentsDeviceNameRoute,
+  } as any)
 const AppSettingsTokensIndexRoute = AppSettingsTokensIndexRouteImport.update({
   id: '/settings/tokens/',
   path: '/settings/tokens/',
   getParentRoute: () => AppRoute,
 } as any)
-const AppAgentsAgentIdBrowserSplatRoute =
-  AppAgentsAgentIdBrowserSplatRouteImport.update({
+const AppAgentsDeviceNameBrowserSplatRoute =
+  AppAgentsDeviceNameBrowserSplatRouteImport.update({
     id: '/browser/$',
     path: '/browser/$',
-    getParentRoute: () => AppAgentsAgentIdRoute,
+    getParentRoute: () => AppAgentsDeviceNameRoute,
   } as any)
 const AppSettingsTokensTokenIdEditRoute =
   AppSettingsTokensTokenIdEditRouteImport.update({
@@ -113,16 +115,16 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/$': typeof AppSplatRoute
   '/logs': typeof AppLogsRoute
-  '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/agents/$deviceName': typeof AppAgentsDeviceNameRouteWithChildren
   '/agents/new': typeof AppAgentsNewRoute
   '/agents/': typeof AppAgentsIndexRoute
   '/transfers/': typeof AppTransfersIndexRoute
-  '/agents/$agentId/edit': typeof AppAgentsAgentIdEditRoute
-  '/agents/$agentId/logs': typeof AppAgentsAgentIdLogsRoute
-  '/agents/$agentId/trash': typeof AppAgentsAgentIdTrashRoute
-  '/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
+  '/agents/$deviceName/edit': typeof AppAgentsDeviceNameEditRoute
+  '/agents/$deviceName/logs': typeof AppAgentsDeviceNameLogsRoute
+  '/agents/$deviceName/trash': typeof AppAgentsDeviceNameTrashRoute
+  '/agents/$deviceName/': typeof AppAgentsDeviceNameIndexRoute
   '/settings/tokens/': typeof AppSettingsTokensIndexRoute
-  '/agents/$agentId/browser/$': typeof AppAgentsAgentIdBrowserSplatRoute
+  '/agents/$deviceName/browser/$': typeof AppAgentsDeviceNameBrowserSplatRoute
   '/settings/tokens/$tokenId/edit': typeof AppSettingsTokensTokenIdEditRoute
 }
 export interface FileRoutesByTo {
@@ -133,12 +135,12 @@ export interface FileRoutesByTo {
   '/agents/new': typeof AppAgentsNewRoute
   '/agents': typeof AppAgentsIndexRoute
   '/transfers': typeof AppTransfersIndexRoute
-  '/agents/$agentId/edit': typeof AppAgentsAgentIdEditRoute
-  '/agents/$agentId/logs': typeof AppAgentsAgentIdLogsRoute
-  '/agents/$agentId/trash': typeof AppAgentsAgentIdTrashRoute
-  '/agents/$agentId': typeof AppAgentsAgentIdIndexRoute
+  '/agents/$deviceName/edit': typeof AppAgentsDeviceNameEditRoute
+  '/agents/$deviceName/logs': typeof AppAgentsDeviceNameLogsRoute
+  '/agents/$deviceName/trash': typeof AppAgentsDeviceNameTrashRoute
+  '/agents/$deviceName': typeof AppAgentsDeviceNameIndexRoute
   '/settings/tokens': typeof AppSettingsTokensIndexRoute
-  '/agents/$agentId/browser/$': typeof AppAgentsAgentIdBrowserSplatRoute
+  '/agents/$deviceName/browser/$': typeof AppAgentsDeviceNameBrowserSplatRoute
   '/settings/tokens/$tokenId/edit': typeof AppSettingsTokensTokenIdEditRoute
 }
 export interface FileRoutesById {
@@ -148,16 +150,16 @@ export interface FileRoutesById {
   '/_app/$': typeof AppSplatRoute
   '/_app/logs': typeof AppLogsRoute
   '/_app/': typeof AppIndexRoute
-  '/_app/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/_app/agents/$deviceName': typeof AppAgentsDeviceNameRouteWithChildren
   '/_app/agents/new': typeof AppAgentsNewRoute
   '/_app/agents/': typeof AppAgentsIndexRoute
   '/_app/transfers/': typeof AppTransfersIndexRoute
-  '/_app/agents/$agentId/edit': typeof AppAgentsAgentIdEditRoute
-  '/_app/agents/$agentId/logs': typeof AppAgentsAgentIdLogsRoute
-  '/_app/agents/$agentId/trash': typeof AppAgentsAgentIdTrashRoute
-  '/_app/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
+  '/_app/agents/$deviceName/edit': typeof AppAgentsDeviceNameEditRoute
+  '/_app/agents/$deviceName/logs': typeof AppAgentsDeviceNameLogsRoute
+  '/_app/agents/$deviceName/trash': typeof AppAgentsDeviceNameTrashRoute
+  '/_app/agents/$deviceName/': typeof AppAgentsDeviceNameIndexRoute
   '/_app/settings/tokens/': typeof AppSettingsTokensIndexRoute
-  '/_app/agents/$agentId/browser/$': typeof AppAgentsAgentIdBrowserSplatRoute
+  '/_app/agents/$deviceName/browser/$': typeof AppAgentsDeviceNameBrowserSplatRoute
   '/_app/settings/tokens/$tokenId/edit': typeof AppSettingsTokensTokenIdEditRoute
 }
 export interface FileRouteTypes {
@@ -167,16 +169,16 @@ export interface FileRouteTypes {
     | '/login'
     | '/$'
     | '/logs'
-    | '/agents/$agentId'
+    | '/agents/$deviceName'
     | '/agents/new'
     | '/agents/'
     | '/transfers/'
-    | '/agents/$agentId/edit'
-    | '/agents/$agentId/logs'
-    | '/agents/$agentId/trash'
-    | '/agents/$agentId/'
+    | '/agents/$deviceName/edit'
+    | '/agents/$deviceName/logs'
+    | '/agents/$deviceName/trash'
+    | '/agents/$deviceName/'
     | '/settings/tokens/'
-    | '/agents/$agentId/browser/$'
+    | '/agents/$deviceName/browser/$'
     | '/settings/tokens/$tokenId/edit'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -187,12 +189,12 @@ export interface FileRouteTypes {
     | '/agents/new'
     | '/agents'
     | '/transfers'
-    | '/agents/$agentId/edit'
-    | '/agents/$agentId/logs'
-    | '/agents/$agentId/trash'
-    | '/agents/$agentId'
+    | '/agents/$deviceName/edit'
+    | '/agents/$deviceName/logs'
+    | '/agents/$deviceName/trash'
+    | '/agents/$deviceName'
     | '/settings/tokens'
-    | '/agents/$agentId/browser/$'
+    | '/agents/$deviceName/browser/$'
     | '/settings/tokens/$tokenId/edit'
   id:
     | '__root__'
@@ -201,16 +203,16 @@ export interface FileRouteTypes {
     | '/_app/$'
     | '/_app/logs'
     | '/_app/'
-    | '/_app/agents/$agentId'
+    | '/_app/agents/$deviceName'
     | '/_app/agents/new'
     | '/_app/agents/'
     | '/_app/transfers/'
-    | '/_app/agents/$agentId/edit'
-    | '/_app/agents/$agentId/logs'
-    | '/_app/agents/$agentId/trash'
-    | '/_app/agents/$agentId/'
+    | '/_app/agents/$deviceName/edit'
+    | '/_app/agents/$deviceName/logs'
+    | '/_app/agents/$deviceName/trash'
+    | '/_app/agents/$deviceName/'
     | '/_app/settings/tokens/'
-    | '/_app/agents/$agentId/browser/$'
+    | '/_app/agents/$deviceName/browser/$'
     | '/_app/settings/tokens/$tokenId/edit'
   fileRoutesById: FileRoutesById
 }
@@ -263,11 +265,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAgentsIndexRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/agents/$agentId': {
-      id: '/_app/agents/$agentId'
-      path: '/agents/$agentId'
-      fullPath: '/agents/$agentId'
-      preLoaderRoute: typeof AppAgentsAgentIdRouteImport
+    '/_app/agents/$deviceName': {
+      id: '/_app/agents/$deviceName'
+      path: '/agents/$deviceName'
+      fullPath: '/agents/$deviceName'
+      preLoaderRoute: typeof AppAgentsDeviceNameRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/agents/new': {
@@ -284,33 +286,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTransfersIndexRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/agents/$agentId/': {
-      id: '/_app/agents/$agentId/'
+    '/_app/agents/$deviceName/': {
+      id: '/_app/agents/$deviceName/'
       path: '/'
-      fullPath: '/agents/$agentId/'
-      preLoaderRoute: typeof AppAgentsAgentIdIndexRouteImport
-      parentRoute: typeof AppAgentsAgentIdRoute
+      fullPath: '/agents/$deviceName/'
+      preLoaderRoute: typeof AppAgentsDeviceNameIndexRouteImport
+      parentRoute: typeof AppAgentsDeviceNameRoute
     }
-    '/_app/agents/$agentId/edit': {
-      id: '/_app/agents/$agentId/edit'
+    '/_app/agents/$deviceName/edit': {
+      id: '/_app/agents/$deviceName/edit'
       path: '/edit'
-      fullPath: '/agents/$agentId/edit'
-      preLoaderRoute: typeof AppAgentsAgentIdEditRouteImport
-      parentRoute: typeof AppAgentsAgentIdRoute
+      fullPath: '/agents/$deviceName/edit'
+      preLoaderRoute: typeof AppAgentsDeviceNameEditRouteImport
+      parentRoute: typeof AppAgentsDeviceNameRoute
     }
-    '/_app/agents/$agentId/logs': {
-      id: '/_app/agents/$agentId/logs'
+    '/_app/agents/$deviceName/logs': {
+      id: '/_app/agents/$deviceName/logs'
       path: '/logs'
-      fullPath: '/agents/$agentId/logs'
-      preLoaderRoute: typeof AppAgentsAgentIdLogsRouteImport
-      parentRoute: typeof AppAgentsAgentIdRoute
+      fullPath: '/agents/$deviceName/logs'
+      preLoaderRoute: typeof AppAgentsDeviceNameLogsRouteImport
+      parentRoute: typeof AppAgentsDeviceNameRoute
     }
-    '/_app/agents/$agentId/trash': {
-      id: '/_app/agents/$agentId/trash'
+    '/_app/agents/$deviceName/trash': {
+      id: '/_app/agents/$deviceName/trash'
       path: '/trash'
-      fullPath: '/agents/$agentId/trash'
-      preLoaderRoute: typeof AppAgentsAgentIdTrashRouteImport
-      parentRoute: typeof AppAgentsAgentIdRoute
+      fullPath: '/agents/$deviceName/trash'
+      preLoaderRoute: typeof AppAgentsDeviceNameTrashRouteImport
+      parentRoute: typeof AppAgentsDeviceNameRoute
     }
     '/_app/settings/tokens/': {
       id: '/_app/settings/tokens/'
@@ -319,12 +321,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsTokensIndexRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/agents/$agentId/browser/$': {
-      id: '/_app/agents/$agentId/browser/$'
+    '/_app/agents/$deviceName/browser/$': {
+      id: '/_app/agents/$deviceName/browser/$'
       path: '/browser/$'
-      fullPath: '/agents/$agentId/browser/$'
-      preLoaderRoute: typeof AppAgentsAgentIdBrowserSplatRouteImport
-      parentRoute: typeof AppAgentsAgentIdRoute
+      fullPath: '/agents/$deviceName/browser/$'
+      preLoaderRoute: typeof AppAgentsDeviceNameBrowserSplatRouteImport
+      parentRoute: typeof AppAgentsDeviceNameRoute
     }
     '/_app/settings/tokens/$tokenId/edit': {
       id: '/_app/settings/tokens/$tokenId/edit'
@@ -336,30 +338,30 @@ declare module '@tanstack/react-router' {
   }
 }
 
-interface AppAgentsAgentIdRouteChildren {
-  AppAgentsAgentIdEditRoute: typeof AppAgentsAgentIdEditRoute
-  AppAgentsAgentIdLogsRoute: typeof AppAgentsAgentIdLogsRoute
-  AppAgentsAgentIdTrashRoute: typeof AppAgentsAgentIdTrashRoute
-  AppAgentsAgentIdIndexRoute: typeof AppAgentsAgentIdIndexRoute
-  AppAgentsAgentIdBrowserSplatRoute: typeof AppAgentsAgentIdBrowserSplatRoute
+interface AppAgentsDeviceNameRouteChildren {
+  AppAgentsDeviceNameEditRoute: typeof AppAgentsDeviceNameEditRoute
+  AppAgentsDeviceNameLogsRoute: typeof AppAgentsDeviceNameLogsRoute
+  AppAgentsDeviceNameTrashRoute: typeof AppAgentsDeviceNameTrashRoute
+  AppAgentsDeviceNameIndexRoute: typeof AppAgentsDeviceNameIndexRoute
+  AppAgentsDeviceNameBrowserSplatRoute: typeof AppAgentsDeviceNameBrowserSplatRoute
 }
 
-const AppAgentsAgentIdRouteChildren: AppAgentsAgentIdRouteChildren = {
-  AppAgentsAgentIdEditRoute: AppAgentsAgentIdEditRoute,
-  AppAgentsAgentIdLogsRoute: AppAgentsAgentIdLogsRoute,
-  AppAgentsAgentIdTrashRoute: AppAgentsAgentIdTrashRoute,
-  AppAgentsAgentIdIndexRoute: AppAgentsAgentIdIndexRoute,
-  AppAgentsAgentIdBrowserSplatRoute: AppAgentsAgentIdBrowserSplatRoute,
+const AppAgentsDeviceNameRouteChildren: AppAgentsDeviceNameRouteChildren = {
+  AppAgentsDeviceNameEditRoute: AppAgentsDeviceNameEditRoute,
+  AppAgentsDeviceNameLogsRoute: AppAgentsDeviceNameLogsRoute,
+  AppAgentsDeviceNameTrashRoute: AppAgentsDeviceNameTrashRoute,
+  AppAgentsDeviceNameIndexRoute: AppAgentsDeviceNameIndexRoute,
+  AppAgentsDeviceNameBrowserSplatRoute: AppAgentsDeviceNameBrowserSplatRoute,
 }
 
-const AppAgentsAgentIdRouteWithChildren =
-  AppAgentsAgentIdRoute._addFileChildren(AppAgentsAgentIdRouteChildren)
+const AppAgentsDeviceNameRouteWithChildren =
+  AppAgentsDeviceNameRoute._addFileChildren(AppAgentsDeviceNameRouteChildren)
 
 interface AppRouteChildren {
   AppSplatRoute: typeof AppSplatRoute
   AppLogsRoute: typeof AppLogsRoute
   AppIndexRoute: typeof AppIndexRoute
-  AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRouteWithChildren
+  AppAgentsDeviceNameRoute: typeof AppAgentsDeviceNameRouteWithChildren
   AppAgentsNewRoute: typeof AppAgentsNewRoute
   AppAgentsIndexRoute: typeof AppAgentsIndexRoute
   AppTransfersIndexRoute: typeof AppTransfersIndexRoute
@@ -371,7 +373,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSplatRoute: AppSplatRoute,
   AppLogsRoute: AppLogsRoute,
   AppIndexRoute: AppIndexRoute,
-  AppAgentsAgentIdRoute: AppAgentsAgentIdRouteWithChildren,
+  AppAgentsDeviceNameRoute: AppAgentsDeviceNameRouteWithChildren,
   AppAgentsNewRoute: AppAgentsNewRoute,
   AppAgentsIndexRoute: AppAgentsIndexRoute,
   AppTransfersIndexRoute: AppTransfersIndexRoute,

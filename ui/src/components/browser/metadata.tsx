@@ -59,7 +59,7 @@ function formatSymbolicPermissions(permissions: number): string {
 }
 
 /** Keeps repeated metadata cells visually and semantically consistent. */
-function MetadataItem(props: {
+export function MetadataItem(props: {
     label: string;
     value: React.ReactNode;
     valueLabel?: string;
@@ -248,7 +248,7 @@ type FilesystemMetadata = {
 };
 
 /** Keeps the symbolic, octal, and 3×3 grid views on one shared 9-bit mask. */
-function PermissionsSection(props: {
+export function PermissionsSection(props: {
     headingId: string;
     permissions: number;
     interactive: boolean;
@@ -495,39 +495,17 @@ function FilesystemMetadataSections(props: {
     const headingIdPrefix = props.headingPrefix.toLowerCase();
 
     return (
-        <div className="grid gap-4 p-4 sm:p-5 lg:grid-cols-[minmax(0,1fr)_minmax(21rem,0.72fr)]">
-            <section aria-labelledby={`${headingIdPrefix}-metadata-heading`}>
-                <div className="mb-4">
-                    <h2
-                        id={`${headingIdPrefix}-metadata-heading`}
-                        className="text-base font-semibold text-slate-100"
-                    >
-                        Metadata
-                    </h2>
-                    <p className="mt-1 text-sm text-slate-500">
-                        Filesystem identity and storage information.
-                    </p>
-                </div>
-                <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {props.size === undefined &&
-                    props.sizeAction === undefined ? null : (
-                        <MetadataItem
-                            label="Size"
-                            value={
-                                props.size === undefined
-                                    ? props.sizeAction
-                                    : formatSize(props.size)
-                            }
-                            valueLabel={props.sizeLabel ?? "File size value"}
-                        />
-                    )}
-                    {props.entryCount === undefined ? null : (
-                        <MetadataItem
-                            label="Entries"
-                            value={props.entryCount}
-                            valueLabel="Directory entry count"
-                        />
-                    )}
+        <MetadataSectionsLayout
+            headingPrefix={props.headingPrefix}
+            description="Filesystem identity and storage information."
+            items={
+                <>
+                    <SizeAndEntryItems
+                        size={props.size}
+                        sizeLabel={props.sizeLabel}
+                        sizeAction={props.sizeAction}
+                        entryCount={props.entryCount}
+                    />
                     <MetadataItem
                         label="Owner"
                         truncate={ownership.showOwnerSelect ? false : undefined}
@@ -578,16 +556,18 @@ function FilesystemMetadataSections(props: {
                         value={ownership.displayed.gid}
                         mono
                     />
-                </dl>
-            </section>
-
-            <PermissionsSection
-                headingId={`${headingIdPrefix}-permissions-heading`}
-                permissions={ownership.displayed.permissions}
-                interactive={ownership.canChmod}
-                disabled={ownership.chmodPending}
-                onToggleBit={ownership.togglePermissionBit}
-            />
+                </>
+            }
+            permissions={
+                <PermissionsSection
+                    headingId={`${headingIdPrefix}-permissions-heading`}
+                    permissions={ownership.displayed.permissions}
+                    interactive={ownership.canChmod}
+                    disabled={ownership.chmodPending}
+                    onToggleBit={ownership.togglePermissionBit}
+                />
+            }
+        >
             {ownership.feedback ? (
                 <Toast
                     tone={ownership.feedback.tone}
@@ -601,7 +581,77 @@ function FilesystemMetadataSections(props: {
                     {ownership.accountsError}
                 </Toast>
             ) : null}
+        </MetadataSectionsLayout>
+    );
+}
+
+/**
+ * Lays out the metadata grid beside the permissions, so worktree paths and Git revisions
+ * present their facts identically while each supplies its own values.
+ */
+export function MetadataSectionsLayout(props: {
+    headingPrefix: string;
+    description: string;
+    items: React.ReactNode;
+    permissions: React.ReactNode;
+    /** Feedback that belongs to the sections, such as toasts. */
+    children?: React.ReactNode;
+}) {
+    const headingIdPrefix = props.headingPrefix.toLowerCase();
+
+    return (
+        <div className="grid gap-4 p-4 @xl:p-5 @4xl:grid-cols-[minmax(0,1fr)_minmax(21rem,0.72fr)]">
+            <section aria-labelledby={`${headingIdPrefix}-metadata-heading`}>
+                <div className="mb-4">
+                    <h2
+                        id={`${headingIdPrefix}-metadata-heading`}
+                        className="text-base font-semibold text-slate-100"
+                    >
+                        Metadata
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-500">
+                        {props.description}
+                    </p>
+                </div>
+                <dl className="grid gap-3 @xl:grid-cols-2 @4xl:grid-cols-3">
+                    {props.items}
+                </dl>
+            </section>
+            {props.permissions}
+            {props.children}
         </div>
+    );
+}
+
+/** The size and entry-count cells every details view starts its metadata grid with. */
+export function SizeAndEntryItems(props: {
+    size?: number;
+    sizeLabel?: string;
+    sizeAction?: React.ReactNode;
+    entryCount?: number;
+}) {
+    return (
+        <>
+            {props.size === undefined &&
+            props.sizeAction === undefined ? null : (
+                <MetadataItem
+                    label="Size"
+                    value={
+                        props.size === undefined
+                            ? props.sizeAction
+                            : formatSize(props.size)
+                    }
+                    valueLabel={props.sizeLabel ?? "File size value"}
+                />
+            )}
+            {props.entryCount === undefined ? null : (
+                <MetadataItem
+                    label="Entries"
+                    value={props.entryCount}
+                    valueLabel="Directory entry count"
+                />
+            )}
+        </>
     );
 }
 
@@ -630,7 +680,7 @@ function CopyFullPathButton(props: { path: string }) {
 }
 
 /** Presents file and directory identity consistently while allowing file-only path copying. */
-function PathDetailHeader(props: {
+export function PathDetailHeader(props: {
     entryType: "file" | "directory";
     name: string;
     path: string;
@@ -850,17 +900,19 @@ export function FileDetailView(props: {
 }
 
 /** Displays one-time download links and preserves their associated copy affordances. */
-function ShareableLinksSection(props: {
+export function ShareableLinksSection(props: {
     downloadUrl: string;
     oneTimeTokens: Array<string>;
     isCreating: boolean;
     errorMessage: string | null;
     onCreate: () => void;
+    /** Links download the working file, so a Git revision cannot offer them. */
+    disabled?: boolean;
 }) {
     return (
         <section
             aria-labelledby="shareable-links-heading"
-            className="border-t border-slate-800 bg-slate-950/15 p-4 sm:p-5"
+            className="border-t border-slate-800 bg-slate-950/15 p-4 @xl:p-5"
         >
             <div className="flex flex-wrap items-start justify-between gap-4">
                 <div>
@@ -879,6 +931,7 @@ function ShareableLinksSection(props: {
                     onClick={props.onCreate}
                     variant="secondary"
                     size="lg"
+                    disabled={props.disabled}
                     isLoading={props.isCreating}
                     className="rounded-lg border-blue-500/30 bg-blue-500/10 text-sm font-semibold text-blue-300 hover:border-blue-500/50 hover:bg-blue-500/20 disabled:opacity-60"
                 >
@@ -962,7 +1015,7 @@ function ShareableLinkCard(props: {
                     )}
                 </IconButton>
             </div>
-            <div className="mt-3 grid min-w-0 gap-3 lg:grid-cols-2">
+            <div className="mt-3 grid min-w-0 gap-3 @4xl:grid-cols-2">
                 <CopyableCodeRow
                     label="wget"
                     value={wgetCommand}

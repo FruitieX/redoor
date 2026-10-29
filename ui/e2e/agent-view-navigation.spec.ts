@@ -23,7 +23,7 @@ test.describe("Agent view navigation", () => {
         page,
     }) => {
         await page.setViewportSize({ width: 360, height: 844 });
-        await page.goto(`${WEB_BASE_URL}/agents/${context.agentId}`);
+        await page.goto(`${WEB_BASE_URL}/agents/${context.agentName}`);
 
         const agentView = page.getByLabel("Device view");
 
@@ -106,7 +106,7 @@ test.describe("Agent view navigation", () => {
             uploadCenter,
         );
         await page.goto(
-            `${WEB_BASE_URL}/agents/${context.agentId}/browser/${encodeFilesystemPath(`${context.testDirPath}/file1.txt`)}`,
+            `${WEB_BASE_URL}/agents/${context.agentName}/browser/${encodeFilesystemPath(`${context.testDirPath}/file1.txt`)}`,
         );
         const fileView = page.getByLabel("File view");
         // Workspace fixtures are inside the repository, so Git follows the unified Sync workspace.
@@ -131,7 +131,9 @@ test.describe("Agent view navigation", () => {
             .getByRole("link", { name: context.agentName, exact: true })
             .click();
         // Returning to the agent page must restore the Agent tab as current.
-        await expect(page).toHaveURL(new RegExp(`/agents/${context.agentId}$`));
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${context.agentName}$`),
+        );
         await expect(agentLink).toHaveAttribute("aria-current", "page");
 
         const logsLink = agentView.getByRole("link", {
@@ -144,7 +146,7 @@ test.describe("Agent view navigation", () => {
         await logsLink.click();
         // The logs route must keep the tab strip visible and mark Logs as current.
         await expect(page).toHaveURL(
-            new RegExp(`/agents/${context.agentId}/logs$`),
+            new RegExp(`/agents/${context.agentName}/logs$`),
         );
         await expect(logsLink).toHaveAttribute("aria-current", "page");
 
@@ -155,7 +157,7 @@ test.describe("Agent view navigation", () => {
             .click();
         // Selecting an agent must navigate and dismiss the mobile drawer.
         await expect(page).toHaveURL(
-            new RegExp(`/agents/${context.agent2Id}/browser/`),
+            new RegExp(`/agents/${context.agent2Name}/browser/`),
         );
         await expect(agentDialog).toBeHidden();
     });

@@ -9,6 +9,7 @@ import {
 } from "vitest";
 import { Agent, ApiClient } from "#ui/api-client";
 import {
+    agentRegisteredPattern,
     ProcessManager,
     TempFileManager,
     startServerAndAgent,
@@ -82,9 +83,7 @@ describe("File Diff API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${secondAgentName},`,
-            ),
+            agentRegisteredPattern(secondAgentName),
             10000,
         );
 
@@ -122,6 +121,51 @@ describe("File Diff API", () => {
 
         // Content from both independent websocket streams reaches one server-side comparison.
         expect(response.unified_diff).toContain("-old\n+new");
+    });
+
+    it("sends small files whole and large files with default context", async () => {
+        /** Numbered lines with one of them edited, so context sizes are predictable. */
+        const numbered = (count: number, changed: number) =>
+            Array.from({ length: count }, (_, index) =>
+                index + 1 === changed
+                    ? `changed ${index + 1}\n`
+                    : `line ${index + 1}\n`,
+            ).join("");
+
+        const smallLeft = tempFiles.create(numbered(50, 0), {
+            suffix: "-small-left.txt",
+        });
+
+        const smallRight = tempFiles.create(numbered(50, 25), {
+            suffix: "-small-right.txt",
+        });
+
+        const small = await apiClient.diffFiles(
+            { agent: testAgent.id, path: smallLeft },
+            { agent: testAgent.id, path: smallRight },
+        );
+
+        // Small files come whole, so the UI can expand context without diffing again.
+        expect(small.full_context).toBe(true);
+        expect(small.unified_diff).toContain("@@ -1,50 +1,50 @@");
+
+        // Large enough that the whole patch exceeds the full-context cap, yet still editable.
+        const largeLeft = tempFiles.create(numbered(40_000, 0), {
+            suffix: "-large-left.txt",
+        });
+
+        const largeRight = tempFiles.create(numbered(40_000, 20_000), {
+            suffix: "-large-right.txt",
+        });
+
+        const large = await apiClient.diffFiles(
+            { agent: testAgent.id, path: largeLeft },
+            { agent: testAgent.id, path: largeRight },
+        );
+
+        // Large files fall back to default context and must not be offered as expandable.
+        expect(large.full_context).toBe(false);
+        expect(large.unified_diff).toContain("@@ -19997,7 +19997,7 @@");
     });
 
     it("returns an empty unified diff for identical files", async () => {

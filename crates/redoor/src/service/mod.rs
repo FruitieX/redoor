@@ -1,8 +1,9 @@
 //! Installs and controls Redoor as an operating-system service.
 //!
-//! The CLI surface (`redoor agent|server systemd|launchd ...`), the install/config checks,
-//! the help text and the status line are shared; each service manager only implements
-//! [`ServiceBackend`]. systemd is used on Linux and launchd (per-user LaunchAgents) on macOS.
+//! The CLI surface (`redoor agent|server systemd|launchd ...` and
+//! `redoor agent relay systemd|launchd ... ID`), the install/config checks, the help text and
+//! the status line are shared; each service manager only implements [`ServiceBackend`].
+//! systemd is used on Linux and launchd (per-user LaunchAgents) on macOS.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod launchd;
@@ -21,57 +22,157 @@ use redoor_core::paths::AppPaths;
 use tokio::io::AsyncWriteExt;
 
 /// Process role selected by the parent CLI command for service management.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub(crate) enum ServiceRole {
     /// Manage a standalone Redoor agent process.
     Agent,
     /// Manage the Redoor HTTP and WebSocket server process.
     Server,
+    /// Manage one configured `[[relays]]` entry, identified by its stable relay ID.
+    Relay(String),
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl ServiceRole {
-    /// Returns the stable CLI and generated-service suffix for this role.
-    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
-    pub(crate) fn cli_name(self) -> &'static str {
+    /// Suffix after `<app-name>-` in generated unit names and labels.
+    ///
+    /// Relays include their ID so every configured relay can be installed side by side.
+    pub(crate) fn service_suffix(&self) -> String {
         match self {
-            Self::Agent => "agent",
-            Self::Server => "server",
+            Self::Agent => "agent".to_string(),
+            Self::Server => "server".to_string(),
+            Self::Relay(id) => format!("relay-{id}"),
+        }
+    }
+
+    /// Human-readable service description written into the service definition.
+    pub(crate) fn description(&self) -> String {
+        match self {
+            Self::Agent => "Redoor agent".to_string(),
+            Self::Server => "Redoor server".to_string(),
+            Self::Relay(id) => format!("Redoor relay {id}"),
+        }
+    }
+
+    /// Arguments after the executable that run this role in the foreground.
+    ///
+    /// The service manager supervises the process itself, so no `--daemon` is passed; the
+    /// caller appends the pinned `--config`.
+    pub(crate) fn program_arguments(&self) -> Vec<&str> {
+        match self {
+            Self::Agent => vec!["agent"],
+            Self::Server => vec!["server"],
+            Self::Relay(id) => vec!["agent", "relay", "start", id],
+        }
+    }
+
+    /// Whether the process reports readiness through `NOTIFY_SOCKET`.
+    ///
+    /// Relays retry their SSH session forever and have no single "ready" moment, so systemd
+    /// must not wait for a notification that never comes.
+    pub(crate) fn notifies_readiness(&self) -> bool {
+        !matches!(self, Self::Relay(_))
+    }
+
+    /// Full CLI invocation of one service action, used in operator guidance.
+    ///
+    /// `action` may carry flags (`disable --now`); a relay ID goes right after the verb so
+    /// the printed command matches the help examples.
+    pub(crate) fn service_command(&self, manager: &str, action: &str) -> String {
+        match self {
+            Self::Agent | Self::Server => {
+                format!("redoor {} {manager} {action}", self.service_suffix())
+            }
+            Self::Relay(id) => {
+                let (verb, flags) = match action.split_once(' ') {
+                    Some((verb, flags)) => (verb, format!(" {flags}")),
+                    None => (action, String::new()),
+                };
+                format!("redoor agent relay {manager} {verb} {id}{flags}")
+            }
+        }
+    }
+
+    /// CLI invocation that shows this role's file log.
+    fn logs_command(&self) -> String {
+        match self {
+            Self::Agent => "redoor agent logs --follow".to_string(),
+            Self::Server => "redoor server logs --follow".to_string(),
+            Self::Relay(id) => format!("redoor agent relay logs {id}"),
         }
     }
 }
 
+/// Target of a service action for roles with exactly one service per namespace.
+///
+/// The agent and server need no extra argument, so their actions stay `install`, `start`, ...
+#[derive(Args, Clone, Debug)]
+pub(crate) struct NoTarget {}
+
+/// Target of a service action for relays, which can have one service per configured entry.
+#[derive(Args, Clone, Debug)]
+pub(crate) struct RelayTarget {
+    /// Stable relay ID from a `[[relays]]` entry.
+    #[arg(value_parser = redoor_core::config::parse_relay_id)]
+    pub(crate) id: String,
+}
+
 /// Operations shared by Redoor's supported operating-system service managers.
+///
+/// `T` is the per-action target: nothing for the agent and server, a relay ID for relays.
+/// Keeping it generic gives every role the same set of actions, so one cannot miss e.g.
+/// `restart`.
 #[derive(Subcommand)]
-pub(crate) enum ServiceCommand {
+pub(crate) enum ServiceCommand<T: Args> {
     /// Install and enable the service, remaining stopped unless requested.
     #[command(after_help = crate::examples::SERVICE_INSTALL)]
-    Install(InstallArgs),
+    Install(InstallArgs<T>),
     /// Stop, disable, and remove the service while preserving its config.
     #[command(after_help = crate::examples::SERVICE_UNINSTALL)]
-    Uninstall,
+    Uninstall(T),
     /// Start the installed service.
     #[command(after_help = crate::examples::SERVICE_START)]
-    Start,
+    Start(T),
     /// Stop the installed service while leaving it enabled for future startup.
     #[command(after_help = crate::examples::SERVICE_STOP)]
-    Stop,
+    Stop(T),
     /// Reload and restart the installed service.
     #[command(after_help = crate::examples::SERVICE_RESTART)]
-    Restart,
+    Restart(T),
     /// Show installation, enablement, and process state.
     #[command(after_help = crate::examples::SERVICE_STATUS)]
-    Status,
+    Status(T),
     /// Enable the installed service without starting it.
     #[command(after_help = crate::examples::SERVICE_ENABLE)]
-    Enable,
+    Enable(T),
     /// Disable automatic startup, optionally stopping the service now.
     #[command(after_help = crate::examples::SERVICE_DISABLE)]
-    Disable(DisableArgs),
+    Disable(DisableArgs<T>),
+}
+
+impl<T: Args> ServiceCommand<T> {
+    /// Returns which service the action targets, so the caller can resolve the role first.
+    pub(crate) fn target(&self) -> &T {
+        match self {
+            Self::Install(install) => &install.target,
+            Self::Disable(disable) => &disable.target,
+            Self::Uninstall(target)
+            | Self::Start(target)
+            | Self::Stop(target)
+            | Self::Restart(target)
+            | Self::Status(target)
+            | Self::Enable(target) => target,
+        }
+    }
 }
 
 /// Controls whether installation also starts the service.
 #[derive(Args)]
-pub(crate) struct InstallArgs {
+pub(crate) struct InstallArgs<T: Args> {
+    /// Service the action targets.
+    #[command(flatten)]
+    target: T,
     /// Start the service after installing and enabling it.
     #[arg(long)]
     pub(crate) start: bool,
@@ -79,54 +180,74 @@ pub(crate) struct InstallArgs {
 
 /// Controls whether disabling also stops the current service process.
 #[derive(Args)]
-pub(crate) struct DisableArgs {
+pub(crate) struct DisableArgs<T: Args> {
+    /// Service the action targets.
+    #[command(flatten)]
+    target: T,
     /// Stop the service in addition to disabling automatic startup.
     #[arg(long)]
     pub(crate) now: bool,
 }
 
-/// Arguments for role-scoped `redoor agent|server systemd` service management.
+/// Arguments for role-scoped `redoor agent|server|agent relay systemd` service management.
 #[derive(Args)]
 #[command(author, version, about)]
-pub(crate) struct SystemdArgs {
+pub(crate) struct SystemdArgs<T: Args> {
     /// Selects the systemd operation while keeping service targeting consistent.
     #[command(subcommand)]
-    command: ServiceCommand,
+    command: ServiceCommand<T>,
 }
 
-/// Arguments for role-scoped `redoor agent|server launchd` management.
+impl<T: Args> SystemdArgs<T> {
+    /// Returns which service the selected action targets.
+    pub(crate) fn target(&self) -> &T {
+        self.command.target()
+    }
+}
+
+/// Arguments for role-scoped `redoor agent|server|agent relay launchd` management.
 #[derive(Args)]
 #[command(author, version, about)]
-pub(crate) struct LaunchdArgs {
+pub(crate) struct LaunchdArgs<T: Args> {
     /// Show output from internal launchctl commands.
     #[arg(long, global = true)]
     verbose: bool,
     /// Selects the launchd operation while keeping service targeting consistent.
     #[command(subcommand)]
-    command: LaunchdCommand,
+    command: LaunchdCommand<T>,
+}
+
+impl<T: Args> LaunchdArgs<T> {
+    /// Returns which service the selected action targets.
+    pub(crate) fn target(&self) -> &T {
+        match &self.command {
+            LaunchdCommand::Service(command) => command.target(),
+            LaunchdCommand::RefreshLocalNetworkPermission(target) => target,
+        }
+    }
 }
 
 /// launchd supports the shared operations plus a macOS-only permission repair.
 #[derive(Subcommand)]
-enum LaunchdCommand {
+enum LaunchdCommand<T: Args> {
     /// Operations shared with systemd.
     #[command(flatten)]
-    Service(ServiceCommand),
+    Service(ServiceCommand<T>),
     /// Replace a stale ad-hoc identity so macOS asks for Local Network access again.
     #[command(after_help = crate::examples::REFRESH_LOCAL_NETWORK_PERMISSION)]
-    RefreshLocalNetworkPermission,
+    RefreshLocalNetworkPermission(T),
 }
 
 /// Runs one systemd operation against the unit scope implied by current privileges.
-pub(crate) async fn run_systemd(
-    args: SystemdArgs,
+pub(crate) async fn run_systemd<T: Args>(
+    args: SystemdArgs<T>,
     role: ServiceRole,
     paths: &AppPaths,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let backend = systemd::SystemdBackend::new(role, paths);
-        run_command(&backend, role, paths, args.command).await
+        let backend = systemd::SystemdBackend::new(role.clone(), paths);
+        run_command(&backend, &role, paths, args.command).await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -136,17 +257,17 @@ pub(crate) async fn run_systemd(
 }
 
 /// Runs one macOS LaunchAgent operation for the invoking non-root user.
-pub(crate) async fn run_launchd(
-    args: LaunchdArgs,
+pub(crate) async fn run_launchd<T: Args>(
+    args: LaunchdArgs<T>,
     role: ServiceRole,
     paths: &AppPaths,
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let backend = launchd::LaunchdBackend::new(role, paths, args.verbose)?;
+        let backend = launchd::LaunchdBackend::new(role.clone(), paths, args.verbose)?;
         match args.command {
-            LaunchdCommand::Service(command) => run_command(&backend, role, paths, command).await,
-            LaunchdCommand::RefreshLocalNetworkPermission => {
+            LaunchdCommand::Service(command) => run_command(&backend, &role, paths, command).await,
+            LaunchdCommand::RefreshLocalNetworkPermission(_) => {
                 backend.refresh_local_network_permission().await
             }
         }
@@ -194,11 +315,11 @@ pub(crate) trait ServiceBackend {
 
 /// Executes one shared service operation through `backend`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn run_command<B: ServiceBackend>(
+async fn run_command<B: ServiceBackend, T: Args>(
     backend: &B,
-    role: ServiceRole,
+    role: &ServiceRole,
     paths: &AppPaths,
-    command: ServiceCommand,
+    command: ServiceCommand<T>,
 ) -> Result<()> {
     match command {
         ServiceCommand::Install(install) => {
@@ -216,7 +337,7 @@ async fn run_command<B: ServiceBackend>(
                 },
             );
         }
-        ServiceCommand::Uninstall => {
+        ServiceCommand::Uninstall(_) => {
             let description = backend.describe();
             if backend.uninstall().await? {
                 println!("Uninstalled {description}; configuration was preserved.");
@@ -224,22 +345,22 @@ async fn run_command<B: ServiceBackend>(
                 println!("{description} is already uninstalled; configuration was preserved.");
             }
         }
-        ServiceCommand::Status => {
+        ServiceCommand::Status(_) => {
             println!("{}", backend.status().await?.format(&backend.describe()))
         }
-        ServiceCommand::Start => {
+        ServiceCommand::Start(_) => {
             backend.ensure_installed().await?;
             backend.start().await?;
         }
-        ServiceCommand::Stop => {
+        ServiceCommand::Stop(_) => {
             backend.ensure_installed().await?;
             backend.stop().await?;
         }
-        ServiceCommand::Restart => {
+        ServiceCommand::Restart(_) => {
             backend.ensure_installed().await?;
             backend.restart().await?;
         }
-        ServiceCommand::Enable => {
+        ServiceCommand::Enable(_) => {
             backend.ensure_installed().await?;
             backend.enable().await?;
         }
@@ -253,10 +374,10 @@ async fn run_command<B: ServiceBackend>(
 
 /// Builds the actionable error shared by every "not installed" check.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn not_installed(description: &str, role: ServiceRole, manager: &str) -> anyhow::Error {
+fn not_installed(description: &str, role: &ServiceRole, manager: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "{description} is not installed. Install it with: redoor {} {manager} install",
-        role.cli_name()
+        "{description} is not installed. Install it with: {}",
+        role.service_command(manager, "install")
     )
 }
 
@@ -275,7 +396,7 @@ struct InstallReport {
 
 /// Prints how to control the service after a successful installation.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn print_install_help<B: ServiceBackend>(backend: &B, role: ServiceRole, report: &InstallReport) {
+fn print_install_help<B: ServiceBackend>(backend: &B, role: &ServiceRole, report: &InstallReport) {
     let trigger = backend.autostart_trigger();
     println!(
         "Installed {} at {} and enabled it {} {trigger} ({}).",
@@ -294,23 +415,29 @@ fn print_install_help<B: ServiceBackend>(backend: &B, role: ServiceRole, report:
 Edit it before starting the service.",
             report.config_path.display()
         );
-        if role == ServiceRole::Agent {
+        if *role == ServiceRole::Agent {
             println!("The [agent] section probably needs to be changed (token, server).");
         }
     } else {
         println!("Config: {}", report.config_path.display());
     }
-    let role = role.cli_name();
     let manager = backend.manager();
+    let command = |action| role.service_command(manager, action);
     println!(
         "
 Manage the service:
-  redoor {role} {manager} start
-  redoor {role} {manager} stop       # remains enabled for future {trigger}
-  redoor {role} {manager} restart
-  redoor {role} {manager} status
-  redoor {role} {manager} disable --now
-  redoor {role} logs --follow"
+  {}
+  {}       # remains enabled for future {trigger}
+  {}
+  {}
+  {}
+  {}",
+        command("start"),
+        command("stop"),
+        command("restart"),
+        command("status"),
+        command("disable --now"),
+        role.logs_command()
     );
 }
 
@@ -378,33 +505,38 @@ impl ServiceState {
 
 /// Ensures service installation has a complete config usable without CLI overrides.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn prepare_config(mode: ServiceRole, config_path: &Path) -> Result<bool> {
+async fn prepare_config(role: &ServiceRole, config_path: &Path) -> Result<bool> {
     if tokio::fs::try_exists(config_path)
         .await
         .with_context(|| format!("Failed to inspect config '{}'", config_path.display()))?
     {
-        validate_existing_config(mode, config_path).await?;
+        validate_existing_config(role, config_path).await?;
         return Ok(false);
     }
 
-    if mode == ServiceRole::Agent {
-        let imported_path =
-            redoor_core::config::import_agent_config_from_stdin(config_path).await?;
-        validate_existing_config(mode, &imported_path).await?;
-        return Ok(false);
+    match role {
+        ServiceRole::Agent => {
+            let imported_path =
+                redoor_core::config::import_agent_config_from_stdin(config_path).await?;
+            validate_existing_config(role, &imported_path).await?;
+            Ok(false)
+        }
+        ServiceRole::Server => bail!(
+            "config '{}' is missing; run `redoor server` once to create a starter config, then re-run install",
+            config_path.display()
+        ),
+        ServiceRole::Relay(id) => bail!(
+            "config '{}' is missing; add agent_token and a [[relays]] entry with id = \"{id}\", then re-run install",
+            config_path.display()
+        ),
     }
-
-    bail!(
-        "config '{}' is missing; run `redoor server` once to create a starter config, then re-run install",
-        config_path.display()
-    )
 }
 
 /// Rejects configs that cannot run the selected role without extra CLI flags.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn validate_existing_config(mode: ServiceRole, config_path: &Path) -> Result<()> {
+async fn validate_existing_config(role: &ServiceRole, config_path: &Path) -> Result<()> {
     let config = redoor_core::config::parse_config_file(config_path).await?;
-    match mode {
+    match role {
         ServiceRole::Agent => {
             if !redoor_core::config::standalone_agent_is_fully_configured(&config) {
                 bail!(
@@ -415,6 +547,15 @@ async fn validate_existing_config(mode: ServiceRole, config_path: &Path) -> Resu
         }
         ServiceRole::Server => {
             redoor_core::config::require_server_section(&config)?;
+        }
+        ServiceRole::Relay(id) => {
+            // The service would otherwise install fine and then fail on every restart.
+            redoor_core::config::require_relay(&config, id).with_context(|| {
+                format!(
+                    "config '{}' has no [[relays]] entry for the service",
+                    config_path.display()
+                )
+            })?;
         }
     }
     Ok(())
@@ -479,6 +620,32 @@ async fn current_binary() -> Result<PathBuf> {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
+
+    /// Printed guidance is copied verbatim, so relay commands must put the ID where clap
+    /// expects it and keep flags after it.
+    #[test]
+    fn formats_role_service_commands() {
+        // Agent and server have one service per namespace and need no ID.
+        assert_eq!(
+            ServiceRole::Server.service_command("systemd", "disable --now"),
+            "redoor server systemd disable --now"
+        );
+        // A relay service is selected by the ID following the action verb.
+        assert_eq!(
+            ServiceRole::Relay("production".into()).service_command("launchd", "disable --now"),
+            "redoor agent relay launchd disable production --now"
+        );
+        // Relay units must not collide with the standalone agent's unit name.
+        assert_eq!(
+            ServiceRole::Relay("production".into()).service_suffix(),
+            "relay-production"
+        );
+        // The service runs the relay in the foreground so the manager can supervise it.
+        assert_eq!(
+            ServiceRole::Relay("production".into()).program_arguments(),
+            ["agent", "relay", "start", "production"]
+        );
+    }
 
     /// Every manager shares one status vocabulary, including orphaned loaded jobs.
     #[test]

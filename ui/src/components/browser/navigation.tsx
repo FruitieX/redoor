@@ -35,6 +35,8 @@ function BrowserPageHeader(props: {
     path: string;
     startEditingPath?: boolean;
     navigation: React.ReactNode;
+    /** Page-wide context shown under the breadcrumbs, such as the browsed Git revision. */
+    banner?: React.ReactNode;
     viewToggle: React.ReactNode;
 }) {
     return (
@@ -44,7 +46,7 @@ function BrowserPageHeader(props: {
                     <Tooltip content="Open device home directory">
                         <Link
                             {...browserRoute(
-                                props.agent.id,
+                                props.agent,
                                 props.agent.cwd ?? "/",
                             )}
                             aria-label="Device home"
@@ -67,8 +69,9 @@ function BrowserPageHeader(props: {
                     />
                 </div>
             </div>
+            {props.banner ? <div className="mb-3">{props.banner}</div> : null}
             {props.viewToggle ? (
-                <div className="-mx-2 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800 px-2 lg:-mx-4 lg:px-4">
+                <div className="-mx-2 min-w-0 overflow-x-auto overscroll-x-contain border-b border-slate-800 px-2 @4xl:-mx-4 @4xl:px-4">
                     {props.viewToggle}
                 </div>
             ) : null}
@@ -85,19 +88,22 @@ export function ViewToggle(props: {
     /** Names the content tab Edit only after the agent marks the file writable. */
     editable?: boolean;
     gitAvailable: boolean;
+    /** Hides views that change files, and never names the content tab Edit. */
+    readOnly?: boolean;
 }) {
     const isDirectory = props.entryType === "directory";
+    const readOnly = props.readOnly === true;
 
     // A directory's default tab is its listing; a file's is its content, named by what it allows.
     const contentLabel = isDirectory
         ? "Files"
-        : props.editable === true
+        : props.editable === true && !readOnly
           ? "Edit"
           : "View";
 
     const contentIcon = isDirectory ? (
         <Files className="h-4 w-4" aria-hidden="true" />
-    ) : props.editable === true ? (
+    ) : props.editable === true && !readOnly ? (
         <Pencil className="h-4 w-4" aria-hidden="true" />
     ) : (
         <File className="h-4 w-4" aria-hidden="true" />
@@ -109,31 +115,33 @@ export function ViewToggle(props: {
             variant="page"
         >
             <ViewToggleLink
-                agentId={props.agent.id}
+                agent={props.agent}
                 path={props.path}
                 label={contentLabel}
                 icon={contentIcon}
                 active={props.activeView === (isDirectory ? "files" : "view")}
             />
             <ViewToggleLink
-                agentId={props.agent.id}
+                agent={props.agent}
                 path={props.path}
                 view="details"
                 label="Details"
                 icon={<Info className="h-4 w-4" aria-hidden="true" />}
                 active={props.activeView === "details"}
             />
-            <ViewToggleLink
-                agentId={props.agent.id}
-                path={props.path}
-                view="sync"
-                label="Sync"
-                icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
-                active={props.activeView === "sync"}
-            />
+            {readOnly ? null : (
+                <ViewToggleLink
+                    agent={props.agent}
+                    path={props.path}
+                    view="sync"
+                    label="Sync"
+                    icon={<RefreshCw className="h-4 w-4" aria-hidden="true" />}
+                    active={props.activeView === "sync"}
+                />
+            )}
             {props.gitAvailable ? (
                 <ViewToggleLink
-                    agentId={props.agent.id}
+                    agent={props.agent}
                     path={props.path}
                     view="git"
                     label="Git"
@@ -147,7 +155,7 @@ export function ViewToggle(props: {
 
 /** Applies current-page semantics to a filesystem representation link. */
 function ViewToggleLink(props: {
-    agentId: string;
+    agent: Agent;
     path: string;
     /** Leaves the default representation, the listing or content, when omitted. */
     view?: "details" | "sync" | "git";
@@ -157,7 +165,7 @@ function ViewToggleLink(props: {
 }) {
     return (
         <Link
-            {...browserRoute(props.agentId, props.path)}
+            {...browserRoute(props.agent, props.path)}
             search={{ view: props.view }}
             aria-current={props.active ? "page" : undefined}
             className={getPageViewTabClass(props.active)}
@@ -219,6 +227,10 @@ export function BrowserHeader(props: {
     gitAvailable: boolean;
     pathUnavailable?: boolean;
     startEditingPath?: boolean;
+    /** Shown under the breadcrumbs, such as the banner of a browsed Git revision. */
+    banner?: React.ReactNode;
+    /** Hides views that change files, for read-only history browsing. */
+    readOnly?: boolean;
 }) {
     const navigate = useNavigate();
     const pathUnavailable = props.pathUnavailable === true;
@@ -231,7 +243,7 @@ export function BrowserHeader(props: {
             !pathUnavailable
         ) {
             void navigate({
-                ...browserRoute(props.agent.id, props.path),
+                ...browserRoute(props.agent, props.path),
                 search: {},
             });
 
@@ -242,7 +254,7 @@ export function BrowserHeader(props: {
             return false;
         }
 
-        void navigate(browserRoute(props.agent.id, props.parentPath));
+        void navigate(browserRoute(props.agent, props.parentPath));
     };
 
     useShortcut({
@@ -266,7 +278,7 @@ export function BrowserHeader(props: {
                     <Tooltip content="Go to the parent directory (Backspace)">
                         <Link
                             {...browserRoute(
-                                props.agent.id,
+                                props.agent,
                                 props.parentPath ?? "/",
                             )}
                             aria-label="Go to the parent directory"
@@ -278,6 +290,7 @@ export function BrowserHeader(props: {
                     </Tooltip>
                 </>
             }
+            banner={props.banner}
             viewToggle={
                 pathUnavailable ? null : (
                     <ViewToggle
@@ -287,6 +300,7 @@ export function BrowserHeader(props: {
                         activeView={props.activeView}
                         editable={props.editable}
                         gitAvailable={props.gitAvailable}
+                        readOnly={props.readOnly}
                     />
                 )
             }
@@ -344,7 +358,7 @@ export function UnavailablePathState(props: {
                 </Button>
                 {props.parentPath ? (
                     <Link
-                        {...browserRoute(props.agent.id, props.parentPath)}
+                        {...browserRoute(props.agent, props.parentPath)}
                         className="inline-flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-tint"
                     >
                         <ArrowUp className="h-4 w-4" aria-hidden="true" />
@@ -415,7 +429,7 @@ function Breadcrumbs(props: {
         }
 
         // Destination route decides whether the editor stays open (missing path).
-        await navigate(browserRoute(props.agent.id, targetPath));
+        await navigate(browserRoute(props.agent, targetPath));
     };
 
     return (
@@ -460,7 +474,7 @@ function Breadcrumbs(props: {
                             </span>
                         ) : (
                             <Link
-                                {...browserRoute(props.agent.id, "/")}
+                                {...browserRoute(props.agent, "/")}
                                 className="-my-1 shrink-0 rounded px-1.5 py-1 text-blue-400 hover:underline"
                             >
                                 /
@@ -487,7 +501,7 @@ function Breadcrumbs(props: {
                                     ) : (
                                         <Link
                                             {...browserRoute(
-                                                props.agent.id,
+                                                props.agent,
                                                 accumulatedPath,
                                             )}
                                             className={`whitespace-nowrap font-medium text-blue-400 hover:underline ${part.length < 3 ? "-my-1 rounded px-1.5 py-1" : ""}`}

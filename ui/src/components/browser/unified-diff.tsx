@@ -1,224 +1,241 @@
 import React from "react";
-import { useNavigate } from "@tanstack/react-router";
-import { parse as parseDiff } from "diff2html";
-import { ColorSchemeType, LineType } from "diff2html/lib/types";
-import { Diff2HtmlUI } from "diff2html/lib/ui/js/diff2html-ui-base";
-import "diff2html/bundles/css/diff2html.min.css";
-import { getBrowserUrl } from "#ui/api-paths";
+import { Link } from "@tanstack/react-router";
+import { FileText } from "lucide-react";
 import { browserRoute } from "#ui/browser-route";
-import { syntaxLanguageFromFileName } from "#ui/utils/editor-language";
+import { isExpandable, parseDiff, type DiffFile } from "#ui/utils/diff-parse";
 import {
-    HIGHLIGHT_LANGUAGE_NAMES,
-    syntaxHighlighter,
-} from "#ui/utils/syntax-highlighting";
-import { useResolvedTheme } from "#ui/utils/use-resolved-theme";
+    Diff,
+    diffFileName,
+    type DiffEditorRoute,
+} from "#ui/components/browser/diff-view";
+import { WholeFileToggle } from "#ui/components/browser/diff-layout-control";
+import {
+    OpenInBackgroundButton,
+    useBackgroundOpen,
+    type BackgroundOpen,
+} from "#ui/components/browser/open-file-actions";
+import { getBaseName } from "#ui/utils/path";
 
-/** Finds a first-line shebang when an extensionless diff includes that line. */
-function firstFileLine(file: ReturnType<typeof parseDiff>[number]): string {
-    for (const block of file.blocks) {
-        for (const line of block.lines) {
-            const isFirstNewLine =
-                line.type !== LineType.DELETE && line.newNumber === 1;
+/** Words for the file-level changes worth a badge; plain modifications need none. */
+const FILE_TYPE_LABELS = {
+    add: "Added",
+    delete: "Deleted",
+    modify: null,
+    rename: "Renamed",
+    copy: "Copied",
+} satisfies Record<DiffFile["type"], string | null>;
 
-            const isFirstOldLine =
-                line.type !== LineType.INSERT && line.oldNumber === 1;
+/** Counts added and removed lines, a modified row counting as one of each, like `git diff --stat`. */
+function changeCounts(file: DiffFile) {
+    let added = 0;
+    let removed = 0;
 
-            if (isFirstNewLine || isFirstOldLine) {
-                return line.content.slice(1);
+    for (const hunk of file.hunks) {
+        if (hunk.type !== "hunk") {
+            continue;
+        }
+
+        for (const line of hunk.lines) {
+            if (line.kind === "insert" || line.kind === "modified") {
+                added++;
+            }
+
+            if (line.kind === "delete" || line.kind === "modified") {
+                removed++;
             }
         }
     }
 
-    return "";
-}
-
-/** Keeps unmodified left-clicks in the SPA while still allowing new-tab opens via href. */
-function isUnmodifiedPrimaryClick(event: MouseEvent): boolean {
-    return (
-        !event.defaultPrevented &&
-        event.button === 0 &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey &&
-        !event.altKey
-    );
-}
-
-/** Reads the new-file line from a diff2html gutter without wrapping the row in a link. */
-function newFileLineNumber(row: Element): number | undefined {
-    const lineText = row.querySelector(".line-num2")?.textContent?.trim() ?? "";
-
-    if (!/^[1-9][0-9]*$/.test(lineText)) {
-        return undefined;
-    }
-
-    return Number(lineText);
-}
-
-/** Turns generated filename chrome into an editor link so the duplicate heading can be omitted. */
-function linkDiffFileNames(root: HTMLElement, editorHref: string) {
-    for (const name of root.querySelectorAll(".d2h-file-name")) {
-        if (name.closest("a") !== null || name.querySelector("a") !== null) {
-            continue;
-        }
-
-        const link = document.createElement("a");
-        link.href = editorHref;
-        link.dataset.editorFile = "";
-        link.className = "d2h-file-name-link";
-
-        while (name.firstChild !== null) {
-            link.append(name.firstChild);
-        }
-
-        name.append(link);
-    }
+    return { added, removed };
 }
 
 /**
- * Appends a trailing editor link so the source text stays selectable and is not itself a link.
- * Only new-side numbers are used because those are the lines that exist in the current file.
+ * Names the file above its rows. The name opens the file in the editor when there is one, so
+ * the diff needs no separate heading. Views that already name the file, such as the diff
+ * list's sticky headers, hide this through its data attribute.
  */
-function appendEditorLineLinks(root: HTMLElement, editorHref: string) {
-    for (const row of root.querySelectorAll("tr")) {
-        const line = newFileLineNumber(row);
-        const codeLine = row.querySelector(".d2h-code-line");
-        const codeCell = codeLine?.parentElement;
+function DiffFileHeader(props: {
+    file: DiffFile;
+    editorRoute: DiffEditorRoute | null;
+    background: BackgroundOpen | null;
+    /** Null when the patch cannot show the file whole, so no toggle is offered. */
+    wholeFile: { shown: boolean; onChange: (shown: boolean) => void } | null;
+}) {
+    const file = props.file;
+    const name = diffFileName(file);
+    const counts = changeCounts(file);
+    const typeLabel = file.isBinary ? "Binary" : FILE_TYPE_LABELS[file.type];
 
-        if (line === undefined || codeCell === null || codeCell === undefined) {
-            continue;
-        }
+    // Sync compares two different files, so both names matter, like a rename.
+    const fromPath =
+        file.oldPath !== null &&
+        file.newPath !== null &&
+        file.oldPath !== file.newPath
+            ? file.oldPath
+            : null;
 
-        codeCell.classList.add("d2h-editor-line-cell");
-        const link = document.createElement("a");
-        link.href = `${editorHref}?line=${String(line)}`;
-        link.dataset.editorLine = String(line);
-        link.className = "d2h-editor-line-link";
-        link.setAttribute("aria-label", `Open line ${String(line)} in editor`);
-        link.textContent = "Open";
-        codeCell.append(link);
+    return (
+        <div
+            data-diff-file-header=""
+            className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 bg-surface-raised px-3 py-2 text-sm"
+        >
+            <FileText
+                className="h-4 w-4 shrink-0 text-slate-400"
+                aria-hidden="true"
+            />
+            {fromPath === null ? null : (
+                <span className="min-w-0 break-all font-mono text-xs text-slate-400">
+                    {fromPath} →
+                </span>
+            )}
+            {props.editorRoute === null ? (
+                <span className="min-w-0 break-all font-mono text-xs text-slate-200">
+                    {name}
+                </span>
+            ) : (
+                <Link
+                    {...props.editorRoute}
+                    search={{}}
+                    className="min-w-0 break-all font-mono text-xs text-blue-300 hover:underline focus-visible:underline"
+                >
+                    {name}
+                </Link>
+            )}
+            {props.background === null ? null : (
+                <OpenInBackgroundButton target={props.background} />
+            )}
+            {typeLabel === null ? null : (
+                <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-400">
+                    {typeLabel}
+                </span>
+            )}
+            <span className="ml-auto flex items-center gap-3">
+                {counts.added + counts.removed === 0 ? null : (
+                    <span className="font-mono text-xs tabular-nums">
+                        <span className="text-emerald-400">
+                            +{counts.added}
+                        </span>{" "}
+                        <span className="text-red-400">−{counts.removed}</span>
+                    </span>
+                )}
+                {props.wholeFile === null ? null : (
+                    <WholeFileToggle
+                        label={`Show whole file ${name}`}
+                        shown={props.wholeFile.shown}
+                        onChange={props.wholeFile.onChange}
+                        className="h-7 w-7"
+                    />
+                )}
+            </span>
+        </div>
+    );
+}
+
+/** Explains a file without rows, so it never reads as an empty or broken diff. */
+function emptyFileMessage(file: DiffFile): string {
+    if (file.isBinary) {
+        return "Binary file not shown.";
     }
+
+    if (file.type === "rename" || file.type === "copy") {
+        return "The content did not change.";
+    }
+
+    return "No content changes.";
 }
 
 /** Turns trusted server-generated unified diff text into the shared accessible table. */
 export function UnifiedDiff(props: {
     unifiedDiff: string;
     emptyMessage?: string;
-    /** The current file, so trailing Open links can jump to it with ?line=. */
-    editorFile?: { agentId: string; path: string };
+    /**
+     * The current file, so the file name and trailing Open links can jump to it with
+     * ?line=, or open it without leaving the diff. The device's current name is what the
+     * browser URL holds; its id is what the open files list keys the file by.
+     */
+    editorFile?: { device: { id: string; name: string }; path: string };
+    /**
+     * Whether a similar removed and added line show as one row with inline changes. It
+     * comes from the reader's stored preference, which the diff views own.
+     */
+    mergeModifiedLines?: boolean;
+    /**
+     * Whether long lines wrap inside the view instead of scrolling it sideways. It comes from
+     * the reader's stored preference, which the diff views own.
+     */
+    wrapLines?: boolean;
+    /**
+     * Whether the patch carries every unchanged line, as the server says, so the view folds
+     * them itself and can reveal them without fetching.
+     */
+    fullContext?: boolean;
+    /**
+     * Shows every file whole. Diff lists set it from their own header, which replaces the
+     * file header here; other views leave it unset and toggle each file in its header.
+     */
+    wholeFile?: boolean;
 }) {
-    const editorAgentId = props.editorFile?.agentId;
+    const mergeModifiedLines = props.mergeModifiedLines ?? true;
+    const fullContext = props.fullContext ?? false;
+
+    // Files are toggled by position, since a patch's files have no other stable identity.
+    const [wholeFiles, setWholeFiles] = React.useState<ReadonlySet<number>>(
+        () => new Set(),
+    );
+
+    const showWholeFile = (index: number, shown: boolean) =>
+        setWholeFiles((current) => {
+            const next = new Set(current);
+
+            if (shown) {
+                next.add(index);
+            } else {
+                next.delete(index);
+            }
+
+            return next;
+        });
+
+    const editorDeviceId = props.editorFile?.device.id;
+    const editorDeviceName = props.editorFile?.device.name;
     const editorPath = props.editorFile?.path;
-    const targetRef = React.useRef<HTMLDivElement>(null);
-    const resolvedTheme = useResolvedTheme();
-    const navigate = useNavigate();
 
-    React.useEffect(() => {
-        const target = targetRef.current;
+    // Parsing pairs similar lines with word diffs, which is too slow to redo every render.
+    const files = React.useMemo(
+        () => parseDiff(props.unifiedDiff, { mergeModifiedLines, fullContext }),
+        [props.unifiedDiff, mergeModifiedLines, fullContext],
+    );
 
-        if (target === null || props.unifiedDiff === "") {
-            return;
-        }
+    // A stable route and file keep the memoized rows from re-rendering when the parent does.
+    const editorRoute = React.useMemo(
+        () =>
+            editorDeviceId === undefined ||
+            editorDeviceName === undefined ||
+            editorPath === undefined
+                ? null
+                : browserRoute(
+                      { id: editorDeviceId, name: editorDeviceName },
+                      editorPath,
+                  ),
+        [editorDeviceId, editorDeviceName, editorPath],
+    );
 
-        const files = parseDiff(props.unifiedDiff);
+    const backgroundFile = React.useMemo(
+        () =>
+            editorDeviceId === undefined ||
+            editorDeviceName === undefined ||
+            editorPath === undefined
+                ? null
+                : {
+                      agentId: editorDeviceId,
+                      agentName: editorDeviceName,
+                      path: editorPath,
+                      name: getBaseName(editorPath),
+                  },
+        [editorDeviceId, editorDeviceName, editorPath],
+    );
 
-        for (const file of files) {
-            const fileName =
-                file.newName === "/dev/null" ? file.oldName : file.newName;
-
-            const language = syntaxLanguageFromFileName(
-                fileName,
-                firstFileLine(file),
-            );
-
-            file.language =
-                language === undefined
-                    ? "plaintext"
-                    : HIGHLIGHT_LANGUAGE_NAMES[language];
-        }
-
-        const diffUi = new Diff2HtmlUI(
-            target,
-            files,
-            {
-                drawFileList: false,
-                matching: "lines",
-                outputFormat: "line-by-line",
-                colorScheme:
-                    resolvedTheme === "light"
-                        ? ColorSchemeType.LIGHT
-                        : ColorSchemeType.DARK,
-                highlightLanguages: new Map(
-                    Object.entries(HIGHLIGHT_LANGUAGE_NAMES),
-                ),
-                synchronisedScroll: false,
-                fileListToggle: false,
-                fileContentToggle: false,
-                stickyFileHeaders: false,
-            },
-            syntaxHighlighter,
-        );
-
-        diffUi.draw();
-
-        if (editorAgentId === undefined || editorPath === undefined) {
-            return;
-        }
-
-        // The anchors are plain DOM nodes, so they need a real href for new tabs and copying.
-        const editorHref = getBrowserUrl(editorAgentId, editorPath);
-
-        linkDiffFileNames(target, editorHref);
-        appendEditorLineLinks(target, editorHref);
-
-        const handleEditorLinkClick = (event: MouseEvent) => {
-            if (!isUnmodifiedPrimaryClick(event)) {
-                return;
-            }
-
-            const eventTarget = event.target;
-
-            if (!(eventTarget instanceof Element)) {
-                return;
-            }
-
-            const lineLink = eventTarget.closest("a[data-editor-line]");
-
-            if (lineLink instanceof HTMLAnchorElement) {
-                const line = Number(lineLink.dataset.editorLine);
-
-                if (!Number.isInteger(line) || line < 1) {
-                    return;
-                }
-
-                event.preventDefault();
-                void navigate({
-                    ...browserRoute(editorAgentId, editorPath),
-                    search: { line },
-                });
-
-                return;
-            }
-
-            const fileLink = eventTarget.closest("a[data-editor-file]");
-
-            if (!(fileLink instanceof HTMLAnchorElement)) {
-                return;
-            }
-
-            event.preventDefault();
-            void navigate({
-                ...browserRoute(editorAgentId, editorPath),
-                search: {},
-            });
-        };
-
-        target.addEventListener("click", handleEditorLinkClick);
-
-        return () => {
-            target.removeEventListener("click", handleEditorLinkClick);
-        };
-    }, [props.unifiedDiff, editorAgentId, editorPath, resolvedTheme, navigate]);
+    const background = useBackgroundOpen(backgroundFile);
 
     if (props.unifiedDiff === "") {
         return (
@@ -228,10 +245,60 @@ export function UnifiedDiff(props: {
         );
     }
 
+    if (files.length === 0) {
+        // Text the reader does not recognise as a patch is still worth showing as is.
+        return (
+            <pre className="whitespace-pre p-3 font-mono text-xs text-slate-200">
+                {props.unifiedDiff}
+            </pre>
+        );
+    }
+
     return (
-        <div
-            ref={targetRef}
-            className="file-diff-html syntax-highlight min-w-max"
-        />
+        <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)]">
+            {files.map((file, index) => {
+                const name = diffFileName(file);
+                const hasRows = file.hunks.some((hunk) => hunk.type === "hunk");
+                const wholeFile = props.wholeFile ?? wholeFiles.has(index);
+
+                return (
+                    <div key={index} className="min-w-0">
+                        <DiffFileHeader
+                            file={file}
+                            editorRoute={editorRoute}
+                            background={background}
+                            wholeFile={
+                                props.wholeFile === undefined &&
+                                isExpandable(file)
+                                    ? {
+                                          shown: wholeFile,
+                                          onChange: (shown) =>
+                                              showWholeFile(index, shown),
+                                      }
+                                    : null
+                            }
+                        />
+                        {hasRows ? (
+                            <Diff
+                                file={file}
+                                label={
+                                    name === ""
+                                        ? "Changes"
+                                        : `Changes in ${name}`
+                                }
+                                editorRoute={editorRoute}
+                                background={background}
+                                wrapLines={props.wrapLines ?? false}
+                                wholeFile={wholeFile}
+                            />
+                        ) : (
+                            <p className="px-3 py-2 text-sm text-slate-400">
+                                {emptyFileMessage(file)}
+                            </p>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
     );
 }

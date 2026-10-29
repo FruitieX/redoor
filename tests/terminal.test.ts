@@ -306,7 +306,7 @@ describe("dedicated terminal tunnel", () => {
         const lifecycle: TerminalServerMessage[] = [];
         let output = "";
 
-        const closed = new Promise<void>((resolve) => {
+        const closed = new Promise<WebSocket.CloseEvent>((resolve) => {
             socket.addEventListener("message", (event) => {
                 const controlFrame = z.string().safeParse(event.data);
 
@@ -324,14 +324,18 @@ describe("dedicated terminal tunnel", () => {
                     output += new TextDecoder().decode(event.data);
                 }
             });
-            socket.addEventListener("close", () => resolve(), { once: true });
+            socket.addEventListener("close", resolve, { once: true });
         });
 
         socket.send(Buffer.from(`echo ${marker}; exit 3\r`));
-        await closed;
+        const closeEvent = await closed;
 
-        // The shell's own status reaches the browser instead of a generic disconnect.
-        expect(lifecycle).toContainEqual({ type: "exit", code: 3, signal: null });
+        // The shell's own status reaches the browser instead of a generic disconnect. The close
+        // code tells a dropped socket (1006) from the relay's own close (1005) if this fails.
+        expect(
+            lifecycle,
+            `close ${closeEvent.code} ${closeEvent.reason}, output ${JSON.stringify(output)}`,
+        ).toContainEqual({ type: "exit", code: 3, signal: null });
         // Output written right before exiting is delivered before the exit event.
         expect(output).toContain(marker);
     });

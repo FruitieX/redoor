@@ -15,6 +15,11 @@ pub(crate) async fn server_info_handler(
         redoor_core::identity::current_exe_path(),
         redoor_core::identity::external_ip()
     );
+    // The UI puts this in the document title, so a missing hostname must not fail the request.
+    let hostname = nix::unistd::gethostname()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_owned());
     (
         StatusCode::OK,
         Json(ServerInfoResponse {
@@ -24,6 +29,7 @@ pub(crate) async fn server_info_handler(
             exe_path,
             auth_mode: state.auth_mode.clone(),
             external_ip,
+            hostname,
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             version: binary.version,

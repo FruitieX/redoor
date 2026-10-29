@@ -368,7 +368,7 @@ fn validate(policy: TokenPolicy) -> Result<ValidPolicy, TokenStoreError> {
             }
             if device_ids
                 .iter()
-                .any(|id| id.0.is_empty() || id.0.len() > MAX_DEVICE_ID_LENGTH)
+                .any(|id| id.as_str().is_empty() || id.as_str().len() > MAX_DEVICE_ID_LENGTH)
             {
                 return invalid("Device ids must contain 1 to 200 characters");
             }
@@ -600,7 +600,7 @@ mod tests {
             },
             TokenPolicy {
                 devices: DeviceScope::Only {
-                    device_ids: vec![AgentId::from("")],
+                    device_ids: vec![AgentId::unchecked("")],
                 },
                 ..policy(&[Permission::FilesRead])
             },
@@ -628,9 +628,9 @@ mod tests {
                     permissions: vec![Permission::FilesWrite, Permission::FilesRead],
                     devices: DeviceScope::Only {
                         device_ids: vec![
-                            AgentId::from("b"),
-                            AgentId::from("a"),
-                            AgentId::from("b"),
+                            redoor_core::test_support::test_agent_id("b"),
+                            redoor_core::test_support::test_agent_id("a"),
+                            redoor_core::test_support::test_agent_id("b"),
                         ],
                     },
                 },
@@ -650,7 +650,10 @@ mod tests {
         assert_eq!(
             listed[0].devices,
             DeviceScope::Only {
-                device_ids: vec![AgentId::from("a"), AgentId::from("b")]
+                device_ids: vec![
+                    redoor_core::test_support::test_agent_id("a"),
+                    redoor_core::test_support::test_agent_id("b")
+                ]
             }
         );
         // The secret still authenticates after restart.

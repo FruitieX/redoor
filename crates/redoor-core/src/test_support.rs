@@ -79,3 +79,23 @@ fn make_directory_accessible(path: &Path, metadata: &std::fs::Metadata) -> std::
 fn make_directory_accessible(_path: &Path, _metadata: &std::fs::Metadata) -> std::io::Result<()> {
     Ok(())
 }
+
+/// Builds a valid device id that is the same for the same label in every test.
+///
+/// The router rejects a `hello` whose id is not in the device id format, so tests cannot use
+/// readable ids such as `"a"`; deriving the id from a label keeps tests readable and lets two
+/// places in one test refer to the same device without passing the value around.
+pub fn test_agent_id(label: &str) -> redoor_protocol::ids::AgentId {
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    // FNV-1a spreads similar labels ("a", "b") over different ids deterministically.
+    let mut hash: u128 = 0x6c62272e07bb014262b821756295c58d;
+    for byte in label.bytes() {
+        hash ^= u128::from(byte);
+        hash = hash.wrapping_mul(0x0000000001000000000000000000013b);
+    }
+    let random = (0..20)
+        .map(|index| char::from(ALPHABET[((hash >> (index * 5)) & 31) as usize]))
+        .collect::<String>();
+    redoor_protocol::ids::AgentId::parse(&format!("dev_{random}"))
+        .expect("derived test ids are always in the id format")
+}

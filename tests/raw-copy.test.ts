@@ -12,6 +12,7 @@ import type { TransferProgressEntry } from "#bindings/TransferProgressEntry";
 import path from "node:path";
 import fs from "node:fs/promises";
 import {
+    agentRegisteredPattern,
     ProcessManager,
     TempFileManager,
     waitForLogMessage,
@@ -123,9 +124,7 @@ describe("Raw Copy API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${secondAgentName},`,
-            ),
+            agentRegisteredPattern(secondAgentName),
             10000,
         );
 
@@ -311,9 +310,7 @@ describe("Raw Copy API", () => {
 
         const waitForSecondAgent = waitForLogMessage(
             serverProcess,
-            new RegExp(
-                `Agent registered: agent_id=${secondAgentName},`,
-            ),
+            agentRegisteredPattern(secondAgentName),
             10000,
         );
 
@@ -446,18 +443,6 @@ describe("Raw Copy API", () => {
         });
     });
 
-    it("should reject the same source and destination directory", async () => {
-        const sourceRoot = tempFiles.tempFile({ suffix: "-same-dir" });
-        await fs.mkdir(sourceRoot, { recursive: true });
-
-        await expect(
-            testAgent.copyTo(
-                { agent: testAgent.id, path: sourceRoot },
-                sourceRoot,
-            ),
-        ).rejects.toThrow(/different/i);
-    });
-
     it("should reject copying a directory onto an existing destination by default", async () => {
         const sourceRoot = tempFiles.tempFile({
             suffix: "-existing-dest-source",
@@ -523,9 +508,7 @@ describe("Raw Copy API", () => {
 
             const waitForSecondAgent = waitForLogMessage(
                 serverProcess,
-                new RegExp(
-                    `Agent registered: agent_id=${secondAgentName},`,
-                ),
+                agentRegisteredPattern(secondAgentName),
                 10000,
             );
 

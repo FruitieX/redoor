@@ -5,31 +5,81 @@ use std::fmt;
 use ts_rs::TS;
 use uuid::Uuid;
 
-/// Identifies one agent across the router, websocket protocol, and REST API.
+/// Identifies one device across the router, websocket protocol, REST API and everything
+/// stored per device (token scopes, resume manifests).
 ///
-/// This is the stable key used to address a connected agent and to associate
-/// agent-originated messages with that agent.
+/// An opaque `dev_` + 20 lowercase base32 characters value that never changes for the
+/// device's lifetime, so a rename cannot move stored references to another device. Values
+/// are deserialized unchecked because stored files and request bodies may hold anything;
+/// the router validates the format of every `hello` before accepting it, and request values
+/// are resolved against the inventory before use.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[ts(type = "string")]
-pub struct AgentId(pub String);
+pub struct AgentId(String);
+
+/// Readability prefix that makes a device id recognisable in logs, config and URLs.
+const AGENT_ID_PREFIX: &str = "dev_";
+/// Number of base32 characters after the prefix; 20 characters carry 100 random bits.
+const AGENT_ID_RANDOM_LENGTH: usize = 20;
+/// RFC 4648 base32 alphabet in lowercase, safe in paths, URLs and TOML strings.
+const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// Why a string is not a device id; the message is shown to operators as is.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "'{0}' is not a valid device id (expected 'dev_' followed by 20 lowercase base32 characters)"
+)]
+pub struct InvalidAgentId(pub String);
 
 impl AgentId {
-    /// Accepts both borrowed and owned strings so call sites need no explicit conversion.
-    pub fn new(value: impl Into<String>) -> Self {
+    /// Creates a fresh random id for a newly added device.
+    ///
+    /// Uses the OS random source because ids must not collide between servers and standalone
+    /// agents that never coordinate.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; AGENT_ID_RANDOM_LENGTH];
+        getrandom::fill(&mut bytes).expect("the operating system random source is unavailable");
+        let random = bytes
+            .iter()
+            .map(|byte| char::from(BASE32_ALPHABET[usize::from(byte % 32)]))
+            .collect::<String>();
+        Self(format!("{AGENT_ID_PREFIX}{random}"))
+    }
+
+    /// Accepts only values in the id format, for ids that come from config files, the id
+    /// file or the command line where a typo must fail loudly.
+    pub fn parse(value: &str) -> Result<Self, InvalidAgentId> {
+        if Self::is_id_format(value) {
+            Ok(Self(value.to_string()))
+        } else {
+            Err(InvalidAgentId(value.to_string()))
+        }
+    }
+
+    /// Whether a string is in the id format; also used to keep names from looking like ids,
+    /// which would make name-or-id lookups ambiguous.
+    pub fn is_id_format(value: &str) -> bool {
+        value.strip_prefix(AGENT_ID_PREFIX).is_some_and(|random| {
+            random.len() == AGENT_ID_RANDOM_LENGTH
+                && random.bytes().all(|byte| BASE32_ALPHABET.contains(&byte))
+        })
+    }
+
+    /// Whether this value is in the id format; values deserialized from the wire are unchecked.
+    pub fn is_valid(&self) -> bool {
+        Self::is_id_format(&self.0)
+    }
+
+    /// Wraps a value without checking its format, for ids that were already resolved against
+    /// the inventory or are only compared (stored scopes, unit tests).
+    pub fn unchecked(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-}
 
-impl From<String> for AgentId {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for AgentId {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
+    /// Borrows the raw value for lookups keyed by string.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -37,6 +87,36 @@ impl fmt::Display for AgentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
+}
+
+/// Why a device name is refused; the message is shown to operators and API clients as is.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidDeviceName {
+    #[error("device name must not be empty")]
+    Empty,
+    #[error("device name '{0}' must not contain ':' or '/'")]
+    ReservedCharacter(String),
+    #[error(
+        "device name '{0}' looks like a device id; choose a name that is not 'dev_' followed by 20 base32 characters"
+    )]
+    LooksLikeId(String),
+}
+
+/// Checks the format rules every device name must follow wherever it enters the system.
+///
+/// `:` would break the CLI's `device:path` syntax and `/` URL paths; a name in the id format
+/// would be ambiguous because requests accept a name or an id.
+pub fn validate_device_name(name: &str) -> Result<(), InvalidDeviceName> {
+    if name.is_empty() {
+        return Err(InvalidDeviceName::Empty);
+    }
+    if name.contains([':', '/']) {
+        return Err(InvalidDeviceName::ReservedCharacter(name.to_string()));
+    }
+    if AgentId::is_id_format(name) {
+        return Err(InvalidDeviceName::LooksLikeId(name.to_string()));
+    }
+    Ok(())
 }
 
 /// Identifies one websocket session connected to the router.
@@ -177,5 +257,54 @@ impl UnixTimestampMillis {
     /// Captures the current instant so step deltas can include milliseconds.
     pub fn now() -> Self {
         Self(jiff::Timestamp::now().as_millisecond())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generated ids must pass the same check `hello` applies, or new devices could not connect.
+    #[test]
+    fn generated_ids_are_in_the_id_format() {
+        let id = AgentId::generate();
+        // The prefix keeps ids recognisable in logs and config.
+        assert!(id.as_str().starts_with("dev_"), "{id}");
+        // 4 prefix characters plus 20 random characters.
+        assert_eq!(id.as_str().len(), 24);
+        assert!(id.is_valid());
+        // Two fresh ids colliding would merge devices; 100 random bits make that impossible
+        // in practice, so a collision here means the generator is broken.
+        assert_ne!(id, AgentId::generate());
+    }
+
+    /// Only the exact format is accepted, so typos in config or the id file fail loudly.
+    #[test]
+    fn parse_rejects_values_outside_the_format() {
+        assert!(AgentId::parse("dev_abcdefghijklmnopqrst").is_ok());
+        assert!(AgentId::parse("dev_234567abcdefghijklmn").is_ok());
+        // Too short and too long.
+        assert!(AgentId::parse("dev_abcdefghijklmnopqrs").is_err());
+        assert!(AgentId::parse("dev_abcdefghijklmnopqrstu").is_err());
+        // Uppercase, base32-excluded digits and other prefixes are not ids.
+        assert!(AgentId::parse("dev_ABCDEFGHIJKLMNOPQRST").is_err());
+        assert!(AgentId::parse("dev_abcdefghijklmnopqrs1").is_err());
+        assert!(AgentId::parse("pi").is_err());
+        assert!(AgentId::parse("").is_err());
+    }
+
+    /// Names are checked wherever they enter the system; these are the rules from the design.
+    #[test]
+    fn device_name_rules() {
+        // Empty names cannot be shown or addressed.
+        assert_eq!(validate_device_name(""), Err(InvalidDeviceName::Empty));
+        // ':' breaks `device:path` and '/' breaks URL paths.
+        assert!(validate_device_name("a:b").is_err());
+        assert!(validate_device_name("a/b").is_err());
+        // A name in the id format would make name-or-id lookups ambiguous.
+        assert!(validate_device_name("dev_abcdefghijklmnopqrst").is_err());
+        // Other names starting with `dev_` are fine, as are spaces and Unicode.
+        assert!(validate_device_name("dev_box").is_ok());
+        assert!(validate_device_name("my pi #2 ?%ä").is_ok());
     }
 }

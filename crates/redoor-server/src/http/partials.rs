@@ -95,8 +95,11 @@ pub(crate) async fn list(
 pub(crate) async fn resume(
     State(state): State<ServerState>,
     Extension(principal): Extension<Principal>,
-    Json(request): Json<PartialActionRequest>,
+    Json(mut request): Json<PartialActionRequest>,
 ) -> Result<Json<ResumePartialResponse>, ApiError> {
+    // Body fields accept a name or an id; resolving before `require` keeps scope checks on
+    // ids, so a name that now belongs to another device cannot slip past a scope.
+    request.dest_agent_id = state.agents.resolve(request.dest_agent_id.as_str()).await?;
     // Reading the partial already touches the destination agent.
     principal.require(&[Permission::FilesWrite], &request.dest_agent_id)?;
     let record = state
@@ -151,8 +154,11 @@ pub(crate) async fn resume(
 pub(crate) async fn discard(
     State(state): State<ServerState>,
     Extension(principal): Extension<Principal>,
-    Json(request): Json<PartialActionRequest>,
+    Json(mut request): Json<PartialActionRequest>,
 ) -> Result<Json<DiscardPartialResponse>, ApiError> {
+    // Body fields accept a name or an id; resolving before `require` keeps scope checks on
+    // ids, so a name that now belongs to another device cannot slip past a scope.
+    request.dest_agent_id = state.agents.resolve(request.dest_agent_id.as_str()).await?;
     principal.require(&[Permission::FilesWrite], &request.dest_agent_id)?;
     state
         .agents
@@ -165,8 +171,12 @@ pub(crate) async fn discard(
 pub(crate) async fn preflight(
     State(state): State<ServerState>,
     Extension(principal): Extension<Principal>,
-    Json(request): Json<CopyPreflightRequest>,
+    Json(mut request): Json<CopyPreflightRequest>,
 ) -> Result<Json<CopyPreflightResponse>, ApiError> {
+    // Body fields accept a name or an id; resolving before `require` keeps scope checks on
+    // ids, so a name that now belongs to another device cannot slip past a scope.
+    request.source.agent = state.agents.resolve(request.source.agent.as_str()).await?;
+    request.dest.agent = state.agents.resolve(request.dest.agent.as_str()).await?;
     principal.require(&[Permission::FilesRead], &request.source.agent)?;
     principal.require(&[Permission::FilesWrite], &request.dest.agent)?;
     let source_path = require_absolute_path(request.source.path)?;

@@ -1,6 +1,6 @@
 # macOS launchd services
 
-Redoor can install the server or standalone agent as a per-user macOS LaunchAgent. A LaunchAgent starts at login in the current user's GUI session and does not require root privileges.
+Redoor can install the server, the standalone agent, or a named relay as a per-user macOS LaunchAgent. A LaunchAgent starts at login in the current user's GUI session and does not require root privileges.
 
 Redoor does not install a system LaunchDaemon. Run all `launchd` commands as the user who should own and run the service, without `sudo`.
 
@@ -53,6 +53,17 @@ redoor agent launchd --app-name staging status
 ```
 
 This creates a namespace-specific service label, configuration directory, and log directory.
+
+## Relays
+
+Relays are installed per relay ID, with the ID after the action:
+
+```bash
+redoor agent relay launchd install production --start
+redoor agent relay launchd restart production
+```
+
+This writes `~/Library/LaunchAgents/redoor-relay-production.plist`. See [SSH relays](relays.md#services) for details.
 
 ## Manage services
 
@@ -120,7 +131,7 @@ The property list contains the absolute executable path selected during installa
 redoor agent launchd install --start
 ```
 
-Replacing the executable at the same path does not require reinstalling the property list. Restart the service to run the new binary:
+Replacing the executable at the same path does not require reinstalling the property list. `redoor upgrade` replaces it and restarts the service itself; after replacing it any other way, restart the service to run the new binary:
 
 ```bash
 redoor agent launchd restart

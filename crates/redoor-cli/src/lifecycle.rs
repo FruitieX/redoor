@@ -39,19 +39,37 @@ impl RemoteClient {
     }
 
     /// Inventory is available even for dormant agents, unlike the live agent-details endpoint.
+    ///
+    /// Accepts a name or an id like the server: an exact id wins, otherwise the name. An
+    /// unknown value lists the available devices, because a renamed device is the usual cause.
     pub(crate) async fn agent_snapshot(&self, agent: &str) -> Result<AgentInfoResponse> {
         let inventory: AgentListResponse = self.get_json("api/v1/agents").await?;
-        inventory
+        let by_id = inventory
             .agents
-            .into_iter()
-            .find(|entry| entry.id.0 == agent)
-            .with_context(|| format!("Device not found: {}", agent.escape_debug()))
+            .iter()
+            .position(|entry| entry.id.as_str() == agent);
+        let index = by_id.or_else(|| {
+            inventory
+                .agents
+                .iter()
+                .position(|entry| entry.name == agent)
+        });
+        match index {
+            Some(index) => Ok(inventory
+                .agents
+                .into_iter()
+                .nth(index)
+                .context("unreachable")?),
+            None => anyhow::bail!("{}", device_not_found(agent, &inventory)),
+        }
     }
 
     /// Polls bounded control requests so SSH provisioning progress can be reported before execution.
     async fn wait_for_agent(&self, mut snapshot: AgentInfoResponse) -> Result<()> {
+        // Requests use the id so a rename during startup cannot switch devices; messages use
+        // the name people typed.
         let agent = snapshot.id.to_string();
-        let label = agent.escape_debug().to_string();
+        let label = snapshot.name.escape_debug().to_string();
         if snapshot.status != AgentConnectionStatus::Starting {
             eprintln!("Starting agent {label}");
             let mut url = self.endpoint("api/v1/agents/")?;
@@ -113,6 +131,37 @@ impl RemoteClient {
             snapshot = self.agent_snapshot(&agent).await?;
         }
     }
+}
+
+/// Explains an unknown device value with the names and ids the caller can use instead.
+fn device_not_found(agent: &str, inventory: &AgentListResponse) -> String {
+    // Escape control characters so remote names cannot manipulate the local terminal.
+    let devices = inventory
+        .agents
+        .iter()
+        .map(|entry| {
+            format!(
+                "  {} ({})",
+                entry.name.escape_debug(),
+                entry.id.as_str().escape_debug()
+            )
+        })
+        .collect::<Vec<_>>();
+    if devices.is_empty() {
+        return format!(
+            "Device not found: {}. No devices are available.",
+            agent.escape_debug()
+        );
+    }
+    format!(
+        "Device not found: {}. Available devices:
+{}",
+        agent.escape_debug(),
+        devices.join(
+            "
+"
+        )
+    )
 }
 
 /// Selects an inventory ID rather than requiring a live SSH or WebSocket connection.

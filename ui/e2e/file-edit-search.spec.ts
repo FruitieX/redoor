@@ -24,10 +24,12 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "title-open.txt");
         await fs.writeFile(filePath, "alpha foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         // Search stays out of the editor until its dedicated action is used.
         await expect(page.getByLabel("Find in file")).toBeHidden();
 
@@ -109,10 +111,12 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "shortcut-open.txt");
         await fs.writeFile(filePath, "alpha foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         await page.keyboard.press("ControlOrMeta+f");
         const findInput = page.getByLabel("Find in file");
         // Cmd+F must focus the app field instead of CodeMirror's default panel.
@@ -136,9 +140,9 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "selection-search.txt");
         await fs.writeFile(filePath, "foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
-        const editor = page.getByLabel("File editor");
+        const editor = page.getByLabel("File editor", { exact: true });
         await expect(editor).toBeVisible();
         await page
             .getByRole("button", { name: "Toggle search and replace" })
@@ -175,10 +179,12 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "replace.txt");
         await fs.writeFile(filePath, "alpha foo beta foo gamma");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
         await page.keyboard.press("ControlOrMeta+f");
         const findInput = page.getByLabel("Find in file");
         await findInput.fill("foo");
@@ -195,15 +201,15 @@ test.describe.serial("File editor search and replace", () => {
         await page
             .getByRole("button", { name: "Replace", exact: true })
             .click();
-        await expect(page.getByLabel("File editor")).toHaveText(
-            "alpha baz beta foo gamma",
-        );
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveText("alpha baz beta foo gamma");
 
         await page.getByRole("button", { name: "Replace all" }).click();
         // Replace all must rewrite every remaining match, not only the selection.
-        await expect(page.getByLabel("File editor")).toHaveText(
-            "alpha baz beta baz gamma",
-        );
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveText("alpha baz beta baz gamma");
         await expect(page.getByLabel("Search match count")).toHaveText(
             "No matches",
         );
@@ -215,10 +221,12 @@ test.describe.serial("File editor search and replace", () => {
         const filePath = path.join(ctx.testDirPath, "tooltip.txt");
         await fs.writeFile(filePath, "content");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}`,
         );
 
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
 
         const searchToggle = page.getByRole("button", {
             name: "Toggle search and replace",

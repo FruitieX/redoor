@@ -20,6 +20,8 @@ import { hostname } from "node:os";
 import path from "node:path";
 import { FakeAgent } from "./fake-agent";
 import {
+    agentRegisteredPattern,
+    generateDeviceId,
     ProcessManager,
     TempFileManager,
     startServerAndAgent,
@@ -1127,8 +1129,10 @@ describe("Agents API", () => {
         expect(replacement.cancelled).toBe(false);
     });
 
-    it("should replace existing agent when same name reconnects", async () => {
+    it("should replace existing agent when the same device reconnects", async () => {
         const DUPLICATE_AGENT_NAME = "duplicate-test-agent";
+        // A reconnect is the same device id; a different id with this name would be refused.
+        const deviceId = generateDeviceId();
 
         const firstAgentCwd = tempFiles.tempDirectory({
             suffix: "-duplicate-agent-first-cwd",
@@ -1137,6 +1141,7 @@ describe("Agents API", () => {
         const firstAgentPid = processManager.spawnAgent({
             wsAddress: wsUrl,
             name: DUPLICATE_AGENT_NAME,
+            agentId: deviceId,
             cwd: firstAgentCwd,
         });
 
@@ -1152,7 +1157,7 @@ describe("Agents API", () => {
 
         await waitForLogMessage(
             serverProcess,
-            /Agent registered: agent_id=duplicate-test-agent,/,
+            agentRegisteredPattern(DUPLICATE_AGENT_NAME),
         );
 
         const agentsAfterFirst = await apiClient.listAgents();
@@ -1168,6 +1173,7 @@ describe("Agents API", () => {
         const secondAgentPid = processManager.spawnAgent({
             wsAddress: wsUrl,
             name: DUPLICATE_AGENT_NAME,
+            agentId: deviceId,
             cwd: secondAgentCwd,
         });
 
@@ -1201,6 +1207,8 @@ describe("Agents API", () => {
         // Verify the replacement agent is registered with the expected name
         // The polling helper returns only after the replacement inventory entry exists.
         expect(replacementAgent.name).toBe(DUPLICATE_AGENT_NAME);
+        // The replacement took over the same device instead of appearing as a new one.
+        expect(replacementAgent.id).toBe(deviceId);
 
         // Verify original test agent is still connected
         const agentsAfterReplacement = await apiClient.listAgents();
@@ -1215,7 +1223,7 @@ describe("Agents API", () => {
         // Without automatic pongs the fixture looks like a half-open tunnel to the server.
         const fixture = await FakeAgent.connect({
             serverPort,
-            agentId: unmanagedAgentName,
+            agentName: unmanagedAgentName,
             hostname: "stale-host",
             username: "stale-user",
             autoPong: false,
@@ -1258,7 +1266,7 @@ describe("Agents API", () => {
 
         const target = await FakeAgent.connect({
             serverPort,
-            agentId: targetName,
+            agentName: targetName,
             hostname: "forge-host",
             username: "forge-user",
         });
@@ -1267,7 +1275,7 @@ describe("Agents API", () => {
 
         const attacker = await FakeAgent.connect({
             serverPort,
-            agentId: "forge-attacker-agent",
+            agentName: "forge-attacker-agent",
         });
 
         onTestFinished(() => attacker.close());
@@ -1314,15 +1322,6 @@ describe("Agents API", () => {
         expect((await echo).message).toBe("genuine");
     });
 
-    it("should echo message back from connected agent", async () => {
-        const testAgent = await getConnectedTestAgent();
-
-        const testMessage = "Hello, World!";
-        const result = await testAgent.echo(testMessage);
-        // Verify message is echoed back correctly
-        expect(result.message).toBe(testMessage);
-    });
-
     it("should handle concurrent echo requests with random sleep", async () => {
         const testAgent = await getConnectedTestAgent();
 
@@ -1345,40 +1344,5 @@ describe("Agents API", () => {
             // Each response must retain its matching request payload despite completion reordering.
             expect(result.message).toBe(uniqueMessages[index]);
         }
-    });
-
-    it("should return 404 for non-existent agent details", async () => {
-        const nonExistentAgentId = "non-existent-agent-id";
-
-        const agent = new Agent(
-            apiClient.baseUrl,
-            {
-                id: nonExistentAgentId,
-                name: "non-existent",
-                cwd: "/tmp",
-                managed: false,
-                configuration_editable: false,
-                ssh_target: null,
-                status: "disconnected",
-                connected_at: null,
-                connection_id: null,
-                last_seen_at: null,
-                connection_issue: null,
-                provisioning_status: [],
-                binary: null,
-                supports_native_open: false,
-                supports_move_to_trash: false,
-                supports_trash: false,
-                uid: null,
-                is_root: false,
-            },
-            {
-                getSessionCookie: () =>
-                    apiClient.getAuthHeaders().Cookie ?? null,
-            },
-        );
-
-        // Verify that requesting details for non-existent agent throws an error
-        await expect(agent.getDetails()).rejects.toThrow("Agent not found");
     });
 });

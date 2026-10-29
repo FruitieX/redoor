@@ -147,7 +147,7 @@ function AccessTokenSettingsPage() {
     const activeCount = tokens.filter((token) => !isExpired(token)).length;
 
     return (
-        <div className="min-h-full bg-canvas px-4 py-8 sm:px-8">
+        <div className="min-h-full bg-canvas px-4 py-8 @xl:px-8">
             <div className="mx-auto max-w-5xl">
                 <TokensHeader
                     tokenCount={tokens.length}
@@ -280,7 +280,7 @@ function TokensHeader(props: {
 }) {
     return (
         <header className="overflow-hidden rounded-xl border border-slate-800 bg-surface">
-            <div className="flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent px-6 py-6 sm:px-8">
+            <div className="flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent px-6 py-6 @xl:px-8">
                 <div className="flex min-w-0 items-start gap-4">
                     <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-2.5 text-blue-300">
                         <KeyRound className="h-6 w-6" aria-hidden="true" />
@@ -310,7 +310,7 @@ function TokensHeader(props: {
                 </Button>
             </div>
             {props.tokenCount > 0 ? (
-                <p className="border-t border-slate-800 px-6 py-2.5 text-xs text-slate-500 sm:px-8">
+                <p className="border-t border-slate-800 px-6 py-2.5 text-xs text-slate-500 @xl:px-8">
                     {props.tokenCount}{" "}
                     {props.tokenCount === 1 ? "token" : "tokens"} ·{" "}
                     {props.activeCount} active
@@ -486,7 +486,7 @@ function TokenCard(props: {
                     </Button>
                 </div>
             </div>
-            <dl className="grid grid-cols-1 gap-px border-t border-slate-800 bg-slate-800 sm:grid-cols-2 lg:grid-cols-4">
+            <dl className="grid grid-cols-1 gap-px border-t border-slate-800 bg-slate-800 @xl:grid-cols-2 @4xl:grid-cols-4">
                 <TokenFact
                     label="Devices"
                     icon={<MonitorSmartphone className="h-3.5 w-3.5" />}
@@ -610,7 +610,9 @@ function CreateTokenDialog(props: {
             size="wide"
             onClose={close}
         >
-            <div className="mt-5">
+            {/* The fields' container queries would otherwise measure the page column behind
+                this viewport-sized modal. */}
+            <div className="@container mt-5">
                 <AccessTokenPolicyFields
                     draft={draft}
                     agents={props.agents}

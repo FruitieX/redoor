@@ -120,9 +120,10 @@ impl Command {
     /// Returns the single authoritative execution policy for this command.
     pub fn policy(&self) -> CommandPolicy {
         match self {
-            Self::Exec { .. } | Self::RawDownload { .. } | Self::TarDownload { .. } => {
-                CommandPolicy::OUTPUT
-            }
+            Self::Exec { .. }
+            | Self::RawDownload { .. }
+            | Self::TarDownload { .. }
+            | Self::GitDownload { .. } => CommandPolicy::OUTPUT,
             Self::RawUpload { .. } => CommandPolicy::upload(UploadKind::RawUpload),
             Self::TarUpload { .. } => CommandPolicy::upload(UploadKind::TarUpload),
             Self::EditFile { .. } => CommandPolicy::upload(UploadKind::EditFile),
@@ -155,6 +156,15 @@ impl Command {
             | Self::GitContext { .. }
             | Self::GitStatus { .. }
             | Self::GitDiff { .. }
+            | Self::GitRevisionTree { .. }
+            | Self::GitRevisionContent { .. }
+            | Self::GitCommitDiff { .. }
+            | Self::GitLog { .. }
+            | Self::GitCommitNeighbors { .. }
+            | Self::GitRefList { .. }
+            | Self::GitWorktreeList { .. }
+            | Self::GitWorktreeStatus { .. }
+            | Self::GitRevisionStat { .. }
             | Self::MoveMetadata { .. }
             | Self::DeleteMoveSource { .. }
             | Self::OpenPath { .. }
@@ -173,7 +183,9 @@ mod tests {
     use super::*;
     use crate::api::agents::EchoRequest;
     use crate::api::files::CreationOwnershipOptions;
-    use crate::api::git::GitDiffMode;
+    use crate::api::git::GitPage;
+    use crate::api::git::refs::{GitRefListKind, GitRefSort};
+    use crate::api::git::worktree::GitDiffMode;
     use crate::api::search::CaseSensitivity;
     use crate::api::transfers::CopyExistingMode;
     use crate::wire::command::MoveSourceIdentity;
@@ -227,11 +239,21 @@ mod tests {
             Command::SetLoggingLevel(request::SetLoggingLevel { .. }) => 33,
             Command::Restart(request::Restart {}) => 34,
             Command::SelfExec(request::SelfExec { .. }) => 35,
+            Command::GitRevisionTree(request::GitRevisionTree { .. }) => 42,
+            Command::GitRevisionContent(request::GitRevisionContent { .. }) => 43,
+            Command::GitCommitDiff(request::GitCommitDiff { .. }) => 44,
+            Command::GitLog(request::GitLog { .. }) => 45,
+            Command::GitRefList(request::GitRefList { .. }) => 46,
+            Command::GitRevisionStat(request::GitRevisionStat { .. }) => 47,
+            Command::GitDownload(request::GitDownload { .. }) => 48,
+            Command::GitCommitNeighbors(request::GitCommitNeighbors { .. }) => 49,
+            Command::GitWorktreeList(request::GitWorktreeList { .. }) => 50,
+            Command::GitWorktreeStatus(request::GitWorktreeStatus { .. }) => 51,
         }
     }
 
     /// Number of variants covered by `variant_index`.
-    const VARIANT_COUNT: usize = 42;
+    const VARIANT_COUNT: usize = 52;
 
     /// Builds one instance of every command variant for table-wide policy checks.
     fn every_command() -> Vec<Command> {
@@ -307,6 +329,7 @@ mod tests {
                 path: path(),
                 on_existing: CopyExistingMode::Override,
                 ownership: CreationOwnershipOptions::default(),
+                executable: false,
             }),
             Command::EditFile(request::EditFile { path: path() }),
             Command::TarUpload(request::TarUpload {
@@ -370,6 +393,45 @@ mod tests {
             Command::GitDiff(request::GitDiff {
                 files: Vec::new(),
                 mode: GitDiffMode::Full,
+            }),
+            Command::GitRevisionTree(request::GitRevisionTree {
+                path: path(),
+                rev: "HEAD".to_string(),
+            }),
+            Command::GitRevisionContent(request::GitRevisionContent {
+                path: path(),
+                rev: "HEAD".to_string(),
+            }),
+            Command::GitCommitDiff(request::GitCommitDiff {
+                path: path(),
+                rev: "HEAD".to_string(),
+            }),
+            Command::GitLog(request::GitLog {
+                path: path(),
+                rev: None,
+                page: GitPage { skip: 0, limit: 1 },
+            }),
+            Command::GitCommitNeighbors(request::GitCommitNeighbors {
+                path: path(),
+                rev: "HEAD".to_string(),
+            }),
+            Command::GitRefList(request::GitRefList {
+                path: path(),
+                kind: GitRefListKind::Tags,
+                sort: GitRefSort::Recent,
+                page: GitPage { skip: 0, limit: 1 },
+            }),
+            Command::GitWorktreeList(request::GitWorktreeList { path: path() }),
+            Command::GitWorktreeStatus(request::GitWorktreeStatus { path: path() }),
+            Command::GitRevisionStat(request::GitRevisionStat {
+                path: path(),
+                rev: "HEAD".to_string(),
+                replace_target: None,
+            }),
+            Command::GitDownload(request::GitDownload {
+                path: path(),
+                rev: "HEAD".to_string(),
+                include_root: false,
             }),
             Command::MoveMetadata(request::MoveMetadata { path: path() }),
             Command::DeleteMoveSource(request::DeleteMoveSource {

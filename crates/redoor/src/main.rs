@@ -4,6 +4,7 @@ mod examples;
 mod process_control;
 mod process_logs;
 mod service;
+mod upgrade;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -63,6 +64,15 @@ struct Cli {
         global = true
     )]
     websocket_stale_check_interval: std::time::Duration,
+    /// Fixed delay between agent reconnect attempts instead of the jittered production backoff.
+    #[arg(
+        long,
+        env = "REDOOR_RECONNECT_DELAY",
+        value_parser = redoor_core::websocket::parse_duration_millis,
+        global = true,
+        hide = true
+    )]
+    reconnect_delay: Option<std::time::Duration>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -78,6 +88,9 @@ enum Commands {
     Agent(Box<AgentCommandArgs>),
     /// Authenticate and operate on devices through a remote server.
     Remote(redoor_cli::RemoteArgs),
+    /// Install a release over this binary and restart the redoor processes running it.
+    #[command(visible_alias = "update", after_help = examples::UPGRADE)]
+    Upgrade(upgrade::UpgradeArgs),
 }
 
 /// Preserves flat server startup flags while exposing `server logs`.
@@ -105,10 +118,10 @@ enum ServerCommand {
     Logs(ServerLogsArgs),
     /// Install or manage the server as a systemd service.
     #[command(after_help = examples::SERVER_SYSTEMD)]
-    Systemd(service::SystemdArgs),
+    Systemd(service::SystemdArgs<service::NoTarget>),
     /// Install or manage the server as a macOS LaunchAgent.
     #[command(after_help = examples::SERVER_LAUNCHD)]
-    Launchd(service::LaunchdArgs),
+    Launchd(service::LaunchdArgs<service::NoTarget>),
 }
 
 /// Options used to locate and limit server file logs.
@@ -153,10 +166,10 @@ enum AgentCommand {
     Logs(AgentLogsArgs),
     /// Install or manage the agent as a systemd service.
     #[command(after_help = examples::AGENT_SYSTEMD)]
-    Systemd(service::SystemdArgs),
+    Systemd(service::SystemdArgs<service::NoTarget>),
     /// Install or manage the agent as a macOS LaunchAgent.
     #[command(after_help = examples::AGENT_LAUNCHD)]
-    Launchd(service::LaunchdArgs),
+    Launchd(service::LaunchdArgs<service::NoTarget>),
     /// Start an agent on an SSH host and relay it through this machine to a redoor server.
     #[command(after_help = examples::RELAY)]
     Relay(Box<RelayCommandArgs>),
@@ -187,6 +200,12 @@ enum RelayCommand {
     /// Print one named relay's file log.
     #[command(after_help = examples::RELAY_LOGS)]
     Logs(RelayLogsArgs),
+    /// Install or manage one named relay as a systemd service.
+    #[command(after_help = examples::RELAY_SYSTEMD)]
+    Systemd(service::SystemdArgs<service::RelayTarget>),
+    /// Install or manage one named relay as a macOS LaunchAgent.
+    #[command(after_help = examples::RELAY_LAUNCHD)]
+    Launchd(service::LaunchdArgs<service::RelayTarget>),
 }
 
 /// Options used to find the configured relay IDs.
@@ -270,6 +289,7 @@ fn main() -> ExitCode {
             keepalive: cli.websocket_keepalive,
             stale_timeout: cli.websocket_stale_timeout,
             stale_check_interval: cli.websocket_stale_check_interval,
+            reconnect_delay: cli.reconnect_delay,
         },
     };
     let runtime = match tokio::runtime::Runtime::new() {
@@ -303,6 +323,7 @@ async fn run(command: Commands, context: RuntimeContext, parent: LaunchParent) -
         }
         Commands::Server(args) => run_server_command(args, context, parent).await,
         Commands::Agent(args) => run_agent_command(*args, context, parent).await,
+        Commands::Upgrade(args) => args.run().await,
     }
 }
 
@@ -375,6 +396,14 @@ async fn run_agent_command(
             RelayCommand::Logs(logs) => {
                 process_logs::run_relay(&logs.id, logs.config, logs.lines, paths).await?
             }
+            RelayCommand::Systemd(systemd) => {
+                let role = ServiceRole::Relay(systemd.target().id.clone());
+                service::run_systemd(systemd, role, paths).await?
+            }
+            RelayCommand::Launchd(launchd) => {
+                let role = ServiceRole::Relay(launchd.target().id.clone());
+                service::run_launchd(launchd, role, paths).await?
+            }
         },
         None => {
             let daemon = args.run.daemon;
@@ -415,7 +444,11 @@ async fn run_named_relay(
     parent: LaunchParent,
 ) -> Result<ExitCode> {
     let paths = &context.paths;
-    let parsed = config::parse_config_file(&config_path(args.config, paths)?).await?;
+    let path = config_path(args.config, paths)?;
+    // The relay owns the id of the agent it launches, like the server owns managed ids, so a
+    // hand-written entry gets one before the remote agent first connects.
+    config::assign_missing_device_ids(&path, config::DeviceIdScope::Relay(&args.id)).await?;
+    let parsed = config::parse_config_file(&path).await?;
     let mut relay = config::require_relay(&parsed, &args.id)?.clone();
     let log = match relay.agent.log.clone() {
         Some(log) => log,
@@ -437,9 +470,8 @@ async fn run_named_relay(
         .clone()
         .unwrap_or_else(|| format!("{}-relay-{}", paths.app_name(), relay.id));
     let metadata = process_control::RelayPidMetadata {
-        pid: 0,
+        process: process_control::ProcessPidMetadata::current(),
         id: relay.id.clone(),
-        started_at: jiff::Timestamp::now().to_string(),
         target: relay.agent.target.clone(),
         server: relay.server.clone(),
         agent_name,
@@ -663,6 +695,79 @@ mod tests {
             Cli::try_parse_from(["redoor", "agent", "relay", "ls", "--config", "relay.toml"])
                 .is_ok(),
             "relay ls should accept an explicit shared config path"
+        );
+    }
+
+    /// Keeps relay services addressed by ID with the same actions as agent and server services.
+    #[test]
+    fn parses_relay_service_commands() {
+        for manager in ["systemd", "launchd"] {
+            for action in [
+                "install",
+                "uninstall",
+                "start",
+                "stop",
+                "restart",
+                "status",
+                "enable",
+                "disable",
+            ] {
+                // Every shared service action must exist for relays too.
+                assert!(
+                    Cli::try_parse_from([
+                        "redoor",
+                        "agent",
+                        "relay",
+                        manager,
+                        action,
+                        "production"
+                    ])
+                    .is_ok(),
+                    "relay {manager} {action} should accept a relay ID"
+                );
+                // Without an ID there is no way to tell which relay to manage.
+                assert!(
+                    Cli::try_parse_from(["redoor", "agent", "relay", manager, action]).is_err(),
+                    "relay {manager} {action} must require a relay ID"
+                );
+            }
+            // Flags of the shared actions still parse after the relay ID.
+            assert!(
+                Cli::try_parse_from([
+                    "redoor",
+                    "agent",
+                    "relay",
+                    manager,
+                    "disable",
+                    "production",
+                    "--now"
+                ])
+                .is_ok(),
+                "relay {manager} disable should accept --now"
+            );
+            // Relay IDs keep the same validation as relay start.
+            assert!(
+                Cli::try_parse_from(["redoor", "agent", "relay", manager, "start", "../x"])
+                    .is_err(),
+                "relay {manager} must reject IDs that are not path-safe"
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "redoor",
+                "agent",
+                "relay",
+                "launchd",
+                "refresh-local-network-permission",
+                "production",
+            ])
+            .is_ok(),
+            "relay launchd should expose the macOS Local Network permission repair"
+        );
+        // Agent and server actions must not grow a positional target.
+        assert!(
+            Cli::try_parse_from(["redoor", "agent", "systemd", "restart", "production"]).is_err(),
+            "agent service actions should not accept a relay ID"
         );
     }
 

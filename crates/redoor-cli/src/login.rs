@@ -183,7 +183,8 @@ fn parse_permissions(value: &str) -> Result<PermissionList, String> {
     Ok(PermissionList(permissions))
 }
 
-/// Parses `--devices` as `all` or a comma-separated list of device ids.
+/// Parses `--devices` as `all` or a comma-separated list of device names or ids; the server
+/// stores the resolved ids, so the scope does not follow a name to another device later.
 fn parse_devices(value: &str) -> Result<DeviceScope, String> {
     if value.trim() == "all" {
         return Ok(DeviceScope::All);
@@ -192,10 +193,10 @@ fn parse_devices(value: &str) -> Result<DeviceScope, String> {
         .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .map(AgentId::from)
+        .map(AgentId::unchecked)
         .collect::<Vec<_>>();
     if device_ids.is_empty() {
-        return Err("--devices needs 'all' or at least one device id".into());
+        return Err("--devices needs 'all' or at least one device name or id".into());
     }
     Ok(DeviceScope::Only { device_ids })
 }

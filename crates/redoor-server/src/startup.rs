@@ -4,7 +4,7 @@
 //! [`ServerConfig::resolve`] is a pure precedence function (CLI > env > file > default),
 //! [`ServerRuntime::build`] performs the fallible side effects (logging, credential
 //! storage, actors, listener, managed inventory), and [`ServerRuntime::serve_until_restart`]
-//! runs until the restart route asks for a re-exec.
+//! runs until the restart route or the `redoor upgrade` signal asks for a re-exec.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -43,9 +43,15 @@ const LOG_FORMAT_ENV: &str = "REDOOR_SERVER_LOG_FORMAT";
 /// a restart re-reads `config.toml` from scratch.
 pub async fn run_server(args: CoordinatorArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     let location = ConfigLocation::find_or_bootstrap(args.config.clone(), &runtime.paths).await?;
+    // The server owns managed ids, so hand-written entries get theirs before anything uses them.
+    let assigned = redoor_core::config::assign_missing_device_ids(
+        &location.path,
+        redoor_core::config::DeviceIdScope::ManagedAgents,
+    )
+    .await?;
     let file = redoor_core::config::parse_config_file(&location.path).await?;
-    // Only the server registers managed agents, so only it rejects colliding names.
-    file.ensure_unique_agent_names(&location.path)?;
+    // Only the server registers managed agents, so only it rejects invalid or colliding names.
+    file.validate_managed_agent_names(&location.path)?;
     let config = ServerConfig::resolve(
         &args,
         &ServerEnvironment::from_process(),
@@ -54,6 +60,14 @@ pub async fn run_server(args: CoordinatorArgs, runtime: RuntimeContext) -> Resul
         &runtime.paths,
     )?;
     let server = ServerRuntime::build(config, runtime).await?;
+    // Logged only now because the logger starts inside `build`.
+    if assigned > 0 {
+        log!(
+            Level::Info,
+            "Assigned device ids to {} [[agents]] entries and wrote them to the config file",
+            assigned
+        );
+    }
     if location.created {
         server.open_first_run_login();
     }
@@ -156,6 +170,9 @@ struct ServerConfig {
     bind: String,
     /// Persistent server log file.
     log: String,
+    /// Size limit of the server log and of managed agents' forwarded logs; `None` uses
+    /// the default limit.
+    log_max_size: Option<u64>,
     /// Initial log threshold.
     log_level: Level,
     /// Process output format.
@@ -212,6 +229,7 @@ impl ServerConfig {
                 .or(server.bind)
                 .unwrap_or_else(|| DEFAULT_BIND.to_string()),
             log,
+            log_max_size: server.log_max_size,
             log_level,
             log_format,
             auth: server.auth,
@@ -249,7 +267,10 @@ impl ServerRuntime {
     /// Initializes logging, credential stores, actors and the listener, then registers inventory.
     async fn build(config: ServerConfig, runtime: RuntimeContext) -> Result<Self> {
         redoor_core::logging::init_with_options(
-            Some(config.log.clone()),
+            Some(redoor_core::rotating_log::LogFileSpec::new(
+                &config.log,
+                config.log_max_size,
+            )),
             config.log_level,
             config.log_format,
         )
@@ -297,23 +318,32 @@ impl ServerRuntime {
         // Built before the listener so the registry exists when the first WebSocket connects.
         let watchdogs = WatchdogRegistry::new();
         let binaries = crate::binaries::BinaryCache::new(runtime.paths.clone());
+        let ssh_keys = crate::ssh::keys::SshKeyStore::for_data_dir(&data_dir);
         let launcher = ManagedLauncher::new(
             config.port,
             config.agent_token,
             crate::ssh::ProvisionContext {
                 app_name: runtime.paths.app_name().to_string(),
                 binaries: binaries.clone(),
+                ssh_keys: ssh_keys.clone(),
+                log_max_size: config.log_max_size,
+                // Empty until the first SSH provision, so servers that never provision a
+                // device never hash the debug build.
+                local_build: Default::default(),
             },
         );
 
         // Oneshot so restart can drop the axum listener before self-exec; keeping
         // the listen FD open would race the restarted process on the same port.
         let (shutdown_tx, shutdown) = tokio::sync::oneshot::channel::<()>();
+        // Caught from now on, so `redoor upgrade` restarts the server instead of killing it.
+        let reexec_requests = redoor_core::process::listen_for_reexec()
+            .context("Failed to listen for the upgrade re-exec signal")?;
         let transfer_service = crate::http::services::transfer::TransferService::new(
             router.clone(),
             runtime.paths.data_dir()?,
         );
-        let app = build_app(ServerState {
+        let state = ServerState {
             runtime,
             binaries,
             launcher: launcher.clone(),
@@ -330,9 +360,15 @@ impl ServerRuntime {
             mcp,
             config_path: config.config_path,
             config_edit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            editor_buffer_lock: Arc::default(),
+            ssh_keys,
+            ssh_key_operations: crate::http::ssh_keys::SshKeyOperations::default(),
             auth_mode,
             shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
-        });
+            upgrade_lock: Arc::default(),
+        };
+        state.clone().restart_on_reexec_signal(reexec_requests);
+        let app = build_app(state);
 
         let listener = tokio::net::TcpListener::bind(&address)
             .await

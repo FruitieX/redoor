@@ -1,9 +1,7 @@
 //! REST endpoints for listing, emptying and restoring agent trash.
 
-use axum::{
-    Json,
-    extract::{Path, State as AxumState},
-};
+use crate::http::access::ResolvedDevice;
+use axum::{Json, extract::State as AxumState};
 use redoor_protocol::{
     api::{
         agents::AgentInfoResponse,
@@ -65,20 +63,18 @@ pub(crate) async fn require_move_to_trash_support(
 
 /// Route: `GET /api/v1/agents/{agent}/trash` lists freshly discovered trash inventory.
 pub(crate) async fn list_trash_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<TrashListResponse>, ApiError> {
-    let agent_id = AgentId::from(agent);
     require_trash_inventory_support(&state, &agent_id).await?;
     Ok(Json(state.agents.call(&agent_id, ListTrash {}).await?))
 }
 
 /// Route: `DELETE /api/v1/agents/{agent}/trash` permanently removes every trash entry.
 pub(crate) async fn empty_trash_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<EmptyTrashResponse>, ApiError> {
-    let agent_id = AgentId::from(agent);
     require_trash_inventory_support(&state, &agent_id).await?;
     let emptied = state.agents.call(&agent_id, EmptyTrash {}).await?;
     Ok(Json(EmptyTrashResponse {
@@ -88,7 +84,7 @@ pub(crate) async fn empty_trash_handler(
 
 /// Route: `POST /api/v1/agents/{agent}/trash/restore` restores one opaque inventory item.
 pub(crate) async fn restore_trash_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
     Json(request): Json<RestoreTrashItemRequest>,
 ) -> Result<Json<RestoreTrashItemResponse>, ApiError> {
@@ -100,7 +96,6 @@ pub(crate) async fn restore_trash_handler(
             "Trash location, item, and restore destination are required",
         ));
     }
-    let agent_id = AgentId::from(agent);
     require_trash_inventory_support(&state, &agent_id).await?;
     let call = RestoreTrash {
         location_id: request.location_id,

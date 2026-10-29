@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createLink } from "@tanstack/react-router";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 
 import {
     OptionalTooltip,
@@ -59,7 +59,7 @@ export function getIconButtonClassName(props: {
     size?: IconButtonSize;
     className?: string;
 }): string {
-    return twMerge(
+    return cn(
         "inline-flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-50",
         props.variant ? variantClasses[props.variant] : undefined,
         props.size ? sizeClasses[props.size] : undefined,

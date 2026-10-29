@@ -11,9 +11,10 @@ use crate::actors::{
         StreamCloseGuard, TerminalStream,
     },
 };
+use crate::http::access::ResolvedDevice;
 use axum::{
     extract::{
-        Path, Query, State as AxumState,
+        Query, State as AxumState,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
@@ -56,7 +57,7 @@ pub(crate) struct TerminalQuery {
 
 /// Upgrades a same-origin browser request and opens one terminal stream for it.
 pub(crate) async fn browser_terminal_websocket_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     Query(query): Query<TerminalQuery>,
     headers: HeaderMap,
     AxumState(state): AxumState<ServerState>,
@@ -80,7 +81,7 @@ pub(crate) async fn browser_terminal_websocket_handler(
     websocket
         .max_message_size(MAX_TERMINAL_MESSAGE_SIZE)
         .max_frame_size(MAX_TERMINAL_MESSAGE_SIZE)
-        .on_upgrade(move |socket| run_terminal(socket, AgentId::from(agent), size, cwd, state))
+        .on_upgrade(move |socket| run_terminal(socket, agent_id, size, cwd, state))
         .into_response()
 }
 
@@ -308,7 +309,7 @@ async fn forward_browser_frame(frame: WsMessage, input: &TerminalInput) -> Resul
 /// One thing the agent side produced for the browser.
 enum AgentOutput {
     Event(Option<TerminalServerMessage>),
-    Output(Option<Result<StreamChunk, String>>),
+    Output(Option<Result<StreamChunk, redoor_protocol::wire::request::CommandError>>),
     Keepalive,
 }
 
@@ -331,8 +332,14 @@ async fn forward_agent_to_browser(
             _ = keepalive.tick() => AgentOutput::Keepalive,
         };
         match next {
-            AgentOutput::Output(Some(Err(message))) => {
-                return finish(&mut browser, &TerminalServerMessage::Error { message }).await;
+            AgentOutput::Output(Some(Err(error))) => {
+                return finish(
+                    &mut browser,
+                    &TerminalServerMessage::Error {
+                        message: error.message,
+                    },
+                )
+                .await;
             }
             AgentOutput::Output(Some(Ok(chunk))) if chunk.is_last => {
                 send_output(&mut browser, chunk).await?;

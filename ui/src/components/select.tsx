@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 
 type SelectProps = React.ComponentPropsWithRef<"select"> & {
     containerClassName?: string;
@@ -15,15 +15,10 @@ export function Select(props: SelectProps) {
     delete selectProps.containerClassName;
 
     return (
-        <span
-            className={twMerge(
-                "relative inline-block",
-                props.containerClassName,
-            )}
-        >
+        <span className={cn("relative inline-block", props.containerClassName)}>
             <select
                 {...selectProps}
-                className={twMerge(
+                className={cn(
                     "w-full appearance-none rounded-md border border-slate-700 bg-canvas py-2 pr-9 pl-3 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-60",
                     props.className,
                 )}

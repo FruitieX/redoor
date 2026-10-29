@@ -26,7 +26,21 @@ import {
     createAccessToken,
 } from "./test-utils";
 
-const size = 512 * 1024 * 1024;
+/** Mirrors `SEGMENT_SIZE` in crates/redoor-core/src/partials.rs: resume reuses whole segments only. */
+const SEGMENT_SIZE = 64 * 1024 * 1024;
+
+/**
+ * Cross-agent copies stream at roughly 200 MB/s on a dev machine, so four segments leave a
+ * multi-segment tail (~1 s) after the just-over-one-segment pause threshold. That keeps the
+ * pause landing mid-stream with a wide margin while halving the bytes copied and hashed.
+ */
+const CROSS_AGENT_SIZE = 4 * SEGMENT_SIZE;
+
+/**
+ * Same-agent copies run at several GB/s and were observed ~170 MB in by the time the pause
+ * arrived, so they keep eight segments to stay well clear of publishing before the pause.
+ */
+const LOCAL_SIZE = 8 * SEGMENT_SIZE;
 
 /** Streaming digest checks exact content without allocating the large test file. */
 async function digest(file: string) {
@@ -107,7 +121,7 @@ describe("resumable transfers", () => {
             predicate: async () =>
                 (await api.listAgents()).find(
                     (agent) =>
-                        agent.id === "resume-dest" &&
+                        agent.name === "resume-dest" &&
                         agent.status === "connected",
                 ),
         });
@@ -160,16 +174,6 @@ describe("resumable transfers", () => {
     }> {
         const sourcePath = path.join(root, `source-${crypto.randomUUID()}`);
         const destPath = `${sourcePath}-dest`;
-        const file = await fs.open(sourcePath, "w");
-        await file.truncate(size);
-        await file.write(Buffer.from("source marker"), 0, 13, 0);
-        await file.close();
-
-        if (local && move) {
-            // Merge requires an existing destination to force the copy-and-delete branch.
-            await fs.writeFile(destPath, "existing destination");
-        }
-
         const destination = local ? source : dest;
         let id: number | undefined;
         onTestFinished(async () => {
@@ -184,34 +188,72 @@ describe("resumable transfers", () => {
             await fs.rm(sourcePath, { force: true });
             await fs.rm(destPath, { force: true });
         });
-        id = move
-            ? (
-                  await source.moveTo(
-                      { agent: destination.id, path: destPath },
-                      sourcePath,
-                      { on_existing: "merge" },
-                  )
-              ).move_request_id
-            : (
-                  await source.copyTo(
-                      { agent: destination.id, path: destPath },
-                      sourcePath,
-                  )
-              ).copy_request_id;
-        const transferId = id;
-        await waitForValue({
-            description: "copy has a durable prefix",
-            intervalMs: 1,
-            predicate: async () =>
-                (await api.getTransferProgress()).transfers.find(
-                    (transfer) =>
-                        transfer.request_id === transferId &&
-                        transfer.state === "active" &&
+
+        // A same-agent copy finishes about 170 ms after crossing the pause threshold, so one
+        // progress poll stalled by suite load can miss the whole mid-stream window. Finishing
+        // before it was seen is not a fault of the feature under test, so such an attempt starts
+        // over with fresh fixtures.
+        for (let attempt = 1; ; attempt += 1) {
+            await fs.rm(destPath, { force: true });
+            const file = await fs.open(sourcePath, "w");
+            await file.truncate(local ? LOCAL_SIZE : CROSS_AGENT_SIZE);
+            await file.write(Buffer.from("source marker"), 0, 13, 0);
+            await file.close();
+
+            if (local && move) {
+                // Merge requires an existing destination to force the copy-and-delete branch.
+                await fs.writeFile(destPath, "existing destination");
+            }
+
+            id = move
+                ? (
+                      await source.moveTo(
+                          { agent: destination.id, path: destPath },
+                          sourcePath,
+                          { on_existing: "merge" },
+                      )
+                  ).move_request_id
+                : (
+                      await source.copyTo(
+                          { agent: destination.id, path: destPath },
+                          sourcePath,
+                      )
+                  ).copy_request_id;
+            const transferId = id;
+
+            const observed = await waitForValue({
+                description: "copy has a durable prefix",
+                intervalMs: 1,
+                predicate: async () => {
+                    const transfer = (
+                        await api.getTransferProgress()
+                    ).transfers.find(
+                        (entry) => entry.request_id === transferId,
+                    );
+
+                    if (transfer?.state === "completed") {
+                        return "finished";
+                    }
+
+                    return transfer?.state === "active" &&
                         transfer.transferred_bytes >= 70 * 1024 * 1024 &&
                         transfer.pausable &&
-                        transfer.cancelable,
-                ),
-        });
+                        transfer.cancelable
+                        ? "mid-stream"
+                        : undefined;
+                },
+            });
+
+            if (observed === "mid-stream") {
+                break;
+            }
+
+            // Repeatedly finishing first would mean the copy can no longer be interrupted at all.
+            expect(
+                attempt,
+                "copy kept finishing before it was seen mid-stream",
+            ).toBeLessThan(3);
+        }
 
         if (options?.checkBusy) {
             // Concurrent admission must leave the first attempt's private staging untouched.
@@ -282,10 +324,17 @@ describe("resumable transfers", () => {
             transfer.state,
             "resume must publish rather than merely finish streaming",
         ).toBe("completed");
+
+        // Hashing both files concurrently keeps the full byte-exact check at half the wall time.
+        const [destDigest, sourceDigest] = await Promise.all([
+            digest(destPath),
+            digest(sourcePath),
+        ]);
+
         expect(
-            await digest(destPath),
+            destDigest,
             "prefix and tail must match the source byte for byte",
-        ).toBe(await digest(sourcePath));
+        ).toBe(sourceDigest);
         expect(
             (await api.listPartials()).partials.some(
                 (partial) => partial.dest.path === destPath,
@@ -458,10 +507,15 @@ describe("resumable transfers", () => {
         expect(transfer?.resumed_bytes).toBeGreaterThanOrEqual(
             64 * 1024 * 1024,
         );
-        expect(
-            await digest(run.destPath),
-            "MCP publication verifies the entire file",
-        ).toBe(await digest(run.sourcePath));
+
+        const [destDigest, sourceDigest] = await Promise.all([
+            digest(run.destPath),
+            digest(run.sourcePath),
+        ]);
+
+        expect(destDigest, "MCP publication verifies the entire file").toBe(
+            sourceDigest,
+        );
     });
 
     it("resumes a local copy after an agent crash", async () => {
@@ -629,7 +683,7 @@ describe("resumable transfers", () => {
         const run = await paused(true, true);
         const originalHash = await digest(run.sourcePath);
         // Pausing a move must retain its source until verified publication completes.
-        expect((await fs.stat(run.sourcePath)).size).toBe(size);
+        expect((await fs.stat(run.sourcePath)).size).toBe(LOCAL_SIZE);
         const resumed = await api.resumePartial(run.partial);
 
         const transfer = await waitForValue({

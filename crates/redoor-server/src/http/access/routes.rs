@@ -53,7 +53,8 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
         )
         | ("GET", "/api/v1/protocol-mismatches" | "/api/v1/server")
         | ("GET" | "PUT", "/api/v1/server/logging-level" | "/api/v1/user/state")
-        | ("POST", "/api/v1/server/restart")
+        | ("GET" | "PUT" | "DELETE", "/api/v1/user/editor-buffers/{key}")
+        | ("POST", "/api/v1/server/restart" | "/api/v1/server/upgrade")
         | ("POST", "/api/v1/agents" | "/api/v1/local-agents")
         | ("PUT" | "DELETE", "/api/v1/agents/{agent}" | "/api/v1/local-agents/{agent}")
         | (
@@ -62,6 +63,12 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
         )
         | ("GET" | "PUT", "/api/v1/agents/{agent}/logging-level")
         | ("POST", "/api/v1/agents/{agent}/echo") => Access::SessionOnly,
+
+        // SSH keys and host keys carry login passwords and change what the server can log
+        // in to.
+        ("GET", "/api/v1/agents/{agent}/ssh-host-key")
+        | ("POST", "/api/v1/agents/{agent}/ssh-host-key/pin")
+        | ("POST" | "DELETE", "/api/v1/agents/{agent}/ssh-key") => Access::SessionOnly,
 
         // Token management: never grantable, so a token cannot mint a broader one.
         ("GET" | "POST", "/api/v1/tokens")
@@ -96,6 +103,16 @@ pub(crate) fn classify(method: &Method, matched_path: &str) -> Option<Access> {
             | "/api/v1/agents/{agent}/metadata"
             | "/api/v1/agents/{agent}/git/context"
             | "/api/v1/agents/{agent}/git/status"
+            | "/api/v1/agents/{agent}/git/tree"
+            | "/api/v1/agents/{agent}/git/blob"
+            | "/api/v1/agents/{agent}/git/download"
+            | "/api/v1/agents/{agent}/git/commit-diff"
+            | "/api/v1/agents/{agent}/git/log"
+            | "/api/v1/agents/{agent}/git/commit-neighbors"
+            | "/api/v1/agents/{agent}/git/branches"
+            | "/api/v1/agents/{agent}/git/tags"
+            | "/api/v1/agents/{agent}/git/worktrees"
+            | "/api/v1/agents/{agent}/git/worktree-status"
             | "/api/v1/agents/{agent}/raw"
             | "/api/v1/agents/{agent}/accounts"
             | "/api/v1/agents/{agent}/trash",
@@ -189,8 +206,53 @@ mod tests {
             (Method::GET, "/api/v1/agents/{agent}", Access::Device(&[])),
             (Method::PUT, "/api/v1/agents/{agent}", Access::SessionOnly),
             (
+                Method::PUT,
+                "/api/v1/user/editor-buffers/{key}",
+                Access::SessionOnly,
+            ),
+            (
                 Method::GET,
                 "/api/v1/agents/{agent}/ls/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/tree/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/commit-diff",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/log/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/commit-neighbors/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/tags",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/download/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/worktrees/{*path}",
+                Access::Device(&[FilesRead]),
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/git/worktree-status/{*path}",
                 Access::Device(&[FilesRead]),
             ),
             (
@@ -224,6 +286,17 @@ mod tests {
                 Access::SessionOnly,
             ),
             (Method::POST, "/api/v1/server/restart", Access::SessionOnly),
+            (Method::POST, "/api/v1/server/upgrade", Access::SessionOnly),
+            (
+                Method::POST,
+                "/api/v1/agents/{agent}/ssh-key",
+                Access::SessionOnly,
+            ),
+            (
+                Method::GET,
+                "/api/v1/agents/{agent}/ssh-host-key",
+                Access::SessionOnly,
+            ),
             (Method::GET, "/api/v1/tokens", Access::SessionOnly),
             (Method::GET, "/api/v1/tokens/current", Access::AnyPrincipal),
             (

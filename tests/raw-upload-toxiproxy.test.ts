@@ -65,7 +65,7 @@ describe("Raw Upload API with toxiproxy", () => {
             await proxy.remove().catch(() => undefined);
         });
 
-        await proxy.addToxic({
+        const bandwidthToxic = await proxy.addToxic({
             name: "slow-upload",
             type: "bandwidth",
             stream: "upstream",
@@ -106,6 +106,11 @@ describe("Raw Upload API with toxiproxy", () => {
         expect(activeTransfer.transferred_bytes).toBeLessThan(totalBytes);
         // The active state check ensures progress polling works while the throttled request is still streaming.
         expect(activeTransfer.state).toBe("active");
+
+        // Mid-flight observability is proven above. Lifting the throttle lets the rest of
+        // the same live request finish at full speed instead of ~8 s at 16 KB/s, while the
+        // assertions below still prove it completes untruncated and uncorrupted.
+        await bandwidthToxic.remove();
 
         const uploadResponse = await uploadPromise;
 
@@ -156,7 +161,7 @@ describe("Raw Upload API with toxiproxy", () => {
             await proxy.remove().catch(() => undefined);
         });
 
-        await proxy.addToxic({
+        const bandwidthToxic = await proxy.addToxic({
             name: "slow-upload",
             type: "bandwidth",
             stream: "upstream",
@@ -216,6 +221,11 @@ describe("Raw Upload API with toxiproxy", () => {
 
         // Returning the same agent name proves the responsive command still reached the intended agent during the upload.
         expect(detailsResult.details.name).toBe(testAgent.name);
+
+        // Responsiveness was proven while the upload was throttled and active. Lifting the
+        // throttle lets the rest of the same request finish at full speed instead of ~12 s
+        // at 16 KB/s, while the response below still proves the upload was not truncated.
+        await bandwidthToxic.remove();
 
         const uploadResponse = await uploadPromise;
 

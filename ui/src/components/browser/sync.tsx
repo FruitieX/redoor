@@ -1,5 +1,6 @@
 import React from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useAtomValue } from "jotai";
 import { Link } from "@tanstack/react-router";
 import {
     Copy,
@@ -22,6 +23,9 @@ import { Tooltip } from "#ui/components/tooltip";
 import { ViewCardHeader } from "#ui/components/view-card-header";
 import { DestinationConflictDialog } from "#ui/components/browser/destination-conflict";
 import { UnifiedDiff } from "#ui/components/browser/unified-diff";
+import { DiffLayoutControl } from "#ui/components/browser/diff-layout-control";
+import { inlineDiffChangesAtom } from "#ui/diff-preferences";
+import { useUserState } from "#ui/user-state";
 import { getPathLoadError } from "#ui/components/browser/utils";
 import {
     WATCHED_TRANSFER_POLL_MS,
@@ -37,7 +41,7 @@ import {
 } from "#ui/utils/path";
 
 /** Names the destination a "view" link opens, so the router builds a real, typed link. */
-type ViewTarget = { agentId: string; path: string };
+type ViewTarget = { agent: Agent; path: string };
 
 /** Reuses the agent and path controls for cross-agent file operations. */
 function AgentPathFields(props: {
@@ -50,7 +54,7 @@ function AgentPathFields(props: {
     onPathChange: (path: string) => void;
 }) {
     return (
-        <div className="grid items-end gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
+        <div className="grid items-end gap-4 @2xl:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
             <label className="grid gap-2 text-sm font-medium text-slate-200">
                 Device
                 <Select
@@ -93,7 +97,7 @@ function AgentPathFields(props: {
                 ) : (
                     <Link
                         {...browserRoute(
-                            props.viewTarget.agentId,
+                            props.viewTarget.agent,
                             props.viewTarget.path,
                         )}
                         search={{}}
@@ -298,6 +302,9 @@ function useSyncDiff(
         unifiedDiff: diffMutation.isSuccess
             ? diffMutation.data.unified_diff
             : null,
+        fullContext: diffMutation.isSuccess
+            ? diffMutation.data.full_context
+            : false,
         run: () => diffMutation.mutate(),
         reset: () => diffMutation.reset(),
     };
@@ -548,7 +555,7 @@ function useSyncWorkspace(props: {
         /** The "view" link target, which only exists for an absolute path. */
         viewTarget: selectedEndpoint?.path.startsWith("/")
             ? {
-                  agentId: selectedEndpoint.agent.id,
+                  agent: selectedEndpoint.agent,
                   path: selectedEndpoint.path,
               }
             : null,
@@ -682,7 +689,7 @@ function SyncDirectionFields(props: {
             }
             disabled={workspace.isBusy}
             legendClassName="text-sm font-medium text-slate-200"
-            optionsClassName="md:grid-cols-2"
+            optionsClassName="@2xl:grid-cols-2"
         >
             <RadioCardOption
                 name="sync-direction"
@@ -884,7 +891,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
         return (
             <p
                 role="status"
-                className="border-t border-slate-800 p-4 text-sm text-emerald-300 sm:p-5"
+                className="border-t border-slate-800 p-4 text-sm text-emerald-300 @xl:p-5"
             >
                 {outcome.label} completed successfully.{" "}
                 {formatSize(outcome.transferredBytes)} transferred from{" "}
@@ -896,7 +903,7 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
     return (
         <p
             role="alert"
-            className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
+            className="border-t border-slate-800 p-4 text-sm text-red-300 @xl:p-5"
         >
             {outcome.label} failed: {outcome.message}
         </p>
@@ -906,12 +913,14 @@ function SyncTransferStatus(props: { workspace: SyncWorkspace }) {
 /** Keeps the rendered hunks under the form so Copy/Move chrome stays interactive. */
 function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     const diff = props.workspace.diff;
+    const mergeModifiedLines = useAtomValue(inlineDiffChangesAtom);
+    const [userState] = useUserState();
 
     if (diff.errorMessage !== null) {
         return (
             <p
                 role="alert"
-                className="border-t border-slate-800 p-4 text-sm text-red-300 sm:p-5"
+                className="border-t border-slate-800 p-4 text-sm text-red-300 @xl:p-5"
             >
                 {diff.errorMessage}
             </p>
@@ -925,9 +934,17 @@ function SyncDiffSection(props: { workspace: SyncWorkspace }) {
     return (
         <section
             aria-label="File diff"
-            className="file-diff-host w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 sm:p-5"
+            className="w-full min-w-0 overflow-x-auto border-t border-slate-800 p-4 @xl:p-5"
         >
-            <UnifiedDiff unifiedDiff={diff.unifiedDiff} />
+            <div className="mb-3 flex justify-end">
+                <DiffLayoutControl />
+            </div>
+            <UnifiedDiff
+                unifiedDiff={diff.unifiedDiff}
+                fullContext={diff.fullContext}
+                mergeModifiedLines={mergeModifiedLines}
+                wrapLines={userState.wrapDiffLines}
+            />
         </section>
     );
 }
@@ -975,7 +992,7 @@ export function SyncView(props: {
                 </p>
             </ViewCardHeader>
 
-            <div className="grid gap-4 p-4 sm:p-5">
+            <div className="grid gap-4 p-4 @xl:p-5">
                 <SyncDirectionFields
                     workspace={workspace}
                     currentAgent={props.sourceAgent}

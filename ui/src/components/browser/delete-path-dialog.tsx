@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useSetAtom } from "jotai";
 
 import type { Agent } from "#ui/api-client";
@@ -9,13 +9,16 @@ import { DeletePathsDialog } from "#ui/components/browser/delete-paths-dialog";
 import { getImmediateParentPath } from "#ui/components/browser/utils";
 import { invalidateAgentData } from "#ui/queries";
 import { unselectFileAtom } from "#ui/selected-files";
-import { unpinFile, useUserState } from "#ui/user-state";
+import { closeFile, getOpenFileKey, useUserState } from "#ui/user-state";
+
+const rootRouteApi = getRouteApi("__root__");
 
 /**
  * Confirms deleting one path and owns what every surface must do once it is gone, so the
  * file list, the details view and the editor cannot drift apart: the path leaves the
- * selection and the pinned files, cached device data refreshes, and a page that showed the
- * path itself moves to its parent. Callers mount it only while the confirmation is open.
+ * selection and the open files (with its editor buffer), cached device data refreshes, and
+ * a page that showed the path itself moves to its parent. Callers mount it only while the
+ * confirmation is open.
  */
 export function DeletePathDialog(props: {
     agent: Agent;
@@ -34,6 +37,7 @@ export function DeletePathDialog(props: {
     const queryClient = useQueryClient();
     const unselectFile = useSetAtom(unselectFileAtom);
     const [, setUserState] = useUserState();
+    const { editor } = rootRouteApi.useRouteContext();
 
     /** Removes the path everywhere it is remembered, then moves off its page if it had one. */
     const cleanUp = async () => {
@@ -41,9 +45,11 @@ export function DeletePathDialog(props: {
 
         // A removed path must disappear from navigation and pending selection actions.
         unselectFile(target);
+        // The file is gone, so its unsaved edits go with it (the delete confirmation said so).
+        editor.close(getOpenFileKey(target));
         setUserState((current) => ({
             ...current,
-            pinnedFiles: unpinFile(current.pinnedFiles, target),
+            openFiles: closeFile(current.openFiles, target),
         }));
         props.onDeleted?.();
 
@@ -52,7 +58,7 @@ export function DeletePathDialog(props: {
         // Leave before refreshing, so no mounted query refetches the path that no longer exists.
         if (props.leaveToParent === true && parentPath !== null) {
             await navigate({
-                ...browserRoute(props.agent.id, parentPath),
+                ...browserRoute(props.agent, parentPath),
                 replace: true,
             });
         }

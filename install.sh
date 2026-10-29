@@ -7,6 +7,8 @@
 #   ./install.sh             # install latest release
 #   ./install.sh v0.1.0      # install a specific tag
 #
+# `redoor upgrade` embeds and runs this same script.
+#
 set -euo pipefail
 
 REPO="esamattis/redoor"
@@ -22,6 +24,9 @@ else
 fi
 INSTALL_DIR="${REDOOR_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 BINARY_NAME="redoor"
+# Release assets live under <base>/<tag>/<archive>. REDOOR_RELEASE_BASE_URL points it at a
+# local mirror (curl also accepts file:// URLs) so `redoor upgrade` can be tested offline.
+RELEASE_BASE_URL="${REDOOR_RELEASE_BASE_URL:-https://github.com/${REPO}/releases/download}"
 
 # Declared at the top level so the EXIT trap (which runs in the global scope,
 # not inside main) can see it. Without this, set -u would error inside the
@@ -69,36 +74,53 @@ is_android() {
     [[ "${OSTYPE:-}" == linux-android* || -n "${TERMUX_VERSION:-}" || -n "${ANDROID_ROOT:-}" ]]
 }
 
-# Map the host OS/arch to the archive name produced by .github/workflows/release.yml.
-# Only targets built in CI are supported; everything else errors out
-# with a clear message rather than a confusing download failure.
-archive_name_for() {
-    local os arch
-    os="$(uname -s)"
-    arch="$(uname -m)"
-
-    case "$os" in
-        Darwin)
-            case "$arch" in
-                arm64|aarch64) echo "redoor-aarch64-macos.tar.gz" ;;
-                *) err "no macOS release asset for arch '$arch' (only Apple Silicon is built)"; return 1 ;;
-            esac
-            ;;
+# Names the host OS the way release assets do; Android first because Termux reports Linux.
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
         Linux)
             if is_android; then
-                case "$arch" in
-                    aarch64|arm64) echo "redoor-aarch64-android.tar.gz" ;;
-                    *) err "no Android release asset for arch '$arch' (only aarch64 is built)"; return 1 ;;
-                esac
-                return
+                echo "android"
+            else
+                echo "linux"
             fi
-            case "$arch" in
-                x86_64)      echo "redoor-x86_64-linux.tar.gz" ;;
-                aarch64|arm64) echo "redoor-aarch64-linux.tar.gz" ;;
-                *) err "no Linux release asset for arch '$arch' (only x86_64 and aarch64 are built)"; return 1 ;;
-            esac
             ;;
-        *) err "unsupported OS '$os' (only Darwin and Linux are built)"; return 1 ;;
+        *) err "unsupported OS '$(uname -s)' (only Darwin and Linux are built)"; return 1 ;;
+    esac
+}
+
+# Names the host CPU architecture the way release assets do.
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64) echo "x86_64" ;;
+        aarch64|arm64) echo "aarch64" ;;
+        *) err "unsupported architecture '$(uname -m)' (only x86_64 and aarch64 are built)"; return 1 ;;
+    esac
+}
+
+# Map the target OS/arch to the archive name produced by .github/workflows/release.yml.
+# The host is the default target. REDOOR_TARGET_OS and REDOOR_TARGET_ARCH pick another one,
+# which the redoor server uses to fetch binaries for agents on other devices. Only targets
+# built in CI are supported; everything else errors out with a clear message rather than a
+# confusing download failure.
+archive_name_for() {
+    local os="${REDOOR_TARGET_OS:-}"
+    local arch="${REDOOR_TARGET_ARCH:-}"
+    if [[ -z "$os" ]]; then
+        os="$(detect_os)" || return 1
+    fi
+    if [[ -z "$arch" ]]; then
+        arch="$(detect_arch)" || return 1
+    fi
+
+    case "${os}/${arch}" in
+        linux/x86_64|linux/aarch64|macos/aarch64|android/aarch64)
+            echo "redoor-${arch}-${os}.tar.gz"
+            ;;
+        *)
+            err "no release asset for ${os}/${arch} (built: linux/x86_64, linux/aarch64, macos/aarch64, android/aarch64)"
+            return 1
+            ;;
     esac
 }
 
@@ -124,11 +146,11 @@ main() {
     tag="$(resolve_tag "$requested_tag")" || exit 1
     archive="$(archive_name_for)" || exit 1
 
-    # Use the GitHub releases download URL which 302-redirects to the asset
-    # on a specific tag. curl -L follows the redirect.
-    local download_url="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+    # The GitHub releases download URL 302-redirects to the asset on a specific
+    # tag. curl -L follows the redirect.
+    local download_url="${RELEASE_BASE_URL}/${tag}/${archive}"
 
-    info "installing redoor ${tag} for $(uname -s)/$(uname -m)"
+    info "installing redoor ${tag} (${archive})"
     info "downloading ${download_url}"
 
     TMP_DIR="$(mktemp -d)"

@@ -75,7 +75,7 @@ test.describe.serial("Upload conflicts", () => {
         await fs.mkdir(directoryPath);
         await fs.writeFile(path.join(directoryPath, "notes.txt"), "existing");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`,
         );
 
         return directoryPath;
@@ -101,7 +101,7 @@ test.describe.serial("Upload conflicts", () => {
         await fs.writeFile(path.join(sourcePhotos, "b.txt"), "new b");
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`,
         );
         await page
             .getByLabel("Choose directory to upload")

@@ -28,14 +28,20 @@ export function useAgentViewContext(): AgentViewContext {
         select: (matches) => matches.at(-1)?.routeId,
     });
 
-    if (browser?.entry) {
+    // A revision page is a filesystem view even when its path is not on disk or did not
+    // resolve at the revision, so it keeps the device tabs with Files active.
+    const browserEntry =
+        browser?.entry ??
+        (browser?.revision ? (browser.revision.entry ?? "directory") : null);
+
+    if (browser && browserEntry) {
         const browserAgent = agents.find(
             (agent) => agent.id === browser.agentId,
         );
 
         if (browserAgent) {
             return {
-                kind: browser.entry,
+                kind: browserEntry,
                 agent: browserAgent,
                 path: browser.path,
             };
@@ -49,17 +55,17 @@ export function useAgentViewContext(): AgentViewContext {
     }
 
     switch (leafRouteId) {
-        case "/_app/agents/$agentId/":
+        case "/_app/agents/$deviceName/":
             return { kind: "agent", agent: activeAgent };
-        case "/_app/agents/$agentId/edit":
+        case "/_app/agents/$deviceName/edit":
             return activeAgent.configurationEditable
                 ? { kind: "configuration", agent: activeAgent }
                 : null;
-        case "/_app/agents/$agentId/logs":
+        case "/_app/agents/$deviceName/logs":
             return isBrowsable(activeAgent)
                 ? { kind: "logs", agent: activeAgent }
                 : null;
-        case "/_app/agents/$agentId/trash":
+        case "/_app/agents/$deviceName/trash":
             return isBrowsable(activeAgent)
                 ? { kind: "trash", agent: activeAgent }
                 : null;

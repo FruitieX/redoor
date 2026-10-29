@@ -19,9 +19,9 @@ import {
     TEST_APP_NAME,
     TEST_PASSWORD,
     TEST_USERNAME,
+    DEVICE_ID_REGEXP,
     VITEST_SERVER_PORT,
     waitForAgentReady,
-    waitForLogMessage,
     waitForPort,
     waitForValue,
 } from "./test-utils";
@@ -58,11 +58,11 @@ let secondDeviceToken: string;
 
 let serverPid: number;
 
-const testDeviceId = "mcp-test-agent";
+const testDeviceName = "mcp-test-agent";
 
-const secondDeviceId = "mcp-test-agent-two";
+const secondDeviceName = "mcp-test-agent-two";
 
-const managedDeviceId = "mcp-managed-agent";
+const managedDeviceName = "mcp-managed-agent";
 
 const agentRoot = join(temporaryDirectory, "agent-root");
 
@@ -97,7 +97,7 @@ async function createToken(options: {
 
 /** Creates a token with every permission on every test device and returns its secret. */
 async function createOperatorToken(name: string): Promise<string> {
-    const devices = [testDeviceId, secondDeviceId, managedDeviceId];
+    const devices = [testDeviceName, secondDeviceName, managedDeviceName];
 
     return (
         await createToken({ name, permissions: ALL_PERMISSIONS, devices })
@@ -169,7 +169,7 @@ mcp_allowed_origins = ["${allowedOrigin}"]
 
 [[agents]]
 local = true
-name = "${managedDeviceId}"
+name = "${managedDeviceName}"
 home = "${agentRoot}"
 log = "${join(temporaryDirectory, "managed-agent.log")}"
 `,
@@ -185,42 +185,30 @@ log = "${join(temporaryDirectory, "managed-agent.log")}"
     activeToken = (
         await createToken({
             name: "primary test client",
-            devices: [managedDeviceId],
+            devices: [managedDeviceName],
         })
     ).token;
     const server = processManager.getProcess(serverPid);
 
     if (server === undefined) throw new Error("MCP test server missing");
 
-    const registered = waitForLogMessage(
-        server,
-        new RegExp(`Agent registered:.*agent_name=${testDeviceId}`),
-        10_000,
-    );
-
-    const transferred = waitForAgentReady(server, testDeviceId);
+    const transferred = waitForAgentReady(server, testDeviceName);
     processManager.spawnAgent({
         wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}`,
-        name: testDeviceId,
+        name: testDeviceName,
         cwd: agentRoot,
         home: agentRoot,
     });
-    await Promise.all([registered, transferred]);
+    await transferred;
 
-    const secondRegistered = waitForLogMessage(
-        server,
-        new RegExp(`Agent registered:.*agent_name=${secondDeviceId}`),
-        10_000,
-    );
-
-    const secondTransferred = waitForAgentReady(server, secondDeviceId);
+    const secondTransferred = waitForAgentReady(server, secondDeviceName);
     processManager.spawnAgent({
         wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}`,
-        name: secondDeviceId,
+        name: secondDeviceName,
         cwd: secondAgentRoot,
         home: secondAgentRoot,
     });
-    await Promise.all([secondRegistered, secondTransferred]);
+    await secondTransferred;
 
     deviceToken = await createOperatorToken("device operator");
     secondDeviceToken = await createOperatorToken("other device operator");
@@ -284,24 +272,31 @@ describe("stateless authenticated MCP", () => {
         expect(
             (await limited.callTool("list_devices")).result.structuredContent
                 ?.devices,
-        ).toEqual([expect.objectContaining({ device_id: managedDeviceId })]);
+        ).toEqual([
+            expect.objectContaining({
+                // Devices are listed by opaque id with the name beside it.
+                device_id: expect.stringMatching(DEVICE_ID_REGEXP),
+                display_name: managedDeviceName,
+            }),
+        ]);
         // Devices outside the scope are refused, not just hidden.
         await expect(
-            limited.callTool("get_device", { device_id: testDeviceId }),
+            limited.callTool("get_device", { device_id: testDeviceName }),
         ).rejects.toThrow("(403)");
         const inventory = await client.callTool("list_devices");
         expect(inventory.result.structuredContent?.devices).toEqual(
             expect.arrayContaining([
                 expect.objectContaining({
-                    device_id: testDeviceId,
+                    device_id: expect.stringMatching(DEVICE_ID_REGEXP),
+                    display_name: testDeviceName,
                     supported_features: {
                         trash: expect.any(Boolean),
                         trash_restore: expect.any(Boolean),
                     },
                 }),
-                expect.objectContaining({ device_id: secondDeviceId }),
+                expect.objectContaining({ display_name: secondDeviceName }),
                 expect.objectContaining({
-                    device_id: managedDeviceId,
+                    display_name: managedDeviceName,
                     managed: true,
                 }),
             ]),
@@ -311,7 +306,7 @@ describe("stateless authenticated MCP", () => {
         const copyPath = join(agentRoot, "mcp-copy.txt");
         const movedPath = join(secondAgentRoot, "mcp-moved.txt");
         await client.callTool("write_file", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             path: firstPath,
             content: "alpha MCP marker",
             on_existing: "error",
@@ -319,7 +314,7 @@ describe("stateless authenticated MCP", () => {
         // Existing destinations fail closed unless the caller explicitly chooses replacement.
         await expect(
             client.callTool("write_file", {
-                device_id: testDeviceId,
+                device_id: testDeviceName,
                 path: firstPath,
                 content: "must not replace",
                 on_existing: "error",
@@ -327,13 +322,13 @@ describe("stateless authenticated MCP", () => {
         ).rejects.toThrow("(409)");
         const directoryPath = join(agentRoot, "created-by-mcp");
         await client.callTool("create_directory", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             path: directoryPath,
         });
         expect(
             (
                 await client.callTool("list_directory", {
-                    device_id: testDeviceId,
+                    device_id: testDeviceName,
                     path: agentRoot,
                 })
             ).result.structuredContent?.entries,
@@ -346,7 +341,7 @@ describe("stateless authenticated MCP", () => {
         expect(
             (
                 await client.callTool("stat_path", {
-                    device_id: testDeviceId,
+                    device_id: testDeviceName,
                     path: firstPath,
                 })
             ).result.structuredContent,
@@ -354,7 +349,7 @@ describe("stateless authenticated MCP", () => {
         expect(
             (
                 await client.callTool("search_paths", {
-                    device_id: testDeviceId,
+                    device_id: testDeviceName,
                     root: agentRoot,
                     query: "mcp-source",
                 })
@@ -362,7 +357,7 @@ describe("stateless authenticated MCP", () => {
         ).toEqual([expect.objectContaining({ path: firstPath })]);
 
         const read = await client.callTool("read_file", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             path: firstPath,
             encoding: "text",
         });
@@ -375,7 +370,7 @@ describe("stateless authenticated MCP", () => {
         expect(
             (
                 await client.callTool("search_contents", {
-                    device_id: testDeviceId,
+                    device_id: testDeviceName,
                     root: agentRoot,
                     query: "MCP marker",
                     fixed_string: true,
@@ -386,15 +381,15 @@ describe("stateless authenticated MCP", () => {
         const copy = await client.callTool<
             JsonObject & { operation_id: string }
         >("copy_path", {
-            source: { device_id: testDeviceId, path: firstPath },
-            destination: { device_id: testDeviceId, path: copyPath },
+            source: { device_id: testDeviceName, path: firstPath },
+            destination: { device_id: testDeviceName, path: copyPath },
             on_existing: "error",
             idempotency_key: "copy-once",
         });
 
         const copyRetry = await client.callTool("copy_path", {
-            source: { device_id: testDeviceId, path: firstPath },
-            destination: { device_id: testDeviceId, path: copyPath },
+            source: { device_id: testDeviceName, path: firstPath },
+            destination: { device_id: testDeviceName, path: copyPath },
             on_existing: "error",
             idempotency_key: "copy-once",
         });
@@ -412,7 +407,7 @@ describe("stateless authenticated MCP", () => {
         const command = await client.callTool<
             JsonObject & { operation_id: string }
         >("run_command", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             argv: ["sh", "-lc", "printf command-output; exit 7"],
             cwd: agentRoot,
             mode: "foreground",
@@ -459,7 +454,7 @@ describe("stateless authenticated MCP", () => {
 
         const uploadedPath = join(agentRoot, "inline-upload.txt");
         await client.callTool("write_file", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             path: uploadedPath,
             content: "inline upload",
             on_existing: "error",
@@ -469,8 +464,8 @@ describe("stateless authenticated MCP", () => {
         const sameMove = await client.callTool<
             JsonObject & { operation_id: string }
         >("move_path", {
-            source: { device_id: testDeviceId, path: uploadedPath },
-            destination: { device_id: testDeviceId, path: sameDeviceMoved },
+            source: { device_id: testDeviceName, path: uploadedPath },
+            destination: { device_id: testDeviceName, path: sameDeviceMoved },
             on_existing: "error",
         });
 
@@ -486,8 +481,8 @@ describe("stateless authenticated MCP", () => {
         const move = await client.callTool<
             JsonObject & { operation_id: string }
         >("move_path", {
-            source: { device_id: testDeviceId, path: copyPath },
-            destination: { device_id: secondDeviceId, path: movedPath },
+            source: { device_id: testDeviceName, path: copyPath },
+            destination: { device_id: secondDeviceName, path: movedPath },
             on_existing: "error",
         });
 
@@ -501,7 +496,7 @@ describe("stateless authenticated MCP", () => {
         expect(
             (
                 await client.callTool("read_file", {
-                    device_id: secondDeviceId,
+                    device_id: secondDeviceName,
                     path: movedPath,
                     encoding: "text",
                 })
@@ -509,7 +504,7 @@ describe("stateless authenticated MCP", () => {
         ).toBe("alpha MCP marker");
 
         await client.callTool("start_managed_agent", {
-            device_id: managedDeviceId,
+            device_id: managedDeviceName,
         });
         let managedConnected = false;
 
@@ -520,7 +515,7 @@ describe("stateless authenticated MCP", () => {
         ) {
             const device = await client.callTool<
                 JsonObject & { device: JsonObject & { status: string } }
-            >("get_device", { device_id: managedDeviceId });
+            >("get_device", { device_id: managedDeviceName });
 
             managedConnected =
                 device.result.structuredContent?.device.status === "connected";
@@ -533,12 +528,12 @@ describe("stateless authenticated MCP", () => {
         expect(
             (
                 await client.callTool("stop_managed_agent", {
-                    device_id: managedDeviceId,
+                    device_id: managedDeviceName,
                 })
             ).result.structuredContent,
         ).toMatchObject({ cleanup_complete: true });
         await client.callTool("delete_path", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             path: firstPath,
             mode: "permanent",
             recursive: true,
@@ -549,8 +544,8 @@ describe("stateless authenticated MCP", () => {
         endpoint,
         baseUrl,
         token: () => deviceToken,
-        sourceDevice: testDeviceId,
-        destinationDevice: secondDeviceId,
+        sourceDevice: testDeviceName,
+        destinationDevice: secondDeviceName,
         sourceRoot: agentRoot,
         destinationRoot: secondAgentRoot,
         metadataPath: join(
@@ -574,7 +569,7 @@ describe("stateless authenticated MCP", () => {
         const peerClient = createMcpTestClient({ endpoint, token: peerToken });
 
         const large = await client.callTool("run_command", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             argv: ["sh", "-lc", "head -c 4096 /dev/zero"],
             cwd: agentRoot,
             mode: "foreground",
@@ -595,7 +590,7 @@ describe("stateless authenticated MCP", () => {
                 (index % 2 === 0 ? client : peerClient).callTool<
                     JsonObject & { operation_id: string }
                 >("run_command", {
-                    device_id: testDeviceId,
+                    device_id: testDeviceName,
                     argv: ["sh", "-lc", "head -c 4096 /dev/zero"],
                     cwd: agentRoot,
                     mode: "foreground",
@@ -616,7 +611,7 @@ describe("stateless authenticated MCP", () => {
 
         const largeDirectory = join(agentRoot, "large-directory");
         await client.callTool("run_command", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             argv: [
                 "sh",
                 "-lc",
@@ -628,7 +623,7 @@ describe("stateless authenticated MCP", () => {
         });
 
         const listing = await client.callTool("list_directory", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             path: largeDirectory,
         });
 
@@ -640,7 +635,7 @@ describe("stateless authenticated MCP", () => {
         const background = await client.callTool<
             JsonObject & { operation_id: string }
         >("run_command", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             argv: ["sh", "-lc", "exec tail -f /dev/null"],
             cwd: agentRoot,
             mode: "background",
@@ -666,7 +661,7 @@ describe("stateless authenticated MCP", () => {
         const searches = await Promise.all(
             Array.from({ length: 8 }, (_, index) =>
                 client.callTool("search_contents", {
-                    device_id: testDeviceId,
+                    device_id: testDeviceName,
                     root: agentRoot,
                     query: index % 2 === 0 ? "alpha" : "streamed",
                     fixed_string: true,
@@ -687,13 +682,13 @@ describe("stateless authenticated MCP", () => {
         const sourceOnly = await createToken({
             name: "source-only transfer",
             permissions: ["files:read", "files:write", "files:delete"],
-            devices: [testDeviceId],
+            devices: [testDeviceName],
         });
 
         const destinationOnly = await createToken({
             name: "destination-only transfer",
             permissions: ["files:read", "files:write", "files:delete"],
-            devices: [secondDeviceId],
+            devices: [secondDeviceName],
         });
 
         const sourceClient = createMcpTestClient({
@@ -711,9 +706,9 @@ describe("stateless authenticated MCP", () => {
         // A source scope cannot infer or write a destination outside its device scope.
         await expect(
             sourceClient.callTool("copy_path", {
-                source: { device_id: testDeviceId, path: sourcePath },
+                source: { device_id: testDeviceName, path: sourcePath },
                 destination: {
-                    device_id: secondDeviceId,
+                    device_id: secondDeviceName,
                     path: destinationPath,
                 },
                 on_existing: "error",
@@ -722,16 +717,16 @@ describe("stateless authenticated MCP", () => {
         // Destination authority alone cannot read the source side of a transfer.
         await expect(
             destinationClient.callTool("copy_path", {
-                source: { device_id: testDeviceId, path: sourcePath },
+                source: { device_id: testDeviceName, path: sourcePath },
                 destination: {
-                    device_id: secondDeviceId,
+                    device_id: secondDeviceName,
                     path: destinationPath,
                 },
                 on_existing: "error",
             }),
         ).rejects.toThrow("(403)");
 
-        const removedEndpoint = `${baseUrl}/mcp/files/${testDeviceId}${sourcePath}`;
+        const removedEndpoint = `${baseUrl}/mcp/files/${testDeviceName}${sourcePath}`;
         const authorization = { Authorization: `Bearer ${sourceOnly.token}` };
 
         const download = await fetch(removedEndpoint, {
@@ -755,7 +750,7 @@ describe("stateless authenticated MCP", () => {
     it("shows devices added later to an all-devices token", async () => {
         const created = await createToken({ name: "all devices" });
         const client = createMcpTestClient({ endpoint, token: created.token });
-        const lateDeviceId = "mcp-late-agent";
+        const lateDeviceName = "mcp-late-agent";
         const lateRoot = join(temporaryDirectory, "late-agent-root");
         mkdirSync(lateRoot, { recursive: true });
 
@@ -765,17 +760,17 @@ describe("stateless authenticated MCP", () => {
         // The device does not exist yet, so it cannot be listed.
         expect(before).not.toEqual(
             expect.arrayContaining([
-                expect.objectContaining({ device_id: lateDeviceId }),
+                expect.objectContaining({ display_name: lateDeviceName }),
             ]),
         );
         const server = processManager.getProcess(serverPid);
 
         if (server === undefined) throw new Error("MCP test server missing");
-        const ready = waitForAgentReady(server, lateDeviceId);
+        const ready = waitForAgentReady(server, lateDeviceName);
 
         const agentPid = processManager.spawnAgent({
             wsAddress: `ws://127.0.0.1:${VITEST_SERVER_PORT}`,
-            name: lateDeviceId,
+            name: lateDeviceName,
             cwd: lateRoot,
             home: lateRoot,
         });
@@ -790,11 +785,11 @@ describe("stateless authenticated MCP", () => {
             description: "late agent in the all-devices inventory",
             predicate: async () => {
                 const listed = await client.callTool<
-                    JsonObject & { devices: Array<{ device_id: string }> }
+                    JsonObject & { devices: Array<{ display_name: string }> }
                 >("list_devices");
 
                 return listed.result.structuredContent?.devices.some(
-                    (device) => device.device_id === lateDeviceId,
+                    (device) => device.display_name === lateDeviceName,
                 )
                     ? true
                     : undefined;
@@ -808,7 +803,7 @@ describe("stateless authenticated MCP", () => {
         const started = await client.callTool<
             JsonObject & { operation_id: string }
         >("run_command", {
-            device_id: testDeviceId,
+            device_id: testDeviceName,
             argv: ["sh", "-lc", "exec tail -f /dev/null"],
             cwd: agentRoot,
             mode: "background",

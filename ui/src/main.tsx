@@ -14,6 +14,7 @@ import { ShortcutRegistry, ShortcutRegistryContext } from "#ui/shortcuts";
 import { TerminalSessions } from "#ui/terminal/terminal-sessions";
 import { findCachedAgent, invalidateAllAgentData } from "#ui/queries";
 import { UploadQueue } from "#ui/upload-queue";
+import { EditorWorkspace } from "#ui/editor/editor-workspace";
 
 // The API lives on the same origin as the page: the redoor binary
 // embeds the UI alongside the API on a single port, and during local
@@ -43,6 +44,12 @@ const uploads = new UploadQueue({
     unloadTarget: window,
 });
 
+// Open files keep their editor buffers (caret, scroll, undo history, unsaved text) while the
+// user moves between pages, and one CodeMirror view serves them all for the page's lifetime.
+const editor = new EditorWorkspace(api, queryClient);
+
+editor.start(window);
+
 // One registry owns every window-level shortcut, so the order in which commands claim a key
 // is decided by explicit priority instead of by whichever component registered first.
 const shortcuts = new ShortcutRegistry(window);
@@ -55,6 +62,7 @@ const router = createRouter({
         queryClient,
         terminals,
         uploads,
+        editor,
     },
     defaultPreload: "intent",
     scrollRestoration: true,
@@ -86,6 +94,14 @@ api.setUnauthorizedHandler(() => {
 declare module "@tanstack/react-router" {
     interface Register {
         router: typeof router;
+    }
+}
+
+// Links built from a device record its id, so the device route can tell a deliberate choice
+// of a device from navigation inside the page that is open (see `deviceRoute`).
+declare module "@tanstack/history" {
+    interface HistoryState {
+        deviceId?: string;
     }
 }
 

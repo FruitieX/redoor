@@ -1,7 +1,5 @@
 //! REST handlers for access token management and a token's view of itself.
 
-use std::collections::BTreeSet;
-
 use axum::{
     Extension, Json,
     extract::{Path, State},
@@ -9,19 +7,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use jiff::Timestamp;
-use redoor_protocol::{
-    api::tokens::{
-        AccessTokenListResponse, AccessTokenSecretResponse, CreateAccessTokenRequest,
-        DeleteAccessTokenResponse, DeviceScope, UpdateAccessTokenRequest,
-    },
-    ids::AgentId,
+use redoor_protocol::api::tokens::{
+    AccessTokenListResponse, AccessTokenSecretResponse, CreateAccessTokenRequest,
+    DeleteAccessTokenResponse, DeviceScope, UpdateAccessTokenRequest,
 };
 use uuid::Uuid;
 
 use super::store::{IssuedToken, TokenPolicy};
-use crate::http::{
-    access::Principal, agents::list_agent_snapshots, error::ApiError, state::ServerState,
-};
+use crate::http::{access::Principal, error::ApiError, state::ServerState};
 
 /// Route: `GET /api/v1/tokens` lists every token's metadata.
 pub(crate) async fn list(State(state): State<ServerState>) -> Response {
@@ -46,14 +39,14 @@ pub(crate) async fn create(
                 .map_err(|_| ApiError::bad_request("Token expiry must be an RFC 3339 timestamp"))
         })
         .transpose()?;
-    require_known_devices(&state, &request.devices).await?;
+    let devices = resolve_scope(&state, request.devices).await?;
     let issued = state
         .tokens
         .create(
             TokenPolicy {
                 name: request.name,
                 permissions: request.permissions,
-                devices: request.devices,
+                devices,
             },
             expires_at,
         )
@@ -70,7 +63,7 @@ pub(crate) async fn update(
 ) -> Result<Response, ApiError> {
     validate_mutation_origin(&headers)?;
     let id = parse_id(&token_id)?;
-    require_known_devices(&state, &request.devices).await?;
+    let devices = resolve_scope(&state, request.devices).await?;
     let metadata = state
         .tokens
         .update(
@@ -78,7 +71,7 @@ pub(crate) async fn update(
             TokenPolicy {
                 name: request.name,
                 permissions: request.permissions,
-                devices: request.devices,
+                devices,
             },
         )
         .await?;
@@ -142,22 +135,32 @@ fn parse_id(value: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(value).map_err(|_| ApiError::bad_request("Token id must be a UUID"))
 }
 
-/// Rejects explicit device ids the server has never seen, which are almost always typos.
-async fn require_known_devices(state: &ServerState, devices: &DeviceScope) -> Result<(), ApiError> {
+/// Resolves the device names or ids of a scope to the ids of known devices.
+///
+/// A scope stays tied to the devices it was created for: storing names would let a token
+/// follow a name to whichever device takes it later. Unknown values are refused because
+/// they are almost always typos.
+async fn resolve_scope(state: &ServerState, devices: DeviceScope) -> Result<DeviceScope, ApiError> {
     let DeviceScope::Only { device_ids } = devices else {
-        return Ok(());
+        return Ok(DeviceScope::All);
     };
-    let known = list_agent_snapshots(state)
-        .await?
-        .into_iter()
-        .map(|agent| agent.id)
-        .collect::<BTreeSet<AgentId>>();
-    match device_ids.iter().find(|device| !known.contains(device)) {
-        Some(unknown) => Err(ApiError::bad_request(format!(
-            "Unknown device id '{unknown}'"
-        ))),
-        None => Ok(()),
+    let mut resolved = Vec::with_capacity(device_ids.len());
+    for device in device_ids {
+        let id = state
+            .agents
+            .resolve(device.as_str())
+            .await
+            .map_err(|error| match error.status_code() {
+                axum::http::StatusCode::NOT_FOUND => {
+                    ApiError::bad_request(format!("Unknown device '{device}'"))
+                }
+                _ => error,
+            })?;
+        resolved.push(id);
     }
+    Ok(DeviceScope::Only {
+        device_ids: resolved,
+    })
 }
 
 /// Session-authenticated mutations reject cross-site requests, since the cookie would

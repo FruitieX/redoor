@@ -3,4 +3,9 @@
 /**
  * Returns text in the conventional unified diff representation used by patch tools.
  */
-export type DiffFilesResponse = { unified_diff: string, };
+export type DiffFilesResponse = { unified_diff: string, 
+/**
+ * True when the patch holds every unchanged line of the files, so the UI can fold and
+ * expand context without diffing again.
+ */
+full_context: boolean, };

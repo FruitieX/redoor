@@ -52,6 +52,16 @@
         rgb(15 23 42 / 0.1),
         rgb(255 255 255 / 0.1)
     );
+    /*
+     * Diff rows are opaque, unlike tinted overlays, so they read the same on any surface.
+     * Dark values are GitHub's tints blended onto the dark surface.
+     */
+    --app-diff-insert: light-dark(#e6ffec, #152921);
+    --app-diff-insert-strong: light-dark(#abf2bc, #1d4c2b);
+    --app-diff-insert-marker: light-dark(#1a7f37, #3fb950);
+    --app-diff-delete: light-dark(#ffebe9, #341d22);
+    --app-diff-delete-strong: light-dark(#ffcecb, #6d2c2d);
+    --app-diff-delete-marker: light-dark(#cf222e, #f85149);
     --breakpoint-sm: theme(--breakpoint-sm);
     --breakpoint-md: theme(--breakpoint-md);
     --breakpoint-lg: theme(--breakpoint-lg);
@@ -76,6 +86,20 @@
     --color-error-tint: var(--app-error-tint);
     --color-tint: var(--app-subtle-overlay);
     --color-tint-strong: var(--app-hover-overlay);
+    --color-diff-insert: var(--app-diff-insert);
+    --color-diff-insert-strong: var(--app-diff-insert-strong);
+    --color-diff-insert-marker: var(--app-diff-insert-marker);
+    --color-diff-delete: var(--app-diff-delete);
+    --color-diff-delete-strong: var(--app-diff-delete-strong);
+    --color-diff-delete-marker: var(--app-diff-delete-marker);
+}
+
+/*
+ * Shared code size for the editor and diffs. It is rem-based so it follows the reader's
+ * browser font size, and it is not "inline" so the phone override below takes effect.
+ */
+@theme {
+    --text-code: 0.8125rem;
 }
 
 :root.light {
@@ -222,13 +246,31 @@ code {
     z-index: 1;
 }
 
-/* Match compact git-diff type on phones so the editor stays readable beside chrome. */
+/*
+ * Code views size text for columns per screen, not for UI readability, so they share their
+ * own size instead of following the UI text scale. Setting it on the editor root also
+ * replaces the browser's implicit 13px default for generic monospace with a value we own.
+ */
+[data-file-editor] .cm-editor {
+    font-size: var(--text-code);
+}
+
+/*
+ * Desktop type sizes crowd a phone screen, so step the shared scale down there. Only the
+ * font-size tokens shrink: rem-based spacing keeps touch targets large, and Tailwind's
+ * ratio line heights follow the smaller sizes. Code drops further than UI text so the
+ * editor and diffs fit enough columns beside the chrome.
+ */
 @media (max-width: 639px) {
-    [data-file-editor] .cm-editor,
-    [data-file-editor] .cm-scroller,
-    [data-file-editor] .cm-content,
-    [data-file-editor] .cm-gutters {
-        font-size: 9px;
+    :root {
+        --text-xs: 0.6875rem;
+        --text-sm: 0.8125rem;
+        --text-base: 0.875rem;
+        --text-lg: 1rem;
+        --text-xl: 1.125rem;
+        --text-2xl: 1.25rem;
+        --text-3xl: 1.5rem;
+        --text-code: 0.5625rem;
     }
 }
 
@@ -307,127 +349,113 @@ code {
     animation: copy-success-flash 0.7s ease-out forwards;
 }
 
-/* Sync diffs grow with their longest line and scroll within their labeled host. */
-.file-diff-host .d2h-wrapper,
-.file-diff-host .d2h-file-wrapper,
-.file-diff-host .d2h-file-diff,
-.file-diff-host .d2h-diff-table {
-    width: max-content;
-    min-width: 100%;
-    max-width: none;
+/*
+ * Lezer token colours for read-only code (diffs and Markdown fences). They follow the editor
+ * themes, BBEdit in light mode and Tokyo Night in dark mode, so code looks the same in the
+ * editor and around it. Tokyo Night's editor comment colour (#444b6a) is too faint on the
+ * darker diff surface, so comments use the theme family's brighter #565f89.
+ */
+.syntax-highlight .tok-keyword {
+    color: light-dark(#0000ff, #bb9af7);
 }
 
-.file-diff-host .d2h-file-diff,
-.file-diff-host .d2h-code-wrapper {
-    overflow: visible;
+.syntax-highlight .tok-comment {
+    color: light-dark(#804000, #565f89);
 }
 
-.file-diff-host .d2h-code-linenumber {
-    z-index: 1;
+.syntax-highlight .tok-meta {
+    color: light-dark(#888888, #565f89);
 }
 
-.file-diff-host .d2h-code-line-ctn {
-    white-space: pre;
+.syntax-highlight .tok-string {
+    color: light-dark(#ff0080, #9ece6a);
 }
 
-/* Filename chrome is the only path label, so it must read as a real destination. */
-.file-diff-html .d2h-file-name-link {
-    color: var(--color-blue-300);
-    text-decoration: none;
+.syntax-highlight .tok-number {
+    color: light-dark(#ff0080, #ff9e64);
 }
 
-.file-diff-html .d2h-file-name-link:hover,
-.file-diff-html .d2h-file-name-link:focus-visible {
-    text-decoration: underline;
+.syntax-highlight .tok-modifier {
+    color: light-dark(currentColor, #ff9e64);
 }
 
-/* The inner code wrapper is content-sized, so anchor the action to the full cell. */
-.file-diff-html .d2h-editor-line-cell {
-    position: relative;
-    padding-inline-end: 5em;
+.syntax-highlight .tok-constant,
+.syntax-highlight .tok-operator {
+    color: light-dark(currentColor, #bb9af7);
 }
 
-/* Trailing control matches Button secondary so it reads as an action, not code. */
-.file-diff-html .d2h-editor-line-link {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    position: absolute;
-    inset-block-start: 50%;
-    inset-inline-end: 0.5em;
-    transform: translateY(-50%);
-    padding: 0.05em 0.45em;
-    border: 1px solid var(--color-slate-700);
-    border-radius: 0.25rem;
-    font-family: var(--font-sans);
-    font-weight: 500;
-    color: var(--color-slate-200);
-    text-decoration: none;
-    vertical-align: middle;
+.syntax-highlight .tok-variable {
+    color: light-dark(#006600, #c0caf5);
 }
 
-.file-diff-html .d2h-editor-line-link:hover,
-.file-diff-html .d2h-editor-line-link:focus-visible {
-    background-color: rgb(255 255 255 / 0.05);
-    text-decoration: none;
+.syntax-highlight .tok-function {
+    color: light-dark(#0000a2, #7aa2f7);
 }
 
-/* Highlight tokens inherit their host background while adapting to app theme. */
-.syntax-highlight .hljs-keyword,
-.syntax-highlight .hljs-type,
-.syntax-highlight .hljs-doctag,
-.syntax-highlight .hljs-template-tag,
-.syntax-highlight .hljs-template-variable,
-.syntax-highlight .hljs-variable.language_ {
-    color: light-dark(#cf222e, #ff7b72);
+.syntax-highlight .tok-property {
+    color: light-dark(currentColor, #7aa2f7);
 }
 
-.syntax-highlight .hljs-title,
-.syntax-highlight .hljs-title.class_,
-.syntax-highlight .hljs-title.function_ {
-    color: light-dark(#8250df, #d2a8ff);
+.syntax-highlight .tok-type {
+    color: light-dark(#6d79de, #0db9d7);
 }
 
-.syntax-highlight .hljs-attr,
-.syntax-highlight .hljs-attribute,
-.syntax-highlight .hljs-literal,
-.syntax-highlight .hljs-meta,
-.syntax-highlight .hljs-number,
-.syntax-highlight .hljs-operator,
-.syntax-highlight .hljs-variable,
-.syntax-highlight .hljs-selector-attr,
-.syntax-highlight .hljs-selector-class,
-.syntax-highlight .hljs-selector-id {
-    color: light-dark(#0550ae, #79c0ff);
+.syntax-highlight .tok-tag {
+    color: light-dark(#1c02ff, #0db9d7);
 }
 
-.syntax-highlight .hljs-regexp,
-.syntax-highlight .hljs-string,
-.syntax-highlight .hljs-meta .hljs-string {
-    color: light-dark(#0a3069, #a5d6ff);
+.syntax-highlight .tok-escape {
+    color: light-dark(#33cc33, #b4f9f8);
 }
 
-.syntax-highlight .hljs-built_in,
-.syntax-highlight .hljs-symbol {
-    color: light-dark(#953800, #ffa657);
+.syntax-highlight .tok-heading {
+    color: light-dark(#0c07ff, #89ddff);
+    font-weight: 700;
 }
 
-.syntax-highlight .hljs-comment,
-.syntax-highlight .hljs-code,
-.syntax-highlight .hljs-formula {
-    color: light-dark(#6e7781, #8b949e);
+.syntax-highlight .tok-list {
+    color: light-dark(#b90690, currentColor);
 }
 
-.syntax-highlight .hljs-name,
-.syntax-highlight .hljs-quote,
-.syntax-highlight .hljs-selector-tag,
-.syntax-highlight .hljs-selector-pseudo {
-    color: light-dark(#116329, #7ee787);
+.syntax-highlight .tok-emphasis {
+    font-style: italic;
 }
 
-.syntax-highlight .hljs-section,
-.syntax-highlight .hljs-bullet {
-    color: light-dark(#0550ae, #f2cc60);
+.syntax-highlight .tok-strong {
+    color: light-dark(#0000ff, currentColor);
+    font-weight: 700;
+}
+
+.syntax-highlight .tok-strikethrough {
+    text-decoration: line-through;
+}
+
+.syntax-highlight .tok-invalid {
+    color: light-dark(currentColor, #ff5370);
+}
+
+/*
+ * Typography's invert palette is hard-coded hex (white headings and code, pale slate body), so
+ * it ignores the light-dark slate remap above and turns faint on light surfaces. Pointing it at
+ * the remapped scale keeps Markdown readable in both themes, like the rest of the UI.
+ */
+.prose-invert {
+    --tw-prose-invert-body: var(--color-slate-300);
+    --tw-prose-invert-headings: var(--color-slate-50);
+    --tw-prose-invert-lead: var(--color-slate-400);
+    --tw-prose-invert-links: var(--color-slate-50);
+    --tw-prose-invert-bold: var(--color-slate-50);
+    --tw-prose-invert-counters: var(--color-slate-400);
+    --tw-prose-invert-bullets: var(--color-slate-600);
+    --tw-prose-invert-hr: var(--color-slate-700);
+    --tw-prose-invert-quotes: var(--color-slate-100);
+    --tw-prose-invert-quote-borders: var(--color-slate-700);
+    --tw-prose-invert-captions: var(--color-slate-400);
+    --tw-prose-invert-kbd: var(--color-slate-50);
+    --tw-prose-invert-code: var(--color-slate-50);
+    --tw-prose-invert-pre-code: var(--color-slate-300);
+    --tw-prose-invert-th-borders: var(--color-slate-600);
+    --tw-prose-invert-td-borders: var(--color-slate-700);
 }
 
 /* Fenced code uses the pre surface instead of repeating inline-code boxes per line. */
@@ -437,36 +465,20 @@ code {
     padding: 0;
 }
 
-.git-file-diff .d2h-file-wrapper {
-    margin-bottom: 0;
-    border: 0;
-    border-radius: 0;
+/*
+ * Sticky offsets start inside the scroll area's padding, which already reserves the overlay
+ * top bar's height, so zero sticks the diff list header right below the bar.
+ */
+.git-diff-sticky-header {
+    top: 0;
 }
 
-/* Git keeps file chrome fixed while only wide diff rows scroll sideways. */
-.git-file-diff .file-diff-html,
-.git-file-diff .d2h-wrapper,
-.git-file-diff .d2h-file-wrapper {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
+/* Touch scrolling slides the top bar away, so the header moves up into its place. */
+[data-touch-scrolling] .git-diff-sticky-header {
+    top: calc(-1 * var(--top-chrome-height, 0px));
 }
 
-.git-file-diff .d2h-file-diff {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    overflow-x: auto;
-    overflow-y: hidden;
-}
-
-.git-file-diff .d2h-diff-table {
-    width: max-content;
-    min-width: 100%;
-}
-
-@media (max-width: 639px) {
-    .git-file-diff .d2h-diff-table {
-        font-size: 9px;
-    }
+/* The diff list names each file in its own sticky header, so the diff's own would repeat it. */
+.git-diff-list-body [data-diff-file-header] {
+    display: none;
 }

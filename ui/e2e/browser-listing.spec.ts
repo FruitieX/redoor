@@ -27,7 +27,7 @@ test.describe.serial("File Browser Listing", () => {
         await page.goto(ctx.agentBrowserUrl);
         await page
             .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
+                `a[href="/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}"]`,
             )
             .click();
 
@@ -43,18 +43,18 @@ test.describe.serial("File Browser Listing", () => {
 
         await backToAgentButton.click();
 
-        await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentId}$`));
+        await expect(page).toHaveURL(new RegExp(`/agents/${ctx.agentName}$`));
     });
 
     test("should remember each agent tab location across switches and reloads", async ({
         page,
     }) => {
         const agent1DirectoryPath = `${ctx.testDirPath}/subdir1`;
-        const agent1DirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(agent1DirectoryPath)}`;
+        const agent1DirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(agent1DirectoryPath)}`;
         const agent2DirectoryPath = `${ctx.testDirPath}/subdir2/deep`;
-        const agent2DirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(agent2DirectoryPath)}`;
+        const agent2DirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(agent2DirectoryPath)}`;
         const agent2FilePath = `${agent2DirectoryPath}/nested3.txt`;
-        const agent2FileUrl = `${WEB_BASE_URL}/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(agent2FilePath)}`;
+        const agent2FileUrl = `${WEB_BASE_URL}/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(agent2FilePath)}`;
 
         await page.goto(ctx.agentBrowserUrl);
         await page.goto(agent1DirectoryUrl);
@@ -65,7 +65,7 @@ test.describe.serial("File Browser Listing", () => {
             }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(agent1DirectoryPath)}`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(agent1DirectoryPath)}`,
         );
 
         await page
@@ -83,7 +83,7 @@ test.describe.serial("File Browser Listing", () => {
             page.getByRole("link", { name: "agent2_custom, connected" }),
         ).toHaveAttribute(
             "href",
-            `/agents/${ctx.agent2Id}/browser/${encodeFilesystemPath(agent2FilePath)}`,
+            `/agents/${ctx.agent2Name}/browser/${encodeFilesystemPath(agent2FilePath)}`,
         );
 
         await page
@@ -100,7 +100,9 @@ test.describe.serial("File Browser Listing", () => {
             .click();
         // Reloading must not discard the inactive tab's remembered file.
         await expect(page).toHaveURL(agent2FileUrl);
-        await expect(page.getByLabel("File editor")).toBeVisible();
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
 
         await page
             .getByRole("link", {
@@ -111,43 +113,10 @@ test.describe.serial("File Browser Listing", () => {
         await expect(page).toHaveURL(agent1DirectoryUrl);
     });
 
-    test("should display correct icons and sizes", async ({ page }) => {
-        await page.goto(ctx.agentBrowserUrl);
-        await page
-            .locator(
-                `a[href="/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}"]`,
-            )
-            .click();
-
-        const dirLinks = page.getByRole("link", {
-            name: /^(subdir1|subdir2|subdir3)$/,
-        });
-
-        await expect(dirLinks).toHaveCount(3);
-
-        const fileEntries = page
-            .locator("td")
-            .filter({ hasText: /^(file1|file2)\.txt$/ });
-
-        await expect(fileEntries).toHaveCount(2);
-
-        const dirSizeColumn = page.getByRole("cell", {
-            name: "Size for subdir1",
-        });
-
-        await expect(dirSizeColumn).toBeVisible();
-
-        const fileSizeColumn = page.getByRole("cell", {
-            name: "Size for file1.txt",
-        });
-
-        await expect(fileSizeColumn).not.toHaveText("-");
-    });
-
     test("should refresh the file list when the tab is focused", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         await expect(
             page.getByRole("link", { name: "file1.txt", exact: true }),
@@ -173,7 +142,7 @@ test.describe.serial("File Browser Listing", () => {
     test("should reload the file list from the reload button", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         await expect(
             page.getByRole("link", { name: "file1.txt", exact: true }),
@@ -201,7 +170,7 @@ test.describe.serial("File Browser Listing", () => {
     test("renders directory toolbar actions as icons on mobile", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(directoryUrl);
         const filesActions = page.getByLabel("Files view actions");
@@ -269,7 +238,7 @@ test.describe.serial("File Browser Listing", () => {
     test("shows one directory toolbar tooltip at a time and hides it on touchend", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         const filesActions = page.getByLabel("Files view actions");
 

@@ -6,19 +6,34 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use nix::sys::signal::kill;
+use nix::unistd::Pid;
 use redoor_core::paths::AppPaths;
-use redoor_core::subprocess::run_checked;
+use redoor_core::subprocess::{SubprocessError, run_checked};
 use tokio::process::Command;
+use tokio::time::Instant;
 
 use super::{ServiceBackend, ServiceRole, ServiceRuntime, ServiceState, not_installed};
+
+/// How long launchd may take to finish removing a booted-out job.
+///
+/// launchd escalates from SIGTERM to SIGKILL after the job's `ExitTimeOut`, 20 seconds by
+/// default, so this leaves room above that before giving up.
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often launchd is asked whether a job finished unloading or a bootstrap may be retried.
+const LAUNCHD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// launchctl's exit status when bootstrap collides with a job that is loaded or still being
+/// removed; launchctl prints it as `Bootstrap failed: 5: Input/output error`.
+const BOOTSTRAP_CONFLICT_STATUS: i32 = 5;
 
 /// launchd control for one role's LaunchAgent in the current user's GUI domain.
 pub(super) struct LaunchdBackend {
     /// Role the agent runs; selects the subcommand and label.
     role: ServiceRole,
-    /// `<app-name>-<role>`.
+    /// `<app-name>-<role>`, or `<app-name>-relay-<id>` for relays.
     label: String,
     /// Shows launchctl output instead of capturing it.
     verbose: bool,
@@ -35,8 +50,8 @@ impl LaunchdBackend {
             );
         }
         Ok(Self {
+            label: service_name(&role, paths.app_name()),
             role,
-            label: service_name(role, paths.app_name()),
             verbose,
             paths: paths.clone(),
         })
@@ -122,15 +137,95 @@ impl LaunchdBackend {
     }
 
     /// Loads the plist into the user's GUI domain, which also starts it (`RunAtLoad`).
+    ///
+    /// A job booted out by an earlier command can still be shutting down, which launchd
+    /// rejects with a conflict, so that conflict is retried until the old job is gone. The
+    /// result is verified because launchctl reporting success is not proof the job stayed.
     async fn bootstrap(&self) -> Result<()> {
         let plist = self.plist_path()?;
-        self.launchctl(&["bootstrap", &user_domain(), &plist.to_string_lossy()])
-            .await
+        let plist = plist.to_string_lossy();
+        let domain = user_domain();
+        let deadline = Instant::now() + UNLOAD_TIMEOUT;
+        loop {
+            let Err(error) =
+                run_checked("launchctl", &["bootstrap", &domain, &plist], self.verbose).await
+            else {
+                break;
+            };
+            if !self.bootstrap_may_succeed_later(&error, deadline).await? {
+                return Err(error.into());
+            }
+            tokio::time::sleep(LAUNCHD_POLL_INTERVAL).await;
+        }
+        if self.loaded_state().await?.is_none() {
+            bail!(
+                "launchctl bootstrap reported success but launchd did not keep '{}' loaded; inspect it with `launchctl print {}`",
+                self.label,
+                self.target()
+            );
+        }
+        Ok(())
     }
 
-    /// Unloads the job, stopping its process.
+    /// Whether a failed bootstrap is the transient conflict with a job still being removed.
+    ///
+    /// A loaded job or a disabled label produce the same status permanently, so those fail
+    /// immediately instead of stalling until the deadline.
+    async fn bootstrap_may_succeed_later(
+        &self,
+        error: &SubprocessError,
+        deadline: Instant,
+    ) -> Result<bool> {
+        Ok(is_bootstrap_conflict(error)
+            && Instant::now() < deadline
+            && self.loaded_state().await?.is_none()
+            && self.is_enabled().await? != Some(false))
+    }
+
+    /// Unloads the job and waits until launchd has finished stopping its process.
     async fn bootout(&self) -> Result<()> {
-        self.launchctl(&["bootout", &self.target()]).await
+        let pid = self.loaded_pid().await?;
+        self.launchctl(&["bootout", &self.target()]).await?;
+        self.wait_until_unloaded(pid).await
+    }
+
+    /// PID of the job's running process, so its exit can be awaited after a bootout.
+    async fn loaded_pid(&self) -> Result<Option<i32>> {
+        Ok(self
+            .loaded_state()
+            .await?
+            .and_then(|state| state.pid)
+            .and_then(|pid| pid.parse().ok()))
+    }
+
+    /// Waits until launchd no longer lists the job and its old process has exited.
+    ///
+    /// `launchctl bootout` can return while launchd is still terminating the process. A
+    /// bootstrap in that window either fails with an I/O error or is accepted and then
+    /// discarded when the pending removal completes, leaving the service silently unloaded.
+    /// The listing alone is not enough because it can disappear before the process exits.
+    async fn wait_until_unloaded(&self, pid: Option<i32>) -> Result<()> {
+        let waited = tokio::time::timeout(UNLOAD_TIMEOUT, async {
+            let mut interval = tokio::time::interval(LAUNCHD_POLL_INTERVAL);
+            loop {
+                interval.tick().await;
+                // EPERM would mean the PID now belongs to another user, so only success
+                // means the old process is still around.
+                let running = pid.is_some_and(|pid| kill(Pid::from_raw(pid), None).is_ok());
+                if !running && self.loaded_state().await?.is_none() {
+                    return Ok(());
+                }
+            }
+        })
+        .await;
+        match waited {
+            Ok(result) => result,
+            Err(_) => bail!(
+                "launchd did not finish unloading '{}' within {}s",
+                self.label,
+                UNLOAD_TIMEOUT.as_secs()
+            ),
+        }
     }
 
     /// Gives an ad-hoc-signed executable a fresh identity so macOS prompts again.
@@ -193,11 +288,14 @@ impl LaunchdBackend {
     async fn replace_signed_binary(&self, binary: &Path, temporary: &Path) -> Result<()> {
         prepare_local_network_signature(binary, temporary).await?;
         let target = self.target();
+        let pid = self.loaded_pid().await?;
         let loaded = run_logged_status("launchctl", &["print".to_string(), target.clone()])
             .await?
             .success();
         if loaded {
             run_logged_command("launchctl", &["bootout".to_string(), target]).await?;
+            // The caller bootstraps right after the swap, which races an unfinished removal.
+            self.wait_until_unloaded(pid).await?;
         }
         tokio::fs::rename(temporary, binary).await.with_context(|| {
             format!(
@@ -227,7 +325,7 @@ impl ServiceBackend for LaunchdBackend {
     /// Renders the plist with this label and the pinned config.
     fn render_definition(&self, binary: &Path, config_path: &Path) -> String {
         render_plist(
-            self.role,
+            &self.role,
             &self.label,
             binary,
             config_path,
@@ -298,7 +396,7 @@ impl ServiceBackend for LaunchdBackend {
         }
         Err(not_installed(
             &format!("macOS LaunchAgent '{}'", self.label),
-            self.role,
+            &self.role,
             "launchd",
         ))
     }
@@ -370,13 +468,21 @@ impl ServiceBackend for LaunchdBackend {
 }
 
 /// Derives a safe launchd label from the already validated installation identity.
-fn service_name(role: ServiceRole, app_name: &str) -> String {
-    format!("{app_name}-{}", role.cli_name())
+fn service_name(role: &ServiceRole, app_name: &str) -> String {
+    format!("{app_name}-{}", role.service_suffix())
 }
 
 /// Returns the current user's launchd GUI domain.
 fn user_domain() -> String {
     format!("gui/{}", nix::unistd::Uid::effective().as_raw())
+}
+
+/// Whether launchctl rejected a bootstrap because the label is loaded or still being removed.
+fn is_bootstrap_conflict(error: &SubprocessError) -> bool {
+    matches!(
+        error,
+        SubprocessError::Failed { status, .. } if status.code() == Some(BOOTSTRAP_CONFLICT_STATUS)
+    )
 }
 
 /// The process details launchd reports for a loaded service.
@@ -498,13 +604,24 @@ fn local_network_signature_temp_path(binary: &Path) -> Result<PathBuf> {
 
 /// Renders a LaunchAgent plist with separately escaped program arguments.
 fn render_plist(
-    mode: ServiceRole,
+    role: &ServiceRole,
     service: &str,
     binary: &Path,
     config_path: &Path,
     app_name: &str,
 ) -> String {
-    let subcommand = mode.cli_name();
+    // Each argument is its own element, so relay IDs need XML escaping but no shell quoting.
+    let role_arguments: String = role
+        .program_arguments()
+        .into_iter()
+        .map(|argument| {
+            format!(
+                "
+        <string>{}</string>",
+                escape_xml(argument)
+            )
+        })
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -514,8 +631,7 @@ fn render_plist(
     <string>{}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
-        <string>{subcommand}</string>
+        <string>{}</string>{role_arguments}
         <string>--config</string>
         <string>{}</string>
     </array>
@@ -620,9 +736,14 @@ mod tests {
     #[test]
     fn service_names_use_application_identity() {
         assert_eq!(
-            service_name(ServiceRole::Agent, "redoor-dev"),
+            service_name(&ServiceRole::Agent, "redoor-dev"),
             "redoor-dev-agent",
             "the agent label should use the validated application namespace"
+        );
+        assert_eq!(
+            service_name(&ServiceRole::Relay("production".into()), "redoor-dev"),
+            "redoor-dev-relay-production",
+            "each relay needs its own label so several can be installed side by side"
         );
     }
 
@@ -630,7 +751,7 @@ mod tests {
     #[test]
     fn agent_plist_pins_config_and_environment() {
         let plist = render_plist(
-            ServiceRole::Agent,
+            &ServiceRole::Agent,
             "redoor-agent",
             Path::new("/Users/test & user/bin/redoor"),
             Path::new("/Users/test & user/.config/redoor/config.toml"),
@@ -663,6 +784,33 @@ mod tests {
         );
     }
 
+    /// Verifies relay plists run the named relay in the foreground under launchd supervision.
+    #[test]
+    fn relay_plist_starts_named_relay() {
+        let plist = render_plist(
+            &ServiceRole::Relay("production".into()),
+            "redoor-relay-production",
+            Path::new("/Users/test/bin/redoor"),
+            Path::new("/Users/test/.config/redoor/config.toml"),
+            "redoor",
+        );
+        assert!(
+            plist.contains(
+                "<string>/Users/test/bin/redoor</string>
+        <string>agent</string>
+        <string>relay</string>
+        <string>start</string>
+        <string>production</string>
+        <string>--config</string>"
+            ),
+            "the LaunchAgent must start the selected relay as distinct arguments: {plist}"
+        );
+        assert!(
+            !plist.contains("--daemon"),
+            "launchd must supervise the relay process itself: {plist}"
+        );
+    }
+
     /// Verifies every XML-sensitive character is escaped in generated values.
     #[test]
     fn xml_values_are_escaped() {
@@ -691,6 +839,33 @@ pid = 1234"
         assert!(
             !parse_process_state("state = waiting").running,
             "a registered service without a process must not be described as running"
+        );
+    }
+
+    /// Only launchctl's conflict status may be retried; other failures must surface at once.
+    #[test]
+    fn recognizes_bootstrap_conflicts() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let failed = |code: i32| SubprocessError::Failed {
+            command: "launchctl bootstrap gui/501 /tmp/redoor-agent.plist".to_string(),
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stderr: None,
+        };
+        assert!(
+            is_bootstrap_conflict(&failed(BOOTSTRAP_CONFLICT_STATUS)),
+            "the status launchctl reports while a booted-out job is still removed must be retried"
+        );
+        assert!(
+            !is_bootstrap_conflict(&failed(1)),
+            "unrelated launchctl failures must not be retried until the deadline"
+        );
+        assert!(
+            !is_bootstrap_conflict(&SubprocessError::Spawn {
+                program: "launchctl".to_string(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }),
+            "a missing launchctl can never succeed later"
         );
     }
 

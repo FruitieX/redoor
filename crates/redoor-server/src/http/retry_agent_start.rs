@@ -1,10 +1,8 @@
 //! Atomic retry control for a managed agent's current startup attempt.
 
-use axum::{
-    Json,
-    extract::{Path, State as AxumState},
-};
-use redoor_protocol::{api::agents::RetryAgentStartResponse, ids::AgentId};
+use crate::http::access::ResolvedDevice;
+use axum::{Json, extract::State as AxumState};
+use redoor_protocol::api::agents::RetryAgentStartResponse;
 
 use super::{
     agents::{
@@ -17,12 +15,11 @@ use super::{
 
 /// Route: `POST /api/v1/agents/{agent}/retry-start` replaces one managed startup attempt.
 pub(crate) async fn retry_agent_start_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     AxumState(state): AxumState<ServerState>,
 ) -> Result<Json<RetryAgentStartResponse>, ApiError> {
     // Configuration replacement and lifecycle controls must resolve against one supervisor identity.
     let _edit_guard = state.config_edit_lock.lock().await;
-    let agent_id = AgentId::from(agent);
     let snapshot = managed_agent_snapshot(&state, &agent_id).await?;
     let watchdog = managed_watchdog(&state, &snapshot)?;
 

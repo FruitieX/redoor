@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import { MarkdownPreview, resolveMarkdownFileLink } from "./markdown-preview";
 
@@ -11,7 +11,7 @@ afterEach(() => {
 test("highlights a labeled TypeScript fence", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`\`\`\`typescript
@@ -24,15 +24,17 @@ const value = true;
 
     // Highlighting must preserve the complete source for readers and copying.
     expect(code?.textContent).toContain("const value = true;");
-    // A grammar token proves the configured TypeScript highlighter handled the fence.
-    expect(code?.querySelector(".hljs-keyword")?.textContent).toBe("const");
+    // A grammar token proves the editor's TypeScript grammar handled the fence.
+    expect(code?.querySelector('[data-token="keyword"]')?.textContent).toBe(
+        "const",
+    );
 });
 
 test("leaves inline code unhighlighted", () => {
     const view = render(
         <MarkdownPreview
             content="Use `const` inline."
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
         />,
@@ -43,13 +45,38 @@ test("leaves inline code unhighlighted", () => {
     // Inline snippets must retain normal Markdown code rendering without block tokens.
     expect(code?.textContent).toBe("const");
     expect(code?.querySelector("span")).toBeNull();
-    expect(code?.classList.contains("hljs")).toBe(false);
+    expect(code?.querySelector("[data-token]")).toBeNull();
+});
+
+test("highlights a fence in a language the editor does not bundle once it loads", async () => {
+    const view = render(
+        <MarkdownPreview
+            deviceName="agent"
+            filePath="/README.md"
+            repositoryRoot={null}
+            content={`\`\`\`sql
+SELECT name FROM users;
+\`\`\``}
+        />,
+    );
+
+    const code = view.container.querySelector("pre code");
+
+    // The source is readable at once, before the lazily loaded grammar arrives.
+    expect(code?.textContent).toContain("SELECT name FROM users;");
+
+    // The SQL grammar loads on demand and then colours the same fence.
+    await waitFor(() => {
+        expect(code?.querySelector('[data-token="keyword"]')?.textContent).toBe(
+            "SELECT",
+        );
+    });
 });
 
 test("leaves an unknown language fence readable", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`\`\`\`unknown-language
@@ -63,13 +90,13 @@ some readable source
     // Unsupported labels must fall back without hiding or rejecting their source.
     expect(code?.textContent).toContain("some readable source");
     expect(code?.querySelector("span")).toBeNull();
-    expect(code?.classList.contains("hljs")).toBe(false);
+    expect(code?.querySelector("[data-token]")).toBeNull();
 });
 
 test("escapes HTML-like source in a recognized fence", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`\`\`\`typescript
@@ -88,33 +115,32 @@ test("escapes HTML-like source in a recognized fence", () => {
 test("resolves relative file links from the markdown directory", () => {
     const link = resolveMarkdownFileLink({
         href: "../source/file%20name.ts#L10",
-        agentId: "agent one",
         filePath: "/repo/docs/README.md",
         repositoryRoot: "/repo",
     });
 
     // Relative links follow the source document and retain useful URL fragments.
-    expect(link).toBe(
-        "/agents/agent%20one/browser/repo/source/file%20name.ts#L10",
-    );
+    expect(link).toEqual({
+        path: "/repo/source/file name.ts",
+        hash: "L10",
+    });
 });
 
 test("resolves absolute markdown links from the repository root", () => {
     const link = resolveMarkdownFileLink({
         href: "/source/main.ts",
-        agentId: "agent",
         filePath: "/repo/docs/README.md",
         repositoryRoot: "/repo",
     });
 
     // A leading slash follows Git hosting conventions while browsing a worktree.
-    expect(link).toBe("/agents/agent/browser/repo/source/main.ts");
+    expect(link).toEqual({ path: "/repo/source/main.ts", hash: undefined });
 });
 
 test("renders nested YAML frontmatter with indentation preserved", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`---
@@ -147,7 +173,7 @@ completions:
 test("collapses YAML frontmatter without hiding the document body", () => {
     const view = render(
         <MarkdownPreview
-            agentId="agent"
+            deviceName="agent"
             filePath="/README.md"
             repositoryRoot={null}
             content={`---
@@ -176,11 +202,10 @@ Visible body
 test("keeps absolute markdown links filesystem-rooted outside git", () => {
     const link = resolveMarkdownFileLink({
         href: "/etc/hosts",
-        agentId: "agent",
         filePath: "/tmp/README.md",
         repositoryRoot: null,
     });
 
     // Outside a worktree there is no repository root to reinterpret the path against.
-    expect(link).toBe("/agents/agent/browser/etc/hosts");
+    expect(link).toEqual({ path: "/etc/hosts", hash: undefined });
 });

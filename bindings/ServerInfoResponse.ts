@@ -31,6 +31,10 @@ auth_mode: ServerAuthMode,
  */
 external_ip: string | null, 
 /**
+ * Hostname of the server machine, so browser tabs of different servers can be told apart.
+ */
+hostname: string, 
+/**
  * Operating system of the running server executable.
  */
 os: string, 

@@ -107,8 +107,8 @@ mod tests {
     /// Covers session, all-device and limited-device principals in one decision table.
     #[test]
     fn require_matrix() {
-        let a = AgentId::from("a");
-        let b = AgentId::from("b");
+        let a = redoor_core::test_support::test_agent_id("a");
+        let b = redoor_core::test_support::test_agent_id("b");
         // A browser session may do everything.
         assert!(Principal::Session.require(&Permission::ALL, &a).is_ok());
         assert!(Principal::Session.require_session().is_ok());
@@ -119,7 +119,10 @@ mod tests {
         // It is still limited to its permissions.
         let denied = all.require(&[Permission::FilesWrite], &a).unwrap_err();
         assert_eq!(denied.status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(denied.to_string(), "Token lacks files:write on device a");
+        assert_eq!(
+            denied.to_string(),
+            format!("Token lacks files:write on device {a}")
+        );
         // Tokens never pass session-only routes.
         assert!(all.require_session().is_err());
 
@@ -140,7 +143,7 @@ mod tests {
         // Out-of-scope devices are refused even without a permission request.
         assert_eq!(
             outside.to_string(),
-            "Device b is outside this token's scope"
+            format!("Device {b} is outside this token's scope")
         );
         // Visibility follows the scope only.
         assert!(only.can_see(&a));

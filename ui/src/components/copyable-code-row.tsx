@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Link } from "@tanstack/react-router";
+import type { browserRoute } from "#ui/browser-route";
 import { Button } from "#ui/components/button";
 import { Check, Copy } from "lucide-react";
 
@@ -26,7 +27,11 @@ async function writeClipboardText(value: string): Promise<void> {
     }
 }
 
-/** Shared clipboard feedback used by the full and compact copyable path controls. */
+/**
+ * Shared clipboard feedback used by the full and compact copyable path controls. A menu that
+ * copies one of several values passes the chosen one to `copy`, so its single trigger can
+ * show the feedback for whichever option was picked.
+ */
 export function useCopyFeedback(value: string) {
     const [isCopied, setIsCopied] = React.useState(false);
     const [flashKey, setFlashKey] = React.useState(0);
@@ -40,9 +45,9 @@ export function useCopyFeedback(value: string) {
         };
     }, []);
 
-    const copy = async () => {
+    const copy = async (text: string = value) => {
         try {
-            await writeClipboardText(value);
+            await writeClipboardText(text);
             setIsCopied(true);
             // Restart the CSS flash without remounting this component.
             setFlashKey((key) => key + 1);
@@ -143,7 +148,8 @@ export function CopyableCodeRow(props: {
 export function CopyablePath(props: {
     value: string;
     copyAriaLabel: string;
-    to?: string;
+    /** Opens the path in the file browser; a typed route so the device name is encoded. */
+    link?: ReturnType<typeof browserRoute>;
     linkAriaLabel?: string;
 }) {
     const { isCopied, flashKey, copy } = useCopyFeedback(props.value);
@@ -163,9 +169,9 @@ export function CopyablePath(props: {
                     className="copy-success-flash pointer-events-none absolute inset-0 rounded-md"
                 />
             ) : null}
-            {props.to ? (
+            {props.link ? (
                 <Link
-                    to={props.to}
+                    {...props.link}
                     aria-label={props.linkAriaLabel}
                     className="relative min-w-0 flex-1 overflow-x-auto whitespace-nowrap px-2.5 py-1.5 font-mono text-xs text-blue-300 underline decoration-blue-400/30 underline-offset-2 hover:text-blue-200 hover:decoration-blue-300"
                 >

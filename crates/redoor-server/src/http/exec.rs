@@ -1,6 +1,7 @@
 //! Dedicated non-PTY execution endpoint reuses stream routing and drop-triggered cancellation.
 
 use super::{error::ApiError, services::output::OutputStream, state::ServerState};
+use crate::http::access::ResolvedDevice;
 use axum::{
     Json,
     body::Body,
@@ -10,21 +11,18 @@ use axum::{
 };
 use redoor_protocol::{
     api::exec::CancelExecutionResponse,
-    ids::{AgentId, RequestId},
+    ids::RequestId,
     wire::exec::{ExecEvent, ExecRequest},
 };
 
 /// Cancels process output through its own resource while file-transfer history stays file-only.
 pub(crate) async fn cancel_execution_handler(
-    Path((agent, execution_id)): Path<(String, u64)>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path((_, execution_id)): Path<(String, u64)>,
     State(state): State<ServerState>,
 ) -> Result<(StatusCode, Json<CancelExecutionResponse>), ApiError> {
     let request_id = RequestId::new(execution_id);
-    if !state
-        .agents
-        .cancel_execution(AgentId::from(agent), request_id)
-        .await?
-    {
+    if !state.agents.cancel_execution(agent_id, request_id).await? {
         return Err(ApiError::not_found("Execution not found"));
     }
     Ok((
@@ -37,13 +35,13 @@ pub(crate) async fn cancel_execution_handler(
 
 /// Returns NDJSON immediately after admission; dropping the body cancels the owned process.
 pub(crate) async fn exec_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     State(state): State<ServerState>,
     Json(request): Json<ExecRequest>,
 ) -> Result<Response, ApiError> {
     request.validate().map_err(ApiError::bad_request)?;
     let (output, terminal) =
-        OutputStream::open_execution(&state.router_ref, AgentId::from(agent), request).await?;
+        OutputStream::open_execution(&state.router_ref, agent_id, request).await?;
     let id = output.request_id();
     Ok(Response::builder()
         .header("Content-Type", "application/x-ndjson")
@@ -73,7 +71,7 @@ fn execution_body(
             match item {
                 Ok(chunk) => yield Ok(bytes::Bytes::from(chunk.data)),
                 Err(error) => {
-                    yield Err(std::io::Error::other(error.0));
+                    yield Err(std::io::Error::other(error.0.message));
                     return;
                 }
             }
@@ -108,7 +106,7 @@ mod tests {
     /// A slow HTTP consumer can have buffered output when the exit status arrives.
     #[tokio::test]
     async fn buffered_output_precedes_single_terminal_event() {
-        let streams = ConnectionStreams::new(AgentId::from("test"));
+        let streams = ConnectionStreams::new(redoor_core::test_support::test_agent_id("test"));
         let receiver = streams.open_detached(RequestId::new(1));
         let output = ExecEvent::Stdout {
             data: b"trailing output".to_vec(),
@@ -120,7 +118,11 @@ mod tests {
         let (terminal, terminal_receiver) = tokio::sync::watch::channel(None);
         terminal.send_replace(Some(ExecEvent::TimedOut));
         let (router, task) = spawn_router();
-        let output = OutputStream::detached(router, AgentId::from("test"), receiver);
+        let output = OutputStream::detached(
+            router,
+            redoor_core::test_support::test_agent_id("test"),
+            receiver,
+        );
         let bytes = axum::body::to_bytes(execution_body(output, terminal_receiver), 4096)
             .await
             .unwrap();

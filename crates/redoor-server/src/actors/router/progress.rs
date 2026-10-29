@@ -684,7 +684,7 @@ mod tests {
 
         let progress_id = state.record_download_start(DownloadStartContext {
             request_id: RequestId::new(2000),
-            agent_id: AgentId::from("agent-1"),
+            agent_id: redoor_core::test_support::test_agent_id("agent-1"),
             path: "/tmp/archive".to_string(),
             total_bytes: 2048,
             full_size: Some(4096),
@@ -722,9 +722,9 @@ mod tests {
 
         state.record_copy_start(CopyStartContext {
             request_id: TransferId::new(8),
-            source_agent_id: AgentId::from("agent-1"),
+            source_agent_id: redoor_core::test_support::test_agent_id("agent-1"),
             source_path: "/tmp/source.bin".to_string(),
-            dest_agent_id: AgentId::from("agent-2"),
+            dest_agent_id: redoor_core::test_support::test_agent_id("agent-2"),
             dest_path: "/tmp/destination.bin".to_string(),
             total_bytes: 16,
             direction: TransferDirection::Copy,
@@ -793,7 +793,7 @@ mod tests {
             transfer_id,
             TransferProgressEntry {
                 request_id: transfer_id,
-                agent_id: AgentId::from("agent-1"),
+                agent_id: redoor_core::test_support::test_agent_id("agent-1"),
                 path: "/tmp/file.bin".to_string(),
                 source: None,
                 dest: None,
@@ -872,7 +872,7 @@ mod tests {
             transfer_id,
             TransferProgressEntry {
                 request_id: transfer_id,
-                agent_id: AgentId::from("agent-1"),
+                agent_id: redoor_core::test_support::test_agent_id("agent-1"),
                 path: "/tmp/file.txt".to_string(),
                 source: None,
                 dest: None,
@@ -915,7 +915,7 @@ mod tests {
             transfer_id,
             TransferProgressEntry {
                 request_id: transfer_id,
-                agent_id: AgentId::from("agent-1"),
+                agent_id: redoor_core::test_support::test_agent_id("agent-1"),
                 path: "/tmp/file.txt".to_string(),
                 source: None,
                 dest: None,
@@ -956,7 +956,7 @@ mod tests {
         let cancelable = matches!(state, TransferProgressState::Active);
         TransferProgressEntry {
             request_id: transfer_id,
-            agent_id: AgentId::from("agent-1"),
+            agent_id: redoor_core::test_support::test_agent_id("agent-1"),
             path: "/tmp/archive".to_string(),
             source: None,
             dest: None,

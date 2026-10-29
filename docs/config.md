@@ -54,6 +54,7 @@ Required when running `redoor server`. Optional in agent-only configs.
 | `port`          | integer (u16) | `7666`             | HTTP listen port. Override with `--port` / `REDOOR_PORT`.                                                                                                                     |
 | `bind`          | string        | `127.0.0.1`        | Listen address. Use `0.0.0.0` only when intentionally exposing beyond localhost. Override with `--bind`.                                                                      |
 | `log`           | string        | platform default\* | Server log file path. Override with `--log` / `REDOOR_SERVER_LOG`.                                                                                                            |
+| `log_max_size`  | integer or string | `"10MB"`       | Size limit of the log file: bytes, or a size with `KB`, `MB` or `GB` (binary multiples), such as `"10MB"`. Also limits the `log` files of server-managed `[[agents]]`. See [Log rotation](#log-rotation). |
 | `log_level`     | string        | `info`             | Initial threshold: `trace`, `debug`, `info`, `warning`, or `error`. Override with `--log-level` or `REDOOR_SERVER_LOG_LEVEL`. Runtime UI/API changes last only until restart. |
 | `log_format`    | string        | `line`             | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_SERVER_LOG_FORMAT`. Browser streams are always structured.            |
 | `username`      | string        | see auth below     | Browser UI login username. Non-empty when set.                                                                                                                                |
@@ -122,6 +123,7 @@ Used by a standalone `redoor agent` process (and by systemd/launchd agent units)
 | `name`       | string | computer hostname           | Device name shown in the UI and remote CLI. Override with `--name` / `REDOOR_AGENT_NAME`.                                                    |
 | `home`       | string | process user home directory | Home directory opened in the UI; does not limit filesystem access. Override with `--home` / `REDOOR_AGENT_HOME`.                             |
 | `log`        | string | platform default\*          | Agent log file path. Override with `--log` / `REDOOR_AGENT_LOG`.                                                                             |
+| `log_max_size` | integer or string | `"10MB"`         | Size limit of the log file: bytes, or a size with `KB`, `MB` or `GB` (binary multiples), such as `"10MB"`. See [Log rotation](#log-rotation). |
 | `log_level`  | string | `info`                      | Initial threshold. Override with `--log-level` or `REDOOR_AGENT_LOG_LEVEL`. Runtime changes are not written to TOML.                         |
 | `log_format` | string | `line`                      | Process stdout/file format: `line` or newline-delimited `json`. Override with `--log-format` or `REDOOR_AGENT_LOG_FORMAT`.                   |
 
@@ -143,6 +145,15 @@ CLI values take precedence over role-specific environment variables, which take 
 
 Optional array of device connections with server-managed agents. Only the server reads this section. Each entry is either **SSH-backed** (default) or **local** (`local = true`). Agents start lazily when you connect a device from the UI or management API. The UI uses **Add device**, **Edit device**, and **Remove device** to manage these entries; removing a device stops its agent and removes its configuration, without deleting files on the device.
 
+### Device ids and names
+
+Every device has a stable **id** (`dev_` followed by 20 lowercase letters and digits) and an editable **name**. Access token scopes and everything else the server stores refer to the id, so renaming a device never changes what a token can reach. Requests (REST, MCP, `redoor remote`) accept either the name or the id; use the id in scripts that must stay on one device across renames.
+
+- The server writes `id` into entries added through the UI or API. Entries you write by hand get an `id` written back on the next server start, keeping the file's comments and formatting. Do not change or copy it: duplicate ids are rejected, so when you copy an entry, delete its `id` line and let the server assign a new one.
+- If the server cannot write the file (for example a read-only mount), startup fails and prints a ready-to-paste `id = "dev_..."` line for each entry without one.
+- Names must be unique, must not be empty, must not contain `:` or `/`, and must not look like an id.
+- A standalone `redoor agent` stores its id in `agent-id` in its data directory (`~/.local/share/redoor/agent-id` by default). Delete that file on a cloned machine to give it its own identity.
+
 ### SSH-backed agent
 
 Default when `local` is omitted or `false`. The server SSHes to the host, ensures a matching binary, and starts `redoor agent` with reverse port forwarding.
@@ -150,14 +161,17 @@ Default when `local` is omitted or `false`. The server SSHes to the host, ensure
 | Key          | Type          | Required | Description                                                                                                                                                                  |
 | ------------ | ------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `target`     | string        | yes      | SSH destination (`host` or `user@host`).                                                                                                                                     |
+| `id`         | string        | no       | Stable device id. Written by the server; see [Device ids and names](#device-ids-and-names).                                                                                  |
 | `local`      | bool          | no       | Must be absent or `false`.                                                                                                                                                   |
 | `username`   | string        | no       | SSH login via `ssh -l`. When omitted, OpenSSH config or `user@host` supplies it.                                                                                             |
 | `ssh_port`   | integer (u16) | no       | SSH port. When omitted, OpenSSH host config / default applies (not forced to 22).                                                                                            |
 | `name`       | string        | no       | Device name. Defaults to the host portion of `target`.                                                                                                                       |
 | `remote_bin` | string        | no       | Path to the redoor binary on the remote host. When omitted, uses the versioned install layout under `${XDG_DATA_HOME:-$HOME/.local/share}/redoor/binaries/<version>/redoor`. |
 | `home`       | string        | no       | Home directory opened on the remote device. When omitted, the remote process user's home directory is published.                                                             |
-| `log`        | string        | no       | Local file that captures the SSH process stdout/stderr (append mode).                                                                                                        |
+| `log`        | string        | no       | Local file that captures the SSH process stdout/stderr (appended, limited by `[server].log_max_size`).                                                                        |
 | `password`   | string        | no       | Plaintext SSH login password. When set, the server answers OpenSSH via `SSH_ASKPASS`. Prefer keys or `ssh-agent` when possible.                                              |
+
+`remote_bin` and `home` are used literally on the device, except that a leading `~/`, `$HOME/` or `${HOME}/` is expanded to the remote user's home directory. Other shell syntax such as variables or `$(...)` is not interpreted.
 
 ```toml
 [[agents]]
@@ -178,9 +192,10 @@ Runs on the same machine as the server. The server reuses its own binary (`std::
 | Key     | Type   | Required | Description                                                                                          |
 | ------- | ------ | -------- | ---------------------------------------------------------------------------------------------------- |
 | `local` | bool   | yes      | Must be `true`.                                                                                      |
+| `id`    | string | no       | Stable device id. Written by the server; see [Device ids and names](#device-ids-and-names).          |
 | `name`  | string | no       | Device name. Defaults to the system hostname.                                                        |
 | `home`  | string | no       | Home directory opened in the UI. Defaults to the spawned process user's home directory.              |
-| `log`   | string | no       | File for the spawned agent stdout/stderr (append). When omitted, stdio is inherited from the server. |
+| `log`   | string | no       | File for the spawned agent stdout/stderr (appended, limited by `[server].log_max_size`). When omitted, stdio is inherited from the server. |
 
 SSH-only keys (`target`, `username`, `ssh_port`, `remote_bin`, `password`) are rejected on local entries.
 
@@ -199,6 +214,7 @@ Optional named SSH relays started explicitly with `redoor agent relay start ID`.
 | Key              | Type          | Required | Description                                                                                 |
 | ---------------- | ------------- | -------- | ------------------------------------------------------------------------------------------- |
 | `id`             | string        | yes      | Unique lifecycle ID. Allowed characters: ASCII letters, numbers, `.`, `_`, `-`.             |
+| `agent_id`       | string        | no       | Stable device id of the remote agent. Written by `relay start` when missing.                |
 | `target`         | string        | yes      | SSH destination (`host` or `user@host`).                                                    |
 | `server`         | string        | yes      | Redoor server URL reached by the relay machine (`http(s)://` or `ws(s)://`).                |
 | `username`       | string        | no       | SSH login via `ssh -l`.                                                                     |
@@ -209,6 +225,7 @@ Optional named SSH relays started explicitly with `redoor agent relay start ID`.
 | `binary_source`  | string        | no       | Local Redoor binary to upload unconditionally.                                              |
 | `home`           | string        | no       | Home directory published by the remote agent.                                               |
 | `log`            | string        | no       | Local relay and remote-agent log. Defaults to a per-ID path.                                |
+| `log_max_size`   | integer or string | no   | Size limit of `log`. Default `"10MB"`. See [Log rotation](#log-rotation).                    |
 | `password`       | string        | no       | Plaintext SSH login password delivered through `SSH_ASKPASS`.                               |
 | `insecure`       | bool          | no       | Disable routed TLS certificate verification. Requires a secure server URL. Default `false`. |
 
@@ -221,6 +238,18 @@ name = "production-agent"
 ```
 
 See [SSH relays](relays.md) for commands and runtime-file behavior.
+
+## Log rotation
+
+Every log file Redoor writes is kept under its `log_max_size` (default `"10MB"`): the server log, standalone agent and relay logs, and the `log` files of server-managed agents. The size is checked when the process opens the file and again after every 100 log lines. When the file is over the limit, its older half of lines is dropped and the newer half kept, in place, so there are no rotated `.1` files to clean up.
+
+| Section       | Limits                                               |
+| ------------- | ---------------------------------------------------- |
+| `[server]`    | The server log and every `[[agents]]` entry's `log`. |
+| `[agent]`     | The standalone agent log.                            |
+| `[[relays]]`  | That relay's log.                                    |
+
+Sizes are a plain byte count (`log_max_size = 1048576`) or a string with a `B`, `KB`, `MB` or `GB` suffix (`"512KB"`, `"10MB"`). Units are binary multiples (1 KB = 1024 bytes), and zero is rejected.
 
 ## Full shared example
 

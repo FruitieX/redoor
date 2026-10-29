@@ -50,7 +50,8 @@ pub struct CreateSshAgentRequest {
     pub username: Option<String>,
     /// Optional explicit SSH port instead of the SSH config default.
     pub ssh_port: Option<u16>,
-    /// Stable managed-agent name; defaults to the target hostname when omitted.
+    /// Editable display name; defaults to the target hostname when omitted. The device id is
+    /// created by the server and never part of this body.
     pub name: Option<String>,
     /// Optional path where the remote Redoor binary is installed.
     pub remote_bin: Option<String>,
@@ -98,7 +99,8 @@ pub struct ManagedSshAgentConfigurationResponse {
     pub username: Option<String>,
     /// Optional explicit SSH port instead of the SSH config default.
     pub ssh_port: Option<u16>,
-    /// Stable managed-agent name; defaults to the target hostname when omitted.
+    /// Editable display name; defaults to the target hostname when omitted. The device id is
+    /// created by the server and never part of this body.
     pub name: Option<String>,
     /// Optional path where the remote Redoor binary is installed.
     pub remote_bin: Option<String>,
@@ -110,6 +112,12 @@ pub struct ManagedSshAgentConfigurationResponse {
     pub password: Option<String>,
     /// Reports whether a password is stored so the edit form can choose the matching auth radio.
     pub has_password: bool,
+    /// Whether the device logs in with a redoor-managed SSH key, so the UI can offer
+    /// rotation and removal instead of the initial setup.
+    pub has_managed_ssh_key: bool,
+    /// Whether a host key is pinned for the device. Setting up a key again then needs no
+    /// host key confirmation, and a target edit is about to discard the pin.
+    pub has_pinned_host_key: bool,
 }
 
 /// Returns the replacement dormant inventory record after an SSH configuration edit.
@@ -123,7 +131,8 @@ pub struct UpdateSshAgentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateLocalAgentRequest {
-    /// Stable managed-agent name; defaults to the server hostname when omitted.
+    /// Editable display name; defaults to the server hostname when omitted. The device id is
+    /// created by the server and never part of this body.
     pub name: Option<String>,
     /// Optional initial browser directory advertised before the first connection.
     pub home: Option<String>,
@@ -151,7 +160,8 @@ pub struct CreateLocalAgentResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ManagedLocalAgentConfigurationResponse {
-    /// Stable managed-agent name; defaults to the server hostname when omitted.
+    /// Editable display name; defaults to the server hostname when omitted. The device id is
+    /// created by the server and never part of this body.
     pub name: Option<String>,
     /// Optional initial browser directory advertised before the first connection.
     pub home: Option<String>,
@@ -228,6 +238,21 @@ pub struct AgentInfoResponse {
     pub uid: Option<u32>,
     /// Whether the latest session's effective UID is root; false until first connect.
     pub is_root: bool,
+    /// Set while several machines are using this device's id (usually a cloned data dir) and
+    /// the router is refusing the newcomers, so the UI can explain why one of them is offline.
+    pub duplicate_id: Option<DuplicateIdWarning>,
+}
+
+/// Several machines connect with the same device id and keep replacing each other's healthy
+/// connections, so the router keeps the current connection and rejects the others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DuplicateIdWarning {
+    /// Hostnames reported in the competing `hello` frames, including the current connection's,
+    /// so the operator can tell which machines are clones of each other.
+    pub hostnames: Vec<String>,
+    /// When the router started rejecting newcomers for this id.
+    pub since: UnixTimestampSeconds,
 }
 
 /// Confirms that a managed supervisor accepted an idempotent start request.

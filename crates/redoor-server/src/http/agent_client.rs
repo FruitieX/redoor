@@ -114,6 +114,21 @@ impl AgentClient {
             .await?)
     }
 
+    /// Resolves a device name or id from a request to the id of a known device.
+    ///
+    /// Every request value that addresses a device goes through here before access control,
+    /// so scope checks and stored references always use ids.
+    pub(crate) async fn resolve(&self, value: &str) -> Result<AgentId, ApiError> {
+        let value_owned = value.to_string();
+        self.router
+            .request(|reply| RouterMsg::ResolveDevice {
+                value: value_owned,
+                reply,
+            })
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("Device not found: {value}")))
+    }
+
     /// Cancels an admitted execution; `false` when no such execution belongs to the agent.
     pub(crate) async fn cancel_execution(
         &self,

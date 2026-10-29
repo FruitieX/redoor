@@ -3,10 +3,16 @@
 //!
 //! # How SSH-backed agent spawning works
 //!
-//! Preparation ([`prepare`]) and spawning are separate so TOML-managed agents can
-//! restart cheaply. Preparation probes the remote operating system and architecture,
-//! installs a compatible redoor binary when the operator did not provide one,
-//! and stores the settings needed for subsequent launches.
+//! A server-managed agent at the default install path is started by a launch script
+//! that probes the binary and `exec`s it only when it matches this server, so a device
+//! with a current binary needs a single SSH session per start. When the binary is
+//! missing or stale, the script exits without starting anything, the server installs the
+//! matching binary ([`provision`]) and starts again. Relays ([`relay`]) prepare once
+//! instead: they probe and install up front and then start the agent repeatedly.
+//!
+//! Every remote command reaches the user's login shell as one `sh -c '<script>' sh
+//! '<arg>'...` line of single-quoted words ([`shell`]), so fish or tcsh users run the
+//! same POSIX script and arguments with spaces or quotes stay intact.
 //!
 //! Each launch starts `ssh` with a reverse forward shaped like
 //! `remote_port:destination_host:destination_port`. SSH listens on
@@ -25,9 +31,19 @@
 //! agent so it inherits the secret only through its environment. Remaining
 //! stdin is then forwarded normally.
 //!
+//! Binary uploads stream the file into one script that creates the directory, writes a
+//! temp file, checks that every byte arrived, marks it executable and renames it into
+//! place in a single SSH session. Remote binaries are never hashed on the device: release
+//! installs are versioned paths, and a debug server installs its local build under a
+//! directory named after the build's content hash, so the path identifies the bytes.
+//!
 //! Optional `password` values are delivered through OpenSSH `SSH_ASKPASS` by
 //! re-executing this binary. That keeps the secret off argv and off the SSH
 //! stdin already used for tokens, sniff scripts, and uploads.
+//!
+//! A device with `managed_ssh_key = true` instead logs in only with its redoor-managed key
+//! ([`keys`], [`managed_keys`]) and only trusts its pinned host key. Those
+//! connections read no ssh config file; their routing comes from `ssh -G`.
 //!
 //! Both standalone and TOML-managed launches select a random dynamic remote
 //! port for each SSH spawn attempt. `ExitOnForwardFailure=yes` makes SSH exit
@@ -35,15 +51,18 @@
 //! standalone relays detect that specific bind failure and retry locally.
 
 pub mod askpass;
+pub(crate) mod keys;
+pub(crate) mod managed_keys;
 mod prepare;
 mod provision;
 pub mod relay;
+mod shell;
 mod transport;
 
 use redoor_core::config::SshBackedAgentConfig;
 
 use crate::watchdog::ProvisioningStatusSink;
-use prepare::{Preparation, PreparedSshBackedAgent, RelayOptions, TunnelDestination};
+use prepare::{Preparation, RelayOptions, TunnelDestination};
 
 /// Why preparing an SSH target failed; every variant's text is shown to operators as is.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +78,9 @@ pub(crate) enum ProvisionError {
     /// a binary that does not verify after upload).
     #[error("{0}")]
     Remote(String),
+    /// The entry cannot be launched as configured (for example it has no device id yet).
+    #[error("{0}")]
+    Configuration(String),
 }
 
 /// Local facts every SSH preparation needs besides the target's own settings.
@@ -68,19 +90,33 @@ pub(crate) struct ProvisionContext {
     pub(crate) app_name: String,
     /// Release cache used when the target lacks a matching binary.
     pub(crate) binaries: crate::binaries::BinaryCache,
+    /// Managed keys and pinned host keys of devices with `managed_ssh_key = true`.
+    pub(crate) ssh_keys: keys::SshKeyStore,
+    /// Size limit of the agent log files this process forwards SSH and child output into;
+    /// `None` uses the default limit.
+    pub(crate) log_max_size: Option<u64>,
+    /// Identity of the local debug build, computed on the first SSH provision that needs it
+    /// and shared by every clone so concurrent starts hash a rebuilt binary only once.
+    pub(crate) local_build: provision::LocalBuildCache,
 }
 
 impl ProvisionContext {
-    /// Prepares a server-managed agent whose tunnel ends at this server's own listener.
+    /// Pairs an agent's configured log path with this process's log size limit.
+    pub(crate) fn log_file(&self, path: &str) -> redoor_core::rotating_log::LogFileSpec {
+        redoor_core::rotating_log::LogFileSpec::new(path, self.log_max_size)
+    }
+
+    /// Starts a server-managed agent whose tunnel ends at this server's own listener,
+    /// installing its binary first when needed.
     ///
     /// Called on every watchdog cycle so the starting UI always reflects a fresh probe.
-    pub(crate) async fn prepare_managed(
+    pub(crate) async fn start_managed(
         &self,
         config: &SshBackedAgentConfig,
         redoor_port: u16,
         agent_token: &str,
         status: &ProvisioningStatusSink,
-    ) -> Result<PreparedSshBackedAgent, ProvisionError> {
+    ) -> Result<tokio::process::Child, ProvisionError> {
         Preparation {
             config,
             destination: TunnelDestination {
@@ -92,7 +128,7 @@ impl ProvisionContext {
             provision: self,
             status,
         }
-        .run()
+        .start_managed()
         .await
     }
 }

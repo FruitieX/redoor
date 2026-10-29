@@ -23,24 +23,43 @@ export const bookmarkSchema = z.object({
 
 export type Bookmark = z.infer<typeof bookmarkSchema>;
 
-/** One editor file kept in the left menu so it can be reopened without browsing. */
-export const pinnedFileSchema = z.object({
+/**
+ * A line to select and center the next time an open file is shown, set when the file is
+ * opened from a diff or search result without going to it. `id` tells a new request apart
+ * from one already applied: the file's buffer remembers the applied id, so the line is
+ * shown once, on whichever computer shows the file first, and never again after that.
+ */
+export const openFileRevealSchema = z.object({
+    line: z.number().int().min(1),
+    id: z.string(),
+});
+
+export type OpenFileReveal = z.infer<typeof openFileRevealSchema>;
+
+/**
+ * One open editor file, listed in the left menu so it can be reopened without browsing. Its
+ * buffer (unsaved text, caret, undo history) is kept on the server while it stays open.
+ */
+export const openFileSchema = z.object({
     agentId: z.string(),
     path: z.string(),
     name: z.string(),
     agentName: z.string(),
+    // A malformed request only loses the line, never the open file itself.
+    reveal: openFileRevealSchema.optional().catch(undefined),
 });
 
-export type PinnedFile = z.infer<typeof pinnedFileSchema>;
+export type OpenFile = z.infer<typeof openFileSchema>;
 
 /** Known UI preferences; extra server keys are ignored until they have a schema. */
 export const userStateSchema = z.object({
     showHiddenFiles: z.boolean().catch(true),
     theme: z.enum(["system", "dark", "light"]).catch("system"),
     bookmarks: z.array(bookmarkSchema).catch([]),
-    pinnedFiles: z.array(pinnedFileSchema).catch([]),
+    openFiles: z.array(openFileSchema).catch([]),
     vimMode: z.boolean().catch(false),
     wrapEditorLines: z.boolean().catch(false),
+    wrapDiffLines: z.boolean().catch(false),
     recursiveSearchTimeoutSeconds: z.number().int().min(1).max(60).catch(5),
     recursiveSearchIncludeHidden: z.boolean().catch(false),
     recursiveSearchRespectGitignore: z.boolean().catch(true),
@@ -71,46 +90,74 @@ export function isPathBookmarked(
     return bookmarks.some((bookmark) => getBookmarkKey(bookmark) === targetKey);
 }
 
-/** Identifies one pinned file so the same path cannot be stored twice. */
-export function getPinnedFileKey(file: Pick<PinnedFile, "agentId" | "path">) {
+/**
+ * Identifies one open file so the same path cannot be listed twice. It is also the key of
+ * the file's editor buffer, which the server derives the same way from the open files list.
+ */
+export function getOpenFileKey(file: Pick<OpenFile, "agentId" | "path">) {
     return `${file.agentId}:${file.path}`;
 }
 
 /** Lets the editor button and the left menu share one membership check. */
-export function isFilePinned(
-    pinnedFiles: PinnedFile[],
-    target: Pick<PinnedFile, "agentId" | "path">,
+export function isFileOpen(
+    openFiles: OpenFile[],
+    target: Pick<OpenFile, "agentId" | "path">,
 ) {
-    const targetKey = getPinnedFileKey(target);
+    const targetKey = getOpenFileKey(target);
 
-    return pinnedFiles.some((file) => getPinnedFileKey(file) === targetKey);
+    return openFiles.some((file) => getOpenFileKey(file) === targetKey);
 }
 
 /**
- * Appends a new pin so later pins stay below earlier ones.
- * Re-pinning an existing path keeps its place instead of jumping to the bottom.
+ * Appends a newly opened file so later files stay below earlier ones.
+ * Opening a file that is already open keeps its place instead of jumping to the bottom.
  */
-export function pinFile(pinnedFiles: PinnedFile[], file: PinnedFile) {
-    if (isFilePinned(pinnedFiles, file)) {
-        return pinnedFiles;
+export function openFile(openFiles: OpenFile[], file: OpenFile) {
+    if (isFileOpen(openFiles, file)) {
+        return openFiles;
     }
 
-    return [...pinnedFiles, file];
+    return [...openFiles, file];
 }
 
-/** Drops one pin without reordering the files that remain. */
-export function unpinFile(
-    pinnedFiles: PinnedFile[],
-    target: Pick<PinnedFile, "agentId" | "path">,
+/**
+ * Opens a file without going to it, from a diff or search result. With a line, the file is
+ * also asked to show that line the next time it is shown; an already open file keeps its
+ * place in the list and only gets the new line, since the user asked to look there now.
+ */
+export function openFileAtLine(
+    openFiles: OpenFile[],
+    file: OpenFile,
+    reveal: OpenFileReveal | undefined,
 ) {
-    const targetKey = getPinnedFileKey(target);
+    if (reveal === undefined) {
+        return openFile(openFiles, file);
+    }
 
-    return pinnedFiles.filter((file) => getPinnedFileKey(file) !== targetKey);
+    if (!isFileOpen(openFiles, file)) {
+        return [...openFiles, { ...file, reveal }];
+    }
+
+    const targetKey = getOpenFileKey(file);
+
+    return openFiles.map((entry) =>
+        getOpenFileKey(entry) === targetKey ? { ...entry, reveal } : entry,
+    );
 }
 
-/** Shares pin order between the sidebar and the full-window editor strip. */
-export function reorderPinnedFiles(pinnedFiles: PinnedFile[], move: ItemMove) {
-    return moveKeyedItems(pinnedFiles, getPinnedFileKey, move);
+/** Drops one open file without reordering the files that remain. */
+export function closeFile(
+    openFiles: OpenFile[],
+    target: Pick<OpenFile, "agentId" | "path">,
+) {
+    const targetKey = getOpenFileKey(target);
+
+    return openFiles.filter((file) => getOpenFileKey(file) !== targetKey);
+}
+
+/** Shares open file order between the sidebar and the full-window editor strip. */
+export function reorderOpenFiles(openFiles: OpenFile[], move: ItemMove) {
+    return moveKeyedItems(openFiles, getOpenFileKey, move);
 }
 
 /**

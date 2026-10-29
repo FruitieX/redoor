@@ -37,8 +37,8 @@ type ReceiveFuture = ReusableBoxFuture<'static, (OutputReceiver, Option<StreamIt
 /// The stream failed: the agent's result was an error, or the router failed the stream; the
 /// text is the (possibly empty) reason.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct AgentStreamError(pub(crate) String);
+#[error("{}", .0.message)]
+pub(crate) struct AgentStreamError(pub(crate) request::CommandError);
 
 /// One admitted output stream plus the cleanup its consumer owes the agent.
 ///
@@ -229,12 +229,12 @@ impl Stream for OutputStream {
             };
             let chunk = match item {
                 Some(Ok(chunk)) => chunk,
-                Some(Err(AgentStreamError(message))) => {
+                Some(Err(AgentStreamError(error))) => {
                     this.finished = true;
-                    let message = if message.is_empty() {
+                    let message = if error.message.is_empty() {
                         UNDESCRIBED_FAILURE.to_string()
                     } else {
-                        message
+                        error.message
                     };
                     return Poll::Ready(Some(Err(std::io::Error::other(message))));
                 }

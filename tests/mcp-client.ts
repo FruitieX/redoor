@@ -109,12 +109,17 @@ export class McpTestClient {
         });
     }
 
-    /** Polls until an operation reaches an explicit terminal or ambiguous state. */
+    /**
+     * Polls until an operation reaches an explicit terminal or ambiguous state. The interval
+     * backs off because every poll spends the token's per-minute MCP request budget, which
+     * the whole suite shares; a fixed fast poll exhausted it on multi-second operations.
+     */
     public async waitForOperation(
         operationId: string,
         timeoutMs: number = 30_000,
     ) {
         const deadline = Date.now() + timeoutMs;
+        let intervalMs = 20;
 
         for (;;) {
             const response = await this.getOperation(operationId);
@@ -140,7 +145,10 @@ export class McpTestClient {
                 );
             }
 
-            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+            await new Promise<void>((resolve) =>
+                setTimeout(resolve, intervalMs),
+            );
+            intervalMs = Math.min(intervalMs * 2, 250);
         }
     }
 

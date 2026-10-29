@@ -116,6 +116,7 @@ impl RouterState {
             return;
         }
         let remote = target.source_agent_id != target.dest_agent_id;
+        let streamed = remote || target.source_rev.is_some();
         let then = match (target.operation, target.source_identity.clone()) {
             (CopyOperation::Copy, _) => None,
             (CopyOperation::Move, Some(identity)) => Some(DeleteSource {
@@ -132,7 +133,7 @@ impl RouterState {
             }
         };
 
-        if remote
+        if streamed
             && self.flows.uploads_into(&target.dest_agent_id)
                 >= super::upload::MAX_UPLOADS_PER_CONNECTION
         {
@@ -186,7 +187,7 @@ impl RouterState {
             Some(verification) if remote && target.partial.is_some() && verification.end > 0 => {
                 self.start_prefix_verification(flow_id, target, then, verification)
             }
-            _ if remote => self.start_remote_copy(flow_id, &target, then),
+            _ if streamed => self.start_remote_copy(flow_id, &target, then),
             _ => self.start_local_copy(flow_id, &target, then),
         };
         if !queued {
@@ -557,7 +558,8 @@ impl RouterState {
     }
 
     /// Opens both streams and the forwarder, then starts the destination upload; the source
-    /// download waits for the destination's readiness.
+    /// download waits for the destination's readiness. Copies from Git history take this path
+    /// on one agent too, with the agent as both source and destination.
     fn start_remote_copy(
         &mut self,
         flow_id: FlowId,
@@ -602,6 +604,7 @@ impl RouterState {
             .upload_command(target.dest_path.clone(), target.on_existing);
         if let Command::RawUpload(raw) = &mut upload {
             raw.partial = target.partial.clone();
+            raw.executable = target.executable;
         }
         let queued = dest_agent.send_command(dest_id, upload);
         self.flows.insert(
@@ -618,16 +621,24 @@ impl RouterState {
                     source,
                     dest,
                     stage: RemoteStage::AwaitingDestination {
-                        source_command: {
-                            let mut command = target
-                                .content_kind
-                                .download_command(target.source_path.clone());
-                            if let Command::RawDownload(raw) = &mut command {
-                                raw.range_start =
-                                    target.partial.as_ref().map(|partial| partial.offset);
-                                raw.expected_identity = target.source_identity.clone();
+                        source_command: match &target.source_rev {
+                            // History streams a file or a plain tar, matching the upload kind.
+                            Some(rev) => Command::GitDownload(request::GitDownload {
+                                path: target.source_path.clone(),
+                                rev: rev.clone(),
+                                include_root: false,
+                            }),
+                            None => {
+                                let mut command = target
+                                    .content_kind
+                                    .download_command(target.source_path.clone());
+                                if let Command::RawDownload(raw) = &mut command {
+                                    raw.range_start =
+                                        target.partial.as_ref().map(|partial| partial.offset);
+                                    raw.expected_identity = target.source_identity.clone();
+                                }
+                                command
                             }
-                            command
                         },
                     },
                     source_finished: false,
@@ -1220,7 +1231,7 @@ mod tests {
 
     /// Builds one agent connection with an observable bulk lane.
     fn agent(name: &str) -> (ConnectionStreams, AgentLink, mpsc::Receiver<StreamChunk>) {
-        let agent = AgentId::from(name);
+        let agent = redoor_core::test_support::test_agent_id(name);
         let (lanes, receivers) = ControlLanes::bounded(16, 16);
         (
             ConnectionStreams::new(agent.clone()),
@@ -1351,9 +1362,9 @@ mod tests {
         let (dest_id, source_id) = (RequestId::new(71), RequestId::new(72));
         state.record_copy_start(CopyStartContext {
             request_id: flow_id.as_transfer_id(),
-            source_agent_id: AgentId::from("source"),
+            source_agent_id: redoor_core::test_support::test_agent_id("source"),
             source_path: "/source".into(),
-            dest_agent_id: AgentId::from("dest"),
+            dest_agent_id: redoor_core::test_support::test_agent_id("dest"),
             dest_path: "/dest".into(),
             total_bytes: 8,
             direction: TransferDirection::Copy,
@@ -1365,8 +1376,8 @@ mod tests {
                 pause: None,
                 resumable: false,
                 progress_id: flow_id.as_transfer_id(),
-                source_agent_id: AgentId::from("source"),
-                dest_agent_id: AgentId::from("dest"),
+                source_agent_id: redoor_core::test_support::test_agent_id("source"),
+                dest_agent_id: redoor_core::test_support::test_agent_id("dest"),
                 content_kind: CopyContentKind::RawFile,
                 then: None,
                 phase: CopyPhase::Remote(Box::new(RemoteCopy {
@@ -1389,7 +1400,7 @@ mod tests {
         state.finish_copy_response(
             flow_id,
             RouteResponse {
-                agent_id: AgentId::from("dest"),
+                agent_id: redoor_core::test_support::test_agent_id("dest"),
                 socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id: dest_id,
                 result: CommandOutcome::error(
@@ -1406,7 +1417,7 @@ mod tests {
         assert!(
             state
                 .flows
-                .id_for(&AgentId::from("dest"), dest_id)
+                .id_for(&redoor_core::test_support::test_agent_id("dest"), dest_id)
                 .is_none()
         );
         state.ui.refresh_check_task.abort();
@@ -1419,7 +1430,7 @@ mod tests {
         let mut state = RouterState::new(tokio::spawn(async {}));
         let mut lanes = Vec::new();
         for name in ["source", "dest"] {
-            let agent = AgentId::from(name);
+            let agent = redoor_core::test_support::test_agent_id(name);
             let (agent_lanes, receivers) = ControlLanes::bounded(4, 4);
             state.agents.by_id.insert(
                 agent.clone(),
@@ -1435,14 +1446,15 @@ mod tests {
         let (dest_id, source_id) = (RequestId::new(81), RequestId::new(82));
         state.record_copy_start(CopyStartContext {
             request_id: flow_id.as_transfer_id(),
-            source_agent_id: AgentId::from("source"),
+            source_agent_id: redoor_core::test_support::test_agent_id("source"),
             source_path: "/source".into(),
-            dest_agent_id: AgentId::from("dest"),
+            dest_agent_id: redoor_core::test_support::test_agent_id("dest"),
             dest_path: "/dest".into(),
             total_bytes: 8,
             direction: TransferDirection::Copy,
         });
-        let link = |name: &str| state.agents.by_id[&AgentId::from(name)].link();
+        let link =
+            |name: &str| state.agents.by_id[&redoor_core::test_support::test_agent_id(name)].link();
         let (source_link, dest_link) = (link("source"), link("dest"));
         state.flows.insert(
             flow_id,
@@ -1450,8 +1462,8 @@ mod tests {
                 pause: None,
                 resumable: false,
                 progress_id: flow_id.as_transfer_id(),
-                source_agent_id: AgentId::from("source"),
-                dest_agent_id: AgentId::from("dest"),
+                source_agent_id: redoor_core::test_support::test_agent_id("source"),
+                dest_agent_id: redoor_core::test_support::test_agent_id("dest"),
                 content_kind: CopyContentKind::RawFile,
                 then: None,
                 phase: CopyPhase::Remote(Box::new(RemoteCopy {
@@ -1469,7 +1481,7 @@ mod tests {
         state.finish_copy_response(
             flow_id,
             RouteResponse {
-                agent_id: AgentId::from("source"),
+                agent_id: redoor_core::test_support::test_agent_id("source"),
                 socket_id: redoor_protocol::ids::SocketId::new(),
                 request_id: source_id,
                 result: CommandOutcome::error(

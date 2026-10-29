@@ -9,7 +9,7 @@ pub const WEBSOCKET_STALE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Production stale-poll period; independent of the ping so the threshold can be a multiple of it.
 pub const WEBSOCKET_STALE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Idle-socket timing chosen once at startup so CLI/env can shrink production defaults in tests.
+/// Connection timing chosen once at startup so CLI/env can shrink production defaults in tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WebSocketTimeouts {
     /// How often idle sockets write a ping so proxies stay alive and half-open links fail.
@@ -18,6 +18,9 @@ pub struct WebSocketTimeouts {
     pub stale_timeout: Duration,
     /// How often the session compares last inbound traffic against `stale_timeout`.
     pub stale_check_interval: Duration,
+    /// Fixed delay that replaces the agent's jittered reconnect windows. Production leaves it
+    /// unset; tests set it so every server restart or dropped link does not cost seconds.
+    pub reconnect_delay: Option<Duration>,
 }
 
 impl WebSocketTimeouts {
@@ -27,6 +30,7 @@ impl WebSocketTimeouts {
             keepalive: WEBSOCKET_KEEPALIVE_INTERVAL,
             stale_timeout: WEBSOCKET_STALE_TIMEOUT,
             stale_check_interval: WEBSOCKET_STALE_CHECK_INTERVAL,
+            reconnect_delay: None,
         }
     }
 

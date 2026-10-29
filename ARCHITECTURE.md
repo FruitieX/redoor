@@ -6,7 +6,10 @@ Redoor is a single `redoor` binary that plays several roles:
 - **agent**: connects to a server and executes filesystem, exec, git, terminal and log commands on its host
 - **remote CLI** (`redoor remote ...`): a REST client for scripting against a server, authenticated
   with an access token
-- **service management**: installs the server or agent as a systemd or launchd service
+- **service management**: installs the server, agent or a named relay as a systemd or launchd
+  service
+- **self-upgrade** (`redoor upgrade`): installs a release over the running binary and restarts
+  the local redoor processes that run it
 
 The Rust code is a cargo workspace under `crates/`. The roles live in separate crates so the
 compiler enforces that agent and server code never depend on each other.
@@ -44,7 +47,7 @@ that cannot import each other.
 The contract between all parties, with no runtime dependencies (no tokio).
 
 - `wire/`: the agent websocket protocol.
-  - `handshake` holds the upgrade contract: the `redoor.v2` subprotocol, the agent endpoint
+  - `handshake` holds the upgrade contract: the `redoor.v3` subprotocol, the agent endpoint
     path, the `426` body and the protocol-mismatch types the UI lists.
   - `ServerToAgent` and `AgentToServer` are the JSON control envelopes, one per direction,
     so each side's `match` is exhaustive. No frame except `hello` carries an agent id: the
@@ -59,8 +62,13 @@ The contract between all parties, with no runtime dependencies (no tokio).
     and the credit windows. `exec`, `log` and `terminal` hold the feature-specific wire types.
   - `registration` holds `AgentIdentity` and `AgentCapabilities`, which are flattened into
     the `hello` frame.
+- `ids`: the strongly typed identifiers. `AgentId` is the stable device id (see "Device
+  identity"); `validate_device_name` holds the device name rules.
 - `api/`: REST request and response types grouped by domain (agents, auth, files,
-  transfers, git, tokens, ...).
+  transfers, git, tokens, ...). Git is a directory with one module per feature area
+  (`worktree`, `worktree_list`, `revision`, `commit`, `history`, `refs`), plus the vocabulary they share
+  (including `GitPage`, the bounded offset and size every paged Git list uses), so later
+  Git features (such as search) are added beside them rather than into one file.
 - Types marked `#[ts(export)]` generate the TypeScript interfaces in `bindings/`, which the UI
   and the integration tests use, so REST JSON (and the wire types the browser shares, such as
   exec, log and terminal events) is checked from both sides. Agent-only wire types are
@@ -75,6 +83,15 @@ Infrastructure that more than one role needs:
 - `RuntimeContext`: app name, `AppPaths` and websocket timeouts. It is built once in `main`
   and passed down instead of being read from process globals.
 - Logging, behind a replaceable logger.
+- `rotating_log`: every log file a process owns goes through `RotatingLogFile`, which keeps
+  it under its `log_max_size` (10 MB by default) so long-running processes on small
+  devices cannot fill the disk. The size is checked when the file is opened and after
+  every 100 messages, counted in memory so writes between checks cost nothing. An
+  oversized file keeps the newer half of its lines. The file is compacted in place
+  instead of renamed, so every open append handle keeps writing to the live log, and it
+  is streamed in fixed chunks so rotation never loads the log into memory. A process-wide
+  lock orders truncation against appends, because a relay writes one file from several
+  writers.
 - Filesystem safety: `safe_fs` (including `safe_rm_all`), `atomic_rename`, `destination`
   (symlink-safe placement and merges) and `staging` (self-deleting hidden staging paths with
   atomic name reservation).
@@ -85,6 +102,9 @@ Infrastructure that more than one role needs:
   for the percentage of local directory uploads.
 - Process helpers (`process`, `subprocess::run_checked`), `bounded_tail`, `paths::home()`,
   binary identity and build information.
+- `upgrade`: installing releases and restarting the processes of a replaced binary, shared by
+  `redoor upgrade` and the server. `upgrade::install` embeds the repository's `install.sh`
+  (`include_str!`) and runs it with bash; it is the only code that downloads releases.
 
 ### `redoor-agent`
 
@@ -100,6 +120,26 @@ The agent runtime and the implementation of every command.
     written (for example, re-exec after a restart response), and the `ResultLedger` that
     lets each request send exactly one result.
 - `commands/`: filesystem, git, file search, content grep, metadata and host commands.
+  - `git/`: one module per Git feature area on top of shared plumbing in `git/mod.rs` (the
+    failure type, the blocking runner that interrupts gix when the request is dropped, path
+    validation and repository discovery). `status` and `diff` read the worktree; `revision`
+    resolves a user-supplied revision to a commit once per request; `tree` and
+    `commit_diff` read committed history; `history` lists the commits that changed a path
+    and `refs` lists branches and tags (see "Git history, branch and tag lists");
+    `worktree_list` lists the main and linked checkouts of a repository and
+    `worktree_status` counts one checkout's uncommitted changes for its row; `export`
+    streams committed files and directory archives for downloads and copies (see "Git
+    history downloads and copies"). All Git work runs in `spawn_blocking` and every
+    response is bounded (entries, files, bytes per blob and per batch), because gix inflates
+    whole objects and the reply is a single control frame. Object kinds and sizes are read
+    from headers before inflating, commit diffs visit changes one at a time and stop at the
+    file limit, and patch budgets count JSON-encoded bytes, since escaping can grow control
+    characters sixfold inside the frame. Text patches carry their whole file
+    (`full_context: true`) when the patch is at most 256 KiB, so the UI can expand context
+    without another request. Each batch charges the default-context (3-line) patch to the
+    8 MiB patch budget and only the extra unchanged lines to a separate 4 MiB context
+    budget. Sending files whole therefore never turns a later file into `too_large`; a
+    file whose whole patch does not fit falls back to default context.
 - `transfers/`: shared upload and download drivers.
   - `UploadSink` covers raw files, tar directories and file edits. `ByteSource` covers file
     ranges and tar archives.
@@ -112,6 +152,8 @@ The agent runtime and the implementation of every command.
 - `platform/`: mounts, accounts and identity, which keeps OS-specific code out of the
   commands.
 - `terminal`, `logs`: PTY sessions and log streaming, each on one stream of the connection.
+- `device_id`: the `<data_dir>/agent-id` file a standalone agent keeps its id in. Agents
+  started with `--agent-id` (managed agents and relays) never read or write it.
 
 ### `redoor-server`
 
@@ -120,6 +162,10 @@ The agent runtime and the implementation of every command.
   - `agent_client`: `AgentClient::call` for any protocol request that is also an
     `AgentCall`, which adds its deadline; all deadlines are defined in one place.
   - `error.rs`: `ApiError`, which owns all HTTP status mapping.
+  - `user_state` and `editor_buffers`: per-account files in the account's private data
+    directory (the preference document and one file per open file's editor buffer).
+  - `git/`: Git REST handlers split by the same feature areas as the protocol, sharing
+    path and revision validation in `git/mod.rs`.
   - `services/`: `TransferService` (copy and move), `OutputStream` (downloads, diffs, exec)
     and `AgentUpload`. REST and MCP handlers are thin adapters over these.
 - `actors/`:
@@ -143,6 +189,20 @@ The agent runtime and the implementation of every command.
   and generation counters.
 - `ssh/`: preparing remote hosts (OS and architecture probe, binary install), launching
   agents through SSH reverse forwards, and the standalone `relay`.
+  - `transport`: `SshHost` with a `HostKeyPolicy` and an `AuthPolicy`. `build_ssh_command`
+    is the only place that creates an `ssh` command, so no connection (probe, upload or
+    agent session) can bypass the policies.
+  - `shell`: every remote command reaches the user's login shell as a single-line
+    `sh -c '<script>' sh '<arg>'...` of single-quoted words. The login shell may be fish or
+    tcsh, so it only ever starts POSIX `sh`, and arguments such as agent names with spaces
+    are never split or interpreted. Remote paths are literal except for a known home or data
+    directory prefix (`~/`, `$HOME/`, `${XDG_DATA_HOME:-$HOME/.local/share}/`), which is
+    expanded on the device.
+  - `provision`: the probe, launch and upload scripts and the `Installer` that picks,
+    uploads and verifies the binary. A binary upload is one session: a script creates the
+    directory, writes a temp file, marks it executable and renames it into place.
+  - `keys` (`SshKeyStore`) and `managed_keys`: per-device SSH keys and pinned host keys,
+    see "SSH device keys" below.
 - `startup`: `ServerConfig::resolve`, then `ServerRuntime::build`, then
   `serve_until_restart`.
 
@@ -176,8 +236,24 @@ The binary crate. `main.rs` parses the CLI with clap and dispatches to a role. E
 returns `anyhow::Result<ExitCode>`, and errors are printed once.
 
 - `service/`: a `ServiceBackend` trait with systemd and launchd backends and one shared
-  status formatter.
+  status formatter. The action set (`install`, `start`, `stop`, `restart`, ...) is one enum
+  generic over its target, so the agent and server (no target) and relays (a relay ID) cannot
+  drift apart. A relay service is `<app-name>-relay-<id>` and runs
+  `redoor agent relay start <id>` in the foreground; its systemd unit is `Type=exec` because
+  a relay retries SSH forever and never sends a readiness notification. `launchctl bootout`
+  can return before launchd has removed the job, and a bootstrap in that window fails with
+  status 5 or is silently discarded, so the launchd backend waits for the job and its process
+  to disappear after every bootout, retries that conflict, and verifies the job is loaded.
 - `process_control` and `process_logs`: PID files, stopping processes and reading logs.
+  Every PID file is a JSON record with a top-level `pid`, a start time and the
+  `BinaryIdentity` of the image that wrote it (relays add their launch metadata). The
+  advisory lock, not the file, decides liveness. The process records its own build because
+  after `redoor upgrade` the executable on disk no longer describes the one in memory;
+  re-exec drops the close-on-exec lock, so the new image claims the file again and rewrites
+  it. `status` prints that build and notes when it differs from the CLI's own. Bare-number
+  files from older builds are still read so their processes can be stopped.
+- `upgrade`: the `redoor upgrade` command on top of `redoor_core::upgrade`, plus the detached
+  restart helper. See "Upgrading in place".
 - The binary re-executes itself as the SSH askpass helper, so no second executable is
   shipped.
 
@@ -229,8 +305,9 @@ behind NAT, on a phone (Termux) or on a host that is only reachable over SSH.
   <random-port>:<server>` and starts the agent on the remote host pointing at
   `ws://localhost:<random-port>/api/v1/agent/ws`. What looks like a local connection on the remote host
   reaches the server through the tunnel. The token is passed on SSH stdin and the password
-  through askpass, so neither appears on a command line. `redoor agent relay` runs the same
-  mechanism without a server, for agents of a remote server.
+  through askpass, so neither appears on a command line. A device can instead use a
+  redoor-managed SSH key and a pinned host key (see "SSH device keys"). `redoor agent relay`
+  runs the same mechanism without a server, for agents of a remote server.
 - **Browsers, the CLI and MCP clients** only use the REST API, the `/mcp` endpoint and browser
   websockets. They never talk to agents directly; the server translates each request into
   agent commands.
@@ -383,14 +460,14 @@ sequenceDiagram
     participant S as Session actor
     participant R as Router
 
-    A->>H: GET /api/v1/agent/ws<br/>Authorization: Bearer token<br/>Sec-WebSocket-Protocol: redoor.v2
+    A->>H: GET /api/v1/agent/ws<br/>Authorization: Bearer token<br/>Sec-WebSocket-Protocol: redoor.v3
     alt wrong or missing token
         H-->>A: 401 (no socket)
     else protocol not offered
         H-->>A: 426 + {server_protocol, server_version, message}
         Note over H: attempt kept in the mismatch list
     else accepted
-        H-->>A: 101, Sec-WebSocket-Protocol: redoor.v2
+        H-->>A: 101, Sec-WebSocket-Protocol: redoor.v3
         A->>S: hello {agent_id, agent_name, identity, capabilities}
         Note over S: any other first frame closes the socket
         alt managed agent the server has stopped
@@ -401,7 +478,10 @@ sequenceDiagram
             alt accepted
                 R->>A: welcome {connection_id}
                 Note over A,R: the agent is connected and available for commands
-            else duplicate name
+            else id not in the dev_ format or invalid name
+                R->>A: rejected {invalid_identity, message}
+                Note over S: the session flushes the frame and closes
+            else name used by another live or configured device
                 R->>A: rejected {duplicate_name, message}
                 Note over S: the session flushes the frame and closes
             end
@@ -423,9 +503,9 @@ sequenceDiagram
 - **Request ids are interpreted per connection.** The server allocates them from one
   router-wide counter, and the router indexes flows by agent and request id, so a frame can
   only resolve work that was sent to its own connection.
-- A reconnect of the same agent id replaces the old connection, which receives `evicted`
-  and exits. A *different* agent id that claims a live agent's name is `rejected` with
-  `duplicate_name`.
+- A reconnect of the same agent id replaces the old connection, which receives `evicted`.
+  A *different* agent id that claims the name of a live or configured device is `rejected`
+  with `duplicate_name`. See "Device identity" for the id format and cloned agents.
 - Every connection gets a **socket id**. The router only accepts frames and unregistrations
   from an agent's *current* session, so a slow-dying old connection cannot remove the agent
   that replaced it after a reconnect.
@@ -433,6 +513,121 @@ sequenceDiagram
   capability flag and no uncredited fallback.
 - On the agent side, each link has a **generation** number. Timers and tasks from a replaced
   connection carry the old generation and are ignored.
+
+## Device identity
+
+Every device has two identifiers with different jobs:
+
+- **The id** (`AgentId`, `dev_` followed by 20 random lowercase base32 characters, 100 bits)
+  never changes for the device's lifetime. Everything stored or used internally refers to
+  it: router keys, watchdog supervisors, token scopes, resume manifests, MCP operations and
+  `config.toml`. The `dev_` prefix only makes ids recognisable in logs and URLs, like
+  `redoor_at_` on access tokens.
+- **The name** is for people. It is shown in the UI and used to address a device in URLs,
+  the REST API, MCP and the CLI, but it is never stored as a reference. Renaming a device
+  changes only the name, so nothing else has to be rewritten.
+
+The name used to be the identity, which meant a token scoped to `pi` silently lost access
+when `pi` was renamed, and gained access to whichever device was later called `pi`. Keeping
+stored references on ids removes that escalation.
+
+**Who owns the id** depends on whether the server has a config entry for the device:
+
+- **Managed agents (`[[agents]]`): the server.** The id is `id = "dev_..."` in the entry,
+  generated when the device is added through the UI or API and passed to the spawned agent
+  with `--agent-id`. Hand-written entries without an id get one at startup, written back
+  with the same formatting-preserving rewrite agent edits use. If the file cannot be
+  written (read-only mount, other owner), startup fails and prints a ready-to-paste
+  `id = "dev_..."` line per entry; an id kept only in memory would change on every start.
+  The server owns these ids because several entries can target the same `user@host` (and
+  share its data dir), because it needs the id before the first connection, and because
+  wiped remote state must not change the id. The edit handlers copy the id from the stored
+  entry: a request never carries it, and dropping it would assign a new id on the next
+  start.
+- **Relays (`[[relays]]`): the relay.** The entry's `agent_id` is assigned like a managed
+  id when `redoor agent relay start` runs and passed to the remote agent with `--agent-id`.
+- **Standalone agents: the agent.** On first start it creates `<data_dir>/agent-id` (0600,
+  written to a temporary file and published with a no-replace rename) and reuses it later.
+  Deleting the file makes the agent appear as a new device, which is how a cloned machine
+  gets its own identity.
+
+Every programmatic rewrite of `config.toml` (id write-back at server or relay startup, and
+the add, edit and delete routes) holds an exclusive `flock` on `.config.toml.lock` next to it
+from read to replace. Each writer replaces the whole file, so a writer working from an older
+read would otherwise drop another's change, such as an id already in use. The id write-back
+first checks without the lock, so a read-only deployment whose entries all have ids never
+creates the lock file.
+
+Duplicate ids in `config.toml` (a copied block) fail parsing for every role and name both
+entries. `hello` carries the id and the name in separate fields; the router rejects a
+`hello` whose id is not in the id format or whose name breaks the name rules
+(`invalid_identity`).
+
+**Names** must not be empty, must not contain `:` (the CLI's `device:path` separator) or
+`/` (URL paths), and must not be in the id format, because requests accept either and an
+id-shaped name would be ambiguous. Names are unique: `[[agents]]` names are checked at
+startup and before restarts, creating or renaming a device to a taken name is refused, and
+a different id claiming the name of a live or configured device is rejected. A create or
+rename reserves the new name in the router before it stops the agent and rewrites the
+config, and `hello` treats a reserved name as taken, so a standalone agent cannot claim the
+name in that window; the reservation is dropped when the edit finishes. A new
+standalone agent may take the name of a disconnected standalone agent; the stale inventory
+row is dropped so the name still points at one device. Uniqueness is not a security
+property, since access control works on ids.
+
+**Name-or-id resolution.** Every request value that addresses a device accepts a name or an
+id: an exact id wins, otherwise the name is matched (`RouterMsg::ResolveDevice`). It happens
+once, before access control:
+
+- The access middleware resolves the `{agent}` path parameter and stores the id as the
+  `ResolvedDevice` extension; handlers take the device from there and never read the raw
+  parameter. It runs after authentication, so anonymous callers cannot probe names.
+- Handlers with devices in the body (copy, move, diff, partials) and MCP tools resolve their
+  device fields before calling `Principal::require`.
+- Token scopes are resolved when a token is created or edited and stored as ids, so a scope
+  stays tied to its devices and does not follow a name.
+
+Addressing by name is intentional: a script that uses `pi` follows whichever device is
+called `pi` now, so a device can be swapped by renaming. Scripts that must stay on one
+device use its id. An unknown value is `404 Device not found`; the CLI then lists the
+available devices with their names and ids.
+
+**Cloned standalone agents.** Copying a home directory or an image with a baked-in data dir
+copies the id file, so several machines report the same id, and since a reconnect replaces
+the old connection, the clones would evict each other forever. Hostnames cannot tell clones
+from reconnects (clones usually keep them), so the router detects the eviction loop itself
+(`router/duplicate_ids.rs`):
+
+- Each session owns a `ConnectionActivity` clock (`actors/activity.rs`) that it updates on
+  every inbound frame; the stale check reads the same clock, and the router reads it
+  directly when a `hello` arrives, so heartbeats never pass through the router mailbox. A
+  connection is healthy while its last frame is no older than `min(2 × keepalive,
+  stale_timeout)`: both ends ping every keepalive period, so a live link always delivers a
+  frame within two periods.
+- Only a `hello` that would replace a *healthy* connection of the same id counts. A real
+  reconnect replaces a dead or dying connection, once, and is never counted.
+- The third counted replacement within 60 seconds still goes through and starts the
+  conflict: while the current connection stays healthy, every newcomer for that id is
+  rejected with `duplicate_id`, and the device carries a `duplicate_id` warning with the
+  hostnames of the competing `hello` frames. If the current connection goes silent, the next
+  newcomer gets through.
+- The warning clears after 60 seconds without any competing `hello`, rejected ones included;
+  counting only replacements would clear it while a clone is still retrying and restart the
+  loop once a minute. The router's periodic tick does the clearing.
+- A rejected agent logs how to fix it (delete `<data_dir>/agent-id` on one machine, or check
+  for duplicate config ids when it was started with `--agent-id`) and retries with its normal
+  backoff, so a fixed clone, or a real reconnect after the current connection died, gets
+  through. Other rejections still make the agent exit.
+- On `evicted`, managed agents and relays exit as before, so an SSH-launched process that
+  outlived its tunnel does not linger. A standalone agent holds the single-instance lock on
+  its data dir, so being replaced means another machine has its id; it reconnects with
+  backoff instead, otherwise the loop would end before the router could detect it.
+- The agent still handles a `rejected` or `evicted` frame that arrived just before the
+  server closed the socket, even if it notices the connection loss first.
+
+Managed agents get their id from their own config entry, and duplicate config ids fail
+startup, so in practice this only affects standalone agents. Like every agent check, it
+trusts self-reported behavior.
 
 ## Managed agent lifecycle
 
@@ -454,29 +649,122 @@ SSH-backed agents. The server's watchdog runs them. Standalone agents manage the
   | Retry start | `POST /api/v1/agents/{agent}/retry-start` | Abandons the current attempt and starts a fresh one with the backoff reset |
   | Restart | `POST /api/v1/agents/{agent}/restart` | Not a watchdog action: the agent re-executes itself, so it works for any connected agent |
 
+- **Agent log files are forwarded, not inherited.** When a managed agent has a `log`, its
+  child (the local `redoor agent` or `ssh`) gets piped stdout and stderr, and the watchdog
+  forwards them line by line into a `RotatingLogFile` limited by `[server].log_max_size`.
+  A descriptor inherited straight into the file could never be kept under a limit. The
+  forwarder also returns the attempt's output tail, which explains a failed exit without
+  rereading a file that may have been truncated meanwhile. The SSH launch script's
+  report is read one byte at a time, so the output after it stays in the pipe for the
+  watchdog. Relays forward their SSH output the same way into the relay log.
 - **Supervision.** While an agent is desired-running, the watchdog restarts it when spawning or
   provisioning fails, when the child exits and when its heartbeat goes stale. The backoff
   starts at 1 s and doubles up to 30 s, and resets after 30 s of stable connection. The
   watchdog never gives up. The latest error is shown as the agent's `connection_issue` while
   it stays `Starting`.
-- **SSH provisioning runs on every attempt**, so the UI always shows current results. It
-  probes the OS and architecture and reuses the remote binary if its version matches.
-  Otherwise it uploads the matching release from the local cache. Each step is published as
-  `provisioning_status`, which the UI lists while the agent starts. The ssh child holds the
-  remote agent's stdin, so killing ssh makes the remote agent exit (`--exit-on-stdin-eof`).
+- **SSH provisioning runs on every attempt**, so the UI always shows current results. The
+  agent is started by a launch script that first reports the OS, architecture and version
+  of the binary at the default install path, and `exec`s it only when the version matches
+  this server. A device with a current binary therefore starts in one SSH session.
+  Otherwise the script exits without starting anything, the server uploads the matching
+  release from the local cache and starts again, and that second report verifies the
+  upload.
+- **Install paths identify the bytes, so devices never hash binaries.** Hashing a debug
+  build of hundreds of megabytes on the device (Perl `shasum` on macOS, phones and boards
+  without hashing instructions) made every start slow, and the hash only has to tell
+  builds apart. Release installs live at versioned paths. A debug server uses its local
+  debug build instead when the platform matches, at
+  `binaries/debug-<hash>/redoor`, where `<hash>` is the first 16 hex characters of the
+  build's BLAKE3 hash; a binary there that reports the expected version is that build. The
+  expected version is the one the build itself reports, not the server's, because the
+  build on disk can be newer than the running server after a version bump without a
+  restart. The server hashes and runs the build lazily on the first provision after it
+  starts or the file changes and caches the result keyed by path, size and modification
+  time, so later starts only stat the file; it is not computed at startup because most
+  servers never provision an SSH device. Every upload streams into a temp file whose byte
+  count must equal the local file's size before it is renamed into place, because a
+  stream that ended early would otherwise be trusted forever at a content-addressed path.
+  The size check plus the post-upload `--version` probe replace the former SHA-1
+  comparison for release, debug and forced uploads. After a debug upload verifies, a
+  background task removes the other `debug-*` directories and the legacy `debug/`
+  directory; an agent still running an old build keeps its deleted file open. Each step is
+  published as `provisioning_status`, which the UI lists while the agent starts. The ssh
+  child holds the remote agent's stdin, so killing ssh makes the remote agent exit
+  (`--exit-on-stdin-eof`). Relays probe and install once before their first start instead,
+  because they restart the agent many times from the prepared state; they prepare again
+  only when the remote shell reports the binary missing (exit 127), which happens after
+  another provision's cleanup removed their `debug-<hash>` directory.
 - **A stop wins every race.** Every start, shutdown and retry bumps an attempt generation, and
   the router commits a registration only if its generation is still current. An agent that
   connects while its entry is not desired-running gets `rejected` with `stopped` and exits.
   Without this, a `hello` that was already in flight, or a remote process that outlived its
   ssh client, would reconnect and silently undo the user's stop. Socket ids likewise filter
   out late disconnect and stale events from replaced sockets.
-- **Config edits apply at runtime.** Adding an agent creates a new dormant supervisor.
-  Editing or deleting one stops the agent, rewrites the config file (preserving its
-  formatting) and replaces the supervisor, so an edited agent comes back as `Stopped`. Changes
-  made to `config.toml` by hand take effect on the next server restart.
-- **Server restart** (`POST /api/v1/server/restart`) validates the config first. It then
-  stops every managed child before re-executing, because `exec` would otherwise leave them
-  orphaned. Standalone agents simply reconnect.
+- **Config edits apply at runtime.** Adding an agent generates its id and creates a new
+  dormant supervisor. Editing or deleting one stops the agent, rewrites the config file
+  (preserving its formatting, finding the entry by its id) and replaces the supervisor, so an
+  edited agent comes back as `Stopped` with the same id. Supervisors are keyed by id, so the
+  session finds its supervisor through the id in `hello` even after a rename. Changes made to
+  `config.toml` by hand take effect on the next server restart.
+- **Server restart** (`POST /api/v1/server/restart`, or the `redoor upgrade` signal) validates
+  the config first. It then stops every managed child before re-executing, because `exec`
+  would otherwise leave them orphaned. Standalone agents simply reconnect.
+
+## Upgrading in place
+
+`redoor upgrade [TAG]` replaces the binary it was run from and restarts every local redoor
+process still running the old file. `install.sh` writes the new binary beside the old one and
+renames it over the path, so running processes keep their old image and never see a
+half-written file.
+
+- **`install.sh` is the one downloader.** `redoor_core::upgrade::install` runs the embedded
+  script for `redoor upgrade`, the server's update endpoint and the server's release cache
+  (`BinaryCache`), which fetches binaries for agent upgrades and SSH provisioning. The cache
+  picks another platform with `REDOOR_TARGET_OS`/`REDOOR_TARGET_ARCH` and installs into its
+  versioned cache directory; `REDOOR_RELEASE_BASE_URL` points every caller at a mirror. A
+  captured run gets its own process group, killed when the run is dropped, so a cancelled
+  download also stops `curl` and `tar`. Hosts that download releases therefore need bash,
+  curl and tar, which the container image installs.
+
+- **Everything executes the binary's path** (`redoor_core::executable`). After the rename,
+  Linux reports a running image as `<path> (deleted)` through `/proc/self/exe`, so
+  `current_exe()` names nothing. Re-exec, managed local agents, SSH askpass, daemon spawning
+  and agent upgrades from the running server strip that marker and use the path, which then
+  holds the upgraded binary. Until the server restarts, a protocol change can therefore make
+  its new local agents and running-server agent upgrades fail to connect; a default
+  `redoor upgrade` restarts the server within seconds, so only `--no-restart` leaves that
+  window open.
+- **Roles restart themselves on `SIGUSR2`.** The server, standalone agents and relays catch
+  it and re-exec in place, which keeps their PID, arguments, environment, working directory,
+  terminal and supervisor, so the upgrade never has to rebuild a command line. The server
+  goes through the same validated restart as the REST route. A relay drops its SSH session
+  first (`kill_on_drop`). Agents launched by a server or relay do not catch it; their owner
+  restarts them. SIGHUP was not used because a foreground process gets it when its terminal
+  closes.
+- **Processes are found by executable path, before the install.** The process table is
+  scanned for the canonical path being replaced; macOS can no longer name a replaced file
+  afterwards, and a failed install restarts nothing. The signal's default action terminates,
+  so a process gets it only if its caught-signal mask (`/proc/<pid>/status`, `ps -o caught`)
+  shows the handler. Older builds without it are listed for a manual restart rather than
+  restarted through systemd or launchd: re-exec keeps a service's PID, so supervised and
+  unsupervised processes need the same single restart path once every build has it.
+- **All current builds are signalled before any is awaited.** A restarting server stops
+  accepting at once, so restarted agents reconnect to the new server and not to the old one,
+  which would reject a newer protocol with `426` and make the agent exit. On Linux the
+  upgrade then waits until `/proc/<pid>/exe` names the new file and the handler is back.
+- **Upgrading from inside a restarted process uses a detached helper.** When an agent's web
+  terminal or exec runs the upgrade, restarting the server drops that agent's connection, and
+  the agent kills its terminals and execs. So the upgrade re-runs itself with the hidden
+  `--restart-pids` option in a new session (`setsid`), outside the process groups that teardown
+  signals, and that helper finishes the restarts.
+- **The server updates itself in-process.** `POST /api/v1/server/upgrade` (session only,
+  like restart) validates the config, finds the processes of its binary and runs the
+  installer. A failed install is answered with the script's output while the old server keeps
+  serving. After a successful one the server starts its own validated restart, which stops
+  accepting at once, then signals the other processes without waiting for them, since it
+  cannot outlive the wait, and answers with each process's outcome; graceful shutdown
+  delivers that answer before the re-exec. The home page's Update button then waits for the
+  replacement server like the restart dialog does.
 
 ## Server-side lanes to an agent
 
@@ -751,7 +1039,8 @@ sequenceDiagram
   was copied. Once the source is being deleted, a destination disconnect no longer affects
   the result.
 - A copy or move on a single agent runs entirely on that agent as a local worker. The server
-  only follows its progress and can cancel it.
+  only follows its progress and can cancel it. Copies from Git history are the exception:
+  they always stream through the server (see "Git history downloads and copies").
 
 ## Resuming copies and moves
 
@@ -906,15 +1195,20 @@ invalidating query keys, so a view never needs a separate reload signal.
   buffers). The inventory list is a sibling key, so refreshing it does not touch any agent's
   files. `invalidateAgentData` is the single entry point mutations and events use after
   changing an agent.
-- **Editor buffers are not server mirrors.** The editor's file content is tagged with query
-  `meta: { editorBuffer: true }`. `invalidateAgentData` and `invalidateAllAgentData` skip it,
-  so an agent-wide refresh can never replace unsaved text. Only the editor refetches it, and
-  only while clean.
+- **The editor's device text is refetched by the editor only.** The file content query is
+  tagged with `meta: { editorBuffer: true }`, and `invalidateAgentData` and
+  `invalidateAllAgentData` skip it, so unrelated mutations do not download open files again.
+  The editor refetches it on focus, window focus and Reload, also while the buffer is dirty:
+  the query only ever holds device text, and the editor workspace decides what that text may
+  do to the buffer (see "Editor buffers and open files").
 - **Stale times follow the events.** The inventory is trusted for 30 s because
   `agents_changed` invalidates it, and it polls every second only while a managed agent is
   starting, which pushes no event. Listings, git state and metadata never go stale on their
   own; the loaders force a refetch on navigation, events and mutations invalidate them, and
-  the window-focus refresh reloads the route and invalidates git state.
+  the window-focus refresh reloads the route and invalidates git state. A directory's Git
+  view also refetches the worktree diffs it already has cached, in batches and without
+  waiting, so coming back to a list shows the cached patches at once and then the edits
+  made while away.
 - **What still reloads the route.** A loader also decides which kind of entry lives at a URL
   and applies redirects, which the cache cannot express. The route is therefore reloaded
   (`router.invalidate`) only when that can have changed: the window-focus refresh, creating
@@ -943,8 +1237,25 @@ The route tree separates the authenticated application from the public login for
   Because they only exist below `_app`, they cannot run while signed out. The clipboard
   import wraps the shell as a context provider, so the toolbar's Paste button calls it
   directly instead of signalling it through a window event.
+- **Device URLs carry names, everything else uses ids.** Device pages live under
+  `/agents/$deviceName`, because people read and type those URLs. The `agents.$deviceName`
+  loader resolves the name once (an exact id also matches first, like the server) from the
+  cached device list, refetching once on a miss, and returns `{ deviceId }`; an unknown name
+  shows the "device not found" page. The route never reloads that resolution
+  (`staleTime: Infinity`, and `invalidateDeviceViews` reloads only its children), so an open
+  page keeps acting on the device it was opened for even if its old name later belongs to
+  another device. Child loaders use `loadDeviceRouteAgent` and components `useRouteAgent`,
+  both by id; API calls, terminals, websockets and stored UI state (remembered browse paths,
+  provisioning history) use the id. Links built from a device (`deviceRoute`,
+  `browserRoute`) also store its id in the history state, and the device route resolves that
+  id instead of keeping its own (`shouldReload`): otherwise choosing the device that took an
+  open page's old name in the sidebar would keep acting on the previous device. Links that
+  only know a name carry no id and stay on the device the page was opened for. Renaming a
+  device on its own page replaces the history entry with the new name's URL. Links are built with `Link`/`navigate` params from the
+  device's current name, never by string concatenation, since names may contain `#`, `?`
+  or `%`.
 - **Context comes from the router, not from pathnames.** `useDisplayedAgentId` reads the
-  `agentId` param of the committed agent route, `useAgentViewContext` picks the top bar's
+  device id the committed device route resolved, `useAgentViewContext` picks the top bar's
   views from the leaf route id, and `useBrowserLocation` is the one selector over the browser
   route's loader data (requested path, whether it is a file or directory, canonical path).
   The top bar, search scope, file import and remembered tab location all use the committed
@@ -952,6 +1263,20 @@ The route tree separates the authenticated application from the public login for
   the sidebar highlight and the terminal shortcut, use `useTargetAgentId`, which also sees
   the pending matches of a navigation whose loaders are still running, so a slow agent does
   not leave them pointed at the previous device.
+- **Back and forward restore the view.** The router restores the scroll position of the
+  shell's scroll area (`data-scroll-restoration-id="app-main"`) per history entry. That
+  position only lands where the reader left if the page has the same height, so view state
+  that changes it, such as which diffs of a list are expanded, their layout choices, the
+  folded lines revealed in them, the diff list's file filter and the directory listing's name
+  filter, is kept per history entry too (`useHistoryEntryState`). It lives in
+  module-level stores instead of component state, because opening a file unmounts the view.
+  Its key mirrors the router's scroll key (`__TSR_key`), read once when the view mounts or
+  changes scope: the live location already points at the next entry while the old view is
+  still on screen. A new visit to the same URL is a new entry and starts from the defaults.
+  The search dialog keeps its results, scroll position and opened result per entry the same
+  way, so back from a result shows the search as it was without asking the agent again. It
+  scrolls inside its own `<dialog>`, which the router cannot restore, and it mounts only
+  while open, so its entry is the one it opened on and never the result's that follows.
 - **Menus own their open state.** `SideMenu` reads and closes the `openSideMenuAtom` itself
   and returns focus to whatever opened it, so the shell passes no props, refs or callbacks
   to the menus or the top bar.
@@ -964,7 +1289,7 @@ The route tree separates the authenticated application from the public login for
   write-only atom that sets both, so revealing a pane is the state change itself; there is no
   request counter for an effect to drain.
 - **Search state is typed URL state.** `agentSearchSchema` validates the search keys on
-  `/agents/$agentId`, and `useAgentSearchNavigation` changes them with the router's typed
+  `/agents/$deviceName`, and `useAgentSearchNavigation` changes them with the router's typed
   `search` updater, so the path, hash and the child view's own keys survive.
 
 ### Browser long-lived resources and shortcuts
@@ -1003,6 +1328,8 @@ context (`useTerminals`, `useUploads`).
   directory. Rename rewrites the top-level path component, and Merge sends `merge` with every
   file. Because uploads go file by file, Replace first trashes (or deletes) a conflicting
   directory and then uploads with `override`.
+- **`EditorWorkspace` owns the editor.** It holds the page's only CodeMirror `EditorView` and
+  the buffers of open files; see "Editor buffers and open files".
 - **`ShortcutRegistry` owns every window shortcut.** There is one capture and one bubble
   `keydown` listener, attached while something is registered. A binding declares its phase,
   a priority tier, a key matcher, whether it skips text controls, the terminal and the editor,
@@ -1017,8 +1344,97 @@ context (`useTerminals`, `useUploads`).
   register with `useShortcut`, which reads `match` and `run` through a ref, so it
   subscribes once and never on every render.
 - **No module-level singletons for per-instance state.** The editor's `:w` finds its save
-  handler in a CodeMirror facet of the editor that ran it. The open editor's path and dirty
-  flag, which refresh triggers read, are an atom in the application's store.
+  handler in a CodeMirror facet of the state that ran it, which resolves to the mounted
+  editor component through the workspace. The open editor's path, which refresh triggers
+  read, is an atom in the application's store.
+
+### Editor buffers and open files
+
+A file becomes *open* when it is first edited or double-clicked in the editor (a double click
+selects a word but changes nothing, so it opens a file without editing it); any other file
+shown in the editor is a *preview*. Diff file headers, diff rows and search results also
+have a small button that opens a file without going to it (`OpenInBackgroundButton`). The
+open files list (`openFiles` in the user state) is shown in the application menu and, in
+full-window mode, as a strip above the editor. Full-window mode is the `fullWindow` search
+key, retained by the browser route like `rev`, so switching files keeps it, Back leaves it
+and a link or reload opens straight into it.
+
+- **One view, one buffer per open file.** `EditorWorkspace` (`ui/src/editor`), created in
+  `main.tsx` and reached through the router context, owns the single `EditorView` and a
+  buffer per open file plus the current preview. A buffer is the file's `EditorState` (text,
+  selection, undo history), its scroll snapshot, the device text it is based on and the
+  server revision it was last written as. Switching files stashes the outgoing `view.state`
+  and `view.scrollSnapshot()` in its buffer, `setState`s the incoming one and dispatches its
+  scroll snapshot, so each open file keeps its caret, selection, scroll and undo history
+  (Vim's `u` and `Ctrl-r` use the same CodeMirror history). The view's DOM moves into
+  whichever `CodeEditor` is mounted. Showing another file drops the previous preview's buffer.
+- **Preferences are compartments.** Vim mode, line wrapping, theme and editability are
+  compartments of every buffer's state, so a restored state built under older preferences is
+  reconfigured on activation without losing its history. Callbacks (update, focus, `:w`)
+  reach the mounted component through a handlers ref, never a captured file.
+- **The buffer is the draft.** Dirty tracking and Save read the buffer's document; there is
+  no second copy of the text in React state. The first edit of a clean buffer opens the file.
+- **Device text never replaces unsaved edits.** When the file content query brings new device
+  text (focus, window focus, Reload, after a reload), a clean buffer takes it as a minimal
+  change outside the undo history (`Transaction.addToHistory` false), so the caret and history
+  stay. A dirty buffer keeps its text; if the device moved away from the text the edits are
+  based on, the editor shows a "changed on device" banner with Keep my changes (which rebases
+  the edits on the new device text, so the banner returns only if the device changes again) and
+  Discard my changes (which loads the device text and starts the history over). Saving
+  overwrites the device.
+- **Buffers are stored on the server per user.** The goal is to edit a file on one computer,
+  walk to another and continue exactly where you left off. `GET`, `PUT` and `DELETE
+  /api/v1/user/editor-buffers/{key}` (`http/editor_buffers.rs`, session only) keep one file per
+  buffer in the account's private `editor-buffers/` directory, named by the SHA-256 of the key
+  (`<agentId>:<path>`, sent base64url-encoded), so no key can escape the directory, and written
+  atomically. The payload is opaque to the server: CodeMirror's state JSON with history, the
+  hash of the device text it is based on, a scroll anchor, the `?line=` history entry and the
+  open files line request already applied, and a dirty flag. Buffers live outside the user state document because that is
+  replaced whole on every preference change, so buffers there would be rewritten on each
+  keystroke.
+- **Last writer wins, with versions.** Buffers belong to one user, who works from one computer
+  at a time, so there are no revision checks. Every `PUT` gets a new server-assigned version
+  (milliseconds, always above the previous one), which `PUT` and `GET` return.
+- **Writes.** The workspace writes an open buffer about a second after the last document or
+  selection change, one request at a time per key (a change during a write is written after
+  it), through a `MutationObserver`; a failed write is retried. Scrolling never schedules a
+  write: the scroll position is read from the view whenever a buffer is serialized, and on
+  `pagehide` or when the page becomes hidden every pending buffer is written at once
+  (`keepalive` when under 64 KiB), plus the shown one if only its scroll moved. That is what
+  carries the scroll position to the next computer. The version a write returns becomes the
+  buffer's `lastSeenVersion`.
+- **Reads are the only thing that may move the caret.** The stored buffer query goes stale
+  immediately, so it is read when a file is first shown in the tab (and on page load), when
+  switching back to a loaded file, and when the window is focused or becomes visible. The
+  copy is adopted only when its version is newer than `lastSeenVersion` and the buffer has no
+  unwritten changes and no write in flight. A user who typed or moved the caret before the
+  response arrived keeps their state (their next write wins), a refocus of the same window
+  gets back its own write and changes nothing, and a slow read that lands after a newer own
+  write is older than it and ignored.
+- **Closing deletes the stored copy.** Closing a file deletes its buffer (after a write still
+  in flight), and replacing the user state deletes the buffer files of files no longer in
+  `openFiles`, under the same lock as buffer writes, so a file closed in another browser does
+  not leave its buffer behind either.
+- **Closing asks only for unsaved edits.** There is no unsaved-changes prompt on navigation
+  or page unload, since edits survive both. Closing an open file (the list's X or Clear) asks for confirmation when the buffer is dirty, reading the stored copy for
+  a file not visited since the reload, and confirming discards the edits.
+- **Limits.** Undo history keeps at least 100 events per buffer (`HISTORY_DEPTH`). A stored
+  buffer may be 8 MiB (`MAX_EDITOR_BUFFER_BYTES`, enforced as the route's body limit); the
+  browser drops the undo history from a payload above 7 MiB and skips storing one that is
+  still too large. Only open files and one preview are kept in memory. Editable files are at
+  most 2 MiB.
+- **`?line=` applies once per history entry.** The applied entry is stored with the buffer,
+  so returning to a file or reloading the page restores the user's place instead of jumping
+  back to the linked line.
+- **Opening at a line without going there.** A diff row or content search result opens its
+  file with a `reveal` (`{ line, id }`) on the open file's entry in the user state, since the
+  file may have no buffer anywhere yet and the line must survive a reload or a move to
+  another computer. When the file is next shown, the workspace selects and centers the line
+  and stores the request's id as the buffer's `revealEntry`, so it is applied once on
+  whichever computer shows the file first. The entry is never cleared from the user state:
+  clearing it would be a settings write triggered by rendering, and the stored id already
+  makes it inert. A `?line=` link not applied yet wins over a pending reveal and consumes
+  it, because following a link is the newer, explicit choice.
 
 ### Browser component library and theme
 
@@ -1057,20 +1473,21 @@ native element, so behaviour and look stay in one place.
 
 ### File browser
 
-The file browser is one route, `_app/agents/$agentId/browser/$`, whose splat is the filesystem
+The file browser is one route, `_app/agents/$deviceName/browser/$`, whose splat is the filesystem
 path. Everything that distinguishes one screen from another lives in the URL or the query
 cache, so Back, reload and shared links all land on the same screen.
 
 - **URL state is a validated schema.** `browser-search.ts` defines the search keys: `view`
-  (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file) and
-  `sort` / `order` (the listing order). Each field falls back to undefined, so a stale link
-  shows the defaults. The loader depends on `view` and `diffMode`, so it prefetches the diff
-  the page is about to show; sorting and `line` stay out of the loader's dependencies and never
+  (details, sync or git), `line`, `preview`, `diffMode` (the Git comparison of a file), `rev`
+  (a browsed Git revision, see "Git revision browsing"), `gitTab` (the Git view's commits,
+  branches, tags or worktrees list) and `sort` / `order` (the listing order). Each field falls back to
+  undefined, so a stale link shows the defaults. The loader depends on `view`, `diffMode`,
+  `rev` and `gitTab`, so it prefetches the diff or list the page is about to show; sorting and `line` stay out of the loader's dependencies and never
   reload the route.
-- **Typed links, string URLs only where a string is required.** `browserRoute(agentId, path)`
-  returns the typed `to` and `params`, so the router encodes the path and checks the search
-  keys. `Agent.getBrowserUrl` remains for real string hrefs, such as links created inside the
-  diff and markdown renderers or a copied URL.
+- **Typed links only.** `browserRoute(device, path)` takes the device object (so a bare id
+  cannot be passed by mistake) and returns the typed `to` and `params`, so the router encodes
+  the name and the path and checks the search keys. Where a real string href is required,
+  such as a copied link, it comes from `router.buildLocation`.
 - **The loader identifies, the cache supplies data.** The loader resolves what lives at the
   path (directory, file, missing, unreadable) and applies redirects. The page then reads the
   live listing from the query cache, so a refresh reaches it without reloading the route.
@@ -1078,9 +1495,10 @@ cache, so Back, reload and shared links all land on the same screen.
   new file, new directory) share `PathNameDialog` and `validatePathComponent`, which rejects
   empty names, `.` and `..`, and separators. Directory creation alone opts in to nested names
   (`a/b`), because the agent creates every missing parent. `DeletePathDialog` owns what must
-  follow any delete: leave the path's own page for its parent, unselect it, unpin it and
-  refresh the agent's data, so the list, details and editor cannot drift apart. Dialogs are
-  mounted only while open, which replaces effects that reset their state.
+  follow any delete: leave the path's own page for its parent, unselect it, close it (with
+  its editor buffer) and refresh the agent's data, so the list, details and editor cannot
+  drift apart. Dialogs are mounted only while open, which replaces effects that reset their
+  state.
 - **Waiting on a transfer uses the transfers query.** Duplicate, batch copy and move, and the
   Sync view all follow transfers they started through `transfers_changed` plus a short poll on
   the same cache entry (`watchedTransfersQueryOptions`). `waitForTransfers` is an observer on
@@ -1094,6 +1512,342 @@ cache, so Back, reload and shared links all land on the same screen.
   and Vim never see it. That works with focus inside or outside the editor and needs no second
   binding in CodeMirror. Whether the find panel is open belongs to the editor view, which also
   shows it on the toolbar.
+
+### Git revision browsing
+
+A `rev` search key (a branch, tag or commit id) turns the file browser into a read-only view
+of that revision. The URL path stays the worktree path, because a revision is only another
+way of looking at the same repository location, and paths deleted since are still reachable.
+
+- **The revision travels with every link.** The browser route declares
+  `retainSearchParams(["rev", "fullWindow"])`, so breadcrumbs, listings, view tabs, diff links and even
+  links from the shell keep `rev` without each link passing it. Leaving history sets
+  `rev: undefined` explicitly, which the middleware respects.
+- **A separate loader branch and page.** With `rev` set the loader asks the agent for the
+  committed tree entry (`git/tree`) instead of `ls` and metadata, and renders
+  `RevisionFileBrowser`, which reuses the worktree's components in a read-only mode: the
+  same `FileList` and toolbar (`readOnly`), the same details card pieces
+  (`RevisionDetailView` fills them with what Git records), the editor (`FileEditView` with
+  `revision`, fed by `git/blob`) and, for `view=git`, the commit's own changes against its
+  first parent (`git/commit-diff`). Every action that would write is shown disabled, since
+  it would act on the worktree rather than the revision; selecting and downloading read the
+  commit instead (see "Git history downloads and copies"). Git records no owner, group or
+  modification time, so those show as absent.
+- **Commit diffs follow the browsed path.** On a subdirectory or file the commit diff shows
+  only that subtree or file, with a link to the repository root for the whole commit, like
+  the worktree Git view. A path the commit deleted has no tree at the commit, so the loader
+  (`browser-revision-loader.ts`) falls back to the commit diff and shows the deletion.
+- **Moving revisions are resolved once per navigation.** The tree query is refetched on
+  every navigation because a branch can move; committed content and commit diffs are then
+  fetched and cached by the commit id the tree resolved, so cached text can never belong to
+  an older commit than the banner shows. Links keep the revision as typed, so they follow
+  the branch.
+- **Nested repositories fall back outwards.** The innermost repository containing the path
+  resolves the revision first, so a submodule's own history is browsable. A revision it
+  does not know is resolved in the enclosing repository, which is how opening a checked-out
+  submodule while browsing a superproject commit shows the gitlink that commit recorded.
+- **A banner under the breadcrumbs** names the revision and commit and links back to the
+  working tree, so committed content is never mistaken for the files on disk.
+- **The shell sees no worktree entry.** `useBrowserLocation` reports a revision page with a
+  null worktree `entry` and a separate `revision` field, so terminals and search do not treat
+  a committed path as existing on disk, while the top bar still shows the device tabs with
+  Files active. The top bar's Files tab, which opens the device home, leaves history.
+- **Viewed content is bounded, downloaded content is streamed.** The editor reads committed
+  text as bounded JSON (its 2 MiB limit), because gix inflates a whole object to read it.
+  Downloads and copies use a separate streaming reader instead (see "Git history
+  downloads and copies").
+
+### Git history, branch and tag lists
+
+The Git view is one card (`GitView`) in the worktree and at a revision alike. Its header
+names the repository as a breadcrumb that starts at the repository root, so a subdirectory
+or file always shows which repository it belongs to and is one click from the whole
+repository, followed by the root's absolute path and a badge for what is checked out (the
+branch and HEAD commit, a detached HEAD, or the browsed revision). Below it a segmented
+switch picks the panel: Changes (the worktree status, file diff or commit diff), Commits,
+Branches, Tags and Worktrees. The switch is the `gitTab` search key, so a panel survives reload and
+Back. It is deliberately not a second row of underlined view tabs, so it reads as part of
+the Git view rather than another level of page navigation.
+
+- **HEAD comes with the context.** `git/context` reports the checked-out branch and HEAD
+  commit next to the repository root, because every worktree Git page renders the header
+  and the context is already loaded on navigation; reading HEAD costs no status walk.
+- **Panels share one vocabulary.** Changed files carry the `git status --short` letter as a
+  colored badge (`git-parts.tsx`), whether they come from worktree status or a commit, and
+  every panel opens with the same summary bar instead of a second card header.
+- **Diffs render as React rows.** Every patch (worktree, staged, commit and Sync diffs) goes
+  through `UnifiedDiff`. `utils/diff-parse.ts` reads the unified diff text the agent and
+  server write with the `similar` crate (bare `---`/`+++` headers, no `diff --git`) and pairs
+  similar deleted and inserted lines into one modified row with inline word and character
+  changes, ported from Fredrika Lindh's MIT-licensed shadcn diff viewer. `diff-view.tsx`
+  renders the rows, highlighting each hunk side as one block so multi-line strings and
+  comments keep their colours, then cutting the highlighted line at the inline segments.
+  Highlighting (`utils/code-highlight.ts`, shared with Markdown fences) parses with the same
+  CodeMirror/Lezer grammars as the editor and renders React nodes with `tok-*` classes and a
+  `data-token` kind, so no highlighter HTML is injected. Grammars the editor bundles colour
+  at once; others come from `@codemirror/language-data`, render plain first and colour when
+  their grammar has loaded.
+  File names and per-line Open links are router `Link`s, and parsing and highlighting are
+  memoized on the patch text so re-renders do not redo them. When the server marks a patch
+  `full_context` (Git diffs from the agent, Sync diffs from the server, see the agent's
+  `git/` budgets), `diff-parse.ts` folds the whole-file hunk back to 3 lines of context.
+  Changed lines are paired within each folded hunk, so revealing context never re-pairs edits.
+  Each gap keeps its rows as an expandable `SkipBlock`. `diff-view.tsx` reveals 20 lines
+  at a time, or the whole gap, and a per-file toggle shows the whole file. All of this
+  happens in the browser without another request. Reveals are keyed on the file's hunk
+  layout, so switching the inline layout keeps them. Highlighting covers every row the
+  patch carries, so a folded line keeps the colours of a string or comment opened above it.
+  Single-diff views toggle the whole file in the patch's own header; diff lists put the
+  toggle in each file's sticky header. Whether edited lines pair into
+  inline rows or stay separate -/+ rows is chosen per file: single-diff views (a file's Git
+  diff, Sync) switch the browser-wide preference (`inlineDiffChangesAtom`, stored in
+  localStorage) from their bar, and diff lists (worktree changes, commits) put a switch in
+  every file header whose choice lives in memory for that list and defaults to the
+  preference. Line wrapping stays one user-wide setting in every diff view's bar. Diff lists
+  can be narrowed by file name (`utils/file-name-filter.ts`): every word must appear in the
+  repository-relative path, a `-word` must not, and quotes keep a word literal (`"-test"`).
+  The filter is client-side over the listed files, so it never refetches status or diffs.
+
+- **History follows the browsed path.** `git/log` lists the commits that changed the path,
+  newest first by commit time, starting at HEAD in the worktree or at the browsed commit
+  under `rev`. A commit counts when the path's tree entry (mode and object) differs from
+  every parent, the `--full-history` rule without merge simplification, so ordinary
+  commits that touched the path are listed and a merge only when it resolved the path into
+  something neither side had. Side branches are not pruned, which keeps every page a plain
+  filter of one walk. A shallow clone's boundary commits compare as roots. The walk caches
+  path states only for its frontier, not for history, and stops when the request is dropped.
+- **Branches and tags are repository-wide.** `git/branches` (local and remote-tracking) and
+  `git/tags` list refs most recently committed first, or by name with `sort=name`, peeling
+  annotated tags with the same header-checked helper as revisions, so tags naming trees or
+  blobs and symbolic refs such as `origin/HEAD` are skipped. Names compare naturally (digit
+  runs by value, letters without case) on the full ref name, so `v1.10` follows `v1.9` and
+  local branches lead remote-tracking ones. The agent sorts because pages are offsets into
+  one order, which the browser could not rebuild from a partial list; the order is the
+  `refSort` search key, shared by both lists. The default branch leads the branches in
+  either order, marked `is_default`: the branch the default remote's `HEAD` names (its
+  local branch when one exists), else `init.defaultBranch`, `main` or `master`. It is part
+  of the heap order rather than a later insert, so offsets stay consistent. Either order visits every ref, but at most
+  `skip + limit` candidates are held in a heap, so a huge tag namespace costs reading, not
+  memory; the name order skips reading commit times.
+- **Worktrees show where work is happening.** `git/worktrees` lists the main checkout and
+  every linked one (`git worktree list`) from the main repository, so the list is the same
+  whichever checkout the request came from, and marks the one containing the browsed path as
+  current. Each row carries its branch (or a detached HEAD), its HEAD commit, the lock and a
+  `missing` flag for a registration whose directory is gone. The main checkout always leads,
+  then checkouts by their latest activity: the newer of the HEAD commit's committer time and
+  the modification time of the checkout's index file, which Git rewrites on add, commit,
+  checkout and most status runs, so a checkout someone works in counts as recent even on an
+  old branch. Missing checkouts trail. The list reads only HEAD and the index file's time,
+  never the checkout's files, so it answers quickly; it is bounded to 200 linked worktrees
+  and not paged. Like refs it is listed at the resolved repository root and refetched on
+  navigation.
+- **Worktree changes load per row.** Counting uncommitted work walks every file of a
+  checkout, so it is a separate request (`git/worktree-status`) that each row of the list
+  makes for itself once the list has rendered. It splits tracked changes from untracked
+  files, since `git stash` and `git worktree remove` treat the two differently, and stops
+  counting at 1000 changes, reported as lower bounds past that. A browser asks for every
+  row at once, and each gix walk already uses every core, so the agent queues the walks
+  behind a process-wide semaphore (two at a time) instead of seeking between checkouts. A
+  queued request waits before its blocking walk starts, so dropping it costs nothing, and
+  the server gives the call a longer deadline than other Git calls to cover the wait.
+- **Pages are offsets, not cursors.** Each list returns up to 100 rows (`GitPage`, at most
+  500 per request and an offset of at most a million) plus `has_more`, and the UI's
+  `useInfiniteQuery` asks for the next offset from a "Load more" button. A time-ordered
+  walk over a DAG has no single-commit resume point, so every page walks again from the
+  start like `git log --skip`; the agent stays stateless between requests and each reply
+  is a small control frame.
+- **A commit steps to its neighbours.** The commit view links to the previous and next
+  commit in the same path-filtered history (`git/commit-neighbors`), so changes can be paged
+  through without returning to the list. Previous is the newest ancestor that changed the
+  path. Git records parents and never children, so "next" only means something relative to
+  a tip: the agent walks from HEAD down to the commit, remembers the matching commits it
+  passed (ids only), and returns the oldest one that contains the commit. That check skips
+  side-branch commits that are newer but not descendants. The walk gives up once it is older
+  than the commit, so a commit HEAD does not contain has no next commit, and the walk never
+  covers the whole history. Neighbours are a separate request from the diff because they
+  move with HEAD, while a commit's diff is cached for good, and because the walk from HEAD
+  grows with the commit's age, so it must not hold up the patches.
+- **Links open revisions.** A commit links to the same path at `view=git&rev=<id>`, showing
+  that commit's changes scoped to the path. A branch or tag links to the path at
+  `rev=<full ref name>`, because a short name can be ambiguous between a tag and a branch;
+  the banner drops the `refs/heads/`, `refs/remotes/` and `refs/tags/` prefix for display.
+- **Caching matches revision browsing.** History is always keyed by a commit id: the
+  browsed commit at a revision, and in the worktree the HEAD commit from the Git context the
+  loader refetches on navigation. Every page of one history then walks the same commits even
+  if HEAD moves between pages, and a moved HEAD is simply a new query. Refs move, so the
+  loader refetches them on navigation and the refresh triggers invalidate them with the rest
+  of the agent's Git queries. Refs are listed at the repository root the page resolved, not at
+  the browsed path, so a submodule browsed at a superproject commit lists the superproject's
+  refs that its header names.
+
+### Git history downloads and copies
+
+A file or directory seen while browsing history can be downloaded, and selected and copied
+like a working file: back onto its own working path to restore it, elsewhere on the same
+device, or to another device.
+
+- **Two agent commands.** `GitRevisionStat` resolves a path at a revision to the commit id
+  and the entry kind (file with its header size and executable bit, directory, symlink,
+  submodule), without inflating anything. Given a same-agent `replace_target`, it also
+  reports whether replacing that path would remove the repository's worktree. `GitDownload` is an output stream like
+  `RawDownload`: a file's bytes, or a plain tar of a directory. The server stats first and
+  then streams the commit id it got, so a branch that moves between the two cannot mix
+  versions, and it refuses symlinks and submodules, which have no content to write.
+- **Blobs stream from the object store.** gix only reads whole objects, which would put a
+  large committed file into memory at once. `commands/git/export.rs` therefore inflates
+  loose objects and undeltified pack entries itself, incrementally with `flate2`, after
+  locating them in the object directory, its alternates and the pack indexes (opened once
+  per export). Git stores files above `core.bigFileThreshold` undeltified, so large files
+  take this path. A deltified blob needs its base in memory to apply the delta anyway, so it
+  is read through gix, and refused above 64 MiB with an explanation. Its bases and
+  intermediates can be far larger than the blob itself, so the repository is reopened for
+  these reads with gix's `gitoxide.objects.allocLimit`, which caps every allocation of the
+  rebuild instead of only the result. The reopened handle preserves trust settings and
+  disables object environment overrides, so an inherited `GIT_ALLOC_LIMIT` cannot raise the
+  export's ceiling. Every blob reader
+  checks that it yields exactly the header's size, so a truncated object fails the stream
+  instead of misaligning the tar members after it.
+- **Directory archives are deterministic and copy-safe.** The tree is walked depth first in
+  Git's stored order, one blob at a time, with the commit time on every member (Git records
+  no others). Symlinks are left out because copy destinations only extract files and
+  directories, a submodule becomes an empty directory as in a fresh clone, and names that
+  could escape the archive (`..`, separators) are skipped. The export runs on a blocking
+  thread behind the same channel writer as worktree tar downloads, buffered to one stream
+  chunk per frame, and stops at the next entry when the download is canceled.
+- **Downloads.** `GET /api/v1/agents/{agent}/git/download/{*path}?rev=` streams a file as
+  an attachment named after it (with an RFC 6266 `filename*`, shared with worktree
+  downloads, since names may hold quotes, newlines or non-ASCII), or a directory as `<name>.tar.gz` rooted at the directory,
+  gzipped at the REST edge exactly like worktree directory downloads. Both are always
+  attachments, so committed content is never shown inline as if it were the working file,
+  and offer no ranges, since there is no source identity to resume against.
+  Download producers, router stream leases and HTTP consumers preserve `CommandError`
+  kinds through the shared stream path. Before a body starts, `ApiError` maps them to HTTP
+  statuses; afterward a failure aborts the body. Allocation-limit refusals are invalid input,
+  while corrupt or missing Git objects remain internal failures.
+- **Copies.** `POST /api/v1/copy` takes `source_rev`. `TransferService::start_revision_copy`
+  stats the source and starts a copy whose source command is `GitDownload` (without the
+  root, so the destination is the directory itself). It always takes the streamed copy
+  path, even when source and destination are the same agent, because the agent-local copy
+  commands read the filesystem; the agent is then both ends of one forwarder. History has
+  no inode, so these copies have no partials, resume or pause, and they are never moves.
+  Copying a revision onto its own working path is allowed, since that is how a file is
+  restored, and `on_existing` still decides whether it may replace the working file.
+  Replacing a directory that contains the repository root is refused: a committed tree has
+  no `.git`, so it would delete the repository. Merge is the way to restore a whole tree.
+  The agent decides this in `GitRevisionStat`, resolving the destination through its
+  filesystem, because a symlinked parent or `..` names the same directory under a path a
+  lexical check on the server would not recognize. A final symlink can be replaced safely:
+  publication renames the link entry itself and leaves its target intact. Missing components
+  are not normalized away, since uploads require existing parents. A file Git records as
+  `100755` is uploaded with `RawUpload::executable`. New files request execute permissions
+  when staging is created, letting the OS apply umask and inherited ACLs; a replaced file
+  keeps its own permissions as with any upload.
+- **Selections remember the commit.** A selected history item stores the resolved commit id
+  (never the typed branch or tag) next to its path, and its key
+  (`<agent>@<commit>:<path>`) keeps it apart from the working file and other versions of
+  it. While the selection holds one, Move and Delete are hidden and Create archive is
+  disabled, the copy preflight is skipped for it (there is no partial to find), and it
+  never counts as landing on itself. Links in the selected items pane set `rev` explicitly,
+  so a history item opens at its commit and a working item leaves history.
+  Because one file can be selected at several commits, the transfer dialog also renames
+  every selected item whose name repeats an earlier one, so two versions never land on one
+  destination path.
+
+## SSH device keys
+
+An SSH device can log in with an ed25519 key that redoor creates for that device only,
+instead of the server user's own keys or a password stored in plaintext in `config.toml`.
+Such a key works for exactly one device, can be revoked on its own, cannot be replayed to
+an impostor host and is restricted in `authorized_keys`.
+
+- **Storage.** `<data_dir>/ssh/<device-id>/` holds `known_hosts` (the pinned host key),
+  `id_ed25519` (the current private key) and, only while a setup or rotation runs,
+  `id_ed25519.next` (the staged key). There is no `.pub` file: the public key is derived
+  from the private key on every load, so switching keys is one atomic
+  `rename(id_ed25519.next, id_ed25519)` and a reader always sees a complete old or new key.
+  The directory is 0700 and every file 0600; files are written with their final mode and
+  renamed into place. Everything is keyed by the permanent device id, so a rename or a
+  reused name cannot hand a key to another device. The `[[agents]]` entry only records
+  `managed_ssh_key = true` (omitted when false); it never holds key material, and it never
+  has both `managed_ssh_key` and `password`. Keys are generated in-process (`ssh-key`
+  crate). In this phase the private key is not encrypted at rest (see
+  `plans/ssh-key-vault.md`).
+- **Policies, each option emitted once.** OpenSSH keeps the first value of an option, so
+  defaults are produced by the policies instead of being written unconditionally:
+  - `HostKeyPolicy::TrustOnFirstUse` (`accept-new`, as before) for devices without a pin,
+    `Probe` for recording the presented key, `Pinned` for devices with a pin, including
+    after their managed login key is removed. `Probe` and `Pinned` use only the device's
+    own `known_hosts` (global file, `KnownHostsCommand` and DNS off, `UpdateHostKeys=no`,
+    `NoHostAuthenticationForLocalhost=no`) and look the key up by
+    `HostKeyAlias=<device-id>`, so the pin survives a target or port change that still
+    reaches the same machine. An existing but malformed pin fails closed instead of
+    restoring trust-on-first-use.
+  - `AuthPolicy::Default` (the server user's keys, `BatchMode`), `Password` (askpass),
+    `NoAuth` (probe) and `ManagedKey` (only the managed key, no agent, no password or
+    keyboard-interactive fallback).
+- **Only the managed key is offered.** `IdentityFile`, forwards and environment settings
+  accumulate across config files and cannot be reset, so managed-key connections run with
+  `-F none`. Their routing comes from `ssh -G`: a safelist of routing and transport
+  options is copied, and a `ProxyJump` becomes an explicit `ProxyCommand=ssh -J … -W …` so
+  jump hosts still use the user's config. The generated proxy command shell-quotes the
+  resolved host and port instead of `%h`/`%p` tokens, whose later substitution could break
+  quoting on older SSH clients. Both config resolution and connections terminate local
+  option parsing with `--` before the device target. Other connections read the config
+  files as before.
+- **Enrollment** (`POST /api/v1/agents/{agent}/ssh-key`, also used for rotation):
+  1. The host key is probed without sending any credential
+     (`GET /api/v1/agents/{agent}/ssh-host-key`), confirmed by the user and pinned.
+  2. First enrollment tries the stored password, the server user's keys, then a typed
+     password. Rotation uses only the current managed key and fails if it is revoked or
+     missing; it never falls back to the server user's identities. A typed password lives
+     only in memory (zeroized) for the request and goes to ssh through
+     askpass; it is never stored or logged.
+  3. A key is generated, written to `id_ed25519.next` (replacing a stale one from an
+     interrupted run) and installed by a script over stdin that atomically rewrites
+     `~/.ssh/authorized_keys`, keeping every other line, dropping this device's lines whose
+     key fingerprint is not in the keep list, and refusing a non-regular file. The line is
+     `restrict,port-forwarding <key> redoor:<device-id>:<SHA256 fingerprint>`. The awk
+     filter gets the marker and keep list through `ENVIRON` (no escape processing) and
+     compares fingerprints only literally (`index`, `==`), because they contain `+`, `/`
+     and `=`; it behaves the same in GNU, BSD and busybox awk.
+  4. The key is verified with only that key, against the pin, with a dummy `-R 0:…`
+     forward like the agent's, so hosts that refuse forwarding fail here. On failure the
+     line is removed again with the bootstrap credential and the staged file deleted.
+  5. Commit of a first key: under the config edit lock, `.next` is renamed to `id_ed25519`
+     (and the directory synced), then `managed_ssh_key = true` is written and `password`
+     removed, and the agent comes back `Stopped` like after any edit. The rename comes
+     first so a crash never leaves a config that claims a missing key, only an unused key
+     file that the next setup overwrites. If the config write fails, the key file is
+     deleted and the remote line rolled back. A runtime registration failure after
+     persistence is reported without rolling back the now-referenced key.
+  6. Commit of a rotation (keep list during install: current and new key): only the
+     rename, with no config write, so a connected agent is not stopped; its ssh session
+     already authenticated, and every agent start loads the key file again. Then the old
+     line is removed using the new key.
+- **Removal** (`DELETE …/ssh-key`) first clears the config, then removes every
+  `redoor:<device-id>:` line using the old key and deletes it locally, reporting whether
+  the device was reached. Failed persistence leaves the remote key intact. Device deletion
+  likewise validates route ownership and persists deletion before revoking the remote key.
+  The pin stays after key removal and still protects subsequent password or default-key
+  logins. Deleting the device or changing its target deletes the whole device directory;
+  changing the username deletes the keys but keeps the pin.
+- **Host key changes** fail the connection (`StrictHostKeyChecking=yes`). The
+  `connection_issue` names the pinned and presented fingerprints, and only an explicit
+  re-pin (`POST …/ssh-host-key/pin` with the confirmed fingerprint) replaces the pin.
+- **Concurrency.** Key operations and device edits of one device are serialized by a
+  per-device busy set; a second request gets 409. The config edit lock is held only for the
+  final commit (rename and config write, or the rotation's rename), because the flow
+  includes network round trips. Mutating HTTP handlers run
+  their operation in an owned Tokio task, so disconnecting a client does not release the
+  busy guard or interrupt commit, rollback, or cleanup. Remote file rewrites are serialized
+  across devices on this server; separate servers rewriting the same account can still race.
+- **UI.** A dedicated key is the default for new SSH devices. The add form then creates the
+  device without a password and opens `SshKeySetupDialog` (host key confirmation, a
+  password used once, enrollment), so the typed password only ever travels with the
+  enroll request. Turning the option off brings back the server-keys or stored-password
+  choice. The device's configuration page has an SSH key section for set up, rotate,
+  remove and re-pin. An edit that changes the username or target warns that the key is
+  dropped and can remove the key from the device first, while it still logs in.
 
 ## Authentication and trust
 
@@ -1136,6 +1890,12 @@ credential only works on its own endpoints:
 - **The agent token** is one secret shared by all agents and checked during the websocket
   upgrade. It proves "this is an agent of this server", not which agent: the agent id in
   `hello` is self-reported. Agents are therefore only partly trusted.
+- **SSH device credentials** live in two places, both readable by the server's OS user
+  and root: an optional plaintext `password` in `config.toml`, or a managed key under
+  `<data_dir>/ssh/<device-id>/` (0600, unencrypted for now). Anyone who can read the data
+  dir or a copy of it can log in to the device with that key; the exposure is limited to
+  that device and revocable by removing the key. The SSH key routes are session-only,
+  because they handle passwords and change what the server can log in to.
 - **What agents are trusted with.** An agent acts as its own OS user. A local managed agent
   runs as the server's user, an SSH agent as the SSH login, and a standalone agent as
   whoever started it. The server trusts the content an agent returns (listings, file data,
@@ -1146,13 +1906,16 @@ credential only works on its own endpoints:
     count.
   - Credit grants are clamped, and messages are capped at 32 MiB, so a peer cannot force
     unbounded buffering.
-  - An agent cannot take over the name of a live agent.
+  - An agent cannot take over the name of a live or configured device, and an id in a
+    `hello` must be in the device id format.
   - The server signs resume manifests and checks them against the agent that returned them,
     and it compares both agents' hashes itself before reusing a prefix.
   - The partial signing key, the sessions and the access token verifiers exist only on the
     server.
   - Agent ids are self-reported, so a token scoped to device X trusts that no other holder
-    of the agent token registers as X. This is the same limit every agent check has.
+    of the agent token registers as X. This is the same limit every agent check has, and
+    the duplicate-id detection only reacts to the behavior of cloned agents. Proper
+    per-agent credentials are a separate topic.
 - **Browser protections.**
   - The cookie is `HttpOnly` and `SameSite=Lax`.
   - JSON endpoints require `Content-Type: application/json`.
@@ -1169,29 +1932,31 @@ device scope:
 
 | Permission | Grants |
 |---|---|
-| `files:read` | list, stat, read and download, search, directory size, git status and diff, trash listing, one-time download links |
+| `files:read` | list, stat, read and download, search, directory size, git status, diffs and revision browsing, trash listing, one-time download links |
 | `files:write` | upload, edit, mkdir, chmod and chown, trash restore, copy destination |
 | `files:delete` | trash, permanent delete, empty trash, move source removal (rename needs write and delete) |
 | `commands:execute` | exec, exec cancel, native open. High trust: commands run as the agent's OS user and bypass every file permission |
 | `agents:manage` | start, stop, retry, restart and upgrade an agent |
 
 The device scope is `All` (every device, including devices added later) or `Only` a list of
-device ids. Listing devices needs no permission; it is filtered to the scope.
+device ids. Names in a create or edit request are resolved and stored as ids, so the scope
+never follows a name to another device. Listing devices needs no permission; it is filtered
+to the scope.
 
 - **One decision function.** `Principal::require(permissions, device)` checks the scope and
   the permissions. REST routes, REST handlers and MCP tools all call it, so REST and MCP
   cannot drift apart.
 - **One route table.** `access/routes.rs` maps each `(method, route template)` to an
   `Access`: `Public`, `SessionOnly`, `AnyPrincipal` (the handler filters by scope),
-  `Device(permissions)` (checked against the `{agent}` path parameter) or `Handler` (the
-  devices are in the body, so the handler calls `require`: copy, move, diff, partials and
-  transfer cancel or pause). The `access_control` middleware is attached with
+  `Device(permissions)` (checked against the id the `{agent}` path parameter resolves to) or
+  `Handler` (the devices are in the body, so the handler resolves them and calls `require`:
+  copy, move, diff, partials and transfer cancel or pause). The `access_control` middleware is attached with
   `Router::layer`, which runs after routing, so it sees the matched template.
 - **Default deny.** A route missing from the table is session-only, so a new route is not
   reachable with a token until someone classifies it.
 - **Session-only routes.** Server and agent configuration, creating SSH or local agents,
-  restart, log levels, terminals, log streams, the UI websocket, user state and token
-  management are never grantable. A token could otherwise widen its own access, for
+  restart, log levels, terminals, log streams, the UI websocket, user state, editor buffers
+  and token management are never grantable. A token could otherwise widen its own access, for
   example by adding a local agent or minting a broader token. The exception is
   `/api/v1/tokens/current`, where a token reads or deletes itself.
 - **Limit of the model.** Permissions describe what a token may do through redoor, not

@@ -1,7 +1,9 @@
+import type { ReactNode } from "react";
 import { CalendarClock, GitCommitHorizontal, Hammer, Tag } from "lucide-react";
 
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { ServerBuildMode } from "#bindings/ServerBuildMode";
+import { CopyableGitRef } from "./copyable-git-ref";
 import { Tooltip } from "./tooltip";
 
 /** Human-readable cargo profile name. */
@@ -125,6 +127,8 @@ export function BinaryIdentityFields(props: {
     binary: BinaryIdentity;
     /** Optional class applied to each field separator row. */
     rowClassName?: string;
+    /** Control shown beside the version, such as the server's update button. */
+    versionAction?: ReactNode;
 }) {
     const rowClass =
         props.rowClassName ??
@@ -138,12 +142,13 @@ export function BinaryIdentityFields(props: {
                     <h2 className="text-sm font-medium text-slate-400">
                         Version
                     </h2>
-                    <p className="mt-1">
+                    <div className="mt-1 flex flex-wrap items-center gap-3">
                         <VersionValue
                             version={props.binary.version}
                             versionDirty={props.binary.version_dirty}
                         />
-                    </p>
+                        {props.versionAction}
+                    </div>
                 </div>
             </div>
             <div className={rowClass}>
@@ -153,10 +158,24 @@ export function BinaryIdentityFields(props: {
                         Git revision
                     </h2>
                     <p className="mt-1">
-                        <RevValue
-                            gitRev={props.binary.git_rev}
-                            gitDirty={props.binary.git_dirty}
-                        />
+                        {/* Only a real hash is worth copying; builds without Git say so in words. */}
+                        {gitCommitUrl(props.binary.git_rev) === null ? (
+                            <RevValue
+                                gitRev={props.binary.git_rev}
+                                gitDirty={props.binary.git_dirty}
+                            />
+                        ) : (
+                            <CopyableGitRef
+                                kind="commit"
+                                value={props.binary.git_rev}
+                                className="text-slate-400"
+                            >
+                                <RevValue
+                                    gitRev={props.binary.git_rev}
+                                    gitDirty={props.binary.git_dirty}
+                                />
+                            </CopyableGitRef>
+                        )}
                     </p>
                 </div>
             </div>

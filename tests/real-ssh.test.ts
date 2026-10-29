@@ -23,14 +23,17 @@ import {
     waitForPort,
     waitForValue,
 } from "./test-utils";
+import {
+    SSH_PASSWORD_USER,
+    SSH_TEST_HOST,
+    SSH_TEST_USER,
+    cleanupSshTest,
+    shellQuote,
+    sshCommandWithPassword,
+    sshTestCommand,
+} from "./ssh-test-utils";
 
 const execFileAsync = promisify(execFile);
-
-const SSH_TEST_HOST = "redoor-ssh-test";
-
-const SSH_TEST_USER = "redoor";
-
-const SSH_PASSWORD_USER = "redoor-password";
 
 const SSH_ROOT_USER = "root";
 
@@ -48,11 +51,6 @@ const relayPidMetadataSchema: z.ZodType<RelayPidMetadata> = z.object({
     agent_app_name: z.string(),
 });
 
-/** Quotes one controlled value for the remote POSIX shell used by OpenSSH. */
-function shellQuote(value: string): string {
-    return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 /** Runs a finite relay lifecycle command inside the test's isolated local namespace. */
 async function relayCommand(options: {
     home: string;
@@ -69,78 +67,20 @@ async function relayCommand(options: {
     });
 }
 
-/** Runs a command on the SSH test host as the required redoor user. */
-async function sshTestCommand(command: string): Promise<void> {
-    await execFileAsync("ssh", ["-l", SSH_TEST_USER, SSH_TEST_HOST, command]);
-}
-
 /** Runs a command as the password-only user so cleanup can reach that user's home. */
-async function sshPasswordTestCommand(command: string): Promise<void> {
-    await sshCommandWithPassword(SSH_PASSWORD_USER, command);
+async function sshPasswordTestCommand(command: string): Promise<string> {
+    return sshCommandWithPassword(SSH_PASSWORD_USER, command);
 }
 
 /** Runs a command as root for ownership behavior that cannot be exercised by local non-root agents. */
-async function sshRootTestCommand(command: string): Promise<void> {
-    await sshCommandWithPassword(SSH_ROOT_USER, command);
-}
-
-/** Uses the shared fixture password without exposing it in process arguments or test output. */
-async function sshCommandWithPassword(
-    username: string,
-    command: string,
-): Promise<void> {
-    const password = process.env.REDOOR_SSH_TEST_PASSWORD;
-
-    if (password === undefined || password === "") {
-        throw new Error(
-            "REDOOR_SSH_TEST_PASSWORD is required for password SSH cleanup",
-        );
-    }
-
-    const askpassDir = mkdtempSync(join(tmpdir(), "redoor-ssh-askpass-"));
-    const askpassPath = join(askpassDir, "askpass");
-    writeFileSync(
-        askpassPath,
-        `#!/bin/sh
-printf '%s\n' ${shellQuote(password)}
-`,
-        { mode: 0o700 },
-    );
-
-    try {
-        await execFileAsync(
-            "ssh",
-            ["-l", username, SSH_TEST_HOST, command],
-            {
-                env: {
-                    ...process.env,
-                    DISPLAY: process.env.DISPLAY ?? ":0",
-                    SSH_ASKPASS: askpassPath,
-                    SSH_ASKPASS_REQUIRE: "force",
-                },
-            },
-        );
-    } finally {
-        rmSync(askpassDir, { recursive: true, force: true });
-    }
-}
-
-/** Stops any orphaned remote agent and removes only this test's isolated files. */
-async function cleanupSshTest(options: {
-    remoteRoot: string;
-    agentAppNames: string[];
-    sshCommand?: (command: string) => Promise<void>;
-}): Promise<void> {
-    const run = options.sshCommand ?? sshTestCommand;
-    const appNames = options.agentAppNames.map(shellQuote).join(" ");
-    const command = `for app in ${appNames}; do pid_file="$HOME/.local/share/$app/agent.pid"; if [ -f "$pid_file" ]; then pid=$(tr -d '[:space:]' < "$pid_file"); case "$pid" in *[!0-9]*|'') ;; *) kill "$pid" 2>/dev/null || true ;; esac; fi; rm -rf "$HOME/.local/share/$app"; done; rm -rf ${shellQuote(options.remoteRoot)}`;
-    await run(command);
+async function sshRootTestCommand(command: string): Promise<string> {
+    return sshCommandWithPassword(SSH_ROOT_USER, command);
 }
 
 /** Kills one remote relay agent so the owning local SSH process must reconnect it. */
 async function killRemoteAgent(agentAppName: string): Promise<void> {
     const appName = shellQuote(agentAppName);
-    const command = `app=${appName}; pid_file="$HOME/.local/share/$app/agent.pid"; pid=$(tr -d '[:space:]' < "$pid_file"); kill -KILL "$pid"`;
+    const command = `app=${appName}; pid_file="$HOME/.local/share/$app/agent.pid"; pid=$(sed -n 's/^ *"pid": *\\([0-9][0-9]*\\).*/\\1/p' "$pid_file"); kill -KILL "$pid"`;
     await sshTestCommand(command);
 }
 
@@ -964,6 +904,8 @@ log = "${agentLogPath}"
         await connected.upload(
             `${parentPath}/root-file.txt`,
             new File(["replacement"], "root-file.txt"),
+            // Uploads refuse to overwrite unless asked, and this replacement is intentional.
+            { on_existing: "override" },
         );
         const listing = await connected.ls(parentPath);
 

@@ -5,16 +5,19 @@ use crate::actors::router::{
     StartCopyRequest,
 };
 use crate::http::{
-    agent_client::{AgentClient, MoveMetadata},
+    agent_client::{AgentClient, GitRevisionStat, MoveMetadata},
     agent_helpers::require_absolute_path,
     error::ApiError,
 };
 use redoor_core::{log, partials::SEGMENT_SIZE};
 use redoor_protocol::{
-    api::transfers::{CopyEndpoint, CopyExistingMode, ResumeMode, TransferProgressEntry},
+    api::{
+        git::revision::validate_revision,
+        transfers::{CopyEndpoint, CopyExistingMode, ResumeMode, TransferProgressEntry},
+    },
     ids::TransferId,
     wire::{
-        command::MoveSourceIdentity,
+        command::{GitRevisionStatKind, MoveSourceIdentity},
         log::Level,
         partials::{
             PartialAuthorization, PartialIdentity, PartialOperation, PartialTransfer, SignedPartial,
@@ -35,6 +38,15 @@ pub(crate) struct CopySpec {
     /// Whether the caller needs the terminal outcome after public history may be pruned (MCP
     /// operation records); REST clients poll the progress API instead.
     pub(crate) observe_terminal: bool,
+}
+
+/// One requested copy whose source is read from Git history.
+pub(crate) struct RevisionCopySpec {
+    pub(crate) source: CopyEndpoint,
+    /// A commit id, branch, tag or other revision; resolved to a commit before streaming.
+    pub(crate) rev: String,
+    pub(crate) dest: CopyEndpoint,
+    pub(crate) on_existing: CopyExistingMode,
 }
 
 /// An admitted copy or move.
@@ -146,6 +158,8 @@ impl TransferService {
                         operation: spec.op,
                         source_identity: Some(source.identity),
                         partial,
+                        source_rev: None,
+                        executable: false,
                     },
                     resume_verification,
                     terminal,
@@ -168,6 +182,90 @@ impl TransferService {
             transfer_id,
             terminal: terminal_receiver,
         })
+    }
+
+    /// Validates the endpoints, resolves the revision and starts a copy from Git history.
+    ///
+    /// The revision is resolved to a commit once, here, and the transfer streams that commit,
+    /// so a branch that moves meanwhile cannot change what arrives. History has no inode to
+    /// resume from or delete, so these copies are never resumable and never moves. Copying a
+    /// revision onto its own working path is allowed, since that is how a file is restored.
+    pub(crate) async fn start_revision_copy(
+        &self,
+        spec: RevisionCopySpec,
+    ) -> Result<TransferId, ApiError> {
+        let source_path = require_absolute_path(spec.source.path.clone())?;
+        let dest_path = require_absolute_path(spec.dest.path.clone())?;
+        validate_revision(&spec.rev).map_err(ApiError::bad_request)?;
+        // Only a replacement on the repository's own agent can delete its `.git`.
+        let replace_target = (spec.on_existing == CopyExistingMode::Override
+            && spec.dest.agent == spec.source.agent)
+            .then(|| dest_path.clone());
+        let stat = self
+            .agents
+            .call(
+                &spec.source.agent,
+                GitRevisionStat {
+                    path: source_path.clone(),
+                    rev: spec.rev.clone(),
+                    replace_target,
+                },
+            )
+            .await?;
+        let (total_bytes, content_kind, executable) = match stat.kind {
+            GitRevisionStatKind::File { size, executable } => {
+                (size, CopyContentKind::RawFile, executable)
+            }
+            // Archive size is unknown until the agent walks the tree.
+            GitRevisionStatKind::Directory => (0, CopyContentKind::TarDirectory, false),
+            GitRevisionStatKind::Symlink | GitRevisionStatKind::Submodule => {
+                return Err(ApiError::bad_request(
+                    "Only files and directories can be copied from a Git revision",
+                ));
+            }
+        };
+        if stat.replaces_repository {
+            return Err(ApiError::bad_request(
+                "Replacing this directory would delete the repository's .git directory, which \
+a committed tree does not contain; merge into it instead",
+            ));
+        }
+        let transfer_id = self
+            .router
+            .request(|reply| {
+                RouterMsg::StartCopyRest(StartCopyRequest {
+                    target: CopyTarget {
+                        source_agent_id: spec.source.agent.clone(),
+                        source_path: source_path.clone(),
+                        dest_agent_id: spec.dest.agent.clone(),
+                        dest_path: dest_path.clone(),
+                        total_bytes,
+                        content_kind,
+                        on_existing: spec.on_existing,
+                        operation: CopyOperation::Copy,
+                        source_identity: None,
+                        partial: None,
+                        source_rev: Some(stat.commit_id.clone()),
+                        executable,
+                    },
+                    resume_verification: None,
+                    terminal: None,
+                    reply,
+                })
+            })
+            .await??;
+        log!(
+            Level::Debug,
+            "Revision copy started: transfer_id={}, source_agent={}, source_path={}, commit={}, dest_agent={}, dest_path={}, total_bytes={}",
+            transfer_id,
+            spec.source.agent,
+            source_path,
+            stat.commit_id,
+            spec.dest.agent,
+            dest_path,
+            total_bytes
+        );
+        Ok(transfer_id)
     }
 
     /// Authorizes the destination to keep a resumable partial of exactly this source.

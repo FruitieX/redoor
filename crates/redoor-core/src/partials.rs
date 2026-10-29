@@ -406,7 +406,7 @@ mod tests {
         PartialSigner::new(root.join("server"))
             .sign(PartialAuthorization {
                 version: 1,
-                source_agent_id: AgentId::from("source"),
+                source_agent_id: AgentId::unchecked("source"),
                 source_path: "/source".into(),
                 source_identity: MoveSourceIdentity {
                     device: 1,
@@ -416,7 +416,7 @@ mod tests {
                     modified_nanoseconds: 4,
                     is_directory: false,
                 },
-                dest_agent_id: AgentId::from("dest"),
+                dest_agent_id: AgentId::unchecked("dest"),
                 dest_path: destination.to_string_lossy().into_owned(),
                 operation: PartialOperation::Copy,
                 on_existing: CopyExistingMode::Error,

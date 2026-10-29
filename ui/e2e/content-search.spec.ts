@@ -78,7 +78,7 @@ last line`,
     test("searches paths by default and only requests the active mode", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?timeout=9&hidden=true&gitignore=false`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?timeout=9&hidden=true&gitignore=false`;
         const requests: URL[] = [];
         const requestBodies = new Map<URL, string | null>();
         page.on("request", (request) => {
@@ -129,7 +129,7 @@ last line`,
         await expect(pathResult).toBeVisible();
         await expect(pathResult).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(nestedPath)}`,
         );
 
         const [pathResultBounds, pathTextBounds] = await Promise.all([
@@ -213,7 +213,7 @@ last line`,
         // A real destination href preserves native middle-click and context-menu navigation.
         await expect(contentResult).toHaveAttribute(
             "href",
-            `/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}?line=1`,
+            `/agents/${ctx.agentName}/browser/${encodeFilesystemPath(nestedPath)}?line=1`,
         );
 
         const searchRequestCount = requests.filter((request) =>
@@ -296,7 +296,7 @@ last line`,
     test("opens from shared entry points and restores results after navigation", async ({
         page,
     }) => {
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         const launcher = page.getByRole("button", {
@@ -457,7 +457,7 @@ last line`,
 
         await dialog.getByRole("button", { name: "Close search" }).click();
         await expect(dialog).toBeHidden();
-        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentId}/logs`);
+        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentName}/logs`);
         await expect(
             page.getByRole("button", { name: "Search device" }),
         ).toBeVisible();
@@ -497,7 +497,7 @@ last line`,
             });
         });
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?q=`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?q=`,
         );
 
         const dialog = page.getByRole("dialog", {
@@ -532,7 +532,7 @@ last line`,
         );
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}?q=&timeout=9&hidden=false&gitignore=true`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}?q=&timeout=9&hidden=false&gitignore=true`,
         );
         // Explicit URL state overrides preferences for shareable searches.
         await expect(
@@ -553,7 +553,7 @@ last line`,
     }) => {
         const filePath = path.join(ctx.testDirPath, "search-target.txt");
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(filePath)}?q=hidden-search-value&mode=content&hidden=false&gitignore=true`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?q=hidden-search-value&mode=content&hidden=false&gitignore=true`,
         );
 
         const dialog = page.getByRole("dialog", {
@@ -620,7 +620,7 @@ last line`,
         page,
     }) => {
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(gitRootNestedPath)}?q=git-root-unique-value&mode=content`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(gitRootNestedPath)}?q=git-root-unique-value&mode=content`,
         );
 
         const dialog = page.getByRole("dialog", {
@@ -653,7 +653,7 @@ last line`,
         ).toBeVisible();
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(gitRootOutsidePath)}?q=&mode=content`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(gitRootOutsidePath)}?q=&mode=content`,
         );
         // Paths outside a worktree must not offer git-root search because no extra git lookup is allowed.
         await expect(
@@ -662,6 +662,139 @@ last line`,
         await expect(dialog).toContainText(
             `Current folder: ${gitRootOutsidePath}`,
         );
+    });
+
+    test("restores results and the place in them on back without searching again", async ({
+        page,
+    }) => {
+        const directory = path.join(ctx.testDirPath, "restore-search");
+        await fs.mkdir(directory);
+        // Enough results that the dialog scrolls and the opened one starts out of view.
+        await Promise.all(
+            Array.from({ length: 60 }, (_, index) =>
+                fs.writeFile(
+                    path.join(directory, `restore-scroll-${index + 10}.txt`),
+                    "restore-scroll-value\n",
+                ),
+            ),
+        );
+
+        // The test sends the page's server events itself, so edits by parallel specs cannot
+        // refresh the search, and the refresh that every finished edit sends is under test.
+        let sendRoutesChanged = () => {};
+
+        await page.routeWebSocket("**/api/v1/ui/ws", (ws) => {
+            sendRoutesChanged = () => {
+                ws.send(JSON.stringify({ type: "routes_changed" }));
+            };
+        });
+
+        let searchRequests = 0;
+        page.on("request", (request) => {
+            const url = new URL(request.url());
+
+            if (
+                url.pathname.includes("/find/") ||
+                url.pathname.includes("/grep/")
+            ) {
+                searchRequests += 1;
+            }
+        });
+
+        const dialog = page.getByRole("dialog", { name: "Search device" });
+
+        // Content search types its query, so opening a result first replaces the entry to
+        // write q, while path search starts from a q already in the URL.
+        const modes = [
+            {
+                search: "mode=content&q=",
+                typed: true,
+                query: "restore-scroll-value",
+                input: "Search file contents",
+            },
+            {
+                search: "q=restore-scroll",
+                typed: false,
+                query: "restore-scroll",
+                input: "Search file paths",
+            },
+        ];
+
+        for (const mode of modes) {
+            await page.goto(
+                `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directory)}?${mode.search}`,
+            );
+
+            const input = dialog.getByRole("searchbox", { name: mode.input });
+
+            if (mode.typed) {
+                await input.fill(mode.query);
+            }
+
+            const links = dialog.getByRole("link", {
+                name: /restore-scroll-\d+\.txt/,
+            });
+
+            await expect(links).toHaveCount(60);
+
+            const opened = links.nth(40);
+            await opened.scrollIntoViewIfNeeded();
+
+            const scrollTop = await dialog.evaluate(
+                (element) => element.scrollTop,
+            );
+
+            // The opened result must start out of view, or restoring the scroll proves nothing.
+            expect(scrollTop).toBeGreaterThan(0);
+
+            const openedName = (await opened.getAttribute("aria-label")) ?? "";
+            const requestsBeforeOpening = searchRequests;
+            await opened.click();
+            await expect(dialog).toBeHidden();
+
+            await page.goBack();
+            await expect(dialog).toBeVisible();
+            // The restored view must follow the entry that replaced the typed search's entry.
+            await expect(input).toHaveValue(mode.query);
+            // Focus on the opened result lets arrow keys continue from where the reader was.
+            await expect(
+                dialog.getByRole("link", { name: openedName, exact: true }),
+            ).toBeFocused();
+            // The dialog scrolls itself, so its own scroll position must come back.
+            await expect
+                .poll(() => dialog.evaluate((element) => element.scrollTop))
+                .toBe(scrollTop);
+            // Back shows the kept results instead of searching again.
+            expect(searchRequests).toBe(requestsBeforeOpening);
+
+            const listingRefreshed = page.waitForRequest((request) =>
+                new URL(request.url()).pathname.includes("/ls/"),
+            );
+
+            // A finished upload or edit refreshes all agent data; the listing behind the
+            // dialog refetching shows the page handled it.
+            sendRoutesChanged();
+            await listingRefreshed;
+
+            const changedQueryAnswered = page.waitForResponse(
+                (response) =>
+                    response
+                        .request()
+                        .postData()
+                        ?.includes(`"query":"${mode.query}-"`) === true,
+            );
+
+            await input.fill(`${mode.query}-`);
+            await changedQueryAnswered;
+            // Only the changed query searched: a refresh of the kept results would have gone
+            // out when the event arrived, well before this answer.
+            expect(searchRequests).toBe(requestsBeforeOpening + 1);
+            await input.fill(mode.query);
+            // Typing the restored query again searches too instead of showing the kept results.
+            await expect
+                .poll(() => searchRequests)
+                .toBe(requestsBeforeOpening + 2);
+        }
     });
 });
 
@@ -678,7 +811,7 @@ test.describe("Mobile agent search", () => {
 
     test("fills the viewport", async ({ page }) => {
         await page.setViewportSize({ width: 390, height: 844 });
-        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentId}?q=`);
+        await page.goto(`${WEB_BASE_URL}/agents/${ctx.agentName}?q=`);
 
         const dialog = page.getByRole("dialog", {
             name: "Search device",

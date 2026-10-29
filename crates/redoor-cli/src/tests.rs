@@ -9,12 +9,9 @@ use axum::{
     routing::{delete, get},
 };
 use clap::Parser;
-use redoor_protocol::{
-    api::{
-        agents::{AgentInfoResponse, AgentListResponse},
-        tokens::{DeviceScope, Permission},
-    },
-    ids::AgentId,
+use redoor_protocol::api::{
+    agents::{AgentInfoResponse, AgentListResponse},
+    tokens::{DeviceScope, Permission},
 };
 use reqwest::Method;
 use std::{
@@ -445,7 +442,8 @@ fn agent_json(id: &str, name: &str) -> serde_json::Value {
         "configuration_editable": false, "ssh_target": null, "status": "connected", "connected_at": null,
         "connection_id": null, "last_seen_at": null, "connection_issue": null, "provisioning_status": [],
         "binary": null, "supports_native_open": false,
-        "supports_move_to_trash": false, "supports_trash": false, "uid": null, "is_root": false
+        "supports_move_to_trash": false, "supports_trash": false, "uid": null, "is_root": false,
+        "duplicate_id": null
     })
 }
 
@@ -649,7 +647,10 @@ async fn flags_skip_prompts() {
             name: "ci".into(),
             permissions: vec![Permission::FilesRead, Permission::AgentsManage],
             devices: DeviceScope::Only {
-                device_ids: vec![AgentId::from("a"), AgentId::from("b")]
+                device_ids: vec![
+                    redoor_protocol::ids::AgentId::unchecked("a"),
+                    redoor_protocol::ids::AgentId::unchecked("b")
+                ]
             },
             expiry: Expiry::Never,
         }
@@ -708,7 +709,7 @@ async fn empty_selections_are_prompted_again() {
     assert_eq!(
         plan.devices,
         DeviceScope::Only {
-            device_ids: vec![AgentId::from("b")]
+            device_ids: vec![redoor_protocol::ids::AgentId::unchecked("b")]
         }
     );
 }

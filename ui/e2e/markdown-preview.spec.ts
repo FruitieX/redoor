@@ -24,8 +24,8 @@ test.describe.serial("Markdown preview", () => {
         await fs.mkdir(markdownDirectory, { recursive: true });
         await $`git -C ${repositoryPath} init`;
         markdownPath = path.join(markdownDirectory, "README.md");
-        markdownUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(markdownPath)}`;
-        markdownDirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(markdownDirectory)}`;
+        markdownUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(markdownPath)}`;
+        markdownDirectoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(markdownDirectory)}`;
         await fs.writeFile(
             path.join(repositoryPath, "root-target.txt"),
             "Repository root target",
@@ -115,14 +115,14 @@ ${"```"}
         await preview.getByRole("link", { name: "Root target" }).click();
         // Leading slashes use the repository root rather than the remote filesystem root.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(repositoryPath, "root-target.txt"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(repositoryPath, "root-target.txt"))}`,
         );
 
         await page.goto(markdownUrl);
         await preview.getByRole("link", { name: "Relative target" }).click();
         // Relative links continue to use the Markdown document's own directory.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(path.join(repositoryPath, "relative-target.txt"))}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(repositoryPath, "relative-target.txt"))}`,
         );
     });
 
@@ -175,7 +175,7 @@ Draft body`);
     test("keeps non-markdown files in the editor", async ({ page }) => {
         const textPath = path.join(ctx.testDirPath, "plain.txt");
         await fs.writeFile(textPath, "Plain text");
-        const textUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(textPath)}`;
+        const textUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(textPath)}`;
 
         await page.goto(textUrl);
 
@@ -205,7 +205,7 @@ completions:
 # Backend docs
 `,
         );
-        const frontmatterUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(frontmatterPath)}`;
+        const frontmatterUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(frontmatterPath)}`;
         await page.goto(frontmatterUrl);
         const preview = page.getByRole("region", { name: "Markdown preview" });
 

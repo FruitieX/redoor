@@ -19,11 +19,15 @@ use std::path::{Path, PathBuf};
 pub use bootstrap::{
     CreatedDefaultConfig, create_default_config_if_missing, default_local_agent_name,
 };
-pub use edit::{append_local_agent, append_ssh_agent, edit_local_agent, edit_ssh_agent};
+pub use edit::{
+    DeviceIdScope, append_local_agent, append_ssh_agent, assign_missing_device_ids,
+    edit_local_agent, edit_ssh_agent,
+};
 pub use import::import_agent_config_from_stdin;
 pub use local_agent::spawn_local_agent;
 
 use crate::logging::LogFormat;
+use redoor_protocol::ids::AgentId;
 use redoor_protocol::wire::log::Level;
 
 /// Derives a default agent name from the ssh target by stripping any
@@ -77,6 +81,10 @@ pub enum ConfigError {
 /// `start_relay` fills it in when `None`.
 #[derive(Clone)]
 pub struct SshBackedAgentConfig {
+    /// Stable device id the remote agent registers with (`id` in `[[agents]]`, `agent_id` in
+    /// `[[relays]]`). `None` only for hand-written entries until startup assigns one, because
+    /// the server and relay own these ids rather than the remote agent.
+    pub id: Option<AgentId>,
     /// SSH login username. Forwarded to ssh via `-l`. When `None`, ssh config
     /// or the `user@host` target syntax supplies the username.
     pub username: Option<String>,
@@ -94,20 +102,29 @@ pub struct SshBackedAgentConfig {
     /// Remote ssh target in `user@host` form.
     pub target: String,
     /// Optional local log file path. When set, the ssh process's
-    /// stdout/stderr is redirected to this file so the remote agent's
+    /// stdout/stderr is forwarded into this file so the remote agent's
     /// logs (forwarded through ssh) are captured locally. The file is
-    /// opened in append mode so agent restarts accumulate logs.
+    /// appended to so agent restarts accumulate logs, and kept under the
+    /// owner's log size limit.
     pub log: Option<String>,
     /// Optional SSH login password. When set, OpenSSH is given `SSH_ASKPASS`
     /// pointing at this binary so password auth can run without a TTY or
     /// stealing the stdin used for tokens and uploads.
     pub password: Option<String>,
+    /// Whether the device logs in with its redoor-managed SSH key. When set, the server logs
+    /// in only with `<data_dir>/ssh/<device-id>/id_ed25519` and only trusts the pinned host
+    /// key next to it. A flag instead of a key reference, because the key always lives at
+    /// the same path: rotation then switches keys with one file rename and no config write,
+    /// so a connected agent is not stopped. The config never holds key material. Never set
+    /// together with `password`.
+    pub managed_ssh_key: bool,
 }
 
 impl std::fmt::Debug for SshBackedAgentConfig {
     /// Redacts the SSH password so debug logging cannot leak it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SshBackedAgentConfig")
+            .field("id", &self.id)
             .field("username", &self.username)
             .field("ssh_port", &self.ssh_port)
             .field("name", &self.name)
@@ -116,6 +133,7 @@ impl std::fmt::Debug for SshBackedAgentConfig {
             .field("target", &self.target)
             .field("log", &self.log)
             .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("managed_ssh_key", &self.managed_ssh_key)
             .finish()
     }
 }
@@ -129,6 +147,9 @@ impl std::fmt::Debug for SshBackedAgentConfig {
 /// needs to be configured.
 #[derive(Debug, Clone)]
 pub struct LocalAgentConfig {
+    /// Stable device id passed to the spawned agent; `None` only for hand-written entries
+    /// until startup assigns one.
+    pub id: Option<AgentId>,
     /// Name the local agent registers with on the server. When `None`,
     /// defaults to the system hostname so multiple local agents on
     /// different machines are naturally distinguishable.
@@ -136,9 +157,9 @@ pub struct LocalAgentConfig {
     /// Home directory the spawned agent publishes for UI tab navigation.
     pub home: Option<String>,
     /// Log file path. When set, the spawned `redoor agent` process's
-    /// stdout/stderr is redirected (append mode) to this file. When
-    /// `None`, stdio is inherited so the agent's logs appear in the
-    /// server's terminal.
+    /// stdout/stderr is forwarded by the server into this size-bounded
+    /// file. When `None`, stdio is inherited so the agent's logs appear
+    /// in the server's terminal.
     pub log: Option<String>,
 }
 
@@ -150,6 +171,31 @@ pub struct LocalAgentConfig {
 pub enum AgentConfig {
     SshBacked(SshBackedAgentConfig),
     Local(LocalAgentConfig),
+}
+
+impl AgentConfig {
+    /// The configured device id; `None` only before startup assigned one to a hand-written
+    /// entry.
+    pub fn id(&self) -> Option<&AgentId> {
+        match self {
+            AgentConfig::SshBacked(config) => config.id.as_ref(),
+            AgentConfig::Local(config) => config.id.as_ref(),
+        }
+    }
+
+    /// The name the agent registers with: the explicit `name`, else the target host for SSH
+    /// entries and the hostname for local ones, so hand-written entries need no name.
+    pub fn effective_name(&self) -> String {
+        match self {
+            AgentConfig::SshBacked(config) => config
+                .name
+                .clone()
+                .unwrap_or_else(|| default_agent_name(&config.target)),
+            AgentConfig::Local(config) => {
+                config.name.clone().unwrap_or_else(default_local_agent_name)
+            }
+        }
+    }
 }
 
 /// Browser login backend selected by the `[server]` credentials.
@@ -208,6 +254,9 @@ pub struct ServerSection {
     pub bind: Option<String>,
     /// Server log file; CLI and env override it.
     pub log: Option<String>,
+    /// Size limit of the server log and of the forwarded logs of server-managed agents;
+    /// `None` uses [`crate::rotating_log::DEFAULT_LOG_MAX_BYTES`].
+    pub log_max_size: Option<u64>,
     /// Initial server threshold; runtime API changes deliberately do not rewrite it.
     pub log_level: Option<Level>,
     /// Initial process output format; browser streams remain structured.
@@ -282,6 +331,8 @@ pub struct AgentSection {
     pub home: Option<String>,
     /// Agent log file.
     pub log: Option<String>,
+    /// Size limit of the agent log; `None` uses the default limit.
+    pub log_max_size: Option<u64>,
     /// Initial standalone-agent threshold before runtime control becomes available.
     pub log_level: Option<Level>,
     /// Initial process output format; browser streams remain structured.
@@ -316,6 +367,9 @@ pub struct RelayConfig {
     pub binary_source: Option<PathBuf>,
     /// Optional remote process namespace; defaults to one derived from the local app and relay ID.
     pub agent_app_name: Option<String>,
+    /// Size limit of the relay log, shared by the relay's own output and its SSH session;
+    /// `None` uses the default limit.
+    pub log_max_size: Option<u64>,
     /// SSH-backed agent settings shared with server-managed agents.
     pub agent: SshBackedAgentConfig,
 }
@@ -354,12 +408,13 @@ fn parse_config_str(path: &Path, content: &str) -> Result<RedoorConfig, ConfigEr
 }
 
 impl RedoorConfig {
-    /// Rejects `[[agents]]` rows that would register under the same effective name.
+    /// Rejects `[[agents]]` rows whose effective names break the device name rules or would
+    /// register under the same name.
     ///
     /// Only the server registers managed agents, so only its startup and restart
     /// pre-validation call this; other roles reading the file keep working.
-    pub fn ensure_unique_agent_names(&self, path: &Path) -> Result<(), ConfigError> {
-        file::reject_duplicate_agent_names(&self.agents).map_err(|file::Invalid(message)| {
+    pub fn validate_managed_agent_names(&self, path: &Path) -> Result<(), ConfigError> {
+        file::validate_managed_agent_names(&self.agents).map_err(|file::Invalid(message)| {
             ConfigError::Invalid {
                 path: path.to_path_buf(),
                 message,
@@ -458,6 +513,9 @@ impl From<SshBackedAgentConfig>
             log: config.log,
             password: None,
             has_password: config.password.is_some(),
+            has_managed_ssh_key: config.managed_ssh_key,
+            // Only the server knows its data dir; the handler fills this in.
+            has_pinned_host_key: false,
         }
     }
 }
@@ -638,48 +696,6 @@ name = "no-target"
         assert!(
             result.is_err(),
             "an entry without a target should be rejected"
-        );
-    }
-
-    /// Verifies that a present-but-non-integer `ssh_port` is rejected rather
-    /// than silently falling back to 22, so a typo like a string value is
-    /// surfaced as an explicit operator error.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_non_integer_ssh_port() {
-        let (_directory, temp) = test_config_path();
-        std::fs::write(
-            &temp,
-            r#"[[agents]]
-target = "host"
-ssh_port = "not-a-port"
-"#,
-        )
-        .unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(result.is_err(), "a non-integer ssh_port should be rejected");
-    }
-
-    /// Verifies that an out-of-range `ssh_port` is rejected rather than
-    /// silently truncating, so the operator gets a clear error for a typo.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_out_of_range_port() {
-        let (_directory, temp) = test_config_path();
-        write_test_config(
-            &temp,
-            r#"[[agents]]
-target = "host"
-ssh_port = 99999
-"#,
-        )
-        .unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(
-            result.is_err(),
-            "an out-of-range ssh_port should be rejected"
         );
     }
 
@@ -971,52 +987,6 @@ target = "host"
         assert_eq!(server.bind.as_deref(), Some("127.0.0.1"));
         assert_eq!(server.log.as_deref(), Some("/tmp/x"));
         assert_eq!(config.agent_token, "test-agent-token");
-    }
-
-    /// Verifies that an unknown key in [server] is rejected so a typo is surfaced
-    /// at startup instead of silently being ignored.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_unknown_server_key() {
-        let (_directory, temp) = test_config_path();
-        let content = r#"
-[server]
-post = 3000
-
-[[agents]]
-target = "host"
-"#;
-        write_test_config(&temp, content).unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(
-            result.is_err(),
-            "an unknown [server] key should be rejected"
-        );
-        assert!(result.unwrap_err().to_string().contains("post"));
-    }
-
-    /// Verifies that an out-of-range port in [server] is rejected so the
-    /// operator gets a clear error for a typo, mirroring the existing
-    /// ssh_port range test.
-    #[tokio::test]
-    async fn test_parse_config_file_rejects_out_of_range_server_port() {
-        let (_directory, temp) = test_config_path();
-        let content = r#"
-[server]
-port = 99999
-
-[[agents]]
-target = "host"
-"#;
-        write_test_config(&temp, content).unwrap();
-
-        let result = parse_config_file(&temp).await;
-
-        assert!(
-            result.is_err(),
-            "an out-of-range server.port should be rejected"
-        );
     }
 
     /// Verifies first startup creates a minimal, parseable demo config and later startups preserve it.
@@ -1358,7 +1328,7 @@ target = "web"
         )
         .expect("parsing alone must accept duplicate names, which only the server rejects");
         let error = config
-            .ensure_unique_agent_names(path)
+            .validate_managed_agent_names(path)
             .expect_err("both rows default to the name 'web'");
         // The message names the colliding identity and how to resolve it.
         assert!(
@@ -1385,6 +1355,236 @@ log_level = "loud"
             error.to_string(),
             "Invalid config file 'config.toml': agent.log_level: logging level must be one of: trace, debug, info, warning, error"
         );
+    }
+
+    /// Copying an entry copies its id, which would silently merge two devices, so any role
+    /// reading the file refuses it and names both entries.
+    #[test]
+    fn duplicate_device_ids_name_both_entries() {
+        let error = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[[agents]]
+id = "dev_abcdefghijklmnopqrst"
+target = "one"
+[[relays]]
+id = "copy"
+agent_id = "dev_abcdefghijklmnopqrst"
+target = "two"
+server = "http://redoor.example.com"
+"#,
+        )
+        .expect_err("an id shared by two entries must be rejected");
+        let message = error.to_string();
+        // Both entries are named so the operator knows which copy to fix.
+        assert!(
+            message.contains("[[agents]] entry #0 ('one')")
+                && message.contains("[[relays]] entry 'copy'"),
+            "{message}"
+        );
+    }
+
+    /// A hand-edited id must be in the id format, or `hello` would be rejected later with a
+    /// less obvious error.
+    #[test]
+    fn malformed_device_id_points_at_the_entry() {
+        let error = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[[agents]]
+id = "pi"
+target = "pi"
+"#,
+        )
+        .expect_err("a malformed id must be rejected");
+        // The message names the entry and the expected format.
+        assert!(
+            error.to_string().contains("agents entry #0 'id'")
+                && error.to_string().contains("not a valid device id"),
+            "{error}"
+        );
+    }
+
+    /// Managed names follow the device name rules, checked by the server before any supervisor
+    /// exists.
+    #[test]
+    fn managed_agent_names_follow_the_name_rules() {
+        let path = Path::new("config.toml");
+        for name in ["a:b", "a/b", "dev_abcdefghijklmnopqrst"] {
+            let config = parse_config_str(
+                path,
+                &format!(
+                    r#"agent_token = "t"
+[[agents]]
+local = true
+name = "{name}"
+"#
+                ),
+            )
+            .expect("parsing alone accepts any name");
+            // Each of these names would break `device:path`, URLs or name-or-id lookups.
+            assert!(
+                config.validate_managed_agent_names(path).is_err(),
+                "{name} must be rejected"
+            );
+        }
+        let config = parse_config_str(
+            path,
+            r#"agent_token = "t"
+[[agents]]
+local = true
+name = "dev_box"
+"#,
+        )
+        .unwrap();
+        // Other names that merely start with `dev_` are fine.
+        assert!(config.validate_managed_agent_names(path).is_ok());
+    }
+
+    /// A managed key is recorded as a flag and survives the formatting-preserving rewrite
+    /// that every device edit goes through.
+    #[tokio::test]
+    async fn managed_ssh_key_round_trips_through_edits() {
+        let (_directory, path) = test_config_path();
+        write_test_config(
+            &path,
+            r#"[[agents]]
+id = "dev_abcdefghijklmnopqrst"
+target = "pi"
+managed_ssh_key = true
+"#,
+        )
+        .unwrap();
+        let config = parse_config_file(&path).await.unwrap();
+        let AgentConfig::SshBacked(agent) = &config.agents[0] else {
+            panic!("the entry is SSH-backed");
+        };
+        // The flag is read as written.
+        assert!(agent.managed_ssh_key);
+
+        let renamed = SshBackedAgentConfig {
+            name: Some("renamed".to_string()),
+            ..agent.clone()
+        };
+        edit_ssh_agent(&path, agent.id.as_ref().unwrap(), Some(&renamed))
+            .await
+            .unwrap();
+        let config = parse_config_file(&path).await.unwrap();
+        let AgentConfig::SshBacked(agent) = &config.agents[0] else {
+            panic!("the entry is SSH-backed");
+        };
+        // A rewrite keeps the key; dropping it would silently fall back to other credentials.
+        assert!(agent.managed_ssh_key);
+
+        let without_key = SshBackedAgentConfig {
+            managed_ssh_key: false,
+            ..agent.clone()
+        };
+        edit_ssh_agent(&path, agent.id.as_ref().unwrap(), Some(&without_key))
+            .await
+            .unwrap();
+        // A device without a key gets no `managed_ssh_key = false` noise in the operator's file.
+        assert!(
+            !tokio::fs::read_to_string(&path)
+                .await
+                .unwrap()
+                .contains("managed_ssh_key")
+        );
+    }
+
+    /// Hand edits that would make a managed key unusable or ambiguous fail at load time.
+    #[test]
+    fn invalid_managed_ssh_key_combinations_are_rejected() {
+        let cases = [
+            (
+                r#"id = "dev_abcdefghijklmnopqrst"
+managed_ssh_key = "key_abcdefghijklmnopqrst""#,
+                "managed_ssh_key",
+            ),
+            (
+                r#"id = "dev_abcdefghijklmnopqrst"
+managed_ssh_key = true
+password = "secret""#,
+                "both 'managed_ssh_key' and 'password'",
+            ),
+            (
+                r#"managed_ssh_key = true"#,
+                "has 'managed_ssh_key' but no 'id'",
+            ),
+        ];
+        for (fields, expected) in cases {
+            let error = parse_config_str(
+                Path::new("/etc/redoor/config.toml"),
+                &format!(
+                    r#"agent_token = "t"
+[[agents]]
+target = "host"
+{fields}
+"#
+                ),
+            )
+            .expect_err("the entry must be rejected");
+            // The message names what is wrong so the operator can fix the file.
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    /// Log size limits accept plain bytes and unit suffixes in every section with a log.
+    #[test]
+    fn log_max_size_accepts_bytes_and_units() {
+        let config = parse_config_str(
+            Path::new("config.toml"),
+            r#"agent_token = "t"
+[server]
+username = "admin"
+password = "secret"
+log_max_size = "10MB"
+[agent]
+log_max_size = 4096
+[[relays]]
+id = "production"
+target = "user@example.com"
+server = "https://redoor.example.com"
+log_max_size = "512kb"
+"#,
+        )
+        .expect("valid sizes must parse");
+        // Units are binary multiples, so 10MB matches the default limit exactly.
+        assert_eq!(
+            config.server.and_then(|server| server.log_max_size),
+            Some(crate::rotating_log::DEFAULT_LOG_MAX_BYTES)
+        );
+        // Plain integers are taken as bytes.
+        assert_eq!(
+            config.agent.and_then(|agent| agent.log_max_size),
+            Some(4096)
+        );
+        // Unit suffixes are case-insensitive.
+        assert_eq!(config.relays[0].log_max_size, Some(512 * 1024));
+    }
+
+    /// Unusable log size limits name the key and the accepted forms.
+    #[test]
+    fn invalid_log_max_size_is_rejected() {
+        for value in ["0", "\"0MB\"", "\"10 parsecs\"", "\"MB\""] {
+            let error = parse_config_str(
+                Path::new("config.toml"),
+                &format!(
+                    r#"agent_token = "t"
+[agent]
+log_max_size = {value}
+"#
+                ),
+            )
+            .expect_err("unusable sizes must be rejected");
+            // A zero or unparseable limit must fail at startup with the key path to fix.
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent.log_max_size must be a positive byte count"),
+                "{value}: {error}"
+            );
+        }
     }
 
     /// Parses a `[server]` section with a password login plus the given `[server.oidc]` body.

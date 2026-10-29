@@ -39,7 +39,7 @@ function EditAccessTokenPage() {
     const token = data.tokens.find((item) => item.id === tokenId) ?? null;
 
     return (
-        <div className="min-h-full bg-canvas px-4 py-8 sm:px-8">
+        <div className="min-h-full bg-canvas px-4 py-8 @xl:px-8">
             <div className="mx-auto max-w-4xl">
                 <LinkButton
                     to="/settings/tokens"
@@ -99,7 +99,7 @@ function EditAccessTokenForm(props: { token: AccessTokenResponse }) {
 
     return (
         <main className="overflow-hidden rounded-xl border border-slate-800 bg-surface shadow-2xl shadow-black/20">
-            <div className="border-b border-slate-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent px-6 py-6 sm:px-8">
+            <div className="border-b border-slate-800 bg-gradient-to-r from-blue-500/10 via-transparent to-transparent px-6 py-6 @xl:px-8">
                 <div className="flex items-center gap-3">
                     <div className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-2 text-blue-300">
                         <KeyRound className="h-5 w-5" aria-hidden="true" />
@@ -121,7 +121,7 @@ function EditAccessTokenForm(props: { token: AccessTokenResponse }) {
             <form
                 aria-labelledby={headingId}
                 onSubmit={submit}
-                className="space-y-7 p-6 sm:p-8"
+                className="space-y-7 p-6 @xl:p-8"
             >
                 {expired ? (
                     <p
@@ -148,7 +148,7 @@ function EditAccessTokenForm(props: { token: AccessTokenResponse }) {
                         )}
                     </p>
                 ) : null}
-                <div className="flex flex-col-reverse gap-3 border-t border-slate-800 pt-6 sm:flex-row sm:justify-end">
+                <div className="flex flex-col-reverse gap-3 border-t border-slate-800 pt-6 @xl:flex-row @xl:justify-end">
                     <Tooltip content="Discard changes and return to the token list">
                         <LinkButton to="/settings/tokens" variant="secondary">
                             Cancel

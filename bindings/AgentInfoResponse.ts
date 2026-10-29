@@ -2,6 +2,7 @@
 import type { AgentConnectionStatus } from "./AgentConnectionStatus";
 import type { AgentId } from "./AgentId";
 import type { BinaryIdentity } from "./BinaryIdentity";
+import type { DuplicateIdWarning } from "./DuplicateIdWarning";
 import type { ProvisioningStatusMessage } from "./ProvisioningStatusMessage";
 import type { SocketId } from "./SocketId";
 import type { UnixTimestampSeconds } from "./UnixTimestampSeconds";
@@ -50,4 +51,9 @@ uid: number | null,
 /**
  * Whether the latest session's effective UID is root; false until first connect.
  */
-is_root: boolean, };
+is_root: boolean, 
+/**
+ * Set while several machines are using this device's id (usually a cloned data dir) and
+ * the router is refusing the newcomers, so the UI can explain why one of them is offline.
+ */
+duplicate_id: DuplicateIdWarning | null, };

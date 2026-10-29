@@ -61,6 +61,14 @@ $HOME/.local/bin/redoor server
 
 and see `$HOME/.local/bin/redoor --help`
 
+### Upgrade
+
+```bash
+redoor upgrade
+```
+
+This runs the same install script over the binary you invoked and restarts the local redoor server, agents and relays that run it, in place, including systemd and launchd services. The Update button next to the version on the web UI home page does the same for the server's binary. Pass a tag such as `redoor upgrade v1.3.1` to pick a release, or `--no-restart` to only replace the binary. Use `sudo redoor upgrade` when the binary or the services belong to root.
+
 ### Docker
 
 Run the `linux/amd64` or `linux/arm64` container with one command:
@@ -213,6 +221,9 @@ server = "http://redoor.internal:7666"
 
 ```bash
 redoor agent relay start production --daemon
+
+# or install and enable it at startup on Linux
+redoor agent relay systemd install production --start
 ```
 
 See [SSH relays](docs/relays.md) for lifecycle commands and configuration.

@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 
+import { deviceRoute } from "#ui/browser-route";
 import { LogViewer } from "#ui/components/log-viewer";
 import { useAgents } from "#ui/use-agents";
 import { sortAgentsByName } from "#ui/utils/agents";
@@ -35,8 +36,7 @@ function ServerLogsPage() {
                 connectedAgents.map((agent) => (
                     <Link
                         key={agent.id}
-                        to="/agents/$agentId/logs"
-                        params={{ agentId: agent.id }}
+                        {...deviceRoute(agent, "/agents/$deviceName/logs")}
                         aria-label={`View logs for ${agent.name}`}
                         className="rounded border border-slate-700 px-2 py-1 text-slate-200 hover:bg-tint"
                     >

@@ -114,9 +114,9 @@ export function UpgradeButton(props: UpgradeButtonProps) {
                         Published release
                     </span>
                 }
-                bodyClassName="flex flex-col gap-4 border-t border-slate-800 pt-4 lg:flex-row lg:items-center"
+                bodyClassName="flex flex-col gap-4 border-t border-slate-800 pt-4 @4xl:flex-row @4xl:items-center"
             >
-                <div className="shrink-0 lg:w-40">
+                <div className="shrink-0 @4xl:w-40">
                     <label
                         htmlFor="agent-upgrade-target-version"
                         className="text-xs text-slate-500"
@@ -161,7 +161,7 @@ export function UpgradeButton(props: UpgradeButtonProps) {
                         </p>
                     )}
                 </div>
-                <div className="flex shrink-0 flex-col gap-2 self-start lg:self-center">
+                <div className="flex shrink-0 flex-col gap-2 self-start @4xl:self-center">
                     <Button
                         type="button"
                         disabled={

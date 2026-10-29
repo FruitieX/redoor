@@ -13,13 +13,22 @@ use crate::api::files::{
     ChmodPathResponse, ChownPathResponse, CreationOwnershipOptions, DirectorySizeResponse,
     MetadataResponse,
 };
-use crate::api::git::{GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse};
+use crate::api::git::GitPage;
+use crate::api::git::commit::GitCommitDiffResponse;
+use crate::api::git::history::{GitCommitNeighborsResponse, GitLogResponse};
+use crate::api::git::refs::{GitRefListKind, GitRefListResponse, GitRefSort};
+use crate::api::git::revision::{GitRevisionContentResponse, GitRevisionTreeResponse};
+use crate::api::git::worktree::{
+    GitContextResponse, GitDiffMode, GitDiffResponse, GitStatusResponse,
+};
+use crate::api::git::worktree_list::GitWorktreeListResponse;
+use crate::api::git::worktree_status::GitWorktreeStatusResponse;
 use crate::api::search::{CaseSensitivity, ContentGrepResponse, FileSearchResponse};
 use crate::api::transfers::CopyExistingMode;
 use crate::api::trash::TrashListResponse;
 use crate::wire::command::{
-    Command, CommandErrorKind, EchoResult, LsDirectoryResult, LsFileResult, MoveMetadataResult,
-    MoveSourceIdentity,
+    Command, CommandErrorKind, EchoResult, GitRevisionStatResult, LsDirectoryResult, LsFileResult,
+    MoveMetadataResult, MoveSourceIdentity,
 };
 use crate::wire::exec::{ExecEvent, ExecRequest};
 use crate::wire::log::Level;
@@ -238,6 +247,10 @@ pub struct RawUpload {
     /// Present only for agent-to-agent file copies, which stage into a resumable partial.
     #[serde(default)]
     pub partial: Option<Box<crate::wire::partials::PartialTransfer>>,
+    /// Makes a newly created file executable, for sources that record the bit apart from the
+    /// filesystem, like Git history. A replaced file keeps its own permissions either way.
+    #[serde(default)]
+    pub executable: bool,
 }
 
 /// Rewrites one existing regular-file inode after staging the complete body.
@@ -386,6 +399,90 @@ pub struct GitDiff {
     pub mode: GitDiffMode,
 }
 
+/// Describes one path as it was committed at a revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionTree {
+    pub path: String,
+    pub rev: String,
+}
+
+/// Reads one committed text file for the read-only editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionContent {
+    pub path: String,
+    pub rev: String,
+}
+
+/// Diffs the commit a revision names against its first parent, below one path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitDiff {
+    pub path: String,
+    pub rev: String,
+}
+
+/// Describes what a path is at a revision and the commit the revision resolved to, so a copy
+/// or download from history can pick its transport and then read exactly that commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionStat {
+    pub path: String,
+    pub rev: String,
+    /// A destination on this agent that a copy of the revision would replace. Only the agent
+    /// can resolve symlinks and `..` in it, which a lexical check on the server would miss.
+    #[serde(default)]
+    pub replace_target: Option<String>,
+}
+
+/// Streams a file's committed content, or a committed directory as a tar archive, so history
+/// can be downloaded and copied without loading whole objects into memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitDownload {
+    pub path: String,
+    /// Normally the commit id [`GitRevisionStat`] resolved, so a moving branch cannot change
+    /// what is streamed between the inspection and the transfer.
+    pub rev: String,
+    /// Includes the directory itself for archives intended for user extraction, like
+    /// [`TarDownload`].
+    pub include_root: bool,
+}
+
+/// Finds the commits before and after the one a revision names in the path's history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitNeighbors {
+    pub path: String,
+    pub rev: String,
+}
+
+/// Lists one page of the commits that changed a path, starting at a revision or HEAD.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitLog {
+    pub path: String,
+    pub rev: Option<String>,
+    pub page: GitPage,
+}
+
+/// Lists one page of the branches or tags of the repository containing a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRefList {
+    pub path: String,
+    pub kind: GitRefListKind,
+    /// Defaults to the recent order so a server older than the option still gets a listing.
+    #[serde(default)]
+    pub sort: GitRefSort,
+    pub page: GitPage,
+}
+
+/// Lists the main and linked worktrees of the repository containing a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitWorktreeList {
+    pub path: String,
+}
+
+/// Counts the uncommitted changes of the checkout containing a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitWorktreeStatus {
+    pub path: String,
+}
+
 /// Reads the stable filesystem identity needed to delete only the source that was copied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveMetadata {
@@ -531,6 +628,16 @@ agent_requests! {
     GitContext => GitContextResponse,
     GitStatus => GitStatusResponse,
     GitDiff => GitDiffResponse,
+    GitRevisionTree => GitRevisionTreeResponse,
+    GitRevisionContent => GitRevisionContentResponse,
+    GitCommitDiff => GitCommitDiffResponse,
+    GitLog => GitLogResponse,
+    GitCommitNeighbors => GitCommitNeighborsResponse,
+    GitRefList => GitRefListResponse,
+    GitWorktreeList => GitWorktreeListResponse,
+    GitWorktreeStatus => GitWorktreeStatusResponse,
+    GitRevisionStat => GitRevisionStatResult,
+    GitDownload => (),
     MoveMetadata => MoveMetadataResult,
     DeleteMoveSource => (),
     OpenPath => (),
@@ -593,6 +700,7 @@ mod tests {
         for unit in [
             through_result_frame::<RawDownload>(Value::Null),
             through_result_frame::<TarDownload>(Value::Null),
+            through_result_frame::<GitDownload>(Value::Null),
             through_result_frame::<RawUpload>(Value::Null),
             through_result_frame::<EditFile>(Value::Null),
             through_result_frame::<TarUpload>(Value::Null),
@@ -611,6 +719,11 @@ mod tests {
             assert_eq!(unit, Value::Null);
         }
         assert_round_trip::<LocalMove>(json!({"atomic": true}));
+        assert_round_trip::<GitRevisionStat>(json!({"commit_id": "abc",
+            "kind": {"type": "file", "size": 3, "executable": true},
+            "replaces_repository": false}));
+        assert_round_trip::<GitRevisionStat>(json!({"commit_id": "abc",
+            "kind": {"type": "directory"}, "replaces_repository": true}));
         assert_round_trip::<ListTrash>(json!({"locations": []}));
         assert_round_trip::<EmptyTrash>(json!({"deleted_items": 3}));
         assert_round_trip::<RestoreTrash>(json!({"path": "/tmp/restored"}));
@@ -629,6 +742,29 @@ mod tests {
             "behind": null, "entries": [], "truncated": false,
             "omitted_non_utf8_entries": 0}));
         assert_round_trip::<GitDiff>(json!({"diffs": []}));
+        let commit = json!({"id": "abc", "summary": "first", "author_name": "A",
+            "author_email": "a@example.invalid", "authored_at": 1, "parent_ids": []});
+        assert_round_trip::<GitRevisionTree>(json!({"rev": "main", "commit": commit,
+            "repository_root": "/repo", "path": "/repo/a", "repository_relative_path": "a",
+            "entry": {"type": "file", "size": 3, "executable": false, "editable": true,
+            "blob_id": "def"}}));
+        assert_round_trip::<GitRevisionContent>(json!({"path": "/repo/a", "commit_id": "abc",
+            "content": "a\n"}));
+        assert_round_trip::<GitCommitDiff>(json!({"commit": commit, "body": "", "parent_id": null,
+            "repository_root": "/repo", "repository_relative_path": "", "files": [],
+            "truncated": false}));
+        assert_round_trip::<GitLog>(json!({"repository_root": "/repo",
+            "repository_relative_path": "a", "commits": [commit], "has_more": true}));
+        assert_round_trip::<GitCommitNeighbors>(json!({"older": commit, "newer": null}));
+        assert_round_trip::<GitRefList>(json!({"repository_root": "/repo", "refs": [{
+            "name": "main", "full_name": "refs/heads/main", "kind": "branch", "is_head": true,
+            "is_default": true, "commit": commit}], "total": 1, "has_more": false}));
+        assert_round_trip::<GitWorktreeList>(json!({"repository_root": "/repo", "worktrees": [{
+            "path": "/repo", "is_main": true, "is_current": true, "branch_name": "main",
+            "head_commit": commit, "last_activity_at": 1, "locked": false, "missing": false}],
+            "truncated": false}));
+        assert_round_trip::<GitWorktreeStatus>(json!({"changed": 1, "untracked": 2,
+            "truncated": false}));
         assert_round_trip::<MoveMetadata>(json!({"file_size": 3, "is_file": true,
             "is_dir": false, "identity": {"device": 1, "inode": 2, "size": 3,
             "modified_seconds": 4, "modified_nanoseconds": 5, "is_directory": false}}));

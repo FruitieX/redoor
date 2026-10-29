@@ -52,11 +52,19 @@ pub(crate) struct ServerState {
     pub(crate) config_path: PathBuf,
     /// Serializes read-modify-write config edits so concurrent submissions cannot lose entries.
     pub(crate) config_edit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes editor buffer writes so a revision check and its write cannot interleave.
+    pub(crate) editor_buffer_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Managed SSH keys and pinned host keys of SSH devices.
+    pub(crate) ssh_keys: crate::ssh::keys::SshKeyStore,
+    /// Devices with a key operation or edit in progress, so they cannot race each other.
+    pub(crate) ssh_key_operations: super::ssh_keys::SshKeyOperations,
     /// Login backend resolved from the TOML credentials (or their absence).
     pub(crate) auth_mode: ServerAuthMode,
     /// Signals axum graceful shutdown; restart fires this after a successful
     /// pre-validation so the listener is dropped before exec.
     pub(crate) shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// Held while `redoor upgrade` installs, so two installs never race over the binary.
+    pub(crate) upgrade_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Arguments for `redoor server`.

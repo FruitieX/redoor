@@ -438,7 +438,7 @@ mod tests {
         // The token travels in the upgrade, never in a websocket frame.
         assert!(request.contains("authorization: bearer secret-token"));
         // The agent offers exactly the protocol it implements.
-        assert!(request.contains("sec-websocket-protocol: redoor.v2"));
+        assert!(request.contains("sec-websocket-protocol: redoor.v3"));
         // The version header lets the server log which build was rejected.
         assert!(request.contains("x-redoor-agent-version: "));
     }
@@ -446,7 +446,7 @@ mod tests {
     /// Verifies a 426 names both protocols so the operator knows which side to upgrade.
     #[tokio::test]
     async fn protocol_mismatch_is_fatal_and_names_both_versions() {
-        let body = r#"{"server_protocol":"redoor.v3","server_version":"9.9.9","message":"m"}"#;
+        let body = r#"{"server_protocol":"redoor.v4","server_version":"9.9.9","message":"m"}"#;
         let (url, _server) = answer_upgrade(format!(
             "HTTP/1.1 426 Upgrade Required\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
             body.len()
@@ -463,7 +463,7 @@ mod tests {
         assert!(error.is_fatal());
         let message = error.to_string();
         // The log line explains which protocol each side speaks and what to do.
-        assert!(message.contains("redoor.v3") && message.contains("redoor.v2"));
+        assert!(message.contains("redoor.v4") && message.contains("redoor.v3"));
         assert!(message.contains("upgrade the agent"));
     }
 

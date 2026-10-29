@@ -291,6 +291,11 @@ fn input_properties(name: &str) -> Value {
                     json!({"type":"object","required":["device_id","path"]})
                 }
                 "recursive" => json!({"type":"boolean"}),
+                // Clients may pass a name for convenience; the id keeps working after renames.
+                "device_id" => json!({
+                    "type":"string",
+                    "description":"Device id (stable across renames) or current device name"
+                }),
                 _ => json!({"type":"string"}),
             },
         );
@@ -356,12 +361,12 @@ async fn get_device(
     id: &Value,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
-    require(principal, &[], device, id)?;
+    let agent_id = authorize_device(state, principal, &[], device, id).await?;
     let agent = crate::http::agents::list_agent_snapshots(state)
         .await
         .map_err(|error| op(error.to_string(), id))?
         .into_iter()
-        .find(|agent| agent.id.to_string() == device)
+        .find(|agent| agent.id == agent_id)
         .ok_or_else(|| op("Device not found", id))?;
     Ok(json!({"device":device_json(agent)}))
 }
@@ -378,7 +383,7 @@ async fn run_command(
     id: &Value,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?.to_string();
-    require(principal, &[CommandsExecute], &device, id)?;
+    let agent_id = authorize_device(state, principal, &[CommandsExecute], &device, id).await?;
     let argv = args
         .get("argv")
         .and_then(Value::as_array)
@@ -431,7 +436,7 @@ async fn run_command(
     let record = state
         .mcp
         .operations
-        .create(owner(principal, id)?, vec![device.clone()], "command")
+        .create(owner(principal, id)?, vec![agent_id.to_string()], "command")
         .await
         .map_err(|error| {
             op(
@@ -439,23 +444,19 @@ async fn run_command(
                 id,
             )
         })?;
-    let (output, terminal) = match OutputStream::open_execution(
-        &state.router_ref,
-        AgentId::from(device.as_str()),
-        request,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => {
-            let mut current = record.lock().await;
-            current.state = "failed".to_string();
-            current.terminal = Some(json!({"reason":"admission_failed","error":error.to_string()}));
-            drop(current);
-            let _ = state.mcp.operations.update(&record).await;
-            return Err(op("Execution admission failed", id));
-        }
-    };
+    let (output, terminal) =
+        match OutputStream::open_execution(&state.router_ref, agent_id, request).await {
+            Ok(value) => value,
+            Err(error) => {
+                let mut current = record.lock().await;
+                current.state = "failed".to_string();
+                current.terminal =
+                    Some(json!({"reason":"admission_failed","error":error.to_string()}));
+                drop(current);
+                let _ = state.mcp.operations.update(&record).await;
+                return Err(op("Execution admission failed", id));
+            }
+        };
     let remote_id = output.request_id();
     {
         let mut record = record.lock().await;
@@ -707,7 +708,7 @@ async fn cancel_operation(
     let accepted = match (kind.as_str(), remote_id, device.as_deref()) {
         ("command", Some(remote), Some(device)) => state
             .agents
-            .cancel_execution(AgentId::from(device), RequestId::new(remote))
+            .cancel_execution(AgentId::unchecked(device), RequestId::new(remote))
             .await
             .map_err(|error| op(error.to_string(), id))?,
         ("copy" | "move", Some(remote), _) => state
@@ -734,13 +735,13 @@ async fn list_directory(
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    require(principal, &[FilesRead], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesRead], device, id).await?;
     let call = Ls {
         path: Some(path.to_string()),
     };
     match state
         .agents
-        .call(&AgentId::from(device), call)
+        .call(&agent_id, call)
         .await
         .map_err(|error| op(error.to_string(), id))?
     {
@@ -760,11 +761,11 @@ async fn stat_path(
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    require(principal, &[FilesRead], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesRead], device, id).await?;
     let result = state
         .agents
         .call(
-            &AgentId::from(device),
+            &agent_id,
             Metadata {
                 path: path.to_string(),
             },
@@ -783,7 +784,7 @@ async fn read_file(
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    require(principal, &[FilesRead], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesRead], device, id).await?;
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
     let limit = args
         .get("limit")
@@ -796,7 +797,7 @@ async fn read_file(
         .unwrap_or("text");
     let mut stream = OutputStream::open(
         &state.router_ref,
-        AgentId::from(device),
+        agent_id,
         Command::RawDownload(request::RawDownload {
             expected_identity: None,
             path: path.to_string(),
@@ -816,7 +817,7 @@ async fn read_file(
     let page = stream
         .read_bounded(limit)
         .await
-        .map_err(|error| op(error.0, id))?;
+        .map_err(|error| op(error.0.message, id))?;
     // Dropping the stream cancels the agent if it still streams the look-ahead byte.
     drop(stream);
     let (bytes, more) = (page.data, page.overflowed);
@@ -839,7 +840,7 @@ async fn write_file(
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    require(principal, &[FilesWrite], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesWrite], device, id).await?;
     let encoding = args
         .get("encoding")
         .and_then(Value::as_str)
@@ -863,8 +864,9 @@ async fn write_file(
         path: path.to_string(),
         on_existing: conflict_mode(string(args, "on_existing", id)?, id)?,
         ownership: CreationOwnershipOptions::default(),
+        executable: false,
     });
-    let written = write_inline(state, device, path, command, &bytes)
+    let written = write_inline(state, agent_id, path, command, &bytes)
         .await
         .map_err(|error| op(error.to_string(), id))?;
     Ok(json!({"path":path,"bytes_written":written}))
@@ -873,14 +875,14 @@ async fn write_file(
 /// Writes bounded inline bytes through the shared streamed upload and returns the bytes written.
 async fn write_inline(
     state: &ServerState,
-    device: &str,
+    agent_id: AgentId,
     path: &str,
     command: Command,
     bytes: &[u8],
 ) -> Result<u64, ApiError> {
     let upload = AgentUpload::start(
         &state.router_ref,
-        AgentId::from(device),
+        agent_id,
         command,
         path.to_string(),
         bytes.len() as u64,
@@ -918,8 +920,16 @@ async fn transfer(
     let destination_device = string(destination, "device_id", id)?;
     let destination_path = absolute(string(destination, "path", id)?, id)?;
     let (source_permissions, destination_permissions) = transfer_permissions(is_move);
-    require(principal, source_permissions, source_device, id)?;
-    require(principal, destination_permissions, destination_device, id)?;
+    let source_id =
+        authorize_device(state, principal, source_permissions, source_device, id).await?;
+    let destination_id = authorize_device(
+        state,
+        principal,
+        destination_permissions,
+        destination_device,
+        id,
+    )
+    .await?;
     let owner = owner(principal, id)?;
     let mode = conflict_mode(string(args, "on_existing", id)?, id)?;
     let kind = if is_move { "move" } else { "copy" };
@@ -952,7 +962,7 @@ async fn transfer(
         .operations
         .create(
             owner,
-            vec![source_device.to_string(), destination_device.to_string()],
+            vec![source_id.to_string(), destination_id.to_string()],
             kind,
         )
         .await
@@ -984,11 +994,11 @@ async fn transfer(
             CopyOperation::Copy
         },
         source: CopyEndpoint {
-            agent: AgentId::from(source_device),
+            agent: source_id,
             path: source_path.to_string(),
         },
         dest: CopyEndpoint {
-            agent: AgentId::from(destination_device),
+            agent: destination_id,
             path: destination_path.to_string(),
         },
         on_existing: mode,
@@ -1052,12 +1062,11 @@ async fn delete_path(
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    require(principal, &[FilesDelete], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesDelete], device, id).await?;
     let recursive = args
         .get("recursive")
         .and_then(Value::as_bool)
         .ok_or_else(|| invalid("recursive must be an explicit boolean", id))?;
-    let agent_id = AgentId::from(device);
     if !recursive {
         let metadata = state
             .agents
@@ -1103,14 +1112,14 @@ async fn create_directory(
     id: &Value,
 ) -> Result<Value, McpError> {
     let (device, path) = device_path(args, id)?;
-    require(principal, &[FilesWrite], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesWrite], device, id).await?;
     let call = CreateDirectory {
         path: path.to_string(),
         ownership: CreationOwnershipOptions::default(),
     };
     state
         .agents
-        .call(&AgentId::from(device), call)
+        .call(&agent_id, call)
         .await
         .map_err(|error| op(error.to_string(), id))?;
     Ok(json!({"path":path,"created":true}))
@@ -1124,7 +1133,7 @@ async fn search_paths(
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
     let root = absolute(string(args, "root", id)?, id)?;
-    require(principal, &[FilesRead], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesRead], device, id).await?;
     let timeout = args
         .get("timeout_seconds")
         .and_then(Value::as_u64)
@@ -1148,7 +1157,7 @@ async fn search_paths(
     );
     let mut result = state
         .agents
-        .call(&AgentId::from(device), call)
+        .call(&agent_id, call)
         .await
         .map_err(|error| op(error.to_string(), id))?;
     let omitted = result.results.len().saturating_sub(2000);
@@ -1166,7 +1175,7 @@ async fn search_contents(
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
     let root = absolute(string(args, "root", id)?, id)?;
-    require(principal, &[FilesRead], device, id)?;
+    let agent_id = authorize_device(state, principal, &[FilesRead], device, id).await?;
     let timeout = args
         .get("timeout_seconds")
         .and_then(Value::as_u64)
@@ -1202,7 +1211,7 @@ async fn search_contents(
     let call = content_grep(root.to_string(), request);
     let result = state
         .agents
-        .call(&AgentId::from(device), call)
+        .call(&agent_id, call)
         .await
         .map_err(|error| op(error.to_string(), id))?;
     serde_json::to_value(result).map_err(|error| op(error.to_string(), id))
@@ -1216,33 +1225,32 @@ async fn managed_agent(
     start: bool,
 ) -> Result<Value, McpError> {
     let device = string(args, "device_id", id)?;
-    require(principal, &[AgentsManage], device, id)?;
-    let agent_id = AgentId::from(device);
+    let agent_id = authorize_device(state, principal, &[AgentsManage], device, id).await?;
     let snapshot = crate::http::agents::managed_agent_snapshot(state, &agent_id)
         .await
         .map_err(|error| op(error.to_string(), id))?;
     let watchdog = state
         .watchdog_registry
-        .lookup(&snapshot.name)
+        .lookup(snapshot.id.as_str())
         .ok_or_else(|| op("Managed supervisor unavailable", id))?;
     if start {
         watchdog
             .start()
             .await
             .map_err(|error| op(error.to_string(), id))?;
-        crate::http::agents::apply_managed_snapshot(state, agent_id, watchdog.snapshot())
+        crate::http::agents::apply_managed_snapshot(state, agent_id.clone(), watchdog.snapshot())
             .await
             .map_err(|error| op(error.to_string(), id))?;
-        Ok(json!({"device_id":device,"accepted":true,"poll_device":true}))
+        Ok(json!({"device_id":agent_id,"accepted":true,"poll_device":true}))
     } else {
         tokio::time::timeout(std::time::Duration::from_secs(10), watchdog.shutdown())
             .await
             .map_err(|_| op("Timed out stopping managed agent", id))?
             .map_err(|error| op(error.to_string(), id))?;
-        crate::http::agents::apply_managed_snapshot(state, agent_id, watchdog.snapshot())
+        crate::http::agents::apply_managed_snapshot(state, agent_id.clone(), watchdog.snapshot())
             .await
             .map_err(|error| op(error.to_string(), id))?;
-        Ok(json!({"device_id":device,"cleanup_complete":true}))
+        Ok(json!({"device_id":agent_id,"cleanup_complete":true}))
     }
 }
 /// Rechecks the token's current permissions and scope rather than trusting admission-time
@@ -1276,7 +1284,8 @@ fn transfer_permissions(is_move: bool) -> (&'static [Permission], &'static [Perm
     }
 }
 
-/// Applies `Principal::require` to an MCP device argument and reports denial as an MCP error.
+/// Applies `Principal::require` to a device id stored in an operation record and reports
+/// denial as an MCP error.
 fn require(
     principal: &Principal,
     permissions: &[Permission],
@@ -1284,8 +1293,28 @@ fn require(
     id: &Value,
 ) -> Result<(), McpError> {
     principal
-        .require(permissions, &AgentId::from(device))
+        .require(permissions, &AgentId::unchecked(device))
         .map_err(|error| McpError::denied(error, id))
+}
+
+/// Resolves an MCP device argument (a name or an id) and applies `Principal::require` to the
+/// resolved id, so the scope check never sees a name that may now belong to another device.
+async fn authorize_device(
+    state: &ServerState,
+    principal: &Principal,
+    permissions: &[Permission],
+    device: &str,
+    id: &Value,
+) -> Result<AgentId, McpError> {
+    let agent_id = state
+        .agents
+        .resolve(device)
+        .await
+        .map_err(|error| op(error.to_string(), id))?;
+    principal
+        .require(permissions, &agent_id)
+        .map_err(|error| McpError::denied(error, id))?;
+    Ok(agent_id)
 }
 
 /// The token that owns new operations; MCP only admits token principals.

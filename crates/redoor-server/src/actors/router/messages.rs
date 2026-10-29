@@ -60,6 +60,9 @@ pub struct RegisterAgentRequest {
     pub watchdog_attempt_generation: Option<u64>,
     /// Payload stream tables of this control session.
     pub streams: ConnectionStreams,
+    /// The session's inbound-traffic clock, so a later `hello` for the same id can tell a
+    /// dead connection (a real reconnect) from a healthy one (a cloned machine).
+    pub activity: crate::actors::activity::ConnectionActivity,
     /// Tells the session whether the router accepted the agent, so a refused socket can be
     /// closed after its `rejected` frame was flushed; absent in unit tests.
     pub reply: Option<RouterReply<Result<(), RegistrationRejection>>>,
@@ -96,6 +99,8 @@ pub struct AgentListEntry {
     pub identity: Option<AgentIdentity>,
     /// Capabilities from the latest registration; all off until the agent first connects.
     pub capabilities: AgentCapabilities,
+    /// Active warning that several machines use this device's id.
+    pub duplicate_id: Option<redoor_protocol::api::agents::DuplicateIdWarning>,
 }
 
 impl AgentListEntry {
@@ -142,6 +147,7 @@ impl From<AgentListEntry> for AgentInfoResponse {
             provisioning_status: agent.provisioning_status,
             uid: identity.as_ref().map(|identity| identity.uid),
             is_root: identity.as_ref().is_some_and(|identity| identity.is_root),
+            duplicate_id: agent.duplicate_id,
             binary: identity.map(|identity| identity.binary),
             supports_native_open: agent.capabilities.supports_native_open,
             supports_move_to_trash: agent.capabilities.supports_move_to_trash,
@@ -152,8 +158,10 @@ impl From<AgentListEntry> for AgentInfoResponse {
 
 /// Registers a configured entry before any process can be started.
 pub struct RegisterManagedAgentRequest {
-    /// Effective name is also the stable id for pre-connection routes.
+    /// Device id from the config entry, known before the agent first connects.
     pub agent_id: AgentId,
+    /// Effective name from the config entry, shown until the agent registers.
+    pub name: String,
     /// Configured directory may be absent for an SSH target.
     pub default_directory: Option<String>,
     /// Distinguishes SSH-backed entries supported by the managed-agent form from local entries.
@@ -331,6 +339,13 @@ pub struct CopyTarget {
     pub source_identity: Option<redoor_protocol::wire::command::MoveSourceIdentity>,
     /// Signed durable staging, used only for regular file copies and moves.
     pub partial: Option<Box<redoor_protocol::wire::partials::PartialTransfer>>,
+    /// The commit the source is read at when it comes from Git history. Such copies always
+    /// stream through the server, even on one agent, because the agent-local copy commands
+    /// read the filesystem rather than the object database.
+    pub source_rev: Option<String>,
+    /// Creates a new destination file executable, for sources whose mode the destination
+    /// cannot otherwise learn, like a Git `100755` entry.
+    pub executable: bool,
 }
 
 /// A destination partial whose prefix must match the source before a remote copy appends.
@@ -438,6 +453,22 @@ pub enum RouterMsg {
     GetAgentList {
         reply: RouterReply<Vec<AgentListEntry>>,
     },
+    /// Resolves a device name or id from a request to the id of a known device.
+    ResolveDevice {
+        value: String,
+        reply: RouterReply<Option<AgentId>>,
+    },
+    /// Claims a name for a managed device being created or renamed; the error carries the
+    /// device that already holds it.
+    ReserveName {
+        agent_id: AgentId,
+        name: String,
+        reply: RouterReply<Result<(), AgentId>>,
+    },
+    /// Drops a device's name reservation once its edit finished, successfully or not.
+    ReleaseName {
+        agent_id: AgentId,
+    },
     GetTransferProgress {
         reply: RouterReply<TransferProgressListResponse>,
     },
@@ -501,8 +532,8 @@ pub enum RouterMsg {
         agent_id: AgentId,
         stream: RequestId,
     },
-    /// Periodic tick: prunes abandoned replies, publishes stream progress and releases
-    /// throttled UI refreshes.
+    /// Periodic tick: prunes abandoned replies, publishes stream progress, releases
+    /// throttled UI refreshes and ends device id conflicts that went quiet.
     CheckPendingUiRefresh,
     Shutdown,
 }
@@ -517,7 +548,8 @@ impl RegisterAgentRequest {
     ) -> Self {
         Self {
             agent_id: agent_id.clone(),
-            agent_name: agent_id.to_string(),
+            // Names must not look like ids, so tests derive a readable one from the id.
+            agent_name: format!("name-{}", agent_id.as_str().trim_start_matches("dev_")),
             socket_id: SocketId::new(),
             lanes,
             identity: AgentIdentity {
@@ -538,6 +570,9 @@ impl RegisterAgentRequest {
             watchdog: None,
             watchdog_attempt_generation: None,
             streams,
+            activity: crate::actors::activity::ConnectionActivity::new(
+                tokio::time::Duration::from_secs(20),
+            ),
             reply: None,
         }
     }
@@ -551,12 +586,12 @@ mod tests {
     /// An inventory row of a connected agent.
     fn entry() -> AgentListEntry {
         let registration = RegisterAgentRequest::for_test(
-            &AgentId::from("a"),
+            &redoor_core::test_support::test_agent_id("a"),
             ControlLanes::bounded(1, 1).0,
-            ConnectionStreams::new(AgentId::from("a")),
+            ConnectionStreams::new(redoor_core::test_support::test_agent_id("a")),
         );
         AgentListEntry {
-            id: AgentId::from("a"),
+            id: redoor_core::test_support::test_agent_id("a"),
             name: "a".to_string(),
             default_directory: Some("/tmp".to_string()),
             managed: false,
@@ -570,6 +605,7 @@ mod tests {
             provisioning_status: Vec::new(),
             identity: Some(registration.identity),
             capabilities: registration.capabilities,
+            duplicate_id: None,
         }
     }
 

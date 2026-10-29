@@ -3,12 +3,14 @@
 pub mod agents;
 pub mod auth;
 pub mod diffs;
+pub mod editor_buffers;
 pub mod exec;
 pub mod files;
 pub mod git;
 pub mod logging;
 pub mod search;
 pub mod server;
+pub mod ssh_keys;
 pub mod tokens;
 pub mod transfers;
 pub mod trash;

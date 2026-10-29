@@ -33,7 +33,7 @@ impl FakeAgent {
     /// Starts a router and registers one agent.
     pub(crate) async fn connect() -> Self {
         let (router, _task) = spawn_router();
-        let agent_id = AgentId::from("fake-agent");
+        let agent_id = redoor_core::test_support::test_agent_id("fake-agent");
         let (lanes, receivers) = ControlLanes::bounded(16, 16);
         let (commands, mut priority) = (receivers.commands, receivers.priority);
         let streams = ConnectionStreams::new(agent_id.clone());

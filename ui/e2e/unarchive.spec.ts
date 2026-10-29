@@ -8,6 +8,7 @@ import {
 import { $ } from "zx";
 import { z } from "zod";
 import {
+    ignoreServerEvents,
     setupTestDir,
     teardownTestDir,
     WEB_BASE_URL,
@@ -75,6 +76,9 @@ test.describe.serial("Unarchive file action", () => {
     });
 
     test("extracts each destination in a fresh terminal", async ({ page }) => {
+        // Other specs' uploads and edits broadcast `routes_changed`, which refetches this
+        // listing at random moments and breaks both the stale-listing and request-count checks.
+        await ignoreServerEvents(page);
         await page.clock.install({
             time: new Date("2026-08-20T08:00:00Z"),
         });
@@ -99,7 +103,7 @@ test.describe.serial("Unarchive file action", () => {
             });
         });
 
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
 
         await page
@@ -189,22 +193,46 @@ test.describe.serial("Unarchive file action", () => {
         await expect(
             page.getByRole("link", { name: "current-output.txt", exact: true }),
         ).toHaveCount(0);
+        let listingRequestCount = 0;
+
+        /** Matches only the originating directory's listing, not file or other directory reads. */
+        const isOriginListing = (url: string) =>
+            decodeURIComponent(new URL(url).pathname).endsWith(
+                `/ls${ctx.testDirPath}`,
+            );
+
+        page.on("request", (request) => {
+            if (isOriginListing(request.url())) {
+                listingRequestCount += 1;
+            }
+        });
+
+        // Leaving the focused terminal reloads the browser path on purpose (files may have
+        // changed in the shell), so the close click itself refetches the listing. The delayed
+        // refresh is therefore observed through listing requests rather than the rendered rows.
+        const leaveTerminalRefresh = page.waitForResponse((response) =>
+            isOriginListing(response.url()),
+        );
+
         await page.getByRole("button", { name: "Close agent1_src 1" }).click();
-        // Closing the terminal after a successful send must not cancel its earned refresh.
+        await leaveTerminalRefresh;
         await expect(
             page.getByRole("button", { name: "Close agent1_src 1" }),
         ).toHaveCount(0);
-        await page.clock.runFor(999);
-        // The refresh is intentionally delayed for one complete second after command delivery.
-        await expect(
-            page.getByRole("link", { name: "current-output.txt", exact: true }),
-        ).toHaveCount(0);
-        await page.clock.runFor(1);
-        await page.clock.resume();
-        // Refetching the exact originating query makes extracted entries appear without navigation.
+        // The leave-terminal reload already shows the extracted entry without navigation.
         await expect(
             page.getByRole("link", { name: "current-output.txt", exact: true }),
         ).toBeVisible();
+        const requestsAfterClose = listingRequestCount;
+        await page.clock.runFor(999);
+        // The refresh is intentionally delayed for one complete second after command delivery.
+        expect(listingRequestCount).toBe(requestsAfterClose);
+        await page.clock.runFor(1);
+        // Closing the terminal after a successful send must not cancel its earned refresh.
+        await expect
+            .poll(() => listingRequestCount)
+            .toBe(requestsAfterClose + 1);
+        await page.clock.resume();
         // The terminal socket proves extraction starts in the archive's containing directory.
         expect(
             new URL(terminalSockets[0]?.url() ?? "").searchParams.get("cwd"),
@@ -388,6 +416,8 @@ test.describe.serial("Unarchive file action", () => {
     test("refreshes only the originating listing after navigation", async ({
         page,
     }) => {
+        // Server events from parallel specs would refetch listings and inflate the count.
+        await ignoreServerEvents(page);
         await page.clock.install({
             time: new Date("2026-08-20T12:00:00Z"),
         });
@@ -397,7 +427,7 @@ test.describe.serial("Unarchive file action", () => {
                 listingRequests.push(request.url());
             }
         });
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`;
         await page.goto(directoryUrl);
         await page
             .getByRole("button", { name: "Actions for file isolation.tar.gz" })

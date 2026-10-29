@@ -1,4 +1,5 @@
 import {
+    infiniteQueryOptions,
     keepPreviousData,
     queryOptions,
     isCancelledError,
@@ -8,10 +9,13 @@ import {
     type QueryClient,
     type QueryKey,
 } from "@tanstack/react-query";
+import { notFound } from "@tanstack/react-router";
 
+import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import type { CaseSensitivity } from "#bindings/CaseSensitivity";
 import type { Agent, ApiClient } from "#ui/api-client";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
+import type { GitRefSort } from "#bindings/GitRefSort";
 import type {
     ManagedAgentFormConfiguration,
     ManagedAgentKind,
@@ -46,8 +50,8 @@ export async function fetchQueryUncancelled<
 export type QueryContext = { api: ApiClient; queryClient: QueryClient };
 
 /**
- * Tags query data that is a user's working copy rather than a mirror of the server.
- * Agent-wide invalidation skips it so a refresh can never overwrite unsaved editor text.
+ * Tags the editor's device text, which only the editor refetches (on focus and reload).
+ * Agent-wide invalidation skips it so unrelated mutations do not download open files again.
  */
 const EDITOR_BUFFER_META = { editorBuffer: true } as const;
 
@@ -86,6 +90,9 @@ export const queryKeys = {
     /** Editable TOML settings of a managed agent. */
     agentConfiguration: (agentId: string) =>
         [...queryKeys.agent(agentId), "configuration"] as const,
+    /** Host key an SSH device presents right now, probed over the network. */
+    sshHostKey: (agentId: string) =>
+        [...queryKeys.agent(agentId), "ssh-host-key"] as const,
     agentLoggingLevel: (agentId: string) =>
         [...queryKeys.agent(agentId), "logging-level"] as const,
     accounts: (agentId: string) =>
@@ -111,6 +118,28 @@ export const queryKeys = {
         [...queryKeys.git(agentId), "status", path] as const,
     gitDiff: (agentId: string, files: string[], mode: GitDiffMode) =>
         [...queryKeys.git(agentId), "diff", files, mode] as const,
+    gitRevisionTree: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "revision-tree", rev, path] as const,
+    gitRevisionContent: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "revision-content", rev, path] as const,
+    gitCommitDiff: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "commit-diff", rev, path] as const,
+    gitCommitNeighbors: (agentId: string, path: string, rev: string) =>
+        [...queryKeys.git(agentId), "commit-neighbors", rev, path] as const,
+    gitLog: (agentId: string, path: string, rev: string | null) =>
+        [...queryKeys.git(agentId), "log", rev, path] as const,
+    gitRefs: (agentId: string, repositoryRoot: string, list: GitRefListOrder) =>
+        [
+            ...queryKeys.git(agentId),
+            "refs",
+            list.kind,
+            list.sort,
+            repositoryRoot,
+        ] as const,
+    gitWorktrees: (agentId: string, repositoryRoot: string) =>
+        [...queryKeys.git(agentId), "worktrees", repositoryRoot] as const,
+    gitWorktreeStatus: (agentId: string, worktreePath: string) =>
+        [...queryKeys.git(agentId), "worktree-status", worktreePath] as const,
     fileSearch: (agentId: string, path: string, search: FileSearchParams) =>
         [...queryKeys.agent(agentId), "file-search", path, search] as const,
     contentGrep: (agentId: string, path: string, search: ContentGrepParams) =>
@@ -122,6 +151,9 @@ export const queryKeys = {
     protocolMismatches: () =>
         [...queryKeys.all, "protocol-mismatches"] as const,
     userState: () => [...queryKeys.all, "user-state"] as const,
+    /** An open file's stored editor buffer, keyed like the open files list. */
+    editorBuffer: (key: string) =>
+        [...queryKeys.all, "editor-buffer", key] as const,
     accessTokens: () => [...queryKeys.all, "access-tokens"] as const,
     serverLoggingLevel: () =>
         [...queryKeys.all, "server-logging-level"] as const,
@@ -197,9 +229,10 @@ export function agentsQueryOptions(api: ApiClient) {
 }
 
 /**
- * Resolves one agent's request client from the inventory cache, fetching it when absent or
- * stale. Loaders use this instead of reading a parent route's data so every route depends
- * on the query cache alone.
+ * Resolves one agent's request client by id from the inventory cache, fetching it when absent
+ * or stale. Loaders use this instead of reading a parent route's data so every route depends
+ * on the query cache alone. A missing id throws `notFound()`, because the device page renders
+ * one "device not found" view for a deleted device and for an unknown name alike.
  */
 export async function loadAgent(
     context: QueryContext,
@@ -213,10 +246,79 @@ export async function loadAgent(
     const info = infos.find((entry) => entry.id === agentId);
 
     if (!info) {
-        throw new Error(`Agent not found: ${agentId}`);
+        throw notFound();
     }
 
     return context.api.agentFor(info);
+}
+
+/**
+ * Finds the device a device URL addresses. URLs carry the name because people read and type
+ * them, but an exact id also matches first, the same rule the REST API follows, so a link
+ * built from an id still opens the device. Names cannot look like ids, so the two never
+ * collide.
+ */
+function findDeviceInfo(
+    infos: AgentInfoResponse[],
+    nameOrId: string,
+): AgentInfoResponse | undefined {
+    return (
+        infos.find((entry) => entry.id === nameOrId) ??
+        infos.find((entry) => entry.name === nameOrId)
+    );
+}
+
+/**
+ * Resolves the device in a device URL to its request client, so the device route can pin the
+ * page to that id. A miss refetches once before giving up: the cached inventory may predate
+ * a device that was just added or renamed elsewhere, and "device not found" must not be shown
+ * for a device that exists. Throws `notFound()` when the server does not know the name either.
+ */
+export async function loadAgentByName(
+    context: QueryContext,
+    deviceName: string,
+): Promise<Agent> {
+    const cached = findDeviceInfo(
+        await fetchQueryUncancelled(
+            context.queryClient,
+            agentsQueryOptions(context.api),
+        ),
+        deviceName,
+    );
+
+    const info =
+        cached ??
+        findDeviceInfo(
+            await fetchQueryUncancelled(context.queryClient, {
+                ...agentsQueryOptions(context.api),
+                staleTime: 0,
+            }),
+            deviceName,
+        );
+
+    if (!info) {
+        throw notFound();
+    }
+
+    return context.api.agentFor(info);
+}
+
+/**
+ * Loads the device a device page was opened for, from the id its parent route resolved. Child
+ * loaders use this instead of resolving the URL name again, so a page left open across a
+ * rename keeps acting on the same device even when a child route reloads.
+ */
+export async function loadDeviceRouteAgent(
+    context: QueryContext,
+    parentMatchPromise: Promise<{ loaderData?: { deviceId: string } }>,
+): Promise<Agent> {
+    const deviceId = (await parentMatchPromise).loaderData?.deviceId;
+
+    if (deviceId === undefined) {
+        throw notFound();
+    }
+
+    return loadAgent(context, deviceId);
 }
 
 /**
@@ -264,6 +366,22 @@ export function agentConfigurationQueryOptions(
                       value: await api.getSshAgentConfiguration(agentId),
                   },
         staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * Probes the host key an SSH device presents. The answer is what the user confirms before
+ * any credential is sent, so it is never served from cache: every confirmation step asks
+ * the device again instead of trusting an earlier probe. A failed probe is not retried
+ * because each attempt is a network round trip the user is waiting on.
+ */
+export function sshHostKeyQueryOptions(api: ApiClient, agentId: string) {
+    return queryOptions({
+        queryKey: queryKeys.sshHostKey(agentId),
+        queryFn: () => api.getSshHostKey(agentId),
+        staleTime: 0,
+        gcTime: 0,
+        retry: false,
     });
 }
 
@@ -348,10 +466,10 @@ export function agentLoggingLevelQueryOptions(agent: Agent) {
 }
 
 /**
- * Reads editable text once so the loader and textarea share a cached buffer.
+ * Reads a file's device text once so the loader and the editor share it.
  * Infinite staleTime keeps later fetchQuery/preload/invalidation off the wire.
- * The editor opts into window-focus refetch while clean; Save writes the cache.
- * The editor-buffer meta keeps agent-wide invalidation from replacing unsaved text.
+ * The editor refetches it on focus and reload; Save writes the cache. It is only the device
+ * side: the editor workspace decides what new device text may do to the file's buffer.
  */
 export function fileContentQueryOptions(agent: Agent, path: string) {
     return queryOptions({
@@ -413,6 +531,292 @@ export function gitDiffQueryOptions(
         queryFn: () => agent.gitDiff(files, mode),
         staleTime: Number.POSITIVE_INFINITY,
     });
+}
+
+/** The most files one diff request may name, matching the server's `GitDiffRequest::MAX_FILES`. */
+const GIT_DIFF_MAX_FILES = 128;
+
+/** Which files of a diff list to fetch, and in which comparison mode. */
+type GitDiffBatchOptions = {
+    queryClient: QueryClient;
+    agent: Agent;
+    files: string[];
+    mode: GitDiffMode;
+};
+
+/**
+ * Fetches many files' comparisons in as few requests as the server accepts and files each
+ * result under that file's own single-file diff query, the one a file fetches when it is
+ * expanded alone. A file's cached diff stays on screen while it is refetched.
+ */
+function fetchGitDiffBatches(options: GitDiffBatchOptions, staleTime: number) {
+    for (
+        let start = 0;
+        start < options.files.length;
+        start += GIT_DIFF_MAX_FILES
+    ) {
+        const batch = options.files.slice(start, start + GIT_DIFF_MAX_FILES);
+        const response = options.agent.gitDiff(batch, options.mode);
+
+        batch.forEach((path, index) => {
+            void options.queryClient.prefetchQuery({
+                ...gitDiffQueryOptions(options.agent, [path], options.mode),
+                staleTime,
+                // The response keeps the request order, so the file's position finds its diff.
+                queryFn: async () => {
+                    const diff = (await response).diffs[index];
+
+                    return { diffs: diff === undefined ? [] : [diff] };
+                },
+            });
+        });
+    }
+}
+
+/** Reads the cache state of one file's single-file diff query. */
+function gitDiffQueryState(options: GitDiffBatchOptions, path: string) {
+    return options.queryClient.getQueryState(
+        queryKeys.gitDiff(options.agent.id, [path], options.mode),
+    );
+}
+
+/**
+ * Fetches the diffs of files not cached yet in batches. Files already cached or loading are
+ * skipped, so expanding every file after opening a few requests only the rest, and the
+ * expanded files then find their diffs loading instead of each starting a request of its own.
+ */
+export function prefetchGitDiffs(options: GitDiffBatchOptions) {
+    const missing = options.files.filter((path) => {
+        const state = gitDiffQueryState(options, path);
+
+        return state?.data === undefined && state?.fetchStatus !== "fetching";
+    });
+
+    fetchGitDiffBatches(
+        { ...options, files: missing },
+        Number.POSITIVE_INFINITY,
+    );
+}
+
+/**
+ * Refetches the cached diffs of the given files in batches. Worktree diffs never go stale on
+ * their own, so without this, coming back to a list after editing a file would show its patch
+ * from before the edit. Only cached files are refetched, because a file without a cached diff
+ * fetches it when it is expanded, and the cached patches stay on screen meanwhile, so the
+ * list keeps the height the restored scroll position was measured in until the new ones land.
+ */
+export function refreshCachedGitDiffs(options: GitDiffBatchOptions) {
+    const cached = options.files.filter((path) => {
+        const state = gitDiffQueryState(options, path);
+
+        return state?.data !== undefined && state.fetchStatus !== "fetching";
+    });
+
+    fetchGitDiffBatches({ ...options, files: cached }, 0);
+}
+
+/**
+ * Shares a path's committed tree entry between the route loader and revision views. A
+ * branch name can move, so a refresh still refetches it, but nothing else needs to.
+ */
+export function gitRevisionTreeQueryOptions(
+    agent: Agent,
+    path: string,
+    rev: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitRevisionTree(agent.id, path, rev),
+        queryFn: () => agent.gitRevisionTree(path, rev),
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * Committed text for the read-only editor, primed by the loader like worktree content. It is
+ * keyed by the commit id the tree resolved, never by a branch name: a branch can move while
+ * this stays cached, which would show old text under the new commit's banner.
+ */
+export function gitRevisionContentQueryOptions(
+    agent: Agent,
+    path: string,
+    commitId: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitRevisionContent(agent.id, path, commitId),
+        queryFn: async () => {
+            const response = await agent.gitRevisionContent(path, commitId);
+
+            return response.content;
+        },
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * The changes of a commit, scoped to the browsed path. Keyed by commit id like the content,
+ * so the cached diff can never belong to an older commit than the banner shows.
+ */
+export function gitCommitDiffQueryOptions(
+    agent: Agent,
+    path: string,
+    commitId: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitCommitDiff(agent.id, path, commitId),
+        queryFn: () => agent.gitCommitDiff(path, commitId),
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * The commits before and after a commit in the path's history. Unlike the diff it is not
+ * cached for good: the newer commit is found from HEAD, which moves with every commit.
+ */
+export function gitCommitNeighborsQueryOptions(
+    agent: Agent,
+    path: string,
+    commitId: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitCommitNeighbors(agent.id, path, commitId),
+        queryFn: () => agent.gitCommitNeighbors(path, commitId),
+    });
+}
+
+/** Rows per page of the Git history, branch and tag lists; more load on request. */
+export const GIT_LIST_PAGE_SIZE = 100;
+
+/** Names the two ref listings the Git view offers. */
+export type GitRefListKind = "branches" | "tags";
+
+/** Which ref listing to read and in which order, kept together because both pick the rows. */
+export type GitRefListOrder = { kind: GitRefListKind; sort: GitRefSort };
+
+/**
+ * The commits that changed a path, a page at a time. `rev` is a resolved commit id, never a
+ * branch name or HEAD, for the same reason the commit diff is keyed by id: every page then
+ * walks the same history even if a branch moves between pages, and a moved HEAD is a new
+ * query. `null` is only for a branch without commits, which has no history to page through.
+ */
+export function gitLogQueryOptions(
+    agent: Agent,
+    path: string,
+    rev: string | null,
+) {
+    return infiniteQueryOptions({
+        queryKey: queryKeys.gitLog(agent.id, path, rev),
+        queryFn: (context) =>
+            agent.gitLog(path, {
+                rev,
+                skip: context.pageParam,
+                limit: GIT_LIST_PAGE_SIZE,
+            }),
+        initialPageParam: 0,
+        getNextPageParam: (lastPage, allPages) =>
+            lastPage.has_more
+                ? allPages.reduce(
+                      (count, page) => count + page.commits.length,
+                      0,
+                  )
+                : undefined,
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * The repository's branches or tags, a page at a time, most recently committed first or by
+ * name. The agent sorts, because pages are offsets into one order. They are asked for at
+ * the repository root the page resolved, because a path inside a nested repository, such as
+ * a submodule browsed at a superproject commit, would list the nested repository's refs
+ * instead.
+ */
+export function gitRefsQueryOptions(
+    agent: Agent,
+    repositoryRoot: string,
+    list: GitRefListOrder,
+) {
+    return infiniteQueryOptions({
+        queryKey: queryKeys.gitRefs(agent.id, repositoryRoot, list),
+        queryFn: (context) =>
+            agent.gitRefs(repositoryRoot, list.kind, {
+                sort: list.sort,
+                skip: context.pageParam,
+                limit: GIT_LIST_PAGE_SIZE,
+            }),
+        initialPageParam: 0,
+        getNextPageParam: (lastPage, allPages) =>
+            lastPage.has_more
+                ? allPages.reduce((count, page) => count + page.refs.length, 0)
+                : undefined,
+        staleTime: Number.POSITIVE_INFINITY,
+    });
+}
+
+/**
+ * Every checkout of the repository, main first and then the most recently active. Asked for
+ * at the repository root the page resolved, like the refs, and refetched on navigation
+ * because checkouts change under the page.
+ */
+export function gitWorktreesQueryOptions(agent: Agent, repositoryRoot: string) {
+    return queryOptions({
+        queryKey: queryKeys.gitWorktrees(agent.id, repositoryRoot),
+        queryFn: () => agent.gitWorktrees(repositoryRoot),
+    });
+}
+
+/**
+ * The uncommitted change counts of one checkout in the worktree list. Each row asks for its
+ * own so the list shows before every checkout has been walked, and the agent queues the walks
+ * so a long list cannot run them all at once.
+ */
+export function gitWorktreeStatusQueryOptions(
+    agent: Agent,
+    worktreePath: string,
+) {
+    return queryOptions({
+        queryKey: queryKeys.gitWorktreeStatus(agent.id, worktreePath),
+        queryFn: () => agent.gitWorktreeStatus(worktreePath),
+    });
+}
+
+/**
+ * Primes the first page of the Git list a route is about to show. Failures stay in the
+ * query, so the list reports them inside its tab instead of failing the whole page. Refs
+ * and worktrees move, so navigation refetches them; history is keyed by commit id and never
+ * changes.
+ */
+export async function prefetchGitList(options: {
+    queryClient: QueryClient;
+    agent: Agent;
+    path: string;
+    repositoryRoot: string;
+    /** The commit history starts at: the browsed commit, or HEAD in the worktree. */
+    commitId: string | null;
+    tab: "commits" | "worktrees" | GitRefListKind;
+    /** The order of a branch or tag list; absent is the default recent order. */
+    refSort: GitRefSort | undefined;
+}) {
+    const { queryClient, agent, path, repositoryRoot, commitId, tab } = options;
+
+    if (tab === "commits") {
+        await queryClient.prefetchInfiniteQuery({
+            ...gitLogQueryOptions(agent, path, commitId),
+            staleTime: commitId === null ? 0 : Number.POSITIVE_INFINITY,
+        });
+    } else if (tab === "worktrees") {
+        await queryClient.prefetchQuery({
+            ...gitWorktreesQueryOptions(agent, repositoryRoot),
+            staleTime: 0,
+        });
+    } else {
+        await queryClient.prefetchInfiniteQuery({
+            ...gitRefsQueryOptions(agent, repositoryRoot, {
+                kind: tab,
+                sort: options.refSort ?? "recent",
+            }),
+            staleTime: 0,
+        });
+    }
 }
 
 /** Shares one agent-scoped account catalog so path changes reuse the same query. */

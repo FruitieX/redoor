@@ -38,8 +38,8 @@ describe("per-stream credit on the multiplexed connection", () => {
     });
 
     /** Starts an execution through REST and returns the response without reading its body. */
-    async function startExec(agentId: string, argv: string[]): Promise<Response> {
-        return fetch(`${api.baseUrl}/api/v1/agents/${agentId}/exec`, {
+    async function startExec(device: string, argv: string[]): Promise<Response> {
+        return fetch(`${api.baseUrl}/api/v1/agents/${device}/exec`, {
             method: "POST",
             headers: {
                 ...api.getAuthHeaders(),
@@ -50,19 +50,20 @@ describe("per-stream credit on the multiplexed connection", () => {
     }
 
     it("fails only the stream that exceeds its credit", async () => {
-        const agentId = "stream-credit-fake";
-        const fake = await FakeAgent.connect({ serverPort, agentId });
+        const agentName = "stream-credit-fake";
+        const fake = await FakeAgent.connect({ serverPort, agentName });
 
         onTestFinished(() => fake.close());
         await waitForValue({
             description: "fake agent connected",
             predicate: async () =>
                 (await api.listAgents()).find(
-                    (agent) => agent.id === agentId && agent.status === "connected",
+                    (agent) =>
+                        agent.id === fake.agentId && agent.status === "connected",
                 ),
         });
 
-        const floodResponse = await startExec(agentId, ["flood"]);
+        const floodResponse = await startExec(agentName, ["flood"]);
         const flood = await fake.nextCommand("Exec");
 
         // The body is never read, so the server cannot drain the flood as fast as it arrives.
@@ -77,7 +78,7 @@ describe("per-stream credit on the multiplexed connection", () => {
         // The server stops the violating worker instead of buffering without bound.
         expect(cancel.id).toBe(flood.id);
 
-        const honestResponse = await startExec(agentId, ["honest"]);
+        const honestResponse = await startExec(agentName, ["honest"]);
         const honest = await fake.nextCommand("Exec");
         const stdout = JSON.stringify({ type: "stdout", data: [104, 105] });
         const exit = { type: "exit", code: 0, signal: null };

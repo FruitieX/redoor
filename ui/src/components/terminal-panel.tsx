@@ -106,7 +106,7 @@ export function TerminalPanel(props: {
             </TerminalToolbar>
             <div
                 data-terminal-theme={resolvedTheme}
-                className={`relative min-h-0 flex-1 overflow-hidden bg-canvas ${props.isFullWindow ? "mx-2 mb-2 rounded-md sm:mx-4 sm:mb-4" : "rounded-md"}`}
+                className={`relative min-h-0 flex-1 overflow-hidden bg-canvas ${props.isFullWindow ? "mx-2 mb-2 rounded-md @xl:mx-4 @xl:mb-4" : "rounded-md"}`}
             >
                 {snapshot.tabs.map((tab) => {
                     const session = terminals.sessionFor(tab.id);

@@ -3,18 +3,20 @@
 use super::{LocalAgentConfig, bootstrap::default_local_agent_name};
 use crate::log;
 use redoor_protocol::wire::log::Level;
-use std::{path::Path, process::Stdio};
+use std::process::Stdio;
 use tokio::process::Command;
 
 /// Spawns `redoor agent` as a local child process and returns the running
 /// [`tokio::process::Child`] so the watchdog supervisor can wait for it or
 /// kill it when the WebSocket goes stale.
 ///
-/// The child reuses the server's own binary (via `std::env::current_exe`),
-/// which is always present because the server itself was launched from it.
+/// The child reuses the server's own binary (via [`crate::executable::current`]),
+/// which is always present because the server itself was launched from it, and
+/// after `redoor upgrade` is the upgraded file the restarted server will run too.
 /// This avoids requiring the operator to keep two binaries in sync or
 /// configure a path. Stdio is inherited so agent logs appear in the same
-/// terminal as the server logs unless `--log` is set in the toml.
+/// terminal as the server logs unless `log` is set in the toml, in which case
+/// stdout and stderr are piped for the caller to forward into that file.
 ///
 /// Failures are I/O errors whose message already names the failing step and path, so the
 /// watchdog can show them to the browser unchanged.
@@ -25,13 +27,19 @@ pub async fn spawn_local_agent(
     agent_token: &str,
 ) -> std::io::Result<tokio::process::Child> {
     let name = config.name.clone().unwrap_or_else(default_local_agent_name);
+    // The server owns managed ids; startup assigned one to every entry before spawning.
+    let agent_id = config.id.as_ref().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "local agent '{name}' has no device id in the config"
+        ))
+    })?;
     let ws_url = format!(
         "ws://localhost:{}{}",
         redoor_port,
         redoor_protocol::wire::handshake::AGENT_WS_PATH
     );
 
-    let bin = std::env::current_exe()
+    let bin = crate::executable::current()
         .map_err(|e| with_context(e, "Failed to determine redoor binary path"))?;
 
     let mut command = Command::new(&bin);
@@ -46,6 +54,8 @@ pub async fn spawn_local_agent(
         .arg("line")
         .arg("--name")
         .arg(&name)
+        .arg("--agent-id")
+        .arg(agent_id.as_str())
         .arg("--token")
         .arg(agent_token);
 
@@ -55,42 +65,12 @@ pub async fn spawn_local_agent(
 
     command.stdin(Stdio::inherit());
 
-    if let Some(log) = &config.log {
-        // Redirect the child's stdout/stderr into the log file instead of
-        // passing --log to the agent. The agent writes to stdout/stderr
-        // and the OS redirect captures it, avoiding double-writes that
-        // would happen if both --log and a redirect were used.
-        let log_path = Path::new(log);
-        if let Some(parent) = log_path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                with_context(
-                    e,
-                    &format!(
-                        "failed to create local agent log directory '{}'",
-                        parent.display()
-                    ),
-                )
-            })?;
-        }
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log)
-            .await
-            .map_err(|e| {
-                with_context(e, &format!("failed to open local agent log file '{log}'"))
-            })?;
-        let file_for_stderr = file.try_clone().await.map_err(|e| {
-            with_context(
-                e,
-                &format!("failed to clone local agent log file handle '{log}'"),
-            )
-        })?;
-        command.stdout(Stdio::from(file.into_std().await));
-        command.stderr(Stdio::from(file_for_stderr.into_std().await));
+    if config.log.is_some() {
+        // Pipe the child's output so the watchdog forwards it into the size-bounded log
+        // file. A descriptor inherited straight into the file could not be kept under its
+        // limit, and passing --log instead would duplicate every line through stdout.
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
     } else {
         command.stdout(Stdio::inherit());
         command.stderr(Stdio::inherit());
@@ -98,8 +78,9 @@ pub async fn spawn_local_agent(
 
     log!(
         Level::Info,
-        "Starting local redoor agent: name={}, ws_url={}, bin={}, log={:?}",
+        "Starting local redoor agent: name={}, agent_id={}, ws_url={}, bin={}, log={:?}",
         name,
+        agent_id,
         ws_url,
         bin.display(),
         config.log,

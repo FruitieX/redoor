@@ -11,7 +11,12 @@
 //! PID-file advisory locks provide the separate single-instance guarantee; the lock,
 //! rather than file existence or a recycled numeric PID, is the source of liveness.
 
-use std::{ffi::OsString, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use nix::{
@@ -21,6 +26,7 @@ use nix::{
 };
 use redoor_core::paths::AppPaths;
 use redoor_core::process::{DETACHED_ENV, ProcessSlot};
+use redoor_protocol::identity::{BinaryIdentity, ServerBuildMode};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, io::AsyncWriteExt, process::Command};
 
@@ -195,15 +201,101 @@ pub(crate) struct PidFile {
     _lock: fs::File,
 }
 
+/// Runtime identity every long-lived role records in its PID file.
+///
+/// The running process writes its own build identity because only it knows which binary
+/// image is in memory: after `redoor upgrade` replaces the executable on disk, inspecting the
+/// file would describe the new build while the process still runs the old one.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ProcessPidMetadata {
+    /// Process holding the advisory lock.
+    pub(crate) pid: u32,
+    /// UTC launch timestamp of the current binary image; re-exec rewrites it.
+    /// `None` only for legacy bare-number PID files.
+    pub(crate) started_at: Option<String>,
+    /// Build of the running image, `None` for files written before it was recorded.
+    pub(crate) binary: Option<BinaryIdentity>,
+}
+
+impl ProcessPidMetadata {
+    /// Captures this process's identity at claim time.
+    pub(crate) fn current() -> Self {
+        Self {
+            pid: std::process::id(),
+            started_at: Some(jiff::Timestamp::now().to_string()),
+            binary: Some(redoor_core::identity::current_binary_identity()),
+        }
+    }
+
+    /// Parses a JSON record, falling back to the bare PID older binaries wrote so a process
+    /// started before an upgrade can still be inspected and stopped.
+    fn parse(content: &str) -> Option<Self> {
+        if let Ok(metadata) = serde_json::from_str(content) {
+            return Some(metadata);
+        }
+        let pid = content.trim().parse().ok()?;
+        Some(Self {
+            pid,
+            started_at: None,
+            binary: None,
+        })
+    }
+
+    /// Reads a record defensively so malformed or partially written stale files can be replaced.
+    async fn read(path: &PathBuf) -> Option<Self> {
+        Self::parse(&fs::read_to_string(path).await.ok()?)
+    }
+
+    /// Prints the liveness line followed by the build details operators need to tell which
+    /// binary is actually running, e.g. whether a restart after an upgrade is still pending.
+    /// The PID file path is included so operators can find the raw record without knowing
+    /// how the data directory resolves for the selected application name.
+    fn print_status(&self, description: &str, pid_file: &Path) {
+        println!("{description} is running with PID {}", self.pid);
+        println!("  pid file:   {}", pid_file.display());
+        let Some(binary) = &self.binary else {
+            println!("  build:      unknown, the process predates build recording in PID files");
+            return;
+        };
+        let version_note = if binary.version_dirty {
+            format!(" (dirty: HEAD was not tagged v{})", binary.version)
+        } else {
+            String::new()
+        };
+        let revision_note = if binary.git_dirty {
+            " (dirty: uncommitted changes at build time)"
+        } else {
+            ""
+        };
+        let build_mode = match binary.build_mode {
+            ServerBuildMode::Debug => "debug",
+            ServerBuildMode::Release => "release",
+            ServerBuildMode::Unknown => "unknown",
+        };
+        println!("  version:    {}{version_note}", binary.version);
+        println!("  revision:   {}{revision_note}", binary.git_rev);
+        println!("  build:      {build_mode}, built {}", binary.build_date);
+        if let Some(started_at) = &self.started_at {
+            println!("  started at: {started_at}");
+        }
+        let cli = redoor_core::identity::current_binary_identity();
+        if *binary != cli {
+            println!(
+                "  note:       differs from this redoor binary ({}, revision {}, built {}); restart to run it",
+                cli.version, cli.git_rev, cli.build_date
+            );
+        }
+    }
+}
+
 /// Runtime identity persisted for a named relay without recording its secret.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RelayPidMetadata {
-    /// Process holding the advisory lock.
-    pub(crate) pid: u32,
+    /// Fields shared with the other roles, flattened so every PID file exposes a top-level `pid`.
+    #[serde(flatten)]
+    pub(crate) process: ProcessPidMetadata,
     /// Stable configured relay identity.
     pub(crate) id: String,
-    /// UTC launch timestamp for operator diagnostics.
-    pub(crate) started_at: String,
     /// SSH destination captured in case configuration changes while running.
     pub(crate) target: String,
     /// Canonical configured server address captured for status diagnostics.
@@ -225,10 +317,8 @@ impl Drop for PidFile {
         let Ok(content) = std::fs::read_to_string(&self.path) else {
             return;
         };
-        let owns_numeric_file = content.trim().parse::<u32>().ok() == Some(self.pid);
-        let owns_relay_file = serde_json::from_str::<RelayPidMetadata>(&content)
-            .is_ok_and(|metadata| metadata.pid == self.pid);
-        if owns_numeric_file || owns_relay_file {
+        // Relay records parse as the shared metadata too because unknown fields are ignored.
+        if ProcessPidMetadata::parse(&content).is_some_and(|metadata| metadata.pid == self.pid) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -251,11 +341,7 @@ pub(crate) async fn acquire(slot: ProcessSlot, paths: &AppPaths) -> Result<Optio
 }
 
 /// Claims one named relay runtime file and writes its JSON launch metadata.
-pub(crate) async fn acquire_relay(
-    mut metadata: RelayPidMetadata,
-    paths: &AppPaths,
-) -> Result<PidFile> {
-    metadata.pid = std::process::id();
+pub(crate) async fn acquire_relay(metadata: RelayPidMetadata, paths: &AppPaths) -> Result<PidFile> {
     let path = relay_pid_path(&metadata.id, paths)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -266,18 +352,36 @@ pub(crate) async fn acquire_relay(
     if !try_lock(&file)? {
         let pid = read_relay_metadata(&path)
             .await
-            .map_or(0, |record| record.pid);
+            .map_or(0, |record| record.process.pid);
         bail!(
             "relay '{}' is already running with PID {pid}; run `redoor agent relay stop {}` to stop it",
             metadata.id,
             metadata.id
         );
     }
-    file.set_len(0).await?;
-    let json = serde_json::to_vec_pretty(&metadata).context("Failed to encode relay PID file")?;
-    file.write_all(&json).await?;
-    file.write_all(b"\n").await?;
-    file.flush().await?;
+    write_pid_record(&mut file, &metadata).await?;
+    Ok(PidFile {
+        path,
+        pid: metadata.process.pid,
+        _lock: file,
+    })
+}
+
+/// Claims an explicit PID path so every process role uses the same duplicate-start check.
+async fn claim_pid_file(slot: ProcessSlot, path: PathBuf) -> Result<PidFile> {
+    let metadata = ProcessPidMetadata::current();
+    let mut file = open_pid_file(&path).await?;
+    if !try_lock(&file)? {
+        let pid = ProcessPidMetadata::read(&path)
+            .await
+            .map_or(0, |record| record.pid);
+        bail!(
+            "{} is already running with PID {pid}; run `redoor {} stop` to stop it",
+            slot.file_stem(),
+            slot.command_path()
+        );
+    }
+    write_pid_record(&mut file, &metadata).await?;
     Ok(PidFile {
         path,
         pid: metadata.pid,
@@ -285,27 +389,15 @@ pub(crate) async fn acquire_relay(
     })
 }
 
-/// Claims an explicit PID path so every process role uses the same duplicate-start check.
-async fn claim_pid_file(slot: ProcessSlot, path: PathBuf) -> Result<PidFile> {
-    let own_pid = std::process::id();
-    let mut file = open_pid_file(&path).await?;
-    if !try_lock(&file)? {
-        let pid = read_pid(&path).await.unwrap_or(0);
-        bail!(
-            "{} is already running with PID {pid}; run `redoor {} stop` to stop it",
-            slot.file_stem(),
-            slot.command_path()
-        );
-    }
+/// Replaces the locked file's contents with one pretty JSON record so both tools and humans
+/// can read it; called only while holding the lock, so no reader sees a competing writer.
+async fn write_pid_record(file: &mut fs::File, record: &impl Serialize) -> Result<()> {
+    let json = serde_json::to_vec_pretty(record).context("Failed to encode PID file")?;
     file.set_len(0).await?;
-    file.write_all(own_pid.to_string().as_bytes()).await?;
+    file.write_all(&json).await?;
     file.write_all(b"\n").await?;
     file.flush().await?;
-    Ok(PidFile {
-        path,
-        pid: own_pid,
-        _lock: file,
-    })
+    Ok(())
 }
 
 /// Reports whether the lock owner is alive without changing process state.
@@ -319,18 +411,20 @@ pub(crate) async fn status(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
         let _ = fs::remove_file(&path).await;
         bail!("{} is not running", slot.file_stem());
     }
-    let Some(pid) = read_pid(&path).await else {
+    let Some(metadata) = ProcessPidMetadata::read(&path).await else {
         bail!("{} PID file is invalid", slot.file_stem());
     };
-    println!("{} is running with PID {pid}", slot.file_stem());
+    metadata.print_status(slot.file_stem(), &path);
     Ok(())
 }
 
 /// Reports whether one named relay owns its runtime-file lock.
 pub(crate) async fn status_relay(id: &str, paths: &AppPaths) -> Result<()> {
-    let (path, metadata) = open_running_relay(id, paths).await?;
-    println!("relay '{id}' is running with PID {}", metadata.pid);
-    drop(path);
+    let (lock, metadata) = open_running_relay(id, paths).await?;
+    metadata
+        .process
+        .print_status(&format!("relay '{id}'"), &relay_pid_path(id, paths)?);
+    drop(lock);
     Ok(())
 }
 
@@ -345,14 +439,20 @@ pub(crate) async fn stop(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
         let _ = fs::remove_file(&path).await;
         bail!("{} is not running", slot.file_stem());
     }
-    let Some(pid) = read_pid(&path).await else {
+    let Some(pid) = ProcessPidMetadata::read(&path)
+        .await
+        .map(|record| record.pid)
+    else {
         bail!("{} PID file is invalid", slot.file_stem());
     };
 
     kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
         .with_context(|| format!("Failed to stop {} process {pid}", slot.file_stem()))?;
     wait_for_unlock(&file, slot.file_stem(), pid).await?;
-    if read_pid(&path).await == Some(pid) {
+    if ProcessPidMetadata::read(&path)
+        .await
+        .is_some_and(|record| record.pid == pid)
+    {
         let _ = fs::remove_file(path).await;
     }
     println!("Stopped {} process {pid}", slot.file_stem());
@@ -373,16 +473,17 @@ pub(crate) async fn stop_relay(id: &str, paths: &AppPaths) -> Result<()> {
     let metadata = read_relay_metadata(&path)
         .await
         .with_context(|| format!("relay '{id}' PID file is invalid"))?;
-    kill(Pid::from_raw(metadata.pid as i32), Signal::SIGTERM)
-        .with_context(|| format!("Failed to stop relay '{id}' process {}", metadata.pid))?;
-    wait_for_unlock(&file, "relay", metadata.pid).await?;
+    let pid = metadata.process.pid;
+    kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+        .with_context(|| format!("Failed to stop relay '{id}' process {pid}"))?;
+    wait_for_unlock(&file, "relay", pid).await?;
     if read_relay_metadata(&path)
         .await
-        .is_some_and(|record| record.pid == metadata.pid)
+        .is_some_and(|record| record.process.pid == pid)
     {
         let _ = fs::remove_file(path).await;
     }
-    println!("Stopped relay '{id}' process {}", metadata.pid);
+    println!("Stopped relay '{id}' process {pid}");
     Ok(())
 }
 
@@ -409,7 +510,9 @@ async fn ensure_not_running(slot: ProcessSlot, paths: &AppPaths) -> Result<()> {
     }
     let file = open_pid_file(&path).await?;
     if !try_lock(&file)? {
-        let pid = read_pid(&path).await.unwrap_or(0);
+        let pid = ProcessPidMetadata::read(&path)
+            .await
+            .map_or(0, |record| record.pid);
         bail!(
             "{} is already running with PID {pid}; run `redoor {} stop` to stop it",
             slot.file_stem(),
@@ -429,7 +532,7 @@ async fn ensure_relay_not_running(id: &str, paths: &AppPaths) -> Result<()> {
     if !try_lock(&file)? {
         let pid = read_relay_metadata(&path)
             .await
-            .map_or(0, |record| record.pid);
+            .map_or(0, |record| record.process.pid);
         bail!(
             "relay '{id}' is already running with PID {pid}; run `redoor agent relay stop {id}` to stop it"
         );
@@ -439,7 +542,8 @@ async fn ensure_relay_not_running(id: &str, paths: &AppPaths) -> Result<()> {
 
 /// Spawns the current command without `--daemon` in a new session, reporting `description`.
 async fn spawn_daemon_process(description: &str) -> Result<()> {
-    let executable = std::env::current_exe().context("Failed to locate the current executable")?;
+    let executable =
+        redoor_core::executable::current().context("Failed to locate the current executable")?;
     let arguments: Vec<OsString> = std::env::args_os()
         .skip(1)
         .filter(|argument| argument != "--daemon")
@@ -481,11 +585,6 @@ fn pid_path(slot: ProcessSlot, paths: &AppPaths) -> Result<PathBuf> {
 pub(crate) fn relay_pid_path(id: &str, paths: &AppPaths) -> Result<PathBuf> {
     redoor_core::config::parse_relay_id(id).map_err(anyhow::Error::msg)?;
     Ok(paths.data_dir()?.join("relays").join(format!("{id}.pid")))
-}
-
-/// Reads a PID defensively so malformed or partially written stale files can be replaced.
-async fn read_pid(path: &PathBuf) -> Option<u32> {
-    fs::read_to_string(path).await.ok()?.trim().parse().ok()
 }
 
 /// Reads one relay runtime record without interpreting file existence as liveness.
@@ -561,9 +660,8 @@ mod tests {
         let directory = redoor_core::test_support::TempDir::create();
         let path = directory.path().join("relay.pid");
         let metadata = RelayPidMetadata {
-            pid: std::process::id(),
+            process: ProcessPidMetadata::current(),
             id: "production".to_string(),
-            started_at: "2026-08-12T00:00:00Z".to_string(),
             target: "user@example.com".to_string(),
             server: "https://redoor.example.com".to_string(),
             agent_name: "production-agent".to_string(),
@@ -579,7 +677,7 @@ mod tests {
         file.flush().await.unwrap();
         let first = PidFile {
             path: path.clone(),
-            pid: metadata.pid,
+            pid: metadata.process.pid,
             _lock: file,
         };
 
@@ -590,8 +688,13 @@ mod tests {
         assert_eq!(record.id, "production");
         // The PID identifies the process operators need to inspect or stop.
         assert!(
-            record.pid > 0,
+            record.process.pid > 0,
             "relay JSON should contain the lock owner's PID"
+        );
+        // Status reports the relay's own build, so it must survive the flattened round trip.
+        assert_eq!(
+            record.process.binary,
+            Some(redoor_core::identity::current_binary_identity())
         );
 
         drop(first);
@@ -599,6 +702,31 @@ mod tests {
         assert!(
             !path.exists(),
             "relay PID cleanup should remove its own JSON file"
+        );
+    }
+
+    /// Processes started by a binary that wrote bare PIDs must stay inspectable and stoppable
+    /// after an upgrade, until they are restarted and rewrite the file as JSON.
+    #[test]
+    fn parses_legacy_numeric_pid_files() {
+        let metadata = ProcessPidMetadata::parse("4242\n").expect("legacy PID should parse");
+        // The PID is all stop needs to signal the old process.
+        assert_eq!(metadata.pid, 4242);
+        // Status must not invent a build identity the old process never recorded.
+        assert!(metadata.binary.is_none());
+    }
+
+    /// Role PID files carry the running build so status can report it without asking the process.
+    #[test]
+    fn role_pid_records_round_trip_the_build_identity() {
+        let json = serde_json::to_string_pretty(&ProcessPidMetadata::current()).unwrap();
+        let metadata = ProcessPidMetadata::parse(&json).expect("JSON record should parse");
+        // The PID must survive so stop and duplicate-start checks keep working.
+        assert_eq!(metadata.pid, std::process::id());
+        // The identity is what status prints, so it must not be lost in serialization.
+        assert_eq!(
+            metadata.binary,
+            Some(redoor_core::identity::current_binary_identity())
         );
     }
 

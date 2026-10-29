@@ -22,12 +22,22 @@ pub(crate) async fn get_user_state_handler(State(state): State<ServerState>) -> 
 
 /// Route: `PUT /api/v1/user/state` replaces the authenticated user's stored document.
 ///
-/// Replaces the on-disk document atomically so a crash cannot leave truncated JSON.
+/// Replaces the on-disk document atomically so a crash cannot leave truncated JSON, then
+/// deletes the editor buffers of files the new document no longer lists as open.
 pub(crate) async fn update_user_state_handler(
     State(state): State<ServerState>,
     Json(request): Json<UpdateUserStateRequest>,
 ) -> impl IntoResponse {
-    match write_user_state(&state.runtime.paths, state.auth.username(), &request.state).await {
+    // Held across both steps, so the cleanup sees the list this update wrote, not a later one.
+    let _buffers_guard = state.editor_buffer_lock.lock().await;
+    let written = async {
+        let paths = &state.runtime.paths;
+        let username = state.auth.username();
+        write_user_state(paths, username, &request.state).await?;
+        super::editor_buffers::delete_closed_buffers(paths, username, &request.state).await
+    };
+
+    match written.await {
         Ok(()) => Json(UserStateResponse {
             state: request.state,
         })
@@ -65,44 +75,65 @@ async fn write_user_state(
     state: &serde_json::Value,
 ) -> anyhow::Result<()> {
     let path = user_state_path(paths, username)?;
-    let account_directory = path
-        .parent()
-        .expect("state.json is nested under users/<username>");
+    let account_directory = prepare_account_directory(paths, username).await?;
+    let contents = serde_json::to_vec(state)?;
+    write_private_file_atomically(&account_directory.join(".state.json.tmp"), &path, &contents)
+        .await
+}
+
+/// Creates the login account's private directory, so every per-user file (preferences,
+/// editor buffers) shares one owner check and mode instead of each writer repeating it.
+pub(super) async fn prepare_account_directory(
+    paths: &redoor_core::paths::AppPaths,
+    username: &str,
+) -> anyhow::Result<PathBuf> {
+    let account_directory = account_directory(paths, username)?;
     let users_directory = account_directory
         .parent()
         .expect("account directories live under users/");
 
-    tokio::fs::create_dir_all(account_directory).await?;
+    tokio::fs::create_dir_all(&account_directory).await?;
     #[cfg(unix)]
     {
         ensure_private_directory(users_directory).await?;
-        ensure_private_directory(account_directory).await?;
+        ensure_private_directory(&account_directory).await?;
     }
+    Ok(account_directory)
+}
 
-    let contents = serde_json::to_vec(state)?;
-    let temporary_path = account_directory.join(".state.json.tmp");
-    write_private_file(&temporary_path, &contents).await?;
-    tokio::fs::rename(&temporary_path, &path).await?;
+/// Replaces `path` through `temporary_path` in the same directory, so a crash or a
+/// concurrent reader never sees a truncated file.
+pub(super) async fn write_private_file_atomically(
+    temporary_path: &Path,
+    path: &Path,
+    contents: &[u8],
+) -> anyhow::Result<()> {
+    write_private_file(temporary_path, contents).await?;
+    tokio::fs::rename(temporary_path, path).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+        tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     }
     Ok(())
 }
 
-/// Keeps each login name as one path component so a crafted username cannot escape the data dir.
+/// Locates the account's preference document inside its private directory.
 fn user_state_path(
+    paths: &redoor_core::paths::AppPaths,
+    username: &str,
+) -> anyhow::Result<PathBuf> {
+    Ok(account_directory(paths, username)?.join("state.json"))
+}
+
+/// Keeps each login name as one path component so a crafted username cannot escape the data dir.
+pub(super) fn account_directory(
     paths: &redoor_core::paths::AppPaths,
     username: &str,
 ) -> anyhow::Result<PathBuf> {
     redoor_core::config::parse_server_username(username)
         .map_err(|_| anyhow::anyhow!("login username cannot be used as a state directory name"))?;
-    Ok(paths
-        .data_dir()?
-        .join("users")
-        .join(username)
-        .join("state.json"))
+    Ok(paths.data_dir()?.join("users").join(username))
 }
 
 /// Writes bytes with mode 0600 so local users cannot read another account's preferences.
@@ -121,7 +152,7 @@ async fn write_private_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
 
 /// Ensures the users directory is owned by this process user and mode 0700.
 #[cfg(unix)]
-async fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
+pub(super) async fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;

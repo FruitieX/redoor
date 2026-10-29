@@ -43,6 +43,16 @@ pub enum Command {
     GitContext(request::GitContext),
     GitStatus(request::GitStatus),
     GitDiff(request::GitDiff),
+    GitRevisionTree(request::GitRevisionTree),
+    GitRevisionContent(request::GitRevisionContent),
+    GitCommitDiff(request::GitCommitDiff),
+    GitLog(request::GitLog),
+    GitCommitNeighbors(request::GitCommitNeighbors),
+    GitRefList(request::GitRefList),
+    GitWorktreeList(request::GitWorktreeList),
+    GitWorktreeStatus(request::GitWorktreeStatus),
+    GitRevisionStat(request::GitRevisionStat),
+    GitDownload(request::GitDownload),
     MoveMetadata(request::MoveMetadata),
     DeleteMoveSource(request::DeleteMoveSource),
     OpenPath(request::OpenPath),
@@ -163,6 +173,44 @@ impl Command {
                 request.files.len(),
                 request.mode
             ),
+            Self::GitRevisionTree(request) => {
+                format!("GitRevisionTree path={} rev={}", request.path, request.rev)
+            }
+            Self::GitRevisionContent(request) => {
+                format!(
+                    "GitRevisionContent path={} rev={}",
+                    request.path, request.rev
+                )
+            }
+            Self::GitCommitDiff(request) => {
+                format!("GitCommitDiff path={} rev={}", request.path, request.rev)
+            }
+            Self::GitLog(request) => format!(
+                "GitLog path={} rev={} skip={} limit={}",
+                request.path,
+                request.rev.as_deref().unwrap_or("HEAD"),
+                request.page.skip,
+                request.page.limit
+            ),
+            Self::GitCommitNeighbors(request) => {
+                format!(
+                    "GitCommitNeighbors path={} rev={}",
+                    request.path, request.rev
+                )
+            }
+            Self::GitRefList(request) => format!(
+                "GitRefList path={} kind={:?} sort={:?} skip={} limit={}",
+                request.path, request.kind, request.sort, request.page.skip, request.page.limit
+            ),
+            Self::GitWorktreeList(request) => format!("GitWorktreeList path={}", request.path),
+            Self::GitWorktreeStatus(request) => format!("GitWorktreeStatus path={}", request.path),
+            Self::GitRevisionStat(request) => {
+                format!("GitRevisionStat path={} rev={}", request.path, request.rev)
+            }
+            Self::GitDownload(request) => format!(
+                "GitDownload path={} rev={} include_root={}",
+                request.path, request.rev, request.include_root
+            ),
             Self::MoveMetadata(request) => format!("MoveMetadata path={}", request.path),
             Self::DeleteMoveSource(request) => format!("DeleteMoveSource path={}", request.path),
             Self::OpenPath(request) => format!("OpenPath path={}", request.path),
@@ -237,6 +285,34 @@ pub struct MoveMetadataResult {
     pub is_file: bool,
     pub is_dir: bool,
     pub identity: MoveSourceIdentity,
+}
+
+/// What a path is at a Git revision, as far as copying or downloading it is concerned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GitRevisionStatKind {
+    /// A regular or executable file, with its size read from the object header.
+    File {
+        size: u64,
+        /// Git's `100755` mode, so a restored script is still runnable.
+        executable: bool,
+    },
+    Directory,
+    /// Symlinks and submodules have no content a copy could write, so callers refuse them.
+    Symlink,
+    Submodule,
+}
+
+/// Answers [`request::GitRevisionStat`]: the entry kind and the commit the revision named.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRevisionStatResult {
+    pub commit_id: String,
+    pub kind: GitRevisionStatKind,
+    /// Whether [`request::GitRevisionStat::replace_target`] contains the repository's
+    /// worktree root once both are resolved through the agent's filesystem. A committed tree
+    /// has no `.git`, so replacing such a directory with it would delete the repository; the
+    /// server refuses that.
+    pub replaces_repository: bool,
 }
 
 /// Agent's echo reply, used to verify the command round trip.

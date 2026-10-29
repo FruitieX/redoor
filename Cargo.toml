@@ -3,8 +3,19 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.5.0"
 edition = "2024"
+# Distributed only as release binaries, never on crates.io; cargo-deny also skips license checks for private crates.
+publish = false
+
+# Dependencies run optimized in debug builds: tests push hundreds of megabytes through
+# hashing, compression, regex and async I/O code that is many times slower unoptimized.
+# Workspace crates stay at opt-level 0 so incremental rebuilds remain fast, and the
+# dependencies are compiled once and then cached. Line tables keep backtraces readable
+# while dropping the full debug info that made the binary tests upload over SSH balloon.
+[profile.dev.package."*"]
+opt-level = 2
+debug = "line-tables-only"
 
 [workspace.dependencies]
 blake3 = "1.8"
@@ -36,6 +47,7 @@ bytes = "1.12.1"
 mime_guess = "2.0.5"
 headers = "0.4.1"
 tar = "0.4.46"
+flate2 = "1.1.9"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 anyhow = "1.0.104"
 thiserror = "2.0.20"
@@ -52,9 +64,11 @@ pty-process = { version = "0.5.3", features = ["async"] }
 # Only the hasher: salts come from getrandom, so the rand_core/getrandom 0.2 stack is not needed.
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
 subtle = "2.6.1"
-sha1 = "0.10.6"
 sha2 = "0.11"
 getrandom = "0.4"
+# Generates and encodes the per-device ed25519 keys in-process, so no external tool writes them.
+ssh-key = { version = "0.6.7", default-features = false, features = ["ed25519", "std"] }
+zeroize = "1"
 base64 = "0.22.1"
 nucleo-matcher = "0.3.1"
 async-compression = { version = "0.4.43", features = ["tokio", "gzip"] }
@@ -63,9 +77,10 @@ similar = "3.1.2"
 ignore = "0.4.33"
 grep-matcher = "0.1.8"
 grep-regex = "0.1.14"
-gix = { version = "0.87.0", default-features = false, features = ["status", "parallel", "sha1"] }
+# `revision` resolves user-supplied revisions (branches, tags, ids) for history browsing.
+gix = { version = "0.90.0", default-features = false, features = ["status", "revision", "parallel", "sha1"] }
 # Names status-walk enums returned by gix without enabling any additional Git capabilities.
-gix-dir = "0.29.0"
+gix-dir = "0.32.0"
 mountpoints = "0.2.1"
 libloading = "0.9.0"
 objc2 = "0.6.4"

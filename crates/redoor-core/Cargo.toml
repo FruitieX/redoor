@@ -2,6 +2,7 @@
 name = "redoor-core"
 version.workspace = true
 edition.workspace = true
+publish.workspace = true
 
 [features]
 # Exposes `test_support` to other crates' tests without shipping it in release builds.
@@ -20,7 +21,7 @@ serde_json.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
-tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "process", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 toml_edit = { workspace = true, features = ["serde"] }
 ts-rs.workspace = true
 uuid.workspace = true

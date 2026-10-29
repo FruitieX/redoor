@@ -91,16 +91,15 @@ mod tests {
     struct InterruptedInput;
 
     impl AsyncRead for InterruptedInput {
-        /// Reports an interrupted read without yielding bytes, matching an aborted import.
+        /// Reports a failed read without yielding bytes, matching an aborted import.
+        ///
+        /// `ErrorKind::Interrupted` is not used because `read_to_end` retries it like EINTR.
         fn poll_read(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
             _buf: &mut tokio::io::ReadBuf<'_>,
         ) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "import cancelled",
-            )))
+            Poll::Ready(Err(std::io::Error::other("import cancelled")))
         }
     }
 

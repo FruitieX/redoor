@@ -5,9 +5,10 @@ use super::{state::ServerState, websocket_security::is_same_origin};
 use crate::actors::router::{
     LogStream, OpenAgentLogStreamRequest, OutputReceiver, RouterError, RouterMsg, StreamCloseGuard,
 };
+use crate::http::access::ResolvedDevice;
 use axum::{
     extract::{
-        Path, State as AxumState,
+        State as AxumState,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
@@ -28,7 +29,7 @@ const MAX_LOG_MESSAGE_SIZE: usize = 256 * 1024;
 
 /// Upgrades an authenticated same-origin browser into one live agent log stream.
 pub(crate) async fn browser_agent_logs_websocket_handler(
-    Path(agent): Path<String>,
+    ResolvedDevice(agent_id): ResolvedDevice,
     headers: HeaderMap,
     AxumState(state): AxumState<ServerState>,
     websocket: WebSocketUpgrade,
@@ -43,7 +44,7 @@ pub(crate) async fn browser_agent_logs_websocket_handler(
     websocket
         .max_message_size(MAX_LOG_MESSAGE_SIZE)
         .max_frame_size(MAX_LOG_MESSAGE_SIZE)
-        .on_upgrade(move |socket| run_log_relay(socket, AgentId::from(agent), state))
+        .on_upgrade(move |socket| run_log_relay(socket, agent_id, state))
         .into_response()
 }
 
@@ -129,7 +130,14 @@ impl LineAssembler {
 
 /// One thing the log stream produced for the browser.
 enum StreamOutput {
-    Data(Option<Result<redoor_protocol::wire::stream::StreamChunk, String>>),
+    Data(
+        Option<
+            Result<
+                redoor_protocol::wire::stream::StreamChunk,
+                redoor_protocol::wire::request::CommandError,
+            >,
+        >,
+    ),
     Keepalive,
 }
 

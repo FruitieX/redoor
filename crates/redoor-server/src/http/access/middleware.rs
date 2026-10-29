@@ -9,10 +9,9 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use redoor_protocol::ids::AgentId;
 
 use super::{
-    Principal,
+    Principal, ResolvedDevice,
     routes::{self, Access},
 };
 use crate::http::{auth::SessionCheck, error::ApiError, state::ServerState};
@@ -35,17 +34,31 @@ pub(crate) async fn access_control(
         warn_unclassified(request.method(), &matched);
         Access::SessionOnly
     });
-    if access == Access::Public
-        || routes::is_one_time_token_raw_request(request.method(), request.uri())
-    {
-        return next.run(request).await;
-    }
-    let (principal, renewed_cookie) = match authenticate(&state, request.headers()).await {
-        Ok(authenticated) => authenticated,
-        Err(response) => return response,
+    let public = access == Access::Public
+        || routes::is_one_time_token_raw_request(request.method(), request.uri());
+    // Authenticating before resolving keeps anonymous callers from probing device names.
+    let (principal, renewed_cookie) = if public {
+        (None, None)
+    } else {
+        match authenticate(&state, request.headers()).await {
+            Ok((principal, renewed_cookie)) => (Some(principal), renewed_cookie),
+            Err(error) => return error.into_response(),
+        }
     };
     let (mut parts, body) = request.into_parts();
-    if let Err(error) = authorize(&principal, access, &mut parts).await {
+    // Every handler and the scope check below see the resolved id, never the name the client
+    // used, so a renamed device cannot slip past a scope.
+    let device = match resolve_device(&state, &mut parts).await {
+        Ok(device) => device,
+        Err(error) => return error.into_response(),
+    };
+    if let Some(device) = &device {
+        parts.extensions.insert(device.clone());
+    }
+    let Some(principal) = principal else {
+        return next.run(Request::from_parts(parts, body)).await;
+    };
+    if let Err(error) = authorize(&principal, access, device.as_ref()) {
         return error.into_response();
     }
     parts.extensions.insert(principal);
@@ -64,7 +77,7 @@ pub(crate) async fn access_control(
 async fn authenticate(
     state: &ServerState,
     headers: &HeaderMap,
-) -> Result<(Principal, Option<HeaderValue>), Response> {
+) -> Result<(Principal, Option<HeaderValue>), ApiError> {
     if let Some(secret) = bearer_token(headers) {
         return match state.tokens.authenticate(secret).await {
             Some(grant) => Ok((Principal::Token(grant), None)),
@@ -87,38 +100,48 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| secret.trim())
 }
 
+/// Resolves the route's `{agent}` parameter (a name or an id) to a known device id; `None`
+/// for routes without the parameter.
+async fn resolve_device(
+    state: &ServerState,
+    parts: &mut Parts,
+) -> Result<Option<ResolvedDevice>, ApiError> {
+    let value = parts
+        .extract::<RawPathParams>()
+        .await
+        .ok()
+        .and_then(|params| {
+            params
+                .iter()
+                .find(|(name, _)| *name == "agent")
+                .map(|(_, value)| value.to_owned())
+        });
+    match value {
+        Some(value) => Ok(Some(ResolvedDevice(state.agents.resolve(&value).await?))),
+        None => Ok(None),
+    }
+}
+
 /// Applies the coarse route rule; `AnyPrincipal` and `Handler` routes decide in the handler.
-async fn authorize(
+fn authorize(
     principal: &Principal,
     access: Access,
-    parts: &mut Parts,
+    device: Option<&ResolvedDevice>,
 ) -> Result<(), ApiError> {
     match access {
         Access::Public | Access::AnyPrincipal | Access::Handler => Ok(()),
         Access::SessionOnly => principal.require_session(),
-        Access::Device(permissions) => {
-            let agent = parts
-                .extract::<RawPathParams>()
-                .await
-                .ok()
-                .and_then(|params| {
-                    params
-                        .iter()
-                        .find(|(name, _)| *name == "agent")
-                        .map(|(_, value)| AgentId::from(value))
-                });
-            match agent {
-                Some(agent) => principal.require(permissions, &agent),
-                // A device rule on a route without `{agent}` is a table bug: fail closed.
-                None => principal.require_session(),
-            }
-        }
+        Access::Device(permissions) => match device {
+            Some(ResolvedDevice(agent)) => principal.require(permissions, agent),
+            // A device rule on a route without `{agent}` is a table bug: fail closed.
+            None => principal.require_session(),
+        },
     }
 }
 
 /// Builds the 401 body every client already understands.
-fn unauthorized(message: &str) -> Response {
-    ApiError::status(StatusCode::UNAUTHORIZED, message).into_response()
+fn unauthorized(message: &str) -> ApiError {
+    ApiError::status(StatusCode::UNAUTHORIZED, message)
 }
 
 /// Reminds developers in debug builds that a new API route needs a table entry; release

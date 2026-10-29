@@ -8,7 +8,7 @@ use super::state::RouterState;
 use super::transfers::copy::CopyRelease;
 use redoor_core::log;
 use redoor_protocol::wire::log::Level;
-use redoor_protocol::wire::request::CommandOutcome;
+use redoor_protocol::wire::request::{CommandError, CommandOutcome};
 use redoor_protocol::{
     api::transfers::{CancelTransferResponse, CancelTransferStatus, TransferProgressState},
     ids::{AgentId, RequestId, TransferId},
@@ -301,7 +301,9 @@ impl RouterState {
                 if let Some(connection) = self.agents.by_id.get(&output.agent_id) {
                     connection.streams.close_inbound(output.request_id);
                 }
-                output.lease.fail(reason.to_string());
+                output
+                    .lease
+                    .fail(CommandError::new(CommandErrorKind::Internal, reason));
                 if let OutputKind::Download { progress_id, .. } = output.kind {
                     self.settle_lost_transfer(progress_id, reason);
                 }

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Link, useLocation } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { useAtom, useAtomValue } from "jotai";
 import {
     Bookmark,
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import type { Agent } from "#ui/api-client";
+import { browserRoute, deviceRoute } from "#ui/browser-route";
 import {
     agentTabLocationsAtom,
     getAgentTabLocation,
@@ -37,7 +38,8 @@ import {
     foldedBookmarkAgentsAtom,
     useCloseSideMenu,
 } from "#ui/side-menu-state";
-import { useTargetAgentId } from "#ui/use-active-agent";
+import { useTargetAgent } from "#ui/use-active-agent";
+import { useBrowserLocation } from "#ui/use-browser-location";
 import { useAgents } from "#ui/use-agents";
 import { sortAgentsByName } from "#ui/utils/agents";
 
@@ -201,24 +203,26 @@ function AgentMenu(props: { agents: Agent[] }) {
                         });
                     }}
                 >
+                    {/* The list reaches through the panel's right padding so its scrollbar
+                        sits on the panel edge instead of beside an empty strip; its own
+                        padding keeps the rows where the panel padding put them. */}
                     <ul
                         ref={listRef}
                         aria-label="Device list"
-                        className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto"
+                        className="-mr-3 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-3"
                     >
                         {visibleAgents.map((agent) => (
                             <DeviceBlock
                                 key={agent.id}
                                 agent={agent}
-                                rememberedTarget={
-                                    agent.status === "connected" &&
+                                rememberedPath={
                                     agent.cwd !== null
                                         ? getAgentTabLocation(
                                               agentTabLocations,
                                               agent.id,
-                                              agent.getBrowserUrl(agent.cwd),
+                                              agent.cwd,
                                           )
-                                        : `/agents/${encodeURIComponent(agent.id)}`
+                                        : null
                                 }
                                 bookmarks={userState.bookmarks.filter(
                                     (bookmark) => bookmark.agentId === agent.id,
@@ -326,7 +330,8 @@ function ConnectedDevicesToggle() {
 /** Moves a device and its bookmarks together without making bookmarks outer draggables. */
 function DeviceBlock(props: {
     agent: Agent;
-    rememberedTarget: string;
+    /** Where browsing resumes on this device, or null before its home directory is known. */
+    rememberedPath: string | null;
     bookmarks: BookmarkEntry[];
     bookmarksFolded: boolean;
     onToggleBookmarks: () => void;
@@ -335,13 +340,16 @@ function DeviceBlock(props: {
 }) {
     const bookmarksId = React.useId();
     const closeMenu = useCloseSideMenu();
-    const agentPrefix = `/agents/${encodeURIComponent(props.agent.id)}`;
-    const isActive = useTargetAgentId() === props.agent.id;
+    const isActive = useTargetAgent()?.id === props.agent.id;
 
-    const canBrowse =
-        props.agent.status === "connected" && props.agent.cwd !== null;
-
-    const target = canBrowse ? props.rememberedTarget : agentPrefix;
+    // Links carry the device's current name, so they follow a rename as soon as the
+    // inventory reports it.
+    const target =
+        props.agent.status === "connected" && props.rememberedPath !== null
+            ? browserRoute(props.agent, props.rememberedPath)
+            : ({
+                  ...deviceRoute(props.agent, "/agents/$deviceName"),
+              } as const);
 
     return (
         <SortableItem id={props.agent.id}>
@@ -388,7 +396,7 @@ function DeviceBlock(props: {
                             />
                         )}
                         <Link
-                            to={target}
+                            {...target}
                             onClick={closeMenu}
                             aria-label={`${props.agent.name}, ${props.agent.status}`}
                             aria-current={isActive ? "page" : undefined}
@@ -414,8 +422,10 @@ function DeviceBlock(props: {
                         {props.agent.configurationEditable ? (
                             <Tooltip content={`Edit ${props.agent.name}`}>
                                 <Link
-                                    to="/agents/$agentId/edit"
-                                    params={{ agentId: props.agent.id }}
+                                    {...deviceRoute(
+                                        props.agent,
+                                        "/agents/$deviceName/edit",
+                                    )}
                                     aria-label={`Edit ${props.agent.name}`}
                                     onClick={closeMenu}
                                     className="mr-1 rounded p-1.5 text-slate-500 hover:bg-tint-strong hover:text-slate-200"
@@ -494,9 +504,12 @@ function BookmarkRow(props: {
     onRemove: (bookmark: BookmarkEntry) => void;
 }) {
     const closeMenu = useCloseSideMenu();
-    const pathname = useLocation({ select: (location) => location.pathname });
-    const href = props.agent.getBrowserUrl(props.bookmark.path);
-    const isActive = pathname === href || pathname.startsWith(`${href}/`);
+    const browser = useBrowserLocation();
+
+    const isActive =
+        browser?.agentId === props.agent.id &&
+        (browser.path === props.bookmark.path ||
+            browser.path.startsWith(`${props.bookmark.path}/`));
 
     return (
         <SortableItem id={getBookmarkKey(props.bookmark)}>
@@ -523,7 +536,7 @@ function BookmarkRow(props: {
                         content={`Open ${props.bookmark.path}`}
                     >
                         <Link
-                            to={href}
+                            {...browserRoute(props.agent, props.bookmark.path)}
                             onClick={closeMenu}
                             aria-current={isActive ? "page" : undefined}
                             className="flex w-full min-w-0 items-center gap-1.5 px-1.5 py-1 text-xs"

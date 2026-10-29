@@ -1,5 +1,5 @@
 import * as React from "react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 
 import {
     OptionalTooltip,
@@ -60,7 +60,7 @@ export function ToggleButton(props: ToggleButtonProps) {
                 type={props.type ?? "button"}
                 aria-label={props.label}
                 aria-pressed={props.pressed}
-                className={twMerge(
+                className={cn(
                     "inline-flex items-center justify-center transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                     variantClasses[props.variant ?? "outline"],
                     sizeClasses[props.size ?? "icon"],

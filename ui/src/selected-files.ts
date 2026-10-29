@@ -10,13 +10,33 @@ export type SelectedPath = {
     path: string;
     fileName: string;
     entryType: "file" | "directory";
+    /**
+     * The commit id a path was selected at while browsing Git history. Absent for the
+     * working tree. A revision can only be copied: it has nothing to move or delete.
+     */
+    rev?: string;
 };
 
-/** Identifies a selection across agents, since the same path can exist on several devices. */
-export function getSelectedFileKey(
-    file: Pick<SelectedPath, "agentId" | "path">,
-) {
-    return `${file.agentId}:${file.path}`;
+/** The fields that identify one selection, shared by every lookup and removal. */
+export type SelectedPathIdentity = Pick<
+    SelectedPath,
+    "agentId" | "path" | "rev"
+>;
+
+/**
+ * Identifies a selection across agents, since the same path can exist on several devices,
+ * and across revisions, since the working file and its older versions are different sources.
+ * Agent ids contain neither `@` nor `:`, so the two forms cannot collide.
+ */
+export function getSelectedFileKey(file: SelectedPathIdentity) {
+    return file.rev === undefined
+        ? `${file.agentId}:${file.path}`
+        : `${file.agentId}@${file.rev}:${file.path}`;
+}
+
+/** True when the selection holds anything read from Git history rather than the worktree. */
+export function hasRevisionSelection(files: SelectedPath[]) {
+    return files.some((file) => file.rev !== undefined);
 }
 
 export const selectedFilesAtom = atomWithLocalStorage<SelectedPath[]>(
@@ -38,7 +58,7 @@ export const selectedFileKeysAtom = atom((get) => {
  */
 export const isFileSelectedAtom = atom(
     null,
-    (get, _set, file: Pick<SelectedPath, "agentId" | "path">): boolean => {
+    (get, _set, file: SelectedPathIdentity): boolean => {
         return get(selectedFileKeysAtom).has(getSelectedFileKey(file));
     },
 );
@@ -66,7 +86,7 @@ export const selectFileAtom = atom(null, (get, set, file: SelectedPath) => {
  */
 export const unselectFileAtom = atom(
     null,
-    (get, set, file: Pick<SelectedPath, "agentId" | "path">) => {
+    (get, set, file: SelectedPathIdentity) => {
         const fileKey = getSelectedFileKey(file);
         const selectedFiles = get(selectedFilesAtom);
 

@@ -1,0 +1,1083 @@
+// Serial: adds, renames, starts and removes devices, including the managed lazy/failing agents.
+import fs from "node:fs/promises";
+import path from "node:path";
+import { expect, test, type APIRequestContext } from "@playwright/test";
+import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
+import type { AgentListResponse } from "#bindings/AgentListResponse";
+import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
+import { encodeFilesystemPath, WEB_BASE_URL } from "../helpers";
+
+const VALID_AGENT = "lazy_managed";
+
+const FAILING_AGENT = "failing_managed";
+
+const CREATED_SSH_AGENT = `playwright-ssh-test-${process.pid}`;
+
+const CREATED_SSH_MISSING_PASSWORD_AGENT = `playwright-ssh-missing-password-${process.pid}`;
+
+const CREATED_SSH_MODE_SWITCH_AGENT = `playwright-ssh-mode-switch-${process.pid}`;
+
+const CREATED_SSH_PASSWORD_CHANGE_AGENT = `playwright-ssh-password-change-${process.pid}`;
+
+const CREATED_LOCAL_AGENT = `playwright-local-${process.pid}`;
+
+const EDITED_LOCAL_AGENT = `playwright-local-edit-${process.pid}`;
+
+const EDITED_AGENT = `playwright-edit-${process.pid}`;
+
+const RUNNING_EDIT_AGENT = `playwright-running-edit-${process.pid}`;
+
+const SERVER_LOG = path.resolve("log/playwright-redoor.log");
+
+// SSH connects provision the agent binary over the fixture and wait up to 60 seconds, so the
+// tests doing them need more than the default 30-second budget under full-suite load.
+const SSH_CONNECT_TEST_TIMEOUT = 150_000;
+
+/** Reads one lifecycle snapshot through the same authenticated API as the UI. */
+async function getAgent(
+    request: APIRequestContext,
+    name: string,
+): Promise<AgentInfoResponse> {
+    const response = await request.get(`${WEB_BASE_URL}/api/v1/agents`);
+    expect(response.ok()).toBe(true);
+    const body: AgentListResponse = await response.json();
+    const agent = body.agents.find((entry) => entry.name === name);
+
+    if (!agent) throw new Error(`Agent ${name} missing from inventory`);
+
+    return agent;
+}
+
+test.describe.serial("Agent management", () => {
+    test.afterEach(async ({ request }) => {
+        for (const name of [
+            VALID_AGENT,
+            FAILING_AGENT,
+            CREATED_SSH_AGENT,
+            CREATED_SSH_MISSING_PASSWORD_AGENT,
+            CREATED_SSH_MODE_SWITCH_AGENT,
+            CREATED_SSH_PASSWORD_CHANGE_AGENT,
+            CREATED_LOCAL_AGENT,
+            EDITED_LOCAL_AGENT,
+            EDITED_AGENT,
+            `${EDITED_AGENT}-original`,
+            RUNNING_EDIT_AGENT,
+            `${RUNNING_EDIT_AGENT}-original`,
+        ]) {
+            const response = await request.get(`${WEB_BASE_URL}/api/v1/agents`);
+            const body: AgentListResponse = await response.json();
+            const agent = body.agents.find((entry) => entry.name === name);
+
+            if (!agent) continue;
+
+            if (agent.status !== "stopped") {
+                const shutdownResponse = await request.post(
+                    `${WEB_BASE_URL}/api/v1/agents/${name}/shutdown`,
+                );
+
+                // Per-test cleanup must leave both managed children stopped for later suites.
+                expect(shutdownResponse.ok()).toBe(true);
+                await expect
+                    .poll(async () => (await getAgent(request, name)).status, {
+                        timeout: 20_000,
+                    })
+                    .toBe("stopped");
+            }
+        }
+    });
+
+    test("marks SSH target required and describes plaintext password storage", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/agents/new`);
+        await expect(page.getByLabel("SSH target")).toHaveAttribute(
+            "aria-required",
+            "true",
+        );
+        await expect(page.getByText("Required", { exact: true })).toBeVisible();
+
+        const dedicatedKey = page.getByRole("checkbox", {
+            name: "Create a dedicated SSH key (recommended)",
+        });
+
+        // New SSH devices default to a dedicated key, which never stores the password.
+        await expect(dedicatedKey).toBeChecked();
+        await expect(
+            page.getByLabel("SSH password (used once, not saved)"),
+        ).toBeEnabled();
+        // The password storage choice is hidden while the dedicated key replaces it.
+        await expect(
+            page.getByRole("radio", { name: "Use ssh password" }),
+        ).toHaveCount(0);
+        await dedicatedKey.uncheck();
+        await expect(
+            page.getByText(
+                "Password authentication stores the secret as plaintext in config.toml. Key mode uses a preconfigured SSH key or ssh-agent.",
+            ),
+        ).toBeVisible();
+        await expect(
+            page.getByRole("radio", { name: "Use preconfigured ssh key" }),
+        ).toBeChecked();
+        // Add defaults to key mode so a blank password cannot be saved as an empty secret.
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeDisabled();
+    });
+
+    test("reveals the SSH password with the visibility toggle", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/agents/new`);
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
+        await page.getByRole("radio", { name: "Use ssh password" }).check();
+        const password = page.getByLabel("SSH password", { exact: true });
+        await password.fill("secret-value");
+        // The typed secret must stay masked until the operator asks to inspect it.
+        await expect(password).toHaveAttribute("type", "password");
+        const toggle = page.getByRole("button", { name: "Show characters" });
+        await toggle.hover();
+        await expect(page.getByRole("tooltip")).toHaveText("Show characters");
+        await toggle.click();
+        // Operators need to verify the secret before it is stored in config.toml.
+        await expect(password).toHaveAttribute("type", "text");
+        await expect(password).toHaveValue("secret-value");
+        await page.getByRole("button", { name: "Hide characters" }).click();
+        await expect(password).toHaveAttribute("type", "password");
+    });
+
+    test("adds, edits, and deletes a local managed agent", async ({ page }) => {
+        await page.goto(`${WEB_BASE_URL}/agents/new`);
+        await page.getByRole("radio", { name: "Local process" }).check();
+        // Switching kinds must hide SSH-only fields so a local save cannot mix transports.
+        await expect(page.getByLabel("SSH target")).toHaveCount(0);
+        await page.getByLabel("Device name").fill(CREATED_LOCAL_AGENT);
+        await page.getByLabel("Home directory").fill("/tmp");
+        await page.getByRole("button", { name: "Add device" }).click();
+
+        // Submission dynamically adds and opens the dormant managed tab without a server restart.
+        await expect(
+            page.getByRole("link", {
+                name: new RegExp(`^${CREATED_LOCAL_AGENT}, `),
+            }),
+        ).toBeVisible({ timeout: 15_000 });
+        await expect(
+            page.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        await expect(
+            page.getByRole("link", {
+                name: `${CREATED_LOCAL_AGENT}, connected`,
+            }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 30_000 });
+
+        await page
+            .getByRole("link", { name: `Edit ${CREATED_LOCAL_AGENT}` })
+            .click();
+        await expect(
+            page.getByRole("heading", { name: "Edit device" }),
+        ).toBeVisible();
+        // Edit must not offer SSH↔local conversion.
+        await expect(
+            page.getByRole("radio", { name: "Local process" }),
+        ).toHaveCount(0);
+        await expect(page.getByLabel("Device name")).toHaveValue(
+            CREATED_LOCAL_AGENT,
+        );
+        await page.getByLabel("Device name").fill(EDITED_LOCAL_AGENT);
+        await page.getByRole("button", { name: "Stop agent and save" }).click();
+
+        // Renaming replaces the tab identity and keeps the user on the editable entry.
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${EDITED_LOCAL_AGENT}/edit$`),
+        );
+        await expect(
+            page.getByRole("link", { name: `Edit ${EDITED_LOCAL_AGENT}` }),
+        ).toBeVisible();
+        await page.getByRole("button", { name: "Remove device" }).click();
+
+        const confirmation = page.getByRole("dialog", {
+            name: `Remove ${EDITED_LOCAL_AGENT} from Redoor?`,
+        });
+
+        // The UI addresses the device by its id, which the rename kept.
+        const localDeleteUrl = `${WEB_BASE_URL}/api/v1/local-agents/${(await getAgent(page.request, EDITED_LOCAL_AGENT)).id}`;
+
+        const localDeleteRequest = page.waitForRequest(
+            (request) =>
+                request.url() === localDeleteUrl &&
+                request.method() === "DELETE",
+        );
+
+        await confirmation
+            .getByRole("button", { name: "Remove device" })
+            .click();
+        // Local deletion must use the local-agent resource rather than the SSH route.
+        await localDeleteRequest;
+
+        await expect(page).toHaveURL(/\/agents\/?$/);
+        // Permanent deletion must remove the managed tab as well as the TOML entry.
+        await expect(
+            page.getByRole("link", { name: `Edit ${EDITED_LOCAL_AGENT}` }),
+        ).toHaveCount(0);
+    });
+
+    test("opens the edit form from the agents table", async ({ page }) => {
+        await page.goto(`${WEB_BASE_URL}/agents`);
+        const valid = page.getByRole("row", { name: `Device ${VALID_AGENT}` });
+        await valid
+            .getByRole("button", { name: `Open actions for ${VALID_AGENT}` })
+            .click();
+        await page
+            .getByRole("dialog", { name: `${VALID_AGENT} actions` })
+            .getByRole("link", { name: "Edit" })
+            .click();
+        // Table actions must reach the same edit form as the sidebar pencil.
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${VALID_AGENT}/edit$`),
+        );
+        await expect(
+            page.getByRole("heading", { name: "Edit device" }),
+        ).toBeVisible();
+        await expect(page.getByLabel("Device name")).toHaveValue(VALID_AGENT);
+    });
+
+    test("edits and deletes a managed SSH entry from its tab", async ({
+        page,
+    }) => {
+        const originalName = `${EDITED_AGENT}-original`;
+
+        const createResponse = await page.request.post(
+            `${WEB_BASE_URL}/api/v1/agents`,
+            {
+                data: {
+                    target: "edit-original-host",
+                    username: null,
+                    ssh_port: null,
+                    name: originalName,
+                    remote_bin: null,
+                    home: null,
+                    log: null,
+                    password: null,
+                },
+            },
+        );
+
+        expect(createResponse.ok()).toBe(true);
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page.getByRole("link", { name: `Edit ${originalName}` }).click();
+
+        await expect(
+            page.getByRole("heading", { name: "Edit device" }),
+        ).toBeVisible();
+
+        const configurationTab = page
+            .getByLabel("Device view")
+            .getByRole("link", { name: "Configuration", exact: true });
+
+        // Editable managed agents expose their form in global navigation, including while stopped.
+        await expect(configurationTab).toHaveAttribute("aria-current", "page");
+        await expect(
+            page.getByText("Device connection settings will be saved to"),
+        ).toBeVisible();
+        // The footer must show the server's absolute TOML path rather than a relative hint.
+        await expect(
+            page.locator("code").filter({ hasText: /^\// }),
+        ).toBeVisible();
+        await page.getByLabel("SSH target").fill("edit-updated-host");
+        await page.getByLabel("Device name").fill(EDITED_AGENT);
+        await page.getByRole("button", { name: "Save device" }).click();
+
+        // Renaming replaces the tab identity and keeps the user on the editable entry.
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${EDITED_AGENT}/edit$`),
+        );
+        await expect(
+            page.getByRole("link", { name: `Edit ${EDITED_AGENT}` }),
+        ).toBeVisible();
+        await page.getByRole("button", { name: "Remove device" }).click();
+
+        const confirmation = page.getByRole("dialog", {
+            name: `Remove ${EDITED_AGENT} from Redoor?`,
+        });
+
+        // The UI addresses the device by its id, which the rename kept.
+        const sshDeleteUrl = `${WEB_BASE_URL}/api/v1/agents/${(await getAgent(page.request, EDITED_AGENT)).id}`;
+
+        const sshDeleteRequest = page.waitForRequest(
+            (request) =>
+                request.url() === sshDeleteUrl && request.method() === "DELETE",
+        );
+
+        await confirmation
+            .getByRole("button", { name: "Remove device" })
+            .click();
+        // SSH deletion must stay on the SSH-backed managed-agent resource.
+        await sshDeleteRequest;
+
+        await expect(page).toHaveURL(/\/agents\/?$/);
+        // Permanent deletion must remove the managed tab as well as the TOML entry.
+        await expect(
+            page.getByRole("link", { name: `Edit ${EDITED_AGENT}` }),
+        ).toHaveCount(0);
+    });
+
+    test("adds and connects an SSH-backed agent through redoor-ssh-test", async ({
+        page,
+    }) => {
+        test.skip(
+            process.env.REDOOR_SSH_TEST !== "1",
+            "redoor-ssh-test SSH fixture is not enabled",
+        );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page.getByRole("link", { name: "Add device" }).click();
+
+        // The trailing add control must navigate to a dedicated, labeled form route.
+        await expect(page).toHaveURL(/\/agents\/new$/);
+        await expect(
+            page.getByRole("heading", { name: "Add device" }),
+        ).toBeVisible();
+        await page.getByLabel("SSH target").fill("redoor-ssh-test");
+        await page.getByLabel("SSH username").fill("redoor");
+        await page.getByLabel("Device name").fill(CREATED_SSH_AGENT);
+        // This test covers the server user's own keys, not a dedicated device key.
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
+        await page
+            .getByRole("radio", { name: "Use preconfigured ssh key" })
+            .check();
+        // Key mode must disable the password field so create cannot persist a leftover secret.
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeDisabled();
+        await page.getByRole("button", { name: "Add device" }).click();
+
+        // Submission dynamically adds and opens the dormant managed tab without a server restart.
+        await expect(
+            page.getByRole("link", {
+                name: new RegExp(`^${CREATED_SSH_AGENT}, `),
+            }),
+        ).toBeVisible({ timeout: 15_000 });
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+
+        // Explicit connection must show sticky SSH steps instead of a generic loading sentence.
+        await expect(
+            page.getByRole("heading", {
+                name: `Connecting ${CREATED_SSH_AGENT}`,
+            }),
+        ).toBeVisible({ timeout: 15_000 });
+        await expect(
+            page.getByRole("list", { name: "Provisioning status" }),
+        ).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByText("Sniffing the SSH target")).toBeVisible();
+
+        // A connected tab proves the form-created config can prepare and run as redoor.
+        await expect(
+            page.getByRole("link", {
+                name: `${CREATED_SSH_AGENT}, connected`,
+            }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+        const connected = await getAgent(page.request, CREATED_SSH_AGENT);
+        expect(connected.managed).toBe(true);
+        expect(connected.connection_id).not.toBeNull();
+
+        // The home card must keep the last start steps after the lifecycle page unmounts.
+        await page.goto(`${WEB_BASE_URL}/agents/${CREATED_SSH_AGENT}`);
+        await expect(
+            page.getByRole("heading", { name: "provisioning history" }),
+        ).toBeVisible();
+        await expect(
+            page.getByRole("list", { name: "Provisioning status" }),
+        ).toBeVisible();
+        await expect(page.getByText("Sniffing the SSH target")).toBeVisible();
+        // Later steps are checked here rather than on the live page: a fast start can connect
+        // and unmount the live list before its second row renders.
+        await expect(page.getByText(/Sniff results:/)).toBeVisible();
+        // Two rows prove later steps stay sticky instead of replacing the first.
+        await expect(
+            page
+                .getByRole("list", { name: "Provisioning status" })
+                .getByRole("listitem")
+                .nth(1),
+        ).toBeVisible();
+        await expect(page.getByLabel(/from start/).nth(1)).toBeVisible();
+    });
+
+    test("stops a running agent before renaming and accessing it again", async ({
+        page,
+    }) => {
+        test.skip(
+            process.env.REDOOR_SSH_TEST !== "1",
+            "redoor-ssh-test SSH fixture is not enabled",
+        );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
+        const originalName = `${RUNNING_EDIT_AGENT}-original`;
+
+        const createResponse = await page.request.post(
+            `${WEB_BASE_URL}/api/v1/agents`,
+            {
+                data: {
+                    target: "redoor-ssh-test",
+                    username: "redoor",
+                    ssh_port: null,
+                    name: originalName,
+                    remote_bin: null,
+                    home: null,
+                    log: null,
+                    password: null,
+                },
+            },
+        );
+
+        expect(createResponse.ok()).toBe(true);
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page
+            .getByRole("link", { name: `${originalName}, stopped` })
+            .click();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        await expect(
+            page.getByRole("link", { name: `${originalName}, connected` }),
+        ).toBeVisible({ timeout: 60_000 });
+        await page.getByRole("link", { name: `Edit ${originalName}` }).click();
+
+        const saveButton = page.getByRole("button", {
+            name: "Stop agent and save",
+        });
+
+        const deleteButton = page.getByRole("button", {
+            name: "Remove device",
+        });
+
+        // The single submit action explains and owns the required shutdown before persistence.
+        await expect(saveButton).toBeEnabled();
+        // Delete uses the same auto-stop API, so a running agent must remain removable.
+        await expect(deleteButton).toBeEnabled();
+        await expect(
+            page.getByText(
+                "The agent must stop before its managed configuration can be changed. Saving will stop it automatically.",
+            ),
+        ).toBeVisible();
+        await page.getByLabel("Device name").fill(RUNNING_EDIT_AGENT);
+        await saveButton.click();
+
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${RUNNING_EDIT_AGENT}/edit$`),
+        );
+        await page
+            .getByRole("link", { name: `${RUNNING_EDIT_AGENT}, stopped` })
+            .click();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        // Explicitly starting the renamed tab proves the edited configuration remains operational.
+        await expect(
+            page.getByRole("link", {
+                name: `${RUNNING_EDIT_AGENT}, connected`,
+            }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+    });
+
+    test("switches an existing agent from password auth to key auth", async ({
+        page,
+    }) => {
+        test.skip(
+            process.env.REDOOR_SSH_TEST !== "1" ||
+                !process.env.REDOOR_SSH_TEST_PASSWORD,
+            "redoor-ssh-test password fixture is not enabled",
+        );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
+        const password = process.env.REDOOR_SSH_TEST_PASSWORD;
+
+        if (password === undefined) {
+            throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
+        }
+
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page.getByRole("link", { name: "Add device" }).click();
+        await page.getByLabel("SSH target").fill("redoor-ssh-test");
+        await page.getByLabel("SSH username").fill("redoor-password");
+        await page
+            .getByLabel("Device name")
+            .fill(CREATED_SSH_MODE_SWITCH_AGENT);
+        await page
+            .getByRole("checkbox", {
+                name: "Create a dedicated SSH key (recommended)",
+            })
+            .uncheck();
+        await page.getByRole("radio", { name: "Use ssh password" }).check();
+        // Password mode must enable the field before a secret can be typed.
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeEnabled();
+        await page.getByLabel("SSH password", { exact: true }).fill(password);
+        await page.getByRole("button", { name: "Add device" }).click();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        // Password auth must prepare and connect without a TTY or ssh-agent key.
+        await expect(
+            page.getByRole("link", {
+                name: `${CREATED_SSH_MODE_SWITCH_AGENT}, connected`,
+            }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+
+        const connected = await getAgent(
+            page.request,
+            CREATED_SSH_MODE_SWITCH_AGENT,
+        );
+
+        // A password-provisioned device is server managed and holds a live connection.
+        expect(connected.managed).toBe(true);
+        expect(connected.connection_id).not.toBeNull();
+
+        await page
+            .getByRole("link", {
+                name: `Edit ${CREATED_SSH_MODE_SWITCH_AGENT}`,
+            })
+            .click();
+        await expect(
+            page.getByRole("radio", { name: "Use ssh password" }),
+        ).toBeChecked();
+        await page
+            .getByRole("radio", { name: "Use preconfigured ssh key" })
+            .check();
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeDisabled();
+        await page.getByLabel("SSH username").fill("redoor");
+        // The UI addresses the device by its id.
+        const updateUrl = `${WEB_BASE_URL}/api/v1/agents/${(await getAgent(page.request, CREATED_SSH_MODE_SWITCH_AGENT)).id}`;
+
+        const [updateResponse] = await Promise.all([
+            page.waitForResponse(
+                (response) =>
+                    response.url() === updateUrl &&
+                    response.request().method() === "PUT",
+            ),
+            page.getByRole("button", { name: "Stop agent and save" }).click(),
+        ]);
+
+        // The same-url navigation cannot serve as a persistence barrier.
+        expect(updateResponse.ok()).toBe(true);
+        expect(updateResponse.request().postDataJSON()).toMatchObject({
+            clear_password: true,
+        });
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${CREATED_SSH_MODE_SWITCH_AGENT}/edit$`),
+        );
+
+        const configuration = await page.request.get(
+            `${WEB_BASE_URL}/api/v1/agents/${CREATED_SSH_MODE_SWITCH_AGENT}/configuration`,
+        );
+
+        expect(configuration.ok()).toBe(true);
+
+        const body: ManagedSshAgentConfigurationResponse =
+            await configuration.json();
+
+        // Switching to key mode must drop the stored secret without echoing it.
+        expect(body.has_password).toBe(false);
+        expect(body.password).toBeNull();
+
+        await page
+            .getByRole("link", {
+                name: `${CREATED_SSH_MODE_SWITCH_AGENT}, stopped`,
+            })
+            .click();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        // Removing the password must allow authentication as the configured key user.
+        await expect(
+            page.getByRole("link", {
+                name: `${CREATED_SSH_MODE_SWITCH_AGENT}, connected`,
+            }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+        await page
+            .getByRole("link", {
+                name: `Edit ${CREATED_SSH_MODE_SWITCH_AGENT}`,
+            })
+            .click();
+        await expect(
+            page.getByRole("radio", { name: "Use preconfigured ssh key" }),
+        ).toBeChecked();
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeDisabled();
+    });
+
+    test("replaces a wrong SSH password on an existing agent", async ({
+        page,
+    }) => {
+        test.skip(
+            process.env.REDOOR_SSH_TEST !== "1" ||
+                !process.env.REDOOR_SSH_TEST_PASSWORD,
+            "redoor-ssh-test password fixture is not enabled",
+        );
+        test.setTimeout(SSH_CONNECT_TEST_TIMEOUT);
+        const password = process.env.REDOOR_SSH_TEST_PASSWORD;
+
+        if (password === undefined) {
+            throw new Error("REDOOR_SSH_TEST_PASSWORD unexpectedly missing");
+        }
+
+        const createResponse = await page.request.post(
+            `${WEB_BASE_URL}/api/v1/agents`,
+            {
+                data: {
+                    target: "redoor-ssh-test",
+                    username: "redoor-password",
+                    ssh_port: null,
+                    name: CREATED_SSH_PASSWORD_CHANGE_AGENT,
+                    remote_bin: null,
+                    home: null,
+                    log: null,
+                    password: `wrong-${process.pid}-password`,
+                    clear_password: false,
+                },
+            },
+        );
+
+        expect(createResponse.ok()).toBe(true);
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page
+            .getByRole("link", {
+                name: `Edit ${CREATED_SSH_PASSWORD_CHANGE_AGENT}`,
+            })
+            .click();
+        await expect(
+            page.getByRole("radio", { name: "Use ssh password" }),
+        ).toBeChecked();
+        await expect(
+            page.getByLabel("SSH password", { exact: true }),
+        ).toBeEnabled();
+        await page.getByLabel("SSH password", { exact: true }).fill(password);
+        await page.getByRole("button", { name: "Save device" }).click();
+        await expect(page).toHaveURL(
+            new RegExp(`/agents/${CREATED_SSH_PASSWORD_CHANGE_AGENT}/edit$`),
+        );
+
+        await page
+            .getByRole("link", {
+                name: `${CREATED_SSH_PASSWORD_CHANGE_AGENT}, stopped`,
+            })
+            .click();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        // The corrected secret must authenticate as redoor-password after the edit.
+        await expect(
+            page.getByRole("link", {
+                name: `${CREATED_SSH_PASSWORD_CHANGE_AGENT}, connected`,
+            }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 60_000 });
+    });
+
+    test("shows an actionable error when SSH needs an omitted password", async ({
+        page,
+    }) => {
+        test.skip(
+            process.env.REDOOR_SSH_TEST !== "1",
+            "redoor-ssh-test SSH fixture is not enabled",
+        );
+
+        const createResponse = await page.request.post(
+            `${WEB_BASE_URL}/api/v1/agents`,
+            {
+                data: {
+                    target: "redoor-ssh-test",
+                    username: "redoor-password",
+                    ssh_port: null,
+                    name: CREATED_SSH_MISSING_PASSWORD_AGENT,
+                    remote_bin: null,
+                    home: null,
+                    log: null,
+                    password: null,
+                },
+            },
+        );
+
+        // Creating the password-less entry must succeed because credentials may come from a key.
+        expect(createResponse.ok()).toBe(true);
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page
+            .getByRole("link", {
+                name: `${CREATED_SSH_MISSING_PASSWORD_AGENT}, stopped`,
+            })
+            .click();
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+
+        const lifecycleAlert = page.getByRole("alert").filter({
+            hasText: "Configure a password, SSH key, or ssh-agent credential",
+        });
+
+        // Clicking the tab must surface non-interactive authentication guidance promptly.
+        await expect(lifecycleAlert).toBeVisible({ timeout: 15_000 });
+        await page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("link", { name: "Devices" })
+            .click();
+
+        const row = page.getByRole("row", {
+            name: `Device ${CREATED_SSH_MISSING_PASSWORD_AGENT}`,
+        });
+
+        // The retained watchdog issue must remain visible outside the lifecycle route.
+        await expect(row.getByRole("alert")).toContainText(
+            "Configure a password, SSH key, or ssh-agent credential",
+        );
+        // Responsive navigation proves password preparation is not blocking the server.
+        await page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("link", { name: "Server home" })
+            .click();
+        await expect(
+            page.getByRole("heading", { name: "Server", exact: true }),
+        ).toBeVisible();
+    });
+
+    test("shows managed inventory before lazy startup", async ({ page }) => {
+        await page.goto(`${WEB_BASE_URL}/agents`);
+        await expect(
+            page.getByRole("heading", {
+                level: 1,
+                name: "Devices",
+                exact: true,
+            }),
+        ).toBeVisible();
+
+        const externalOne = page.getByRole("row", {
+            name: "Device agent1_src",
+        });
+
+        const externalTwo = page.getByRole("row", {
+            name: "Device agent2_custom",
+        });
+
+        // Shell-owned external agents remain visible and connected but observation-only.
+        await expect(externalOne).toContainText("Started independently", {
+            timeout: 30_000,
+        });
+        await expect(externalOne).toContainText("connected");
+        await expect(
+            externalOne.getByRole("button", {
+                name: "Connect",
+                exact: true,
+            }),
+        ).toHaveCount(0);
+        await expect(externalTwo).toContainText("connected", {
+            timeout: 30_000,
+        });
+
+        const valid = page.getByRole("row", { name: `Device ${VALID_AGENT}` });
+
+        const failing = page.getByRole("row", {
+            name: `Device ${FAILING_AGENT}`,
+        });
+
+        // TOML entries are registered as stopped and expose lifecycle controls before processes exist.
+        await expect(valid).toContainText("Managed by Redoor");
+        await expect(valid).toContainText("stopped");
+        await valid
+            .getByRole("button", { name: `Open actions for ${VALID_AGENT}` })
+            .click();
+        await expect(
+            page
+                .getByRole("dialog", { name: `${VALID_AGENT} actions` })
+                .getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible();
+        await page
+            .getByRole("dialog", { name: `${VALID_AGENT} actions` })
+            .getByRole("button", { name: "Close device actions" })
+            .click();
+        await expect(failing).toContainText("stopped");
+
+        const log = await fs.readFile(SERVER_LOG, "utf8");
+        // Absence of registration proves the valid managed child was not launched at server startup.
+        expect(log).not.toContain(`agent_name=${VALID_AGENT},`);
+    });
+
+    test("keeps offline file tabs at their destinations and opens them on connection", async ({
+        page,
+        context,
+    }) => {
+        const home = path.resolve(".test-playwright-home/lazy-agent");
+        const firstPath = path.join(home, "queued first.txt");
+        const secondPath = path.join(home, "queued second.txt");
+        await fs.writeFile(firstPath, "First queued file");
+        await fs.writeFile(secondPath, "Second queued file");
+        const firstUrl = `${WEB_BASE_URL}/agents/${VALID_AGENT}/browser/${encodeFilesystemPath(firstPath)}?line=1`;
+        const secondUrl = `${WEB_BASE_URL}/agents/${VALID_AGENT}/browser/${encodeFilesystemPath(secondPath)}?view=details`;
+        const secondTab = await context.newPage();
+
+        await page.goto(firstUrl);
+        await secondTab.goto(secondUrl);
+        // Each tab must keep its destination and offer explicit startup without starting on navigation.
+        await expect(page).toHaveURL(firstUrl);
+        await expect(secondTab).toHaveURL(secondUrl);
+        await expect(
+            page.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible();
+        await expect(
+            secondTab.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible();
+        expect((await getAgent(page.request, VALID_AGENT)).status).toBe(
+            "stopped",
+        );
+
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        // One tab's connection must resolve both queued routes without replacing their view options.
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible({ timeout: 30_000 });
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toHaveText("First queued file");
+        await expect(
+            secondTab.getByText("queued second.txt", { exact: true }).first(),
+        ).toBeVisible({ timeout: 30_000 });
+        await expect(
+            secondTab.getByRole("button", { name: "Connect", exact: true }),
+        ).toHaveCount(0);
+        await expect(page).toHaveURL(firstUrl);
+        await expect(secondTab).toHaveURL(secondUrl);
+
+        const shutdown = await page.request.post(
+            `${WEB_BASE_URL}/api/v1/agents/${VALID_AGENT}/shutdown`,
+        );
+
+        // Losing the connection must restore controls at the same URLs without stale startup progress.
+        expect(shutdown.ok()).toBe(true);
+        await expect(
+            page.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible({ timeout: 15_000 });
+        await expect(
+            secondTab.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible({ timeout: 15_000 });
+        await expect(page).toHaveURL(firstUrl);
+        await expect(secondTab).toHaveURL(secondUrl);
+        await secondTab.close();
+    });
+
+    test("shows optimistic starting state before the start request completes", async ({
+        page,
+    }) => {
+        let releaseStart: (() => void) | undefined;
+
+        const gate = new Promise<void>((resolve) => {
+            releaseStart = resolve;
+        });
+
+        let markContinued: (() => void) | undefined;
+
+        const continued = new Promise<void>((resolve) => {
+            markContinued = resolve;
+        });
+
+        let startRequests = 0;
+        // The UI addresses devices by id, so intercept the id's start endpoint.
+        const startRoute = `**/api/v1/agents/${(await getAgent(page.request, VALID_AGENT)).id}/start`;
+        await page.route(startRoute, async (route) => {
+            startRequests += 1;
+            await gate;
+            await route.continue();
+            markContinued?.();
+        });
+        await page.goto(`${WEB_BASE_URL}/`);
+        await page
+            .getByRole("link", { name: `${VALID_AGENT}, stopped` })
+            .click();
+
+        // Selection must only open the lifecycle route and leave the dormant watchdog untouched.
+        await expect(
+            page.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible();
+        expect(startRequests).toBe(0);
+        expect((await getAgent(page.request, VALID_AGENT)).status).toBe(
+            "stopped",
+        );
+        await page
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+
+        // Explicit connection guarantees immediate progress even when local registration is fast.
+        await expect(
+            page.getByRole("heading", { name: `Connecting ${VALID_AGENT}` }),
+        ).toBeVisible();
+        expect(startRequests).toBe(1);
+
+        if (!releaseStart) {
+            throw new Error("Start route was not intercepted");
+        }
+
+        releaseStart();
+        await continued;
+        await page.unroute(startRoute);
+
+        await expect
+            .poll(
+                async () => (await getAgent(page.request, VALID_AGENT)).status,
+                {
+                    timeout: 20_000,
+                },
+            )
+            .toBe("connected");
+        // Successful startup redirects to file browsing while preserving the active agent tab.
+        await expect(
+            page.getByRole("link", { name: `${VALID_AGENT}, connected` }),
+        ).toHaveAttribute("aria-current", "page", { timeout: 15_000 });
+    });
+
+    test("shuts down and restarts from the management row", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/agents`);
+        const row = page.getByRole("row", { name: `Device ${VALID_AGENT}` });
+        await row
+            .getByRole("button", { name: `Open actions for ${VALID_AGENT}` })
+            .click();
+        await page
+            .getByRole("dialog", { name: `${VALID_AGENT} actions` })
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        await expect
+            .poll(
+                async () => (await getAgent(page.request, VALID_AGENT)).status,
+                { timeout: 20_000 },
+            )
+            .toBe("connected");
+        await row
+            .getByRole("button", { name: `Open actions for ${VALID_AGENT}` })
+            .click();
+        await page
+            .getByRole("dialog", { name: `${VALID_AGENT} actions` })
+            .getByRole("button", { name: "Disconnect" })
+            .click();
+
+        const dialog = page.getByRole("dialog", {
+            name: `Disconnect ${VALID_AGENT}?`,
+        });
+
+        await dialog
+            .getByRole("button", { name: "Disconnect", exact: true })
+            .click();
+
+        // Shutdown retains the row and switches duration into server-observed last-seen recency.
+        await expect(row).toContainText("stopped", { timeout: 15_000 });
+        await expect(row).toContainText(/Last seen .* ago/);
+        await row
+            .getByRole("button", { name: `Open actions for ${VALID_AGENT}` })
+            .click();
+        await page
+            .getByRole("dialog", { name: `${VALID_AGENT} actions` })
+            .getByRole("button", { name: "Connect", exact: true })
+            .click();
+        await expect
+            .poll(
+                async () => (await getAgent(page.request, VALID_AGENT)).status,
+                {
+                    timeout: 20_000,
+                },
+            )
+            .toBe("connected");
+        // Restart returns the same stable managed id to connected state.
+        await expect(row).toContainText("connected");
+    });
+
+    test("surfaces failing managed connection issues without blocking the UI", async ({
+        page,
+    }) => {
+        await page.goto(`${WEB_BASE_URL}/agents/${FAILING_AGENT}`);
+
+        const connectButton = page.getByRole("button", {
+            name: "Connect",
+            exact: true,
+        });
+
+        // Opening a dormant managed agent must not express desired-running intent.
+        await expect(connectButton).toBeVisible();
+        expect((await getAgent(page.request, FAILING_AGENT)).status).toBe(
+            "stopped",
+        );
+        await connectButton.click();
+
+        await expect
+            .poll(
+                async () =>
+                    (await getAgent(page.request, FAILING_AGENT))
+                        .connection_issue,
+                {
+                    timeout: 20_000,
+                },
+            )
+            .not.toBeNull();
+        // The actionable supervisor issue remains visible after the first explicit attempt fails.
+        await expect(page.getByRole("alert")).not.toBeEmpty();
+        await expect(
+            page.getByRole("heading", { name: `Connecting ${FAILING_AGENT}` }),
+        ).toBeVisible();
+        const retryButton = page.getByRole("button", { name: "Retry Start" });
+        // Desired-running state must not disable the explicit attempt replacement control.
+        await expect(retryButton).toBeEnabled();
+        // The failed initial attempt must keep intentional shutdown available.
+        await expect(
+            page.getByRole("button", { name: "Disconnect", exact: true }),
+        ).toBeEnabled();
+        // An unrelated navigation remains responsive while the failing child cycles.
+        await page
+            .getByRole("button", { name: "Disconnect", exact: true })
+            .click();
+        await page
+            .getByRole("dialog", { name: `Disconnect ${FAILING_AGENT}?` })
+            .getByRole("button", { name: "Disconnect", exact: true })
+            .click();
+        // Shutdown must settle the failed first connection without navigation reviving it.
+        await expect(
+            page.getByRole("button", { name: "Connect", exact: true }),
+        ).toBeVisible({ timeout: 15_000 });
+        await expect(
+            page.getByRole("link", { name: `${FAILING_AGENT}, stopped` }),
+        ).toHaveAttribute("aria-current", "page");
+        expect((await getAgent(page.request, FAILING_AGENT)).status).toBe(
+            "stopped",
+        );
+        const retryWindowStartedAt = Date.now();
+        await expect
+            .poll(
+                async () => {
+                    const agent = await getAgent(page.request, FAILING_AGENT);
+
+                    return Date.now() - retryWindowStartedAt >= 2_000
+                        ? agent.status
+                        : "observing";
+                },
+                { timeout: 5_000 },
+            )
+            // Remaining stopped beyond the first backoff proves shutdown canceled reconnecting.
+            .toBe("stopped");
+        await page
+            .getByRole("navigation", { name: "Application" })
+            .getByRole("link", { name: "Server home" })
+            .click();
+        await expect(
+            page.getByRole("heading", { name: "Server", exact: true }),
+        ).toBeVisible();
+    });
+});

@@ -9,6 +9,7 @@ import {
     waitForValue,
 } from "./test-utils";
 import type { Agent, ApiClient } from "#ui/api-client";
+import { browserRoute } from "#ui/browser-route";
 
 const processManager = new ProcessManager();
 
@@ -79,7 +80,7 @@ describe("absolute filesystem path contract", () => {
     it("rejects relative paths at every public boundary", async () => {
         const agentId = encodeURIComponent(agent.id);
         // Browser routes must reject cwd-relative addressing before building a URL.
-        expect(() => agent.getBrowserUrl("relative")).toThrow(
+        expect(() => browserRoute(agent, "relative")).toThrow(
             "Filesystem path must be absolute",
         );
         // REST listing must reject cwd-relative addressing before sending a request.

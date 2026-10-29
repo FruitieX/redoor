@@ -40,10 +40,16 @@ export const sidebarModeAtom = atomWithSessionStorage<SidebarMode>(
     "auto",
 );
 
+/**
+ * Starting width of each edge. The application menu starts wider because open file names
+ * share its width with the navigation rail, and the names are what the user scans for.
+ */
+export const defaultSidebarWidths = { left: 260, right: 224 };
+
 /** Remembers each edge's preferred width independently across navigation and tab reloads. */
 export const sidebarWidthsAtom = atomWithSessionStorage(
     "redoor.sidebar-widths",
-    { left: 224, right: 224 },
+    defaultSidebarWidths,
 );
 
 /** Resolves whether both edge menus should occupy layout space instead of drawers. */

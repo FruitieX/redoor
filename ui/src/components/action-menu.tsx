@@ -1,5 +1,5 @@
 import React from "react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 import { Dialog } from "./dialog";
 import { Tooltip } from "./tooltip";
 
@@ -47,7 +47,7 @@ export function ActionMenu(props: {
             aria-expanded={isOpen}
             disabled={props.disabled}
             onClick={() => setIsOpen(true)}
-            className={twMerge(
+            className={cn(
                 "inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-200 transition-colors hover:bg-tint hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-50",
                 isIcon &&
                     "h-8 w-8 shrink-0 justify-center p-0 text-slate-400 hover:text-slate-100",
@@ -58,7 +58,9 @@ export function ActionMenu(props: {
             {hideLabel ? null : (
                 <span
                     className={
-                        props.hideLabelOnMobile ? "hidden sm:inline" : undefined
+                        props.hideLabelOnMobile
+                            ? "hidden @xl:inline"
+                            : undefined
                     }
                 >
                     {props.label}
@@ -112,7 +114,7 @@ export function ActionMenuButton(props: {
         React.isValidElement<{ className?: string }>(props.children)
     ) {
         return React.cloneElement(props.children, {
-            className: twMerge(className, props.children.props.className),
+            className: cn(className, props.children.props.className),
         });
     }
 

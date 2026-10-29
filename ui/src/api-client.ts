@@ -12,6 +12,7 @@ import type { AgentDetailsResponse } from "#bindings/AgentDetailsResponse";
 import type { EchoRequest } from "#bindings/EchoRequest";
 import type { EchoResponse } from "#bindings/EchoResponse";
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
+import type { DuplicateIdWarning } from "#bindings/DuplicateIdWarning";
 import type { AgentConnectionStatus } from "#bindings/AgentConnectionStatus";
 import type { StartAgentResponse } from "#bindings/StartAgentResponse";
 import type { RetryAgentStartResponse } from "#bindings/RetryAgentStartResponse";
@@ -44,6 +45,8 @@ import type { OpenPathResponse } from "#bindings/OpenPathResponse";
 import type { ServerInfoResponse } from "#bindings/ServerInfoResponse";
 import type { BinaryIdentity } from "#bindings/BinaryIdentity";
 import type { RestartResponse } from "#bindings/RestartResponse";
+import type { ServerUpgradeRequest } from "#bindings/ServerUpgradeRequest";
+import type { ServerUpgradeResponse } from "#bindings/ServerUpgradeResponse";
 import type { UpgradeAgentResponse } from "#bindings/UpgradeAgentResponse";
 import type { UpgradeAgentRequest } from "#bindings/UpgradeAgentRequest";
 import type { RenamePathRequest } from "#bindings/RenamePathRequest";
@@ -60,6 +63,12 @@ import type { CreateSshAgentResponse } from "#bindings/CreateSshAgentResponse";
 import type { ManagedSshAgentConfigurationResponse } from "#bindings/ManagedSshAgentConfigurationResponse";
 import type { UpdateSshAgentResponse } from "#bindings/UpdateSshAgentResponse";
 import type { UpdateSshAgentRequest } from "#bindings/UpdateSshAgentRequest";
+import type { SshHostKeyResponse } from "#bindings/SshHostKeyResponse";
+import type { EnrollSshKeyRequest } from "#bindings/EnrollSshKeyRequest";
+import type { SshKeyEnrollmentResponse } from "#bindings/SshKeyEnrollmentResponse";
+import type { SshKeyRemovalResponse } from "#bindings/SshKeyRemovalResponse";
+import type { PinSshHostKeyRequest } from "#bindings/PinSshHostKeyRequest";
+import type { SshHostKeyPinResponse } from "#bindings/SshHostKeyPinResponse";
 import type { CreateLocalAgentRequest } from "#bindings/CreateLocalAgentRequest";
 import type { CreateLocalAgentResponse } from "#bindings/CreateLocalAgentResponse";
 import type { ManagedLocalAgentConfigurationResponse } from "#bindings/ManagedLocalAgentConfigurationResponse";
@@ -67,12 +76,25 @@ import type { UpdateLocalAgentResponse } from "#bindings/UpdateLocalAgentRespons
 import type { UpdateLocalAgentRequest } from "#bindings/UpdateLocalAgentRequest";
 import type { DeleteManagedAgentResponse } from "#bindings/DeleteManagedAgentResponse";
 import type { UpdateUserStateRequest } from "#bindings/UpdateUserStateRequest";
+import type { EditorBufferResponse } from "#bindings/EditorBufferResponse";
+import type { PutEditorBufferRequest } from "#bindings/PutEditorBufferRequest";
+import type { PutEditorBufferResponse } from "#bindings/PutEditorBufferResponse";
+import type { DeleteEditorBufferResponse } from "#bindings/DeleteEditorBufferResponse";
 import type { UserStateResponse } from "#bindings/UserStateResponse";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import type { GitStatusResponse } from "#bindings/GitStatusResponse";
 import type { GitDiffResponse } from "#bindings/GitDiffResponse";
 import type { GitDiffRequest } from "#bindings/GitDiffRequest";
 import type { GitDiffMode } from "#bindings/GitDiffMode";
+import type { GitRevisionTreeResponse } from "#bindings/GitRevisionTreeResponse";
+import type { GitRevisionContentResponse } from "#bindings/GitRevisionContentResponse";
+import type { GitCommitDiffResponse } from "#bindings/GitCommitDiffResponse";
+import type { GitCommitNeighborsResponse } from "#bindings/GitCommitNeighborsResponse";
+import type { GitLogResponse } from "#bindings/GitLogResponse";
+import type { GitRefListResponse } from "#bindings/GitRefListResponse";
+import type { GitRefSort } from "#bindings/GitRefSort";
+import type { GitWorktreeListResponse } from "#bindings/GitWorktreeListResponse";
+import type { GitWorktreeStatusResponse } from "#bindings/GitWorktreeStatusResponse";
 import type { DirectorySizeResponse } from "#bindings/DirectorySizeResponse";
 import type { AgentAccountsResponse } from "#bindings/AgentAccountsResponse";
 import type { ChownPathRequest } from "#bindings/ChownPathRequest";
@@ -98,7 +120,7 @@ import {
 import * as apiPaths from "#ui/api-paths";
 import type { LsResponse } from "#ui/ls-response";
 
-const { appendFilesystemPath, encodeFilesystemPath, getBrowserUrl } = apiPaths;
+const { appendFilesystemPath, encodeFilesystemPath } = apiPaths;
 
 export class Agent {
     private baseUrl: string;
@@ -121,6 +143,28 @@ export class Agent {
             `/api/v1/agents/${encodeURIComponent(this.info.id)}/${route}`,
             path,
         )}`;
+    }
+
+    /** Builds a filesystem route URL that also names the Git revision it reads. */
+    private revisionUrl(route: string, path: string, rev: string): string {
+        return `${this.filesystemUrl(route, path)}?${new URLSearchParams({ rev }).toString()}`;
+    }
+
+    /** Builds a filesystem route URL with optional query values, leaving unset ones out. */
+    private filesystemQueryUrl(
+        route: string,
+        path: string,
+        query: Record<string, string | number | null>,
+    ): string {
+        const params = new URLSearchParams();
+
+        for (const [key, value] of Object.entries(query)) {
+            if (value !== null) {
+                params.set(key, String(value));
+            }
+        }
+
+        return `${this.filesystemUrl(route, path)}?${params.toString()}`;
     }
 
     /** Posts JSON to an agent route without repeating content-type boilerplate. */
@@ -165,10 +209,15 @@ export class Agent {
         );
     }
 
+    /**
+     * The opaque device id that never changes, used for every request, cache key and stored
+     * reference so a rename cannot point them at another device.
+     */
     get id(): string {
         return this.info.id;
     }
 
+    /** The editable name shown to people and used in UI URLs; never stored as a reference. */
     get name(): string {
         return this.info.name;
     }
@@ -240,6 +289,14 @@ export class Agent {
     /** Returns sticky SSH start steps for the current attempt. */
     get provisioningStatus(): AgentInfoResponse["provisioning_status"] {
         return this.info.provisioning_status;
+    }
+
+    /**
+     * Set while several machines are using this device's id, so the UI can explain why one
+     * of them is refused and how to give the clone its own id.
+     */
+    get duplicateId(): DuplicateIdWarning | null {
+        return this.info.duplicate_id;
     }
 
     /** Returns binary identity from the latest registration, if any. */
@@ -382,6 +439,106 @@ export class Agent {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(request),
             },
+            this.requestContext,
+        );
+    }
+
+    /** Describes a path as committed at a revision: a tree listing or a file's facts. */
+    async gitRevisionTree(
+        path: string,
+        rev: string,
+    ): Promise<GitRevisionTreeResponse> {
+        return apiRequest<GitRevisionTreeResponse>(
+            this.revisionUrl("git/tree", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Reads a committed text file for the read-only editor. */
+    async gitRevisionContent(
+        path: string,
+        rev: string,
+    ): Promise<GitRevisionContentResponse> {
+        return apiRequest<GitRevisionContentResponse>(
+            this.revisionUrl("git/blob", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /**
+     * Lists one page of the commits that changed a path, newest first. Without a revision
+     * the history starts at HEAD.
+     */
+    async gitLog(
+        path: string,
+        options: { rev: string | null; skip: number; limit: number },
+    ): Promise<GitLogResponse> {
+        return apiRequest<GitLogResponse>(
+            this.filesystemQueryUrl("git/log", path, options),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Lists one page of the repository's branches or tags, most recently committed first or by name. */
+    async gitRefs(
+        path: string,
+        kind: "branches" | "tags",
+        options: { sort: GitRefSort; skip: number; limit: number },
+    ): Promise<GitRefListResponse> {
+        return apiRequest<GitRefListResponse>(
+            this.filesystemQueryUrl(`git/${kind}`, path, options),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /**
+     * Lists the main and linked worktrees of the repository containing a path, main first
+     * and then the most recently active, with each one's branch and HEAD commit.
+     */
+    async gitWorktrees(path: string): Promise<GitWorktreeListResponse> {
+        return apiRequest<GitWorktreeListResponse>(
+            this.filesystemUrl("git/worktrees", path),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /**
+     * Counts the uncommitted changes of the checkout containing a path. Separate from the
+     * worktree list because it walks every file of the checkout.
+     */
+    async gitWorktreeStatus(path: string): Promise<GitWorktreeStatusResponse> {
+        return apiRequest<GitWorktreeStatusResponse>(
+            this.filesystemUrl("git/worktree-status", path),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Shows what the commit a revision names changed below a path. */
+    async gitCommitDiff(
+        path: string,
+        rev: string,
+    ): Promise<GitCommitDiffResponse> {
+        return apiRequest<GitCommitDiffResponse>(
+            this.revisionUrl("git/commit-diff", path, rev),
+            undefined,
+            this.requestContext,
+        );
+    }
+
+    /** Finds the commits before and after the one a revision names in a path's history. */
+    async gitCommitNeighbors(
+        path: string,
+        rev: string,
+    ): Promise<GitCommitNeighborsResponse> {
+        return apiRequest<GitCommitNeighborsResponse>(
+            this.revisionUrl("git/commit-neighbors", path, rev),
+            undefined,
             this.requestContext,
         );
     }
@@ -553,9 +710,13 @@ export class Agent {
         return url;
     }
 
-    /** Returns a browser URL that keeps filesystem separators readable. */
-    getBrowserUrl(path: string): string {
-        return getBrowserUrl(this.info.id, path);
+    /**
+     * Builds the download URL of a path as committed at a revision: a file's bytes, or a
+     * directory as a .tar.gz. Pass the resolved commit id so the download cannot follow a
+     * branch that moved after the page loaded.
+     */
+    getGitDownloadUrl(path: string, rev: string): string {
+        return this.revisionUrl("git/download", path, rev);
     }
 
     /** Builds the authenticated browser endpoint for one ephemeral agent log tunnel. */
@@ -719,6 +880,8 @@ export class Agent {
         options?: {
             on_existing?: CopyExistingMode;
             resume?: ResumeMode;
+            /** Copies the source as committed at this Git revision instead of the worktree. */
+            sourceRev?: string;
         },
     ): Promise<CopyFileResponse> {
         encodeFilesystemPath(sourcePath);
@@ -732,6 +895,7 @@ export class Agent {
             dest: destination,
             on_existing: options?.on_existing ?? "error",
             resume: options?.resume ?? "auto",
+            source_rev: options?.sourceRev ?? null,
         };
 
         return apiRequest<CopyFileResponse>(
@@ -909,6 +1073,28 @@ export class ApiClient {
         return response;
     }
 
+    /**
+     * Installs a release over the server binary. Resolves once installed; the server and its
+     * local agents restart right after, so callers wait for the replacement process.
+     */
+    async upgradeServer(
+        targetVersion: string | null,
+    ): Promise<ServerUpgradeResponse> {
+        const request: ServerUpgradeRequest = { target_version: targetVersion };
+
+        return apiRequest<ServerUpgradeResponse>(
+            `${this.baseUrl}/api/v1/server/upgrade`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
     /** Asks the server to restart in place after validating its configuration. */
     async restartServer(): Promise<RestartResponse> {
         return apiRequest<RestartResponse>(
@@ -1021,6 +1207,56 @@ export class ApiClient {
         return apiRequest<ManagedSshAgentConfigurationResponse>(
             `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/configuration`,
             undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Probes the host key an SSH device presents, so the user can confirm it before any credential is sent. */
+    async getSshHostKey(agentId: string): Promise<SshHostKeyResponse> {
+        return apiRequest<SshHostKeyResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-host-key`,
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /** Re-pins an SSH device's host key after the user confirmed a change. */
+    async pinSshHostKey(
+        agentId: string,
+        request: PinSshHostKeyRequest,
+    ): Promise<SshHostKeyPinResponse> {
+        return apiRequest<SshHostKeyPinResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-host-key/pin`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Sets up, or rotates, the redoor-managed SSH key of an SSH device. */
+    async enrollSshKey(
+        agentId: string,
+        request: EnrollSshKeyRequest,
+    ): Promise<SshKeyEnrollmentResponse> {
+        return apiRequest<SshKeyEnrollmentResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-key`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Removes the managed SSH key from the device (when reachable) and from the server. */
+    async removeSshKey(agentId: string): Promise<SshKeyRemovalResponse> {
+        return apiRequest<SshKeyRemovalResponse>(
+            `${this.baseUrl}/api/v1/agents/${encodeURIComponent(agentId)}/ssh-key`,
+            { method: "DELETE" },
             this.requestContext(),
         );
     }
@@ -1307,6 +1543,64 @@ export class ApiClient {
             },
             this.requestContext(),
         );
+    }
+
+    /** Loads the stored editor buffer of one open file; `buffer` is null when none exists. */
+    async getEditorBuffer(key: string): Promise<EditorBufferResponse> {
+        return apiRequest<EditorBufferResponse>(
+            this.editorBufferUrl(key),
+            undefined,
+            this.requestContext(),
+        );
+    }
+
+    /**
+     * Stores an editor buffer (last writer wins) and returns its new version. `keepalive`
+     * lets a small final write outlive a closing page.
+     */
+    async putEditorBuffer(
+        key: string,
+        request: PutEditorBufferRequest,
+        keepalive = false,
+    ): Promise<PutEditorBufferResponse> {
+        return apiRequest<PutEditorBufferResponse>(
+            this.editorBufferUrl(key),
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(request),
+                keepalive,
+            },
+            this.requestContext(),
+        );
+    }
+
+    /** Forgets the stored buffer of a file that was closed. */
+    async deleteEditorBuffer(key: string): Promise<DeleteEditorBufferResponse> {
+        return apiRequest<DeleteEditorBufferResponse>(
+            this.editorBufferUrl(key),
+            { method: "DELETE" },
+            this.requestContext(),
+        );
+    }
+
+    /**
+     * Encodes the key as base64url, so a file path's slashes stay inside one URL segment and
+     * no proxy can normalize them away.
+     */
+    private editorBufferUrl(key: string) {
+        let binary = "";
+
+        for (const byte of new TextEncoder().encode(key)) {
+            binary += String.fromCharCode(byte);
+        }
+
+        const encoded = btoa(binary)
+            .replaceAll("+", "-")
+            .replaceAll("/", "_")
+            .replace(/=+$/, "");
+
+        return `${this.baseUrl}/api/v1/user/editor-buffers/${encoded}`;
     }
 
     async waitForAgentNames(names: string[], timeoutMs = 5000): Promise<void> {

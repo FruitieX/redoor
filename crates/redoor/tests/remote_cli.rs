@@ -70,7 +70,7 @@ async fn connected_inventory() -> Json<serde_json::Value> {
         "connection_issue": null, "provisioning_status": [], "binary": null,
         "supports_native_open": false,
         "supports_move_to_trash": false, "supports_trash": false,
-        "uid": null, "is_root": false
+        "uid": null, "is_root": false, "duplicate_id": null
     }]}))
 }
 
@@ -330,7 +330,7 @@ async fn lifecycle_fixture(
         "connection_issue": null, "provisioning_status": [], "binary": null,
         "supports_native_open": false,
         "supports_move_to_trash": false, "supports_trash": false,
-        "uid": null, "is_root": false
+        "uid": null, "is_root": false, "duplicate_id": null
     }}))
     .into_response()
 }

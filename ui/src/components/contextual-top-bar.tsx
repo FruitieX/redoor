@@ -11,7 +11,7 @@ import {
 import { useAtom } from "jotai";
 import type * as React from "react";
 
-import { browserRoute } from "#ui/browser-route";
+import { browserRoute, deviceRoute } from "#ui/browser-route";
 import { IconButton } from "#ui/components/icon-button";
 import {
     getViewSwitchItemClass,
@@ -45,7 +45,7 @@ export function ContextualTopBar() {
     return (
         <header
             aria-label="View navigation"
-            className="flex min-h-12 min-w-0 items-center gap-2 border-b border-slate-800 bg-chrome px-2 pt-2 md:px-3"
+            className="flex min-h-12 min-w-0 items-center gap-2 border-b border-slate-800 bg-chrome px-2 pt-2 @2xl:px-3"
         >
             {isPersistent ? null : (
                 <IconButton
@@ -131,8 +131,7 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
     return (
         <ViewSwitch label="Device view">
             <ViewSwitchLink
-                to="/agents/$agentId"
-                params={{ agentId: agent.id }}
+                {...deviceRoute(agent, "/agents/$deviceName")}
                 active={kind === "agent"}
             >
                 <HardDrive className="h-4 w-4" aria-hidden="true" />
@@ -141,8 +140,7 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
             {canBrowse ? (
                 browseHome === null ? (
                     <ViewSwitchLink
-                        to="/agents/$agentId"
-                        params={{ agentId: agent.id }}
+                        {...deviceRoute(agent, "/agents/$deviceName")}
                         active={isFilesystemContext}
                     >
                         {filesIcon}
@@ -150,7 +148,10 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
                     </ViewSwitchLink>
                 ) : (
                     <ViewSwitchLink
-                        {...browserRoute(agent.id, browseHome)}
+                        {...browserRoute(agent, browseHome)}
+                        // The device home is rarely inside the browsed repository, so this
+                        // entry point leaves Git history instead of keeping its revision.
+                        search={{ rev: undefined }}
                         active={isFilesystemContext}
                     >
                         {filesIcon}
@@ -160,8 +161,7 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
             ) : null}
             {canBrowse ? (
                 <ViewSwitchLink
-                    to="/agents/$agentId/trash"
-                    params={{ agentId: agent.id }}
+                    {...deviceRoute(agent, "/agents/$deviceName/trash")}
                     active={kind === "trash"}
                 >
                     <Trash2 className="h-4 w-4" aria-hidden="true" />
@@ -170,8 +170,7 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
             ) : null}
             {agent.configurationEditable ? (
                 <ViewSwitchLink
-                    to="/agents/$agentId/edit"
-                    params={{ agentId: agent.id }}
+                    {...deviceRoute(agent, "/agents/$deviceName/edit")}
                     active={kind === "configuration"}
                 >
                     <Settings className="h-4 w-4" aria-hidden="true" />
@@ -180,8 +179,7 @@ function ContextualViewSwitch(props: { context: AgentViewContext }) {
             ) : null}
             {canBrowse ? (
                 <ViewSwitchLink
-                    to="/agents/$agentId/logs"
-                    params={{ agentId: agent.id }}
+                    {...deviceRoute(agent, "/agents/$deviceName/logs")}
                     active={kind === "logs"}
                 >
                     <ScrollText className="h-4 w-4" aria-hidden="true" />

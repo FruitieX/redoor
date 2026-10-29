@@ -3,14 +3,13 @@
 
 use std::{
     collections::VecDeque,
-    path::PathBuf,
     sync::{
         Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicU8, AtomicU64, Ordering},
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use redoor_protocol::wire::log::{
     LOG_DIAGNOSTIC_LIMIT, LOG_HISTORY_ENTRY_LIMIT, LOG_MESSAGE_LIMIT, Level, LogEntry,
     LogErrorDetails,
@@ -24,6 +23,8 @@ use tokio::{
     },
 };
 use ts_rs::TS;
+
+use crate::rotating_log::{LogFileSpec, RotatingLogFile};
 
 /// Live subscriber backlog; a slower subscriber lags and skips entries instead of blocking logging.
 const LIVE_LOG_CAPACITY: usize = 1_024;
@@ -140,9 +141,9 @@ pub struct LoggerHandle {
 
 impl LoggerHandle {
     /// Opens the optional log file and starts the single output task owning stdout and file I/O.
-    pub async fn spawn(log_file_path: Option<PathBuf>, format: LogFormat) -> Result<Self> {
+    pub async fn spawn(log_file: Option<LogFileSpec>, format: LogFormat) -> Result<Self> {
         let (records, record_receiver) = mpsc::channel(LOG_RECORD_CAPACITY);
-        let logger = Logger::new(log_file_path, format).await?;
+        let logger = Logger::new(log_file, format).await?;
         let file_logging_enabled = logger.log_file.is_some();
         let (live_entries, _) = broadcast::channel(LIVE_LOG_CAPACITY);
         tokio::spawn(logger.run(record_receiver));
@@ -225,39 +226,20 @@ pub enum SubscribeError {
 
 /// Owns output and replay state in one task so producers never wait for I/O.
 struct Logger {
-    log_file_path: Option<PathBuf>,
-    log_file: Option<tokio::fs::File>,
+    /// Size-bounded persistent output; `None` without a configured file or after a write
+    /// failure, so a broken disk does not stop stdout logging.
+    log_file: Option<RotatingLogFile>,
     format: LogFormat,
 }
 
 impl Logger {
     /// Opens persistent output before startup so availability is authoritative.
-    async fn new(log_file_path: Option<PathBuf>, format: LogFormat) -> Result<Self> {
-        let (log_file_path, log_file) = match log_file_path {
-            Some(path) => {
-                if let Some(parent) = path
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                {
-                    tokio::fs::create_dir_all(parent).await.with_context(|| {
-                        format!("Failed to create log directory '{}'", parent.display())
-                    })?;
-                }
-                let file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .await
-                    .with_context(|| format!("Failed to open log file '{}'", path.display()))?;
-                (Some(path), Some(file))
-            }
-            None => (None, None),
+    async fn new(log_file: Option<LogFileSpec>, format: LogFormat) -> Result<Self> {
+        let log_file = match log_file {
+            Some(spec) => Some(spec.open().await?),
+            None => None,
         };
-        Ok(Self {
-            log_file_path,
-            log_file,
-            format,
-        })
+        Ok(Self { log_file, format })
     }
 
     /// Reports sink failures directly to avoid recursively using the broken logger.
@@ -281,13 +263,10 @@ impl Logger {
             eprintln!("Failed to write logger output to stdout: {error}");
         }
         if let Some(file) = self.log_file.as_mut()
-            && let Err(error) = file.write_all(&bytes).await
+            && let Err(error) = file.write_message(&bytes).await
         {
-            if let Some(path) = self.log_file_path.as_deref() {
-                Self::report_file_error("write", path, &error);
-            }
+            Self::report_file_error("write", file.path(), &error);
             self.log_file = None;
-            self.log_file_path = None;
         }
     }
 
@@ -307,13 +286,13 @@ impl Logger {
 }
 
 /// Initializes the process-global logger with the info threshold and line output.
-pub async fn init(log_file_path: Option<String>) -> Result<()> {
-    init_with_options(log_file_path, Level::Info, LogFormat::Line).await
+pub async fn init(log_file: Option<LogFileSpec>) -> Result<()> {
+    init_with_options(log_file, Level::Info, LogFormat::Line).await
 }
 
 /// Initializes logging with a threshold and line output.
-pub async fn init_with_level(log_file_path: Option<String>, level: Level) -> Result<()> {
-    init_with_options(log_file_path, level, LogFormat::Line).await
+pub async fn init_with_level(log_file: Option<LogFileSpec>, level: Level) -> Result<()> {
+    init_with_options(log_file, level, LogFormat::Line).await
 }
 
 /// Initializes logging after the owning process role resolves startup options.
@@ -321,7 +300,7 @@ pub async fn init_with_level(log_file_path: Option<String>, level: Level) -> Res
 /// Keeps an already installed sink: role startup runs once per process, and tests that
 /// call this repeatedly (or injected their own sink first) must not be replaced.
 pub async fn init_with_options(
-    log_file_path: Option<String>,
+    log_file: Option<LogFileSpec>,
     level: Level,
     format: LogFormat,
 ) -> Result<()> {
@@ -329,7 +308,7 @@ pub async fn init_with_options(
         return Ok(());
     }
     set_level(level);
-    let handle = LoggerHandle::spawn(log_file_path.map(PathBuf::from), format).await?;
+    let handle = LoggerHandle::spawn(log_file, format).await?;
     let mut slot = LOGGER.write().unwrap_or_else(PoisonError::into_inner);
     if slot.is_none() {
         *slot = Some(handle);

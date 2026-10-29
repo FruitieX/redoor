@@ -29,7 +29,7 @@ pub(crate) async fn run(store: CredentialStore, args: RmArgs) -> Result<()> {
     let endpoint = Location::remote(&args.path).await?;
     let label = endpoint.path.escape_debug().to_string();
     let client = RemoteClient::load(&store).await?;
-    client.ensure_agent_running(&endpoint.agent.0).await?;
+    client.ensure_agent_running(endpoint.agent.as_str()).await?;
     let metadata = client
         .metadata(&endpoint)
         .await?
@@ -39,7 +39,7 @@ pub(crate) async fn run(store: CredentialStore, args: RmArgs) -> Result<()> {
     }
     let mut path = client.agent_path(&endpoint, "raw")?;
     if !args.permanent {
-        let device = client.agent_snapshot(&endpoint.agent.0).await?;
+        let device = client.agent_snapshot(endpoint.agent.as_str()).await?;
         if !device.supports_move_to_trash {
             bail!(
                 "Device {} has no trash; use --permanent to delete {label} permanently",

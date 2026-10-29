@@ -1,5 +1,6 @@
 //! REST endpoint for bounded content search below an agent directory.
 
+use crate::http::access::ResolvedDevice;
 use crate::http::{
     agent_client::content_grep,
     agent_helpers::{AgentFilePath, absolute_path_from_url},
@@ -10,14 +11,12 @@ use axum::{
     Json,
     extract::{Path, State as AxumState},
 };
-use redoor_protocol::{
-    api::search::{ContentGrepResponse, GrepRequest, MAX_GREP_CONTEXT_LINES},
-    ids::AgentId,
-};
+use redoor_protocol::api::search::{ContentGrepResponse, GrepRequest, MAX_GREP_CONTEXT_LINES};
 
 /// Route: `POST /api/v1/agents/{agent}/grep/{*path}` searches below one filesystem root.
 pub(crate) async fn content_grep_handler(
-    Path(AgentFilePath { agent, path }): Path<AgentFilePath>,
+    ResolvedDevice(agent_id): ResolvedDevice,
+    Path(AgentFilePath { path }): Path<AgentFilePath>,
     AxumState(state): AxumState<ServerState>,
     Json(search): Json<GrepRequest>,
 ) -> Result<Json<ContentGrepResponse>, ApiError> {
@@ -34,5 +33,5 @@ pub(crate) async fn content_grep_handler(
         )));
     }
     let call = content_grep(absolute_path_from_url(path.unwrap_or_default()), search);
-    Ok(Json(state.agents.call(&AgentId::from(agent), call).await?))
+    Ok(Json(state.agents.call(&agent_id, call).await?))
 }

@@ -85,7 +85,7 @@ pub(crate) struct GrepArgs {
 pub(crate) async fn find(store: CredentialStore, args: FindArgs) -> Result<()> {
     let root = Location::remote(&args.root).await?;
     let client = RemoteClient::load(&store).await?;
-    client.ensure_agent_running(&root.agent.0).await?;
+    client.ensure_agent_running(root.agent.as_str()).await?;
     let request = FindRequest {
         query: args.query,
         timeout: args.options.timeout,
@@ -114,7 +114,7 @@ pub(crate) async fn find(store: CredentialStore, args: FindArgs) -> Result<()> {
 pub(crate) async fn grep(store: CredentialStore, args: GrepArgs) -> Result<()> {
     let root = Location::remote(&args.root).await?;
     let client = RemoteClient::load(&store).await?;
-    client.ensure_agent_running(&root.agent.0).await?;
+    client.ensure_agent_running(root.agent.as_str()).await?;
     let context = args.context.min(MAX_GREP_CONTEXT_LINES);
     let request = GrepRequest {
         query: args.pattern,

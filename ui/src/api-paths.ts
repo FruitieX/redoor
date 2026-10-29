@@ -17,11 +17,6 @@ export function appendFilesystemPath(route: string, path: string): string {
     return encodedPath ? `${route}/${encodedPath}` : route;
 }
 
-/** Builds a browser route whose filesystem components remain visible as URL segments. */
-export function getBrowserUrl(agentId: string, path: string): string {
-    return `/agents/${encodeURIComponent(agentId)}/browser/${encodeFilesystemPath(path)}`;
-}
-
 /** Serializes only requested ownership overrides so omitted fields retain agent-side defaults. */
 export function appendOwnershipOptions(
     url: URL,

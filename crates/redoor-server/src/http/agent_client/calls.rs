@@ -10,9 +10,11 @@ use super::AgentCall;
 use redoor_protocol::api::search::{FindRequest, GrepRequest};
 pub(crate) use redoor_protocol::wire::request::{
     ChmodPath, ChownPath, ContentGrep, CreateDirectory, DeletePartial, DirectorySize, Echo,
-    EmptyTrash, FileSearch, GetAgentDetails, GetLoggingLevel, GitContext, GitDiff, GitStatus,
-    ListAccounts, ListPartials, ListTrash, Ls, Metadata, MoveMetadata, OpenPath, ProbePartial,
-    RawDelete, ReadPartial, RenamePath, Restart, RestoreTrash, SelfExec, SetLoggingLevel, Trash,
+    EmptyTrash, FileSearch, GetAgentDetails, GetLoggingLevel, GitCommitDiff, GitCommitNeighbors,
+    GitContext, GitDiff, GitLog, GitRefList, GitRevisionContent, GitRevisionStat, GitRevisionTree,
+    GitStatus, GitWorktreeList, GitWorktreeStatus, ListAccounts, ListPartials, ListTrash, Ls,
+    Metadata, MoveMetadata, OpenPath, ProbePartial, RawDelete, ReadPartial, RenamePath, Restart,
+    RestoreTrash, SelfExec, SetLoggingLevel, Trash,
 };
 use std::time::Duration;
 
@@ -20,6 +22,9 @@ use std::time::Duration;
 pub(crate) const STANDARD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Deadline for process control that answers immediately or not at all.
 pub(crate) const QUICK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for counting one worktree's changes, which may first wait for the walks of other
+/// checkouts the agent queues ahead of it.
+pub(crate) const GIT_WORKTREE_STATUS_TIMEOUT: Duration = Duration::from_secs(120);
 /// Deadline for permanently deleting every trash entry, which can touch many files.
 pub(crate) const EMPTY_TRASH_TIMEOUT: Duration = Duration::from_secs(300);
 /// Extra wait beyond an agent-enforced limit so the agent's own timeout result arrives first.
@@ -62,6 +67,14 @@ standard_calls! {
     GitContext => "reading git context",
     GitStatus => "reading git status",
     GitDiff => "reading git diff",
+    GitRevisionTree => "reading a git revision tree",
+    GitRevisionContent => "reading a file at a git revision",
+    GitCommitDiff => "reading a git commit diff",
+    GitLog => "reading git history",
+    GitCommitNeighbors => "finding the neighbouring git commits",
+    GitRefList => "listing git branches or tags",
+    GitWorktreeList => "listing git worktrees",
+    GitRevisionStat => "inspecting a path at a git revision",
     GetAgentDetails => "fetching agent details",
     SelfExec => "starting the upgraded agent",
 }
@@ -87,6 +100,16 @@ impl AgentCall for DirectorySize {
 
     fn timeout(&self) -> Option<Duration> {
         agent_limited(self.timeout_seconds)
+    }
+}
+
+impl AgentCall for GitWorktreeStatus {
+    const OPERATION: &'static str = "counting git worktree changes";
+
+    /// One status walk fits the standard deadline, but the agent runs only a few at a time,
+    /// so a row of a long list may queue behind the walks of the rows before it.
+    fn timeout(&self) -> Option<Duration> {
+        Some(GIT_WORKTREE_STATUS_TIMEOUT)
     }
 }
 

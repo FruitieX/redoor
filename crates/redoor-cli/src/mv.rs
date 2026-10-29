@@ -60,9 +60,11 @@ async fn execute(
     let source = Location::remote(&args.source).await?;
     let mut destination = Location::remote(&args.destination).await?;
     let client = RemoteClient::load(store).await?;
-    client.ensure_agent_running(&source.agent.0).await?;
+    client.ensure_agent_running(source.agent.as_str()).await?;
     if destination.agent != source.agent {
-        client.ensure_agent_running(&destination.agent.0).await?;
+        client
+            .ensure_agent_running(destination.agent.as_str())
+            .await?;
     }
     client
         .metadata(&source)

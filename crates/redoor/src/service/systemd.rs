@@ -2,8 +2,8 @@
 //!
 //! Non-root installs a lingering user unit under `~/.config/systemd/user`.
 //! Root installs a system unit under `/etc/systemd/system`: the server runs as
-//! a dedicated `redoor` system user, while the agent stays root so it can manage
-//! the host.
+//! a dedicated `redoor` system user, while the agent and relays stay root so they
+//! keep the privileges (and SSH identity) of the account that installed them.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use super::{ServiceBackend, ServiceRole, ServiceRuntime, ServiceState, not_insta
 pub(super) struct SystemdBackend {
     /// Role the unit runs; selects the subcommand and service identity.
     role: ServiceRole,
-    /// `<app-name>-<role>.service`.
+    /// `<app-name>-<role>.service`, or `<app-name>-relay-<id>.service` for relays.
     unit: String,
     /// User manager (`--user`) for non-root callers, system manager for root.
     user: bool,
@@ -31,8 +31,8 @@ impl SystemdBackend {
     /// Resolves the unit name and scope for `role`.
     pub(super) fn new(role: ServiceRole, paths: &AppPaths) -> Self {
         Self {
+            unit: unit_name(&role, paths.app_name()),
             role,
-            unit: unit_name(role, paths.app_name()),
             user: !nix::unistd::Uid::effective().is_root(),
             paths: paths.clone(),
         }
@@ -175,7 +175,7 @@ impl ServiceBackend for SystemdBackend {
     /// System units differ from user units in identity and install target.
     fn render_definition(&self, binary: &Path, config_path: &Path) -> String {
         render_unit(
-            self.role,
+            &self.role,
             binary,
             config_path,
             !self.user,
@@ -243,7 +243,7 @@ impl ServiceBackend for SystemdBackend {
 
     /// Uses the manager's load state so a unit installed elsewhere still counts.
     async fn ensure_installed(&self) -> Result<()> {
-        validate_unit_load_state(&self.unit, self.role, self.user, &self.load_state().await?)
+        validate_unit_load_state(&self.unit, &self.role, self.user, &self.load_state().await?)
     }
 
     /// Starts the unit in this scope.
@@ -311,14 +311,14 @@ impl ServiceBackend for SystemdBackend {
 }
 
 /// Derives the unit file name from the already validated installation identity.
-fn unit_name(role: ServiceRole, app_name: &str) -> String {
-    format!("{app_name}-{}.service", role.cli_name())
+fn unit_name(role: &ServiceRole, app_name: &str) -> String {
+    format!("{app_name}-{}.service", role.service_suffix())
 }
 
 /// Turns systemd's `not-found` load state into an actionable Redoor error.
 fn validate_unit_load_state(
     service: &str,
-    role: ServiceRole,
+    role: &ServiceRole,
     user: bool,
     load_state: &str,
 ) -> Result<()> {
@@ -450,9 +450,9 @@ async fn chown_path_to_redoor(path: &Path) -> Result<()> {
     .context("Failed to join chown task")?
 }
 
-/// Renders a user or system unit. The agent has no CLI flags — the TOML is authoritative.
+/// Renders a user or system unit. No connection flags are passed — the TOML is authoritative.
 fn render_unit(
-    mode: ServiceRole,
+    role: &ServiceRole,
     binary: &Path,
     config_path: &Path,
     system: bool,
@@ -461,19 +461,22 @@ fn render_unit(
     let binary = quote_unit_argument(binary.to_string_lossy().as_ref());
     let config_path = quote_unit_argument(config_path.to_string_lossy().as_ref());
     let app_environment = quote_unit_argument(&format!("REDOOR_APP_NAME={app_name}"));
-    let (description, command) = match mode {
-        // Pin --config so the unit always loads the file prepared during installation.
-        ServiceRole::Agent => (
-            "Redoor agent",
-            format!("{binary} agent --config {config_path}"),
-        ),
-        ServiceRole::Server => (
-            "Redoor server",
-            format!("{binary} server --config {config_path}"),
-        ),
+    let description = role.description();
+    // Role arguments are fixed words and validated relay IDs, so they need no quoting.
+    // Pin --config so the unit always loads the file prepared during installation.
+    let command = format!(
+        "{binary} {} --config {config_path}",
+        role.program_arguments().join(" ")
+    );
+    // `exec` still fails the start when the binary cannot be executed, without waiting for
+    // a readiness notification the process never sends.
+    let service_type = if role.notifies_readiness() {
+        "notify"
+    } else {
+        "exec"
     };
     // System server drops privileges; system agent stays root for host management.
-    let service_identity = match (system, mode) {
+    let service_identity = match (system, role) {
         (true, ServiceRole::Server) => "User=redoor\nGroup=redoor\n",
         _ => "",
     };
@@ -490,7 +493,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=notify
+Type={service_type}
 {service_identity}Environment={app_environment}
 ExecStart={command}
 Restart=on-failure
@@ -521,14 +524,19 @@ mod tests {
     #[test]
     fn unit_names_use_application_identity() {
         assert_eq!(
-            unit_name(ServiceRole::Agent, "redoor-dev"),
+            unit_name(&ServiceRole::Agent, "redoor-dev"),
             "redoor-dev-agent.service",
             "the agent unit should use the effective application namespace"
         );
         assert_eq!(
-            unit_name(ServiceRole::Server, "redoor-dev"),
+            unit_name(&ServiceRole::Server, "redoor-dev"),
             "redoor-dev-server.service",
             "the server unit should use the effective application namespace"
+        );
+        assert_eq!(
+            unit_name(&ServiceRole::Relay("production".into()), "redoor-dev"),
+            "redoor-dev-relay-production.service",
+            "each relay needs its own unit so several can be installed side by side"
         );
     }
 
@@ -537,7 +545,7 @@ mod tests {
     fn missing_unit_load_state_has_actionable_error() {
         let error = validate_unit_load_state(
             "custom-agent.service",
-            ServiceRole::Agent,
+            &ServiceRole::Agent,
             true,
             "not-found",
         )
@@ -555,7 +563,7 @@ mod tests {
         assert!(
             validate_unit_load_state(
                 "redoor-server.service",
-                ServiceRole::Server,
+                &ServiceRole::Server,
                 false,
                 "loaded"
             )
@@ -625,7 +633,7 @@ MainPID=0"
     #[test]
     fn agent_unit_pins_config_without_other_cli_flags() {
         let unit = render_unit(
-            ServiceRole::Agent,
+            &ServiceRole::Agent,
             Path::new("/home/test user/bin/redoor"),
             Path::new("/home/test user/.config/redoor/config.toml"),
             false,
@@ -664,7 +672,7 @@ MainPID=0"
     #[test]
     fn server_unit_uses_default_config_path() {
         let unit = render_unit(
-            ServiceRole::Server,
+            &ServiceRole::Server,
             Path::new("/home/test/bin/redoor"),
             Path::new("/home/test/.config/redoor/config.toml"),
             false,
@@ -691,7 +699,7 @@ MainPID=0"
     #[test]
     fn system_server_unit_runs_as_redoor() {
         let unit = render_unit(
-            ServiceRole::Server,
+            &ServiceRole::Server,
             Path::new("/usr/local/bin/redoor"),
             Path::new("/etc/redoor/config.toml"),
             true,
@@ -718,7 +726,7 @@ MainPID=0"
     #[test]
     fn system_agent_unit_runs_as_root_with_config_path() {
         let unit = render_unit(
-            ServiceRole::Agent,
+            &ServiceRole::Agent,
             Path::new("/usr/local/bin/redoor"),
             Path::new("/etc/redoor/config.toml"),
             true,
@@ -738,6 +746,37 @@ MainPID=0"
         assert!(
             unit.contains("WantedBy=multi-user.target"),
             "system units should install under multi-user.target: {unit}"
+        );
+    }
+
+    /// Verifies relay units run the named relay in the foreground without readiness waits.
+    #[test]
+    fn relay_unit_starts_named_relay() {
+        let unit = render_unit(
+            &ServiceRole::Relay("production".into()),
+            Path::new("/home/test/bin/redoor"),
+            Path::new("/home/test/.config/redoor/config.toml"),
+            false,
+            "redoor",
+        );
+
+        assert!(
+            unit.contains(
+                "ExecStart=\"/home/test/bin/redoor\" agent relay start production --config \"/home/test/.config/redoor/config.toml\""
+            ),
+            "the relay service must start the selected relay with the pinned config: {unit}"
+        );
+        assert!(
+            !unit.contains("--daemon"),
+            "systemd must supervise the relay process itself: {unit}"
+        );
+        assert!(
+            unit.contains("Type=exec"),
+            "relays never send READY=1, so a notify unit would time out: {unit}"
+        );
+        assert!(
+            unit.contains("Description=Redoor relay production"),
+            "the description should identify which relay the unit runs: {unit}"
         );
     }
 

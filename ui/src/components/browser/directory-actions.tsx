@@ -35,7 +35,11 @@ import { useRefreshBrowserPath } from "#ui/components/browser/refresh";
  * Sends file and directory selections through the same conflict check and bounded global
  * queue as dropped files, which also report their errors.
  */
-function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
+function UploadFilesAction(props: {
+    agent: Agent;
+    directoryPath: string;
+    disabled: boolean;
+}) {
     const uploadFilesTo = useFileUpload();
     const fileInputRef = React.useRef<FileInputHandle>(null);
     const directoryInputRef = React.useRef<FileInputHandle>(null);
@@ -68,6 +72,7 @@ function UploadFilesAction(props: { agent: Agent; directoryPath: string }) {
                 label="Upload"
                 icon={<Upload className="h-4 w-4" />}
                 hideLabelOnMobile
+                disabled={props.disabled}
             >
                 {(close) => (
                     <>
@@ -119,7 +124,7 @@ function CreateDirectoryDialog(props: {
         onSuccess: async (_, name) => {
             await navigate(
                 browserRoute(
-                    props.agent.id,
+                    props.agent,
                     joinBrowserPath(props.directoryPath, name),
                 ),
             );
@@ -170,7 +175,7 @@ function CreateFileDialog(props: {
         onSuccess: async (_, name) => {
             await navigate(
                 browserRoute(
-                    props.agent.id,
+                    props.agent,
                     joinBrowserPath(props.directoryPath, name),
                 ),
             );
@@ -202,7 +207,11 @@ function CreateFileDialog(props: {
 }
 
 /** Groups file and directory creation without mixing their modal workflows. */
-function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
+function DirectoryNewAction(props: {
+    agent: Agent;
+    directoryPath: string;
+    disabled: boolean;
+}) {
     const [dialogType, setDialogType] = React.useState<
         "file" | "directory" | null
     >(null);
@@ -217,7 +226,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
             match: (event) => isPlainKey(event, "n", { allowShift: true }),
             run: () => setDialogType("file"),
         },
-        dialogType === null,
+        dialogType === null && !props.disabled,
     );
 
     useShortcut(
@@ -229,7 +238,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
             match: (event) => isPlainKey(event, "d", { allowShift: true }),
             run: () => setDialogType("directory"),
         },
-        dialogType === null,
+        dialogType === null && !props.disabled,
     );
 
     return (
@@ -238,6 +247,7 @@ function DirectoryNewAction(props: { agent: Agent; directoryPath: string }) {
                 label="New"
                 icon={<Plus className="h-4 w-4" />}
                 hideLabelOnMobile
+                disabled={props.disabled}
             >
                 {(close) => (
                     <>
@@ -296,7 +306,15 @@ export function DirectoryFilesActions(props: {
     directoryPath: string;
     showHiddenFiles: boolean;
     onToggleHiddenFiles: () => void;
+    /**
+     * The commit id of a committed Git revision this toolbar shows: everything that writes
+     * into the directory (paste, new, upload, file operations) is disabled, and Download
+     * archives the directory as committed.
+     */
+    revision?: string;
 }) {
+    const revision = props.revision;
+    const readOnly = revision !== undefined;
     const refreshBrowser = useRefreshBrowserPath(props.agent.id);
     const importFromClipboard = useClipboardImport();
     const [isReloading, setIsReloading] = React.useState(false);
@@ -321,7 +339,7 @@ export function DirectoryFilesActions(props: {
     return (
         <div
             aria-label="Files view actions"
-            className="flex flex-wrap items-center justify-between gap-1 border-b border-slate-800 bg-slate-900/35 p-1.5 sm:gap-2 sm:p-2"
+            className="flex flex-wrap items-center justify-between gap-1 border-b border-slate-800 bg-slate-900/35 p-1.5 @xl:gap-2 @xl:p-2"
         >
             <ToggleButton
                 onClick={props.onToggleHiddenFiles}
@@ -344,7 +362,7 @@ export function DirectoryFilesActions(props: {
                 ) : (
                     <Eye className="h-4 w-4" />
                 )}
-                <span className="hidden sm:inline">
+                <span className="hidden @xl:inline">
                     {props.showHiddenFiles ? "Hide hidden" : "Show hidden"}
                 </span>
             </ToggleButton>
@@ -355,31 +373,50 @@ export function DirectoryFilesActions(props: {
                     variant="ghost"
                     size="sm"
                     onClick={importFromClipboard}
+                    disabled={readOnly}
                     aria-label="Paste files or text"
                     className="rounded-md"
                 >
                     <ClipboardPaste className="h-4 w-4 text-slate-400" />
-                    <span className="hidden sm:inline">Paste</span>
+                    <span className="hidden @xl:inline">Paste</span>
                 </Button>
                 <DirectoryNewAction
                     agent={props.agent}
                     directoryPath={props.directoryPath}
+                    disabled={readOnly}
                 />
                 <UploadFilesAction
                     agent={props.agent}
                     directoryPath={props.directoryPath}
+                    disabled={readOnly}
                 />
                 <PersistentPathActions
                     agent={props.agent}
                     path={props.directoryPath}
                     currentName={directoryName}
                     entryType="directory"
-                    downloadUrl={props.agent.getRawUrl(props.directoryPath, {
-                        download: true,
-                    })}
+                    downloadUrl={
+                        revision === undefined
+                            ? props.agent.getRawUrl(props.directoryPath, {
+                                  download: true,
+                              })
+                            : props.agent.getGitDownloadUrl(
+                                  props.directoryPath,
+                                  revision,
+                              )
+                    }
                     downloadName={getDirectoryArchiveName(directoryName)}
-                    downloadTooltip="Downloads this directory as a .tar.gz archive."
+                    downloadTooltip={
+                        revision === undefined
+                            ? "Downloads this directory as a .tar.gz archive."
+                            : "Downloads this directory as committed at this revision, as a .tar.gz archive."
+                    }
                     secondaryDownload
+                    revision={
+                        revision === undefined
+                            ? undefined
+                            : { commitId: revision, transferable: true }
+                    }
                     afterDownload={
                         <Button
                             tooltip="Reload directory listing from the device"
@@ -395,7 +432,7 @@ export function DirectoryFilesActions(props: {
                             className="rounded-md"
                         >
                             <RefreshCw className="h-4 w-4 text-slate-400" />
-                            <span className="hidden sm:inline">
+                            <span className="hidden @xl:inline">
                                 {isReloading ? "Reloading..." : "Reload"}
                             </span>
                         </Button>

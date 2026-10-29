@@ -1,5 +1,5 @@
 import * as React from "react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 
 /**
  * Provides the shared visual baseline without obscuring native input behavior or attributes.
@@ -9,7 +9,7 @@ export function InputControl(props: React.ComponentPropsWithRef<"input">) {
     return (
         <input
             {...props}
-            className={twMerge(
+            className={cn(
                 "rounded-md border border-slate-700 bg-canvas px-3 py-2 text-slate-100 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20",
                 props.className,
             )}

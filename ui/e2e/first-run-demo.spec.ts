@@ -227,9 +227,8 @@ test.describe("First-run demo", () => {
             await page
                 .getByRole("button", { name: "Connect", exact: true })
                 .click();
-            await expect(
-                page.getByRole("heading", { name: "Connecting local" }),
-            ).toBeVisible();
+            // The connecting view is transient: a fast local agent can replace it before any
+            // assertion sees it, so only the settled connected state is checked.
             await expect(
                 page.getByRole("link", { name: "local, connected" }),
             ).toBeVisible({ timeout: 30_000 });

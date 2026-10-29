@@ -11,6 +11,7 @@ mod archive_upload;
 pub(crate) mod auth;
 mod copy;
 mod diffs;
+mod editor_buffers;
 pub(crate) mod error;
 mod exec;
 #[cfg(test)]
@@ -32,7 +33,9 @@ mod restart;
 mod retry_agent_start;
 pub(crate) mod routes;
 mod server_info;
+mod server_upgrade;
 pub(crate) mod services;
+pub(crate) mod ssh_keys;
 pub mod state;
 mod terminals;
 pub(crate) mod tokens;

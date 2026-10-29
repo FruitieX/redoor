@@ -1,2 +1,6 @@
 [settings]
 idiomatic_version_file_enable_tools = ["node", "pnpm"]
+
+[tools]
+# Prebuilt release binary, so the dependency audit does not need a from-source cargo install.
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"

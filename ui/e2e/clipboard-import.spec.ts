@@ -24,7 +24,7 @@ test.describe("Clipboard imports", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir3");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const suggestedName = `clipboard-image-${Date.now()}.png`;
         const savedName = `renamed-pasted-image-${Date.now()}.png`;
         const suggestedPath = path.join(directoryPath, suggestedName);
@@ -68,7 +68,7 @@ test.describe("Clipboard imports", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir1");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const existingName = "pasted-text.txt";
         const replacementName = `renamed-pasted-text-${Date.now()}.txt`;
         const existingPath = path.join(directoryPath, existingName);
@@ -121,7 +121,7 @@ test.describe("Clipboard imports", () => {
         page,
     }) => {
         const directoryPath = path.join(ctx.testDirPath, "subdir2");
-        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(directoryPath)}`;
+        const directoryUrl = `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(directoryPath)}`;
         const existingName = `existing-pasted-image-${Date.now()}.png`;
         const replacementName = `renamed-colliding-image-${Date.now()}.png`;
         const existingPath = path.join(directoryPath, existingName);

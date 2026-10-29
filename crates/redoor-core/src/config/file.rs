@@ -9,12 +9,12 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use redoor_protocol::ids::{AgentId, validate_device_name};
 use serde::Deserialize;
 
 use super::{
     AgentConfig, AgentSection, AuthMode, LocalAgentConfig, OidcConfig, RedoorConfig, RelayConfig,
-    ServerSection, SshBackedAgentConfig, default_agent_name, default_local_agent_name,
-    parse_relay_id, parse_server_username,
+    ServerSection, SshBackedAgentConfig, parse_relay_id, parse_server_username,
 };
 
 /// Whole-document shape; every section is optional because roles validate their own needs.
@@ -38,6 +38,7 @@ struct RawServerSection {
     port: Option<u16>,
     bind: Option<String>,
     log: Option<String>,
+    log_max_size: Option<RawByteSize>,
     log_level: Option<String>,
     log_format: Option<String>,
     username: Option<String>,
@@ -81,6 +82,7 @@ struct RawAgentSection {
     name: Option<String>,
     home: Option<String>,
     log: Option<String>,
+    log_max_size: Option<RawByteSize>,
     log_level: Option<String>,
     log_format: Option<String>,
 }
@@ -89,6 +91,7 @@ struct RawAgentSection {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgentEntry {
+    id: Option<String>,
     #[serde(default)]
     local: bool,
     target: Option<String>,
@@ -99,6 +102,7 @@ struct RawAgentEntry {
     home: Option<String>,
     log: Option<String>,
     password: Option<String>,
+    managed_ssh_key: Option<bool>,
 }
 
 /// One `[[relays]]` row.
@@ -106,6 +110,7 @@ struct RawAgentEntry {
 #[serde(deny_unknown_fields)]
 struct RawRelay {
     id: Option<String>,
+    agent_id: Option<String>,
     target: Option<String>,
     server: Option<String>,
     username: Option<String>,
@@ -115,10 +120,63 @@ struct RawRelay {
     binary_source: Option<String>,
     home: Option<String>,
     log: Option<String>,
+    log_max_size: Option<RawByteSize>,
     #[serde(default)]
     insecure: bool,
     agent_app_name: Option<String>,
     password: Option<String>,
+}
+
+/// A size as written: plain bytes, or a string with a unit such as `"10MB"`.
+///
+/// Both forms are accepted because sizes like ten megabytes are unreadable as bytes, while
+/// scripts that generate the file find plain integers easiest.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawByteSize {
+    /// Exact byte count.
+    Bytes(u64),
+    /// Number with an optional `B`, `KB`, `MB` or `GB` suffix.
+    Text(String),
+}
+
+impl RawByteSize {
+    /// Resolves the byte count; zero is rejected because a log that may hold nothing
+    /// would be emptied on every check.
+    fn parse(self, key: &str) -> Result<u64, Invalid> {
+        let bytes = match self {
+            Self::Bytes(bytes) => Some(bytes),
+            Self::Text(text) => Self::parse_text(&text),
+        };
+        bytes.filter(|bytes| *bytes > 0).ok_or_else(|| {
+            invalid(format!(
+                "{key} must be a positive byte count or a size such as \"512KB\", \"10MB\" or \"1GB\""
+            ))
+        })
+    }
+
+    /// Parses `<number><unit>` with binary multiples, matching how `ls -h` and most log
+    /// tools report sizes.
+    fn parse_text(text: &str) -> Option<u64> {
+        let text = text.trim();
+        let digits_end = text
+            .find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(text.len());
+        let (number, unit) = text.split_at(digits_end);
+        let multiplier: u64 = match unit.trim().to_ascii_uppercase().as_str() {
+            "" | "B" => 1,
+            "K" | "KB" | "KIB" => 1024,
+            "M" | "MB" | "MIB" => 1024 * 1024,
+            "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+            _ => return None,
+        };
+        number.parse::<u64>().ok()?.checked_mul(multiplier)
+    }
+}
+
+/// Parses an optional size key with its path in the error.
+fn parse_byte_size(value: Option<RawByteSize>, key: &str) -> Result<Option<u64>, Invalid> {
+    value.map(|value| value.parse(key)).transpose()
 }
 
 /// A violated cross-key rule; the text names the key path and how to fix it.
@@ -159,6 +217,7 @@ impl RawConfig {
             }
             relays.push(relay);
         }
+        reject_duplicate_device_ids(&agents, &relays)?;
         Ok(RedoorConfig {
             agent_token,
             server,
@@ -169,22 +228,52 @@ impl RawConfig {
     }
 }
 
-/// Rejects two managed rows that would register under one name, before any supervisor exists.
+/// Rejects two entries with the same device id, naming both.
+///
+/// Copying an `[[agents]]` or `[[relays]]` block copies its id, which would silently merge
+/// two devices. Ids are opaque, so a duplicate is never intended and every role may refuse it.
+fn reject_duplicate_device_ids(
+    agents: &[AgentConfig],
+    relays: &[RelayConfig],
+) -> Result<(), Invalid> {
+    let agent_ids = agents.iter().enumerate().filter_map(|(index, agent)| {
+        agent.id().map(|id| {
+            (
+                id,
+                format!("[[agents]] entry #{index} ('{}')", agent.effective_name()),
+            )
+        })
+    });
+    let relay_ids = relays.iter().filter_map(|relay| {
+        relay
+            .agent
+            .id
+            .as_ref()
+            .map(|id| (id, format!("[[relays]] entry '{}'", relay.id)))
+    });
+    let mut seen: Vec<(&AgentId, String)> = Vec::new();
+    for (id, label) in agent_ids.chain(relay_ids) {
+        if let Some((_, first)) = seen.iter().find(|(existing, _)| *existing == id) {
+            return Err(invalid(format!(
+                "duplicate device id '{id}' in {first} and {label}; remove the id from the copied entry so a new one is generated"
+            )));
+        }
+        seen.push((id, label));
+    }
+    Ok(())
+}
+
+/// Rejects managed rows whose effective names break the device name rules or collide,
+/// before any supervisor exists.
 ///
 /// Not part of `validate`: only the server registers managed agents, so other roles reading
 /// the same file (logs, relays, service install) must not fail on it.
-pub(super) fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
+pub(super) fn validate_managed_agent_names(agents: &[AgentConfig]) -> Result<(), Invalid> {
     let mut names = HashSet::new();
-    for agent in agents {
-        let name = match agent {
-            AgentConfig::Local(local) => {
-                local.name.clone().unwrap_or_else(default_local_agent_name)
-            }
-            AgentConfig::SshBacked(ssh) => ssh
-                .name
-                .clone()
-                .unwrap_or_else(|| default_agent_name(&ssh.target)),
-        };
+    for (index, agent) in agents.iter().enumerate() {
+        let name = agent.effective_name();
+        validate_device_name(&name)
+            .map_err(|error| invalid(format!("agents entry #{index}: {error}")))?;
         if !names.insert(name.clone()) {
             return Err(invalid(format!(
                 "duplicate managed agent name '{name}' in [[agents]]; set a distinct 'name' on one of the entries"
@@ -192,6 +281,13 @@ pub(super) fn reject_duplicate_agent_names(agents: &[AgentConfig]) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Parses an optional configured device id with the entry label in the error.
+fn parse_optional_id(value: Option<String>, label: &str) -> Result<Option<AgentId>, Invalid> {
+    value
+        .map(|value| AgentId::parse(&value).map_err(|error| invalid(format!("{label}: {error}"))))
+        .transpose()
 }
 
 impl RawServerSection {
@@ -237,6 +333,7 @@ impl RawServerSection {
             port: self.port,
             bind: self.bind,
             log: self.log,
+            log_max_size: parse_byte_size(self.log_max_size, "server.log_max_size")?,
             log_level,
             log_format,
             auth,
@@ -388,6 +485,7 @@ impl RawAgentSection {
             name: non_empty(self.name, "name")?,
             home: non_empty(self.home, "home")?,
             log: non_empty(self.log, "log")?,
+            log_max_size: parse_byte_size(self.log_max_size, "agent.log_max_size")?,
             log_level: parse_named(non_empty(self.log_level, "log_level")?, "agent.log_level")?,
             log_format: parse_named(
                 non_empty(self.log_format, "log_format")?,
@@ -421,6 +519,7 @@ impl RawAgentEntry {
             ("ssh_port", self.ssh_port.is_some()),
             ("remote_bin", self.remote_bin.is_some()),
             ("password", self.password.is_some()),
+            ("managed_ssh_key", self.managed_ssh_key.is_some()),
         ];
         if let Some((key, _)) = ssh_only.into_iter().find(|(_, present)| *present) {
             return Err(invalid(format!(
@@ -428,6 +527,7 @@ impl RawAgentEntry {
             )));
         }
         Ok(AgentConfig::Local(LocalAgentConfig {
+            id: parse_optional_id(self.id, &format!("agents entry #{index} 'id'"))?,
             name: self.name,
             home,
             log: self.log,
@@ -446,7 +546,23 @@ impl RawAgentEntry {
                 "agents entry #{index} 'password' must be non-empty when set"
             )));
         }
+        let managed_ssh_key = self.managed_ssh_key.unwrap_or(false);
+        if managed_ssh_key {
+            // A managed key turns password logins off, so both together is a hand edit gone wrong.
+            if self.password.is_some() {
+                return Err(invalid(format!(
+                    "agents entry #{index} has both 'managed_ssh_key' and 'password'; remove 'password'"
+                )));
+            }
+            // The key is stored under the device id, so a key without one is unusable.
+            if self.id.is_none() {
+                return Err(invalid(format!(
+                    "agents entry #{index} has 'managed_ssh_key' but no 'id'"
+                )));
+            }
+        }
         Ok(AgentConfig::SshBacked(SshBackedAgentConfig {
+            id: parse_optional_id(self.id, &format!("agents entry #{index} 'id'"))?,
             username: self.username,
             ssh_port: self.ssh_port,
             name: self.name,
@@ -455,6 +571,7 @@ impl RawAgentEntry {
             target,
             log: self.log,
             password: self.password,
+            managed_ssh_key,
         }))
     }
 }
@@ -487,13 +604,20 @@ impl RawRelay {
         let agent_app_name = non_blank(self.agent_app_name, "agent_app_name")?
             .map(|value| crate::app_name::parse_app_name(&value).map_err(invalid))
             .transpose()?;
+        let agent_id = parse_optional_id(self.agent_id, &format!("relay '{id}' 'agent_id'"))?;
+        let log_max_size = parse_byte_size(
+            self.log_max_size,
+            &format!("relays entry #{index} 'log_max_size'"),
+        )?;
         Ok(RelayConfig {
             id,
             server,
+            log_max_size,
             insecure: self.insecure,
             binary_source: non_blank(self.binary_source, "binary_source")?.map(PathBuf::from),
             agent_app_name,
             agent: SshBackedAgentConfig {
+                id: agent_id,
                 username: non_blank(self.username, "username")?,
                 ssh_port: self.ssh_port,
                 name: non_blank(self.name, "name")?,
@@ -502,6 +626,8 @@ impl RawRelay {
                 target,
                 log: non_blank(self.log, "log")?,
                 password: non_blank(self.password, "password")?,
+                // Relays keep using the account's own credentials; managed keys are server-only.
+                managed_ssh_key: false,
             },
         })
     }

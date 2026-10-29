@@ -24,6 +24,7 @@ import {
     describeDestinationEntries,
     type ConflictResolution,
     ExistingItemOptions,
+    findNameCollisions,
     getEffectiveResolution,
     NewNameFields,
     planRenames,
@@ -97,6 +98,39 @@ function ResumeOptions(props: {
     );
 }
 
+/**
+ * Words the dialog after what needs deciding: existing destination items take precedence,
+ * then selected items that share a name, and otherwise a plain confirmation.
+ */
+function describeTransferDialog(props: {
+    operationLabel: string;
+    selectedCount: number;
+    conflictCount: number;
+    hasCollisions: boolean;
+    destination: string;
+}) {
+    const items = props.selectedCount === 1 ? "item" : "items";
+
+    if (props.conflictCount > 0) {
+        return {
+            title: "Destination items already exist",
+            description: `${props.conflictCount} selected ${props.conflictCount === 1 ? "item has" : "items have"} the same name as an item in this directory. Choose how to handle the existing destination.`,
+        };
+    }
+
+    if (props.hasCollisions) {
+        return {
+            title: "Selected items share a name",
+            description: `Some selected items have the same name. Give them distinct names in ${props.destination}.`,
+        };
+    }
+
+    return {
+        title: `${props.operationLabel} selected ${items}?`,
+        description: `${props.operationLabel} the selected ${items} to ${props.destination}.`,
+    };
+}
+
 /** Always confirms selected paths and includes a conflict policy when needed. */
 export function SelectedFilesTransferTrigger(props: {
     api: ApiClient;
@@ -135,20 +169,23 @@ export function SelectedFilesTransferTrigger(props: {
             props.selectedFiles,
         ],
         enabled: isOpen,
+        // A revision is read from a commit, so it never leaves a resumable partial.
         queryFn: async () =>
             Promise.all(
-                props.selectedFiles.map((file) =>
-                    props.api.copyPreflight({
-                        source: { agent: file.agentId, path: file.path },
-                        dest: {
-                            agent: props.destinationAgent.id,
-                            path: joinBrowserPath(
-                                props.directoryPath,
-                                file.fileName,
-                            ),
-                        },
-                    }),
-                ),
+                props.selectedFiles
+                    .filter((file) => file.rev === undefined)
+                    .map((file) =>
+                        props.api.copyPreflight({
+                            source: { agent: file.agentId, path: file.path },
+                            dest: {
+                                agent: props.destinationAgent.id,
+                                path: joinBrowserPath(
+                                    props.directoryPath,
+                                    file.fileName,
+                                ),
+                            },
+                        }),
+                    ),
             ),
     });
 
@@ -174,7 +211,9 @@ export function SelectedFilesTransferTrigger(props: {
             file.fileName,
         );
 
+        // A revision is copied from a commit, so it conflicts even with its own working file.
         const isSamePath =
+            file.rev === undefined &&
             file.agentId === props.destinationAgent.id &&
             file.path === destinationPath;
 
@@ -189,12 +228,22 @@ export function SelectedFilesTransferTrigger(props: {
         conflictingKeys.has(candidate.key),
     );
 
+    const collidingKeys = findNameCollisions(candidates);
+
     const canMerge = canMergeConflicts(conflicts, destination.directoryNames);
     const resolution = getEffectiveResolution(chosenResolution, canMerge);
 
+    const operationLabel = copy ? "Copy" : "Move";
+    const hasConflicts = conflictingFiles.length > 0;
+    const isRenaming = hasConflicts && resolution === "rename";
+
     const renames = planRenames({
         items: candidates,
-        conflicts,
+        conflicts: candidates.filter(
+            (candidate) =>
+                collidingKeys.has(candidate.key) ||
+                (isRenaming && conflictingKeys.has(candidate.key)),
+        ),
         destinationFileNames: destination.fileNames,
         editedNames,
     });
@@ -207,12 +256,7 @@ export function SelectedFilesTransferTrigger(props: {
         setIsOpen(true);
     };
 
-    const operationLabel = copy ? "Copy" : "Move";
-    const hasConflicts = conflictingFiles.length > 0;
-    const isRenaming = hasConflicts && resolution === "rename";
-
-    const hasInvalidName =
-        isRenaming && renames.some((rename) => rename.error !== null);
+    const hasInvalidName = renames.some((rename) => rename.error !== null);
 
     // Clearing the selection dismisses the prompt. Resetting the state while rendering, rather
     // than hiding the dialog, keeps it from reappearing when something is selected again.
@@ -230,24 +274,19 @@ export function SelectedFilesTransferTrigger(props: {
             <Dialog
                 isOpen={isOpen}
                 size="wide"
-                title={
-                    hasConflicts
-                        ? "Destination items already exist"
-                        : `${operationLabel} selected ${props.selectedFiles.length === 1 ? "item" : "items"}?`
-                }
-                description={
-                    hasConflicts
-                        ? `${conflictingFiles.length} selected ${conflictingFiles.length === 1 ? "item has" : "items have"} the same name as an item in this directory. Choose how to handle the existing destination.`
-                        : `${operationLabel} the selected ${props.selectedFiles.length === 1 ? "item" : "items"} to ${props.destinationAgent.name}:${props.directoryPath}.`
-                }
+                {...describeTransferDialog({
+                    operationLabel,
+                    selectedCount: props.selectedFiles.length,
+                    conflictCount: conflictingFiles.length,
+                    hasCollisions: collidingKeys.size > 0,
+                    destination: `${props.destinationAgent.name}:${props.directoryPath}`,
+                })}
                 closeAriaLabel={labels.closeAriaLabel}
                 onClose={() => setIsOpen(false)}
             >
                 <AffectedPathsList
                     paths={props.selectedFiles}
-                    onDeselect={(path) =>
-                        unselectFile({ agentId: path.agentId, path: path.path })
-                    }
+                    onDeselect={(path) => unselectFile(path)}
                 />
                 {candidate ? (
                     <ResumeOptions
@@ -270,7 +309,7 @@ export function SelectedFilesTransferTrigger(props: {
                         onChange={setResolution}
                     />
                 ) : null}
-                {isRenaming ? (
+                {renames.length > 0 ? (
                     <NewNameFields
                         renames={renames}
                         onChange={(key, value) =>
@@ -303,12 +342,10 @@ export function SelectedFilesTransferTrigger(props: {
                                     : "error",
                                 resumeMode,
                                 new Map(
-                                    isRenaming
-                                        ? renames.map((rename) => [
-                                              rename.key,
-                                              rename.name,
-                                          ])
-                                        : [],
+                                    renames.map((rename) => [
+                                        rename.key,
+                                        rename.name,
+                                    ]),
                                 ),
                             );
                         }}

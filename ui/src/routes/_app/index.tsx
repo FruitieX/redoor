@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { deviceRoute } from "#ui/browser-route";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useAtom } from "jotai";
 import {
@@ -18,6 +19,7 @@ import type { ServerAuthMode } from "#bindings/ServerAuthMode";
 import { AgentStatusDot } from "#ui/components/agent-status-dot";
 import { BinaryIdentityFields } from "#ui/components/binary-identity";
 import { Button } from "#ui/components/button";
+import { ServerUpdateButton } from "#ui/components/server-update-button";
 import {
     CopyableCodeRow,
     CopyablePath,
@@ -108,8 +110,7 @@ function AgentNameGrid(props: { agents: Agent[] }) {
                             content={`Open ${agent.name} (${agentOriginTooltip(agent)})`}
                         >
                             <Link
-                                to="/agents/$agentId"
-                                params={{ agentId: agent.id }}
+                                {...deviceRoute(agent, "/agents/$deviceName")}
                                 className="inline-flex items-center gap-1.5 rounded border border-slate-800 bg-surface px-2 py-0.5 text-sm text-slate-200 hover:border-slate-600 hover:bg-tint"
                             >
                                 <AgentStatusDot agent={agent} />
@@ -235,6 +236,12 @@ server = ${JSON.stringify(serverAddress)}
                             build_mode: serverInfo.build_mode,
                             build_date: serverInfo.build_date,
                         }}
+                        versionAction={
+                            <ServerUpdateButton
+                                currentVersion={serverInfo.version}
+                                exePath={serverInfo.exe_path}
+                            />
+                        }
                     />
                 </div>
                 <div className="mt-6">

@@ -17,9 +17,7 @@ use redoor_protocol::ids::AgentId;
 use redoor_protocol::wire::log::Level;
 use tokio::process::Child;
 
-use redoor_core::config::{
-    AgentConfig, LocalAgentConfig, default_local_agent_name, spawn_local_agent,
-};
+use redoor_core::config::{AgentConfig, LocalAgentConfig, spawn_local_agent};
 
 /// Process-wide inputs every managed agent spawn needs besides its own TOML row.
 ///
@@ -51,8 +49,8 @@ impl ManagedLauncher {
 
     /// Registers configured inventory and dormant supervisors without starting subprocesses.
     ///
-    /// Config parsing already rejected duplicate effective names, so a registry conflict
-    /// here means an earlier registration of the same name is still alive.
+    /// Config validation already rejected duplicate ids and names, so a registry conflict
+    /// here means an earlier registration of the same id is still alive.
     pub(crate) async fn register_all(
         &self,
         configs: &[AgentConfig],
@@ -71,14 +69,22 @@ impl ManagedLauncher {
     }
 
     /// Registers one newly persisted agent without disturbing existing supervisors or connections.
+    ///
+    /// The supervisor is keyed by the entry's id, which is what the spawned agent sends in its
+    /// `hello`, so the session finds its supervisor even after a rename.
     pub(crate) async fn register(
         &self,
         config: AgentConfig,
         registry: &WatchdogRegistry,
         router: &RouterHandle,
     ) -> Result<AgentId> {
-        let key = supervisor_key(&config);
-        let agent_id = AgentId::from(key.clone());
+        let agent_id = config.id().cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Managed agent '{}' has no device id; restart the server to assign one",
+                config.effective_name()
+            )
+        })?;
+        let name = config.effective_name();
         let default_directory = configured_directory(&config);
         // Both local and SSH TOML entries are operator-owned, so the UI can edit either kind.
         let configuration_editable = true;
@@ -87,11 +93,17 @@ impl ManagedLauncher {
             AgentConfig::Local(_) => None,
         };
         let callback = lifecycle_projection(router.clone(), agent_id.clone());
-        spawn_supervisor(key, self.spawn_fn(config), registry, callback)?;
+        spawn_supervisor(
+            agent_id.to_string(),
+            self.spawn_fn(config),
+            registry,
+            callback,
+        )?;
         router
             .request(|reply| {
                 RouterMsg::RegisterManagedAgent(RegisterManagedAgentRequest {
                     agent_id: agent_id.clone(),
+                    name,
                     default_directory,
                     configuration_editable,
                     ssh_target,
@@ -114,7 +126,7 @@ impl ManagedLauncher {
 
     /// Re-invoking just spawns a fresh `redoor agent` child; the supervisor handles restarts.
     fn local_spawn_fn(&self, config: LocalAgentConfig) -> SpawnFn {
-        let diagnostic_log = config.log.clone();
+        let log_file = self.log_file(config.log.as_deref());
         let launcher = self.clone();
         let spawn = SpawnFn::new(move |_status| {
             let config = config.clone();
@@ -130,8 +142,8 @@ impl ManagedLauncher {
                 .map_err(SpawnError::Spawn)
             }
         });
-        match diagnostic_log {
-            Some(path) => spawn.with_diagnostic_log(path),
+        match log_file {
+            Some(log_file) => spawn.with_log_file(log_file),
             None => spawn,
         }
     }
@@ -140,7 +152,8 @@ impl ManagedLauncher {
     fn ssh_backed_spawn_fn(&self, config: redoor_core::config::SshBackedAgentConfig) -> SpawnFn {
         log!(
             Level::Debug,
-            "Creating managed SSH spawn closure: target={}, ssh_server_port={}, name={:?}, remote_bin={:?}, home={:?}, log={:?}, username={:?}",
+            "Creating managed SSH spawn closure: agent_id={:?}, target={}, ssh_server_port={}, name={:?}, remote_bin={:?}, home={:?}, log={:?}, username={:?}",
+            config.id,
             config.target,
             config
                 .ssh_port
@@ -152,7 +165,7 @@ impl ManagedLauncher {
             config.log,
             config.username
         );
-        let diagnostic_log = config.log.clone();
+        let log_file = self.log_file(config.log.as_deref());
         let config = std::sync::Arc::new(config);
         let launcher = self.clone();
         let spawn = SpawnFn::new(move |status| {
@@ -161,30 +174,30 @@ impl ManagedLauncher {
             async move { launcher.ssh_backed_spawn_once(&config, status).await }
         })
         .with_process_name("SSH process");
-        match diagnostic_log {
-            Some(path) => spawn.with_diagnostic_log(path),
+        match log_file {
+            Some(log_file) => spawn.with_log_file(log_file),
             None => spawn,
         }
     }
 
-    /// Prepares then spawns one SSH-backed child. Prepare is not cached because
-    /// the starting UI must show sniff results on every attempt.
+    /// Applies the server's log size limit to an agent's configured log file.
+    fn log_file(&self, path: Option<&str>) -> Option<redoor_core::rotating_log::LogFileSpec> {
+        path.map(|path| self.provision.log_file(path))
+    }
+
+    /// Probes, installs when needed, and spawns one SSH-backed child. Nothing is cached
+    /// because the starting UI must show sniff results on every attempt.
     async fn ssh_backed_spawn_once(
         &self,
         config: &redoor_core::config::SshBackedAgentConfig,
         status: crate::watchdog::ProvisioningStatusSink,
     ) -> Result<Child, SpawnError> {
-        let prepared = self
-            .provision
-            .prepare_managed(config, self.redoor_port, &self.agent_token, &status)
-            .await
-            .map_err(SpawnError::Provision)?;
         // ExitOnForwardFailure makes an occupied random remote port terminate the
         // child; the supervisor's next cycle calls this again with a new port.
-        prepared
-            .spawn_managed(&status)
+        self.provision
+            .start_managed(config, self.redoor_port, &self.agent_token, &status)
             .await
-            .map_err(SpawnError::Spawn)
+            .map_err(SpawnError::Provision)
     }
 }
 
@@ -219,20 +232,5 @@ fn configured_directory(config: &AgentConfig) -> Option<String> {
     match config {
         AgentConfig::Local(config) => config.home.clone(),
         AgentConfig::SshBacked(config) => config.home.clone(),
-    }
-}
-
-/// Computes the key used to look up the supervisor from the session.
-/// The key must match the name the agent registers with via its
-/// `AgentRegister` message. Falls back to the system hostname for
-/// local agents and the target hostname for SSH-backed agents when the
-/// config omits an explicit name.
-pub(crate) fn supervisor_key(config: &AgentConfig) -> String {
-    match config {
-        AgentConfig::Local(c) => c.name.clone().unwrap_or_else(default_local_agent_name),
-        AgentConfig::SshBacked(c) => c
-            .name
-            .clone()
-            .unwrap_or_else(|| redoor_core::config::default_agent_name(&c.target)),
     }
 }

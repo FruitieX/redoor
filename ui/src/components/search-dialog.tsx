@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import {
+    hashKey,
+    useQuery,
+    type QueryKey,
+    type UseQueryResult,
+} from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import {
     CaseLower,
@@ -21,6 +26,10 @@ import type { FileSearchResponse } from "#bindings/FileSearchResponse";
 import type { GitContextResponse } from "#bindings/GitContextResponse";
 import { type Agent } from "#ui/api-client";
 import { browserRoute } from "#ui/browser-route";
+import {
+    OpenInBackgroundButton,
+    useBackgroundOpen,
+} from "#ui/components/browser/open-file-actions";
 import { getImmediateParentPath } from "#ui/components/browser/utils";
 import { Dialog } from "#ui/components/dialog";
 import { IconButton } from "#ui/components/icon-button";
@@ -31,8 +40,13 @@ import {
     contentGrepQueryOptions,
     fileSearchQueryOptions,
     gitContextQueryOptions,
+    type ContentGrepParams,
 } from "#ui/queries";
 import type { AgentSearch } from "#ui/agent-search";
+import {
+    HistoryEntryStore,
+    useHistoryEntryState,
+} from "#ui/history-entry-state";
 import { useAgentSearchNavigation } from "#ui/search-navigation";
 import {
     useBrowserLocation,
@@ -42,8 +56,9 @@ import { useUserState } from "#ui/user-state";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import { isPlainKey } from "#ui/utils/keyboard";
 import { useArrayKeyboardFocus } from "#ui/utils/use-array-keyboard-focus";
+import { getBaseName } from "#ui/utils/path";
 
-const agentRoute = getRouteApi("/_app/agents/$agentId");
+const agentRoute = getRouteApi("/_app/agents/$deviceName");
 
 /** Cycles smart → sensitive → insensitive so the control can name the next click. */
 const nextCaseSensitivity = {
@@ -169,8 +184,258 @@ function useOpenSearchShortcut(isOpen: boolean) {
     );
 }
 
+/** The results a search showed, tagged with their mode so each query only takes its own kind. */
+type SearchViewResults =
+    | { mode: "path"; response: FileSearchResponse }
+    | { mode: "content"; response: ContentGrepResponse };
+
+/**
+ * Where the reader left a search when they opened a result. Back shows the same results
+ * instead of searching again, which could reorder the list under the reader and keep the
+ * agent busy for nothing on a large tree.
+ */
+type SearchView = {
+    /** Hash of the query key the results answer, so another query or option searches again. */
+    queryHash: string;
+    /** Kept here so the results outlive the query cache dropping results nobody observes. */
+    results: SearchViewResults;
+    /** How far the dialog was scrolled, since the dialog scrolls itself, not the page. */
+    scrollTop: number;
+    /** Which result link was opened, so arrow keys continue from it. */
+    openedIndex: number;
+};
+
+/**
+ * What a history entry remembers of its search. The view sits in an object because the store
+ * cannot tell an undefined value from a missing one, and a dismissed view must stay dismissed.
+ */
+type RestoredSearch = { view?: SearchView };
+
+/** Holds few entries, because content search results with context lines can be large. */
+const restoredSearches = new HistoryEntryStore<RestoredSearch>(20);
+
+/**
+ * The view to restore on the history entry on screen. The open dialog mounts when it opens and
+ * unmounts when it closes, so the entry is the one Back or Forward returned to, and opening a
+ * result never carries the view over to the file's entry. A replace that keeps the dialog open,
+ * such as writing the typed query into the URL, carries it over to the replacing entry.
+ * Changing the search dismisses the view, so the same query typed again later searches.
+ */
+function useRestoredSearchView(options: {
+    scope: string;
+    resultsRef: React.RefObject<HTMLDivElement | null>;
+    getResults: () => HTMLElement[];
+}) {
+    const placedView = React.useRef<SearchView>(undefined);
+
+    const [restored, update] = useHistoryEntryState<RestoredSearch>({
+        store: restoredSearches,
+        scope: options.scope,
+        initial: () => ({}),
+    });
+
+    const view = restored.view;
+
+    // Puts the reader back where they left the results. It runs after the dialog's own effect,
+    // which opens the dialog and focuses the search field, so the opened result keeps focus.
+    // TanStack's scroll restoration cannot do this: the dialog scrolls itself and opens only
+    // after the route renders. It checks after every render because the results may render
+    // later than the view, for example once the search scope resolves.
+    React.useEffect(() => {
+        if (view === undefined || placedView.current === view) {
+            return;
+        }
+
+        const link = options.getResults()[view.openedIndex];
+        const dialog = options.resultsRef.current?.closest("dialog");
+
+        if (link === undefined || !dialog) {
+            return;
+        }
+
+        placedView.current = view;
+        link.focus({ preventScroll: true });
+        dialog.scrollTop = view.scrollTop;
+    });
+
+    return {
+        view,
+        dismiss: () => {
+            if (view !== undefined) {
+                update(() => ({}));
+            }
+        },
+        /**
+         * Stores the results and the place in them on the entry on screen. It must run before
+         * a navigation replaces the entry, which carries the view over to the replacing one.
+         */
+        save: (
+            results: SearchViewResults | undefined,
+            queryKey: QueryKey,
+            openedIndex: number,
+        ) => {
+            if (results === undefined) {
+                return;
+            }
+
+            update(() => ({
+                view: {
+                    queryHash: hashKey(queryKey),
+                    results,
+                    scrollTop:
+                        options.resultsRef.current?.closest("dialog")
+                            ?.scrollTop ?? 0,
+                    openedIndex,
+                },
+            }));
+        },
+    };
+}
+
+/** The results on screen, unless they are a previous query's shown while searching. */
+function shownSearchResults(
+    isContentSearch: boolean,
+    pathSearch: UseQueryResult<FileSearchResponse>,
+    contentSearch: UseQueryResult<ContentGrepResponse>,
+): SearchViewResults | undefined {
+    if (isContentSearch) {
+        return contentSearch.data && !contentSearch.isPlaceholderData
+            ? { mode: "content", response: contentSearch.data }
+            : undefined;
+    }
+
+    return pathSearch.data && !pathSearch.isPlaceholderData
+        ? { mode: "path", response: pathSearch.data }
+        : undefined;
+}
+
+/**
+ * The restored results for a query, if the view is for that exact query. While they are
+ * shown the query is static, so neither its observer nor an invalidation, such as the one
+ * every finished upload or edit sends, asks for them again. They are selected over the
+ * cache, which may hold newer results of the same search run from another entry.
+ */
+function restoredSearchOptions<T>(
+    response: T | undefined,
+    view: SearchView | undefined,
+    queryKey: QueryKey,
+) {
+    const matches =
+        response !== undefined && view?.queryHash === hashKey(queryKey);
+
+    return {
+        initialData: matches ? response : undefined,
+        select: matches ? (cached: T) => response ?? cached : undefined,
+        staleTime: matches ? ("static" as const) : 0,
+    };
+}
+
+/** Runs the search the dialog shows, keeping a restored view's results as they were. */
+function useSearchQueries(options: {
+    agent: Agent;
+    directory: string;
+    isContentSearch: boolean;
+    canSearch: boolean;
+    params: ContentGrepParams;
+    view: SearchView | undefined;
+}) {
+    const view = options.view;
+    const searchesPaths = options.canSearch && !options.isContentSearch;
+    const searchesContent = options.canSearch && options.isContentSearch;
+
+    // Path search keeps its own fields, so a content-only option never searches paths again.
+    const pathOptions = fileSearchQueryOptions(
+        options.agent,
+        options.directory,
+        {
+            query: searchesPaths ? options.params.query : "",
+            timeoutSeconds: options.params.timeoutSeconds,
+            includeHidden: options.params.includeHidden,
+            respectGitignore: options.params.respectGitignore,
+            caseSensitivity: options.params.caseSensitivity,
+        },
+    );
+
+    const contentOptions = contentGrepQueryOptions(
+        options.agent,
+        options.directory,
+        {
+            ...options.params,
+            query: searchesContent ? options.params.query : "",
+        },
+    );
+
+    const pathSearch = useQuery({
+        ...pathOptions,
+        ...restoredSearchOptions(
+            view?.results.mode === "path" ? view.results.response : undefined,
+            view,
+            pathOptions.queryKey,
+        ),
+        enabled: searchesPaths,
+    });
+
+    const contentSearch = useQuery({
+        ...contentOptions,
+        ...restoredSearchOptions(
+            view?.results.mode === "content"
+                ? view.results.response
+                : undefined,
+            view,
+            contentOptions.queryKey,
+        ),
+        enabled: searchesContent,
+    });
+
+    return {
+        pathSearch,
+        contentSearch,
+        activeQueryKey: options.isContentSearch
+            ? contentOptions.queryKey
+            : pathOptions.queryKey,
+    };
+}
+
 /** Names where a search result leads, with the line a content match should reveal. */
 type SearchResultTarget = { path: string; line?: number };
+
+/**
+ * One result row: the link fills it and the open-in-background button stays at its right
+ * edge, also while a wide preview scrolls sideways. The button sits beside the link, never
+ * inside it, and arrow-key focus only walks the links.
+ */
+function SearchResultRow(props: {
+    agent: Agent;
+    target: SearchResultTarget;
+    /** Directories have nothing to open in the editor. */
+    canOpenInBackground: boolean;
+    children: React.ReactNode;
+}) {
+    const background = useBackgroundOpen(
+        props.canOpenInBackground
+            ? {
+                  agentId: props.agent.id,
+                  agentName: props.agent.name,
+                  path: props.target.path,
+                  name: getBaseName(props.target.path),
+              }
+            : null,
+    );
+
+    return (
+        <div className="flex w-max min-w-full items-start border-b border-slate-800">
+            {props.children}
+            {background === null ? null : (
+                <div className="sticky right-0 shrink-0 self-stretch bg-surface px-2 py-2">
+                    <OpenInBackgroundButton
+                        target={background}
+                        line={props.target.line}
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
 
 /** Leaves modified clicks on the real href so middle-click and new-tab still work. */
 function handleSearchResultClick(
@@ -193,12 +458,23 @@ function handleSearchResultClick(
 
 /** Owns the single route-wide path and content search workflow. */
 export function SearchDialog(props: { agent: Agent }) {
+    const isOpen = agentRoute.useSearch({
+        select: (search) => search.q !== undefined,
+    });
+
+    useOpenSearchShortcut(isOpen);
+
+    // Mounting the dialog only while open binds its restored view to the entry it opened on.
+    return isOpen ? <OpenSearchDialog agent={props.agent} /> : null;
+}
+
+/** The search dialog while the URL has it open. */
+function OpenSearchDialog(props: { agent: Agent }) {
     const search = agentRoute.useSearch();
     const navigate = useNavigate();
     const { updateSearch } = useAgentSearchNavigation();
     const { directory, gitRoot } = useSearchScope(props.agent);
     const [userState, setUserState] = useUserState();
-    const isOpen = search.q !== undefined;
     const isContentSearch = search.mode === "content";
     const { query, setQuery, debouncedQuery } = useSearchQuery(search.q);
 
@@ -217,37 +493,11 @@ export function SearchDialog(props: { agent: Agent }) {
     const searchFromGitRoot = gitRoot !== null && (search.gitroot ?? false);
     const searchDirectory = searchFromGitRoot ? gitRoot : directory;
     const resultsRef = React.useRef<HTMLDivElement>(null);
-    useOpenSearchShortcut(isOpen);
 
     const canSearch =
-        isOpen &&
         props.agent.status === "connected" &&
         searchDirectory !== null &&
         debouncedQuery.trim() !== "";
-
-    const pathSearch = useQuery({
-        ...fileSearchQueryOptions(props.agent, searchDirectory ?? "", {
-            query: canSearch && !isContentSearch ? debouncedQuery : "",
-            timeoutSeconds,
-            includeHidden,
-            respectGitignore,
-            caseSensitivity,
-        }),
-        enabled: canSearch && !isContentSearch,
-    });
-
-    const contentSearch = useQuery({
-        ...contentGrepQueryOptions(props.agent, searchDirectory ?? "", {
-            query: canSearch && isContentSearch ? debouncedQuery : "",
-            timeoutSeconds,
-            includeHidden,
-            respectGitignore,
-            regex,
-            contextSize,
-            caseSensitivity,
-        }),
-        enabled: canSearch && isContentSearch,
-    });
 
     const getResults = React.useCallback(
         () =>
@@ -257,18 +507,60 @@ export function SearchDialog(props: { agent: Agent }) {
         [],
     );
 
-    useArrayKeyboardFocus(getResults, isOpen, shortcutPriority.modal);
+    const restored = useRestoredSearchView({
+        scope: props.agent.id,
+        resultsRef,
+        getResults,
+    });
 
-    /** Snapshots the typed query onto this history entry so Back can restore the search. */
-    const openSelectedResult = async (target: SearchResultTarget) => {
+    const { pathSearch, contentSearch, activeQueryKey } = useSearchQueries({
+        agent: props.agent,
+        directory: searchDirectory ?? "",
+        isContentSearch,
+        canSearch,
+        params: {
+            query: debouncedQuery,
+            timeoutSeconds,
+            includeHidden,
+            respectGitignore,
+            regex,
+            contextSize,
+            caseSensitivity,
+        },
+        view: restored.view,
+    });
+
+    useArrayKeyboardFocus(getResults, true, shortcutPriority.modal);
+
+    /**
+     * Snapshots the typed query onto this history entry, and the results with the place in
+     * them, so Back can restore the search as the reader left it.
+     */
+    const openSelectedResult = async (
+        target: SearchResultTarget,
+        index: number,
+    ) => {
+        restored.save(
+            shownSearchResults(isContentSearch, pathSearch, contentSearch),
+            activeQueryKey,
+            index,
+        );
+
         if (query !== (search.q ?? "")) {
             await updateSearch({ q: query });
         }
 
         await navigate({
-            ...browserRoute(props.agent.id, target.path),
+            ...browserRoute(props.agent, target.path),
             search: { line: target.line },
         });
+    };
+
+    /** A change the reader makes searches again, even if it leads back to the same query. */
+    const changeSearch = (changes: AgentSearch, replace?: boolean) => {
+        restored.dismiss();
+
+        return updateSearch(changes, replace);
     };
 
     const close = () =>
@@ -290,12 +582,12 @@ export function SearchDialog(props: { agent: Agent }) {
         preferenceChanges: Partial<typeof userState>,
     ) => {
         setUserState((current) => ({ ...current, ...preferenceChanges }));
-        void updateSearch(changes);
+        void changeSearch(changes);
     };
 
     return (
         <Dialog
-            isOpen={isOpen}
+            isOpen
             title="Search device"
             description={
                 searchDirectory ? (
@@ -327,13 +619,16 @@ export function SearchDialog(props: { agent: Agent }) {
                     searchFromGitRoot={searchFromGitRoot}
                     disabled={directory === null}
                     onModeChange={(checked) =>
-                        void updateSearch(
+                        void changeSearch(
                             { mode: checked ? "content" : undefined },
                             false,
                         )
                     }
-                    onQueryChange={setQuery}
-                    onUpdate={updateSearch}
+                    onQueryChange={(next) => {
+                        restored.dismiss();
+                        setQuery(next);
+                    }}
+                    onUpdate={changeSearch}
                     onUpdateOption={updateOption}
                 />
                 <SearchStatus
@@ -349,25 +644,29 @@ export function SearchDialog(props: { agent: Agent }) {
                     className="overflow-x-auto rounded-lg border border-slate-800"
                 >
                     {isContentSearch
-                        ? contentSearch.data?.results.map((result) => (
+                        ? contentSearch.data?.results.map((result, index) => (
                               <ContentResult
                                   key={`${result.path}:${result.line_number}:${result.line}`}
                                   result={result}
-                                  agentId={props.agent.id}
+                                  agent={props.agent}
                                   target={{
                                       path: result.path,
                                       line: result.line_number,
                                   }}
-                                  onOpen={openSelectedResult}
+                                  onOpen={(target) =>
+                                      openSelectedResult(target, index)
+                                  }
                               />
                           ))
-                        : pathSearch.data?.results.map((result) => (
+                        : pathSearch.data?.results.map((result, index) => (
                               <PathResult
                                   key={result.path}
                                   result={result}
-                                  agentId={props.agent.id}
+                                  agent={props.agent}
                                   target={{ path: result.path }}
-                                  onOpen={openSelectedResult}
+                                  onOpen={(target) =>
+                                      openSelectedResult(target, index)
+                                  }
                               />
                           ))}
                 </div>
@@ -646,95 +945,111 @@ function SearchNumberInputs(props: {
 /** Presents one fuzzy path match with enough context to distinguish duplicate names. */
 function PathResult(props: {
     result: FileSearchEntry;
-    agentId: string;
+    agent: Agent;
     target: SearchResultTarget;
     onOpen: (target: SearchResultTarget) => void;
 }) {
     const ResultIcon = props.result.type === "directory" ? Folder : File;
 
     return (
-        <Link
-            {...browserRoute(props.agentId, props.target.path)}
-            search={{ line: props.target.line }}
-            className="flex w-full items-start gap-3 rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
-            aria-label={`Open path ${props.result.path}`}
-            onClick={(event) =>
-                handleSearchResultClick(event, () => props.onOpen(props.target))
-            }
+        <SearchResultRow
+            agent={props.agent}
+            target={props.target}
+            canOpenInBackground={props.result.type !== "directory"}
         >
-            <ResultIcon className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
-            <span className="min-w-0">
-                <span className="block text-sm font-medium text-blue-300 sm:text-base">
-                    {props.result.name}
+            <Link
+                {...browserRoute(props.agent, props.target.path)}
+                search={{ line: props.target.line }}
+                className="flex min-w-0 flex-1 items-start gap-3 rounded-none px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
+                aria-label={`Open path ${props.result.path}`}
+                onClick={(event) =>
+                    handleSearchResultClick(event, () =>
+                        props.onOpen(props.target),
+                    )
+                }
+            >
+                <ResultIcon className="mt-0.5 h-5 w-5 shrink-0 text-blue-400" />
+                <span className="min-w-0">
+                    <span className="block text-sm font-medium text-blue-300 sm:text-base">
+                        {props.result.name}
+                    </span>
+                    <span className="block whitespace-nowrap font-mono text-[11px] font-normal text-slate-500 sm:text-xs">
+                        {props.result.path}
+                    </span>
                 </span>
-                <span className="block whitespace-nowrap font-mono text-[11px] font-normal text-slate-500 sm:text-xs">
-                    {props.result.path}
-                </span>
-            </span>
-        </Link>
+            </Link>
+        </SearchResultRow>
     );
 }
 
 /** Presents a grep match with its line preview and exact navigation destination. */
 function ContentResult(props: {
     result: ContentGrepMatch;
-    agentId: string;
+    agent: Agent;
     target: SearchResultTarget;
     onOpen: (target: SearchResultTarget) => void;
 }) {
     return (
-        <Link
-            {...browserRoute(props.agentId, props.target.path)}
-            search={{ line: props.target.line }}
-            className="block w-full rounded-none border-b border-slate-800 px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
-            aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}
-            onClick={(event) =>
-                handleSearchResultClick(event, () => props.onOpen(props.target))
-            }
+        <SearchResultRow
+            agent={props.agent}
+            target={props.target}
+            canOpenInBackground
         >
-            <span className="block text-xs text-blue-300 sm:text-sm">
-                {props.result.path}:{props.result.line_number}
-            </span>
-            <span className="mt-1 block font-mono text-xs font-normal sm:text-sm">
-                {props.result.before_context.map((line) => (
-                    <span
-                        key={line.line_number}
-                        className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
-                    >
-                        <span className="pr-3 text-right select-none">
-                            {line.line_number}
-                        </span>
-                        <span className="whitespace-pre">
-                            {line.line}
-                            {line.line_truncated ? "…" : ""}
-                        </span>
-                    </span>
-                ))}
-                <span className="grid grid-cols-[3rem_minmax(0,1fr)] bg-blue-500/10 text-slate-200">
-                    <span className="pr-3 text-right text-blue-300 select-none">
-                        {props.result.line_number}
-                    </span>
-                    <span className="whitespace-pre">
-                        {props.result.line}
-                        {props.result.line_truncated ? "…" : ""}
-                    </span>
+            <Link
+                {...browserRoute(props.agent, props.target.path)}
+                search={{ line: props.target.line }}
+                className="block min-w-0 flex-1 rounded-none px-3 py-2 text-left focus:bg-blue-500/10 focus:outline-none"
+                aria-label={`Open ${props.result.path} at line ${props.result.line_number}`}
+                onClick={(event) =>
+                    handleSearchResultClick(event, () =>
+                        props.onOpen(props.target),
+                    )
+                }
+            >
+                <span className="block text-xs text-blue-300 sm:text-sm">
+                    {props.result.path}:{props.result.line_number}
                 </span>
-                {props.result.after_context.map((line) => (
-                    <span
-                        key={line.line_number}
-                        className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
-                    >
-                        <span className="pr-3 text-right select-none">
-                            {line.line_number}
+                <span className="mt-1 block font-mono text-xs font-normal sm:text-sm">
+                    {props.result.before_context.map((line) => (
+                        <span
+                            key={line.line_number}
+                            className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
+                        >
+                            <span className="pr-3 text-right select-none">
+                                {line.line_number}
+                            </span>
+                            <span className="whitespace-pre">
+                                {line.line}
+                                {line.line_truncated ? "…" : ""}
+                            </span>
+                        </span>
+                    ))}
+                    <span className="grid grid-cols-[3rem_minmax(0,1fr)] bg-blue-500/10 text-slate-200">
+                        <span className="pr-3 text-right text-blue-300 select-none">
+                            {props.result.line_number}
                         </span>
                         <span className="whitespace-pre">
-                            {line.line}
-                            {line.line_truncated ? "…" : ""}
+                            {props.result.line}
+                            {props.result.line_truncated ? "…" : ""}
                         </span>
                     </span>
-                ))}
-            </span>
-        </Link>
+                    {props.result.after_context.map((line) => (
+                        <span
+                            key={line.line_number}
+                            className="grid grid-cols-[3rem_minmax(0,1fr)] text-slate-500"
+                        >
+                            <span className="pr-3 text-right select-none">
+                                {line.line_number}
+                            </span>
+                            <span className="whitespace-pre">
+                                {line.line}
+                                {line.line_truncated ? "…" : ""}
+                            </span>
+                        </span>
+                    ))}
+                </span>
+            </Link>
+        </SearchResultRow>
     );
 }
 

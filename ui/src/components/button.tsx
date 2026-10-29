@@ -1,5 +1,5 @@
 import React from "react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 
 import {
     OptionalTooltip,
@@ -53,7 +53,7 @@ export function getButtonClassName(props: {
     size?: ButtonSize;
     className?: string;
 }): string {
-    return twMerge(
+    return cn(
         "inline-flex items-center justify-center gap-2 rounded font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[props.variant ?? "primary"],
         sizeClasses[props.size ?? "md"],

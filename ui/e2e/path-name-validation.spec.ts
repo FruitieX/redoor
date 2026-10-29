@@ -28,7 +28,7 @@ test.describe.serial("Path name validation", () => {
         const renamedFile = path.join(ctx.testDirPath, "file1.txt");
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page.getByRole("button", { name: "New", exact: true }).click();
         await page
@@ -83,13 +83,13 @@ test.describe.serial("Path name validation", () => {
 
         // The nested directory becomes the active location, as the agent created every level.
         await expect(page).toHaveURL(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${encodeFilesystemPath(nestedPath)}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(nestedPath)}`,
         );
         // A directory on disk proves the nested name was accepted rather than rejected or flattened.
         expect((await fs.stat(nestedPath)).isDirectory()).toBe(true);
 
         await page.goto(
-            `${WEB_BASE_URL}/agents/${ctx.agentId}/browser/${ctx.testDirUrlPath}`,
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${ctx.testDirUrlPath}`,
         );
         await page
             .getByRole("button", {

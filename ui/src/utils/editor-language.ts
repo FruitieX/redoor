@@ -10,7 +10,11 @@ import { python } from "@codemirror/lang-python";
 import { rust } from "@codemirror/lang-rust";
 import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
-import { StreamLanguage } from "@codemirror/language";
+import {
+    StreamLanguage,
+    type Language,
+    type LanguageSupport,
+} from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { lua } from "@codemirror/legacy-modes/mode/lua";
 import { perl } from "@codemirror/legacy-modes/mode/perl";
@@ -18,7 +22,6 @@ import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
-import type { Extension } from "@codemirror/state";
 
 export type SupportedSyntaxLanguage =
     | "cpp"
@@ -71,9 +74,19 @@ const SHELL_BASENAMES = new Set([
 export function languageFromFileName(
     fileName: string,
     content = "",
-): Extension | undefined {
+): LanguageSupport | Language | undefined {
     const language = syntaxLanguageFromFileName(fileName, content);
 
+    return language === undefined ? undefined : syntaxLanguageSupport(language);
+}
+
+/**
+ * Builds the CodeMirror grammar of a supported language. The editor and read-only
+ * highlighting both use it, so code is parsed the same way wherever it is shown.
+ */
+export function syntaxLanguageSupport(
+    language: SupportedSyntaxLanguage,
+): LanguageSupport | Language {
     switch (language) {
         case "rust":
             return rust();
@@ -117,9 +130,36 @@ export function languageFromFileName(
         case "cpp":
         case "csharp":
             return cpp();
-        case undefined:
-            return undefined;
     }
+}
+
+/** Full language names that are not also file extensions, for labels such as fences. */
+const SYNTAX_LANGUAGE_NAMES = new Map<string, SupportedSyntaxLanguage>([
+    ["csharp", "csharp"],
+    ["golang", "go"],
+    ["javascript", "javascript"],
+    ["perl", "perl"],
+    ["properties", "properties"],
+    ["python", "python"],
+    ["ruby", "ruby"],
+    ["rust", "rust"],
+    ["shell", "shell"],
+    ["typescript", "typescript"],
+]);
+
+/**
+ * Identifies a supported language from a label such as a Markdown fence (`ts`, `bash`,
+ * `python`). Labels are usually a name or an extension, so both are tried.
+ */
+export function syntaxLanguageFromName(
+    name: string,
+): SupportedSyntaxLanguage | undefined {
+    const lowerName = name.toLowerCase();
+
+    return (
+        SYNTAX_LANGUAGE_NAMES.get(lowerName) ??
+        syntaxLanguageFromFileName(`file.${lowerName}`)
+    );
 }
 
 /** Identifies syntax once so editors and rendered diffs support the same files. */

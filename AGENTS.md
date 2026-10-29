@@ -29,14 +29,18 @@
 - The generated ts bindings are put in the `bindings` directory
 - Never sleep in tests. Instead wait for a log message to appear or poll some API until the desired state is set
 - Integration tests for the server and agent are in the `tests` directory. The tests are authored in Typescript and vitest. Run with `pn integration-test`
+- UI unit tests live next to the source in `ui/src` as `*.test.ts(x)`. Run with `pn test:unit` (also part of `pn test`)
 - Add comments to test assertions why they are there
 - Add integration tests for all rest api features
 - Run `pn test` only after real code changes, including changes to executable scripts, tests, or configuration that affects application or build behavior. Use a timeout of at least 1200 seconds so cargo, integration, and Playwright can finish without the runner aborting mid-suite.
 - Do not run tests or builds for changes limited to documentation, plans, or code comments. If those edits accompany real code changes, run the checks required for the code changes.
 - If the changes are purely visual, running `pn build-and-restart` is enough instead of `pn test`; it builds the UI and server binary and restarts the `redoor-dev` systemd unit
+- Purely visual changes (layout, spacing, wrapping, responsive breakpoints, colors) must not have tests. Do not assert element positions, sizes or styles in Playwright or unit tests
 - Always add `| cat` to git commands to avoid getting stuck in interactive pager
+- Do all work and commits directly on the `main` branch; do not create feature branches
 - When making git commits always add description explaining why the change was made, not what it does
 - Make multiple commits if there are clear distinct edits
+- To make a release run `node scripts/release.mts <patch|minor|major>` on a clean `main`. It pushes `main`, bumps the version in `Cargo.toml`, commits, tags and pushes the tag, so do not bump versions or tag by hand
 - On test failures see the ./log dir for related logs
 - When a single test needs cleanup, always use onTestFinished() instead of try-finally
 - When using `tokio::select!` keep the arm bodies small be delegating to methods/functions, since `cargo fmt` does not work with it.
@@ -55,7 +59,13 @@ Use TanStack Router route loaders for data that must be fetched immediately duri
 
 Never call the API client from `useEffect`. Effects may coordinate browser APIs and subscriptions, but server reads belong in route loaders or TanStack Query and server writes belong in TanStack Query mutations.
 
+Before reaching for local component state with `useState`, consider whether the state should be stored with `useHistoryEntryState` from `ui/src/history-entry-state.ts` so it is restored when the user navigates "back", or in the URL search params with `useSearch()` so it can be linked to.
+
 Use Tailwind for styling.
+
+Prefer container queries over viewport media queries for responsive layouts, including when asked to fix something "on mobile" or "on phones". Persistent side menus can make the content column phone-narrow on a wide screen, so content must respond to the column, not the viewport. `OverlayChromeLayout` makes the content column (page, top bar and bottom drawer) the `@container/main` container: use `@xl:` / `@max-xl:` (36rem) where the old viewport `sm:` would go, `@2xl:` for `md:`, and `@4xl:` for `lg:`. Inside a component that is its own `@container`, name the main container explicitly (`@max-xl/main:`). In JS use `useIsContentBelow("xl")` instead of `useIsBelowBreakpoint`. Viewport media queries (`sm:` etc. and `useIsBelowBreakpoint`) are only for shell decisions such as side menu drawers and for modal dialogs, which are sized against the viewport.
+
+Combine and conditionally apply class names with `cn` from `ui/src/utils/cn.ts`. Do not call `twMerge` directly.
 
 Always use the rest apis using `ui/src/api-client.ts`
 
@@ -75,7 +85,9 @@ After modifying the routes run `cd ui && pnpm run build` to regenerate the route
 
 Do dot use class names in the playwright tests. Add accessibility aria attributes if there are no text to select with.
 
-When adding a completely new UI feature, always add a Playwright test that covers its primary user workflow.
+When adding a completely new UI feature, always add a Playwright test that covers its primary user workflow. Purely visual tweaks to existing UI are not new features and get no tests.
+
+Playwright specs that mutate state shared by all specs (server or agent restarts, the device list, user settings/preferences such as theme, the hidden-file filter, bookmarks or pins, ...) go in `ui/e2e/serial/` with a top comment saying why; they run one at a time after the parallel specs. Everything else in `ui/e2e/` runs in parallel and must use its own fixtures and directories.
 
 Never use ! to fix nullish issues in typescript. Always handle nullish values properly.
 
@@ -85,4 +97,4 @@ Use `Tooltip` to clarify the purpose of most buttons and other form controls, es
 
 Do not use use plain <button> or <input> elements. Always use reusable component or create one.
 
-Reusable components (update this list when adding new ones): ActionMenu, ActionMenuButton, AgentLifecycle, AgentRestartButton, AgentStatusDot, BrowserViewCard, Button, Checkbox, ClearableInput, ConfirmationDialog, ContextMenu, CopyableCodeRow, CopyablePath, DetailCard, Dialog, DialogActions, FileInput, FoldingSection, FullWindowToggle, IconButton, IconLinkButton, InputControl, LinkButton, LogViewer, OptionalTooltip, OverlayChromeLayout, Password, ProvisioningStatusList, RadioCardGroup, RadioCardOption, ResponsiveAnchoredDialog, SearchButton, SegmentedControl, Select, SidebarModeToggle, SideMenu, SortableItem, SortableList, Tab, TabbedBottomDrawer, TabList, TextField, ThemeToggle, Toast, ToggleButton, Tooltip, ViewCardHeader
+Reusable components (update this list when adding new ones): ActionMenu, ActionMenuButton, AgentLifecycle, AgentRestartButton, AgentStatusDot, BrowserViewCard, Button, Checkbox, ClearableInput, ConfirmationDialog, ContextMenu, CopyableCodeRow, CopyableGitRef, CopyablePath, DetailCard, Dialog, DialogActions, FileInput, FoldingSection, FullWindowToggle, HighlightedLines, HighlightedTokens, IconButton, IconLinkButton, InputControl, LinkButton, LogViewer, OpenInBackgroundButton, OptionalTooltip, OverlayChromeLayout, Password, ProvisioningStatusList, RadioCardGroup, RadioCardOption, ResponsiveAnchoredDialog, RestartDialog, SearchButton, SegmentedControl, Select, SidebarModeToggle, SideMenu, SortableItem, SortableList, SshKeySetupDialog, Tab, TabbedBottomDrawer, TabList, TextField, ThemeToggle, Toast, ToggleButton, Tooltip, ViewCardHeader

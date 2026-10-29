@@ -1,5 +1,5 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
-import { getRouteApi } from "@tanstack/react-router";
+import { getRouteApi, notFound } from "@tanstack/react-router";
 import * as React from "react";
 
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
@@ -28,9 +28,9 @@ export function useAgents(): Agent[] {
 }
 
 /**
- * Selects one agent without rerendering for changes to other agents. Returns undefined
- * while the agent is absent, such as for the moment between a rename and the navigation to
- * its new id, so callers decide whether that is an error.
+ * Selects one agent by id without rerendering for changes to other agents. Returns undefined
+ * while the agent is absent, such as after it was removed, so callers decide whether that is
+ * an error. A rename keeps the id, so it never makes the agent absent.
  */
 export function useAgent(agentId: string): Agent | undefined {
     const { api } = rootRouteApi.useRouteContext();
@@ -47,12 +47,12 @@ export function useAgent(agentId: string): Agent | undefined {
     return useSuspenseQuery({ ...agentsQueryOptions(api), select }).data;
 }
 
-/** Throws when the agent is gone so the route's error boundary reports it as missing. */
+/** Throws `notFound()` when the agent is gone, so the device route reports it as missing. */
 export function useRequiredAgent(agentId: string): Agent {
     const agent = useAgent(agentId);
 
     if (!agent) {
-        throw new Error(`Agent not found: ${agentId}`);
+        throw notFound();
     }
 
     return agent;

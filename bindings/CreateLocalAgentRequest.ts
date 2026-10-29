@@ -5,7 +5,8 @@
  */
 export type CreateLocalAgentRequest = { 
 /**
- * Stable managed-agent name; defaults to the server hostname when omitted.
+ * Editable display name; defaults to the server hostname when omitted. The device id is
+ * created by the server and never part of this body.
  */
 name: string | null, 
 /**

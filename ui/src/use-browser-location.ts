@@ -17,6 +17,13 @@ export type BrowserLocation = {
     resolvedPath: string | null;
     /** Whether the agent was connected when the route loaded, so repository discovery ran. */
     isConnected: boolean;
+    /**
+     * The browsed Git revision and what the path is at it, or null for the worktree. It is
+     * kept apart from `entry`, which describes the disk, so worktree consumers such as
+     * terminals and search never treat a committed path as existing. `entry` here is null
+     * when the path did not resolve at the revision.
+     */
+    revision: { rev: string; entry: "directory" | "file" | null } | null;
 };
 
 /**
@@ -26,13 +33,26 @@ export type BrowserLocation = {
  */
 export function useBrowserLocation(): BrowserLocation | null {
     const location = useMatch({
-        from: "/_app/agents/$agentId/browser/$",
+        from: "/_app/agents/$deviceName/browser/$",
         shouldThrow: false,
         select: (match): BrowserLocation | null => {
             const data = match.loaderData;
 
             if (!data) {
                 return null;
+            }
+
+            // A Git revision is not on disk, so worktree consumers such as terminals and
+            // search must not treat its path as an existing file or directory.
+            if (data.kind === "revision") {
+                return {
+                    agentId: data.agentId,
+                    path: data.path,
+                    entry: null,
+                    resolvedPath: null,
+                    isConnected: true,
+                    revision: { rev: data.rev, entry: revisionEntry(data) },
+                };
             }
 
             const lsResult = data.lsResult;
@@ -47,9 +67,30 @@ export function useBrowserLocation(): BrowserLocation | null {
                     : null,
                 resolvedPath: lsResult?.path ?? null,
                 isConnected: data.kind === "connected",
+                revision: null,
             };
         },
     });
 
     return location ?? null;
+}
+
+/** Names what a revision page shows: a committed tree or file, or a path the commit deleted. */
+function revisionEntry(data: {
+    tree: { entry: { type: string } } | null;
+    deletion: { files: { path: string }[] } | null;
+    path: string;
+}): "directory" | "file" | null {
+    if (data.tree !== null) {
+        return data.tree.entry.type === "directory" ? "directory" : "file";
+    }
+
+    if (data.deletion !== null) {
+        return data.deletion.files.length === 1 &&
+            data.deletion.files[0]?.path === data.path
+            ? "file"
+            : "directory";
+    }
+
+    return null;
 }

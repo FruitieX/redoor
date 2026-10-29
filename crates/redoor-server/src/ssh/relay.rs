@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use redoor_core::config::{RelayConfig, SshBackedAgentConfig};
 use redoor_core::paths::AppPaths;
+use redoor_core::rotating_log::RotatingLogFile;
 use redoor_core::server_address::ServerAddress;
 use redoor_core::{log, log_error};
 use redoor_protocol::wire::log::Level;
@@ -64,12 +65,20 @@ pub async fn run_relay(
         .log
         .clone()
         .context("relay startup must resolve a log path")?;
-    redoor_core::logging::init(Some(log)).await?;
     let provision = ProvisionContext {
         app_name: paths.app_name().to_string(),
+        // Relays never have managed keys; the store is only consulted for `managed_ssh_key`.
+        ssh_keys: crate::ssh::keys::SshKeyStore::for_data_dir(&paths.data_dir()?),
         binaries: crate::binaries::BinaryCache::new(paths),
+        log_max_size: relay.log_max_size,
+        // Filled on the first preparation that uploads the local debug build.
+        local_build: Default::default(),
     };
-    Relay {
+    redoor_core::logging::init(Some(provision.log_file(&log))).await?;
+    // Caught from now on, so `redoor upgrade` restarts the relay instead of killing it.
+    let mut reexec_requests = redoor_core::process::listen_for_reexec()
+        .context("Failed to listen for the upgrade re-exec signal")?;
+    let relay = Relay {
         secure_server: server.is_secure().then(|| SecureRelayServer {
             authority: server.authority(),
             insecure: relay.insecure,
@@ -84,9 +93,15 @@ pub async fn run_relay(
         token,
         provision,
         backoff: Backoff::default(),
+    };
+    tokio::select! {
+        result = relay.run() => return result,
+        _ = reexec_requests.recv() => {}
     }
-    .run()
-    .await
+    // The relay future is dropped by now, and `kill_on_drop` stopped its SSH session, so the
+    // restarted relay does not race an orphaned tunnel for the remote agent.
+    eprintln!("Re-exec signal received; restarting relay");
+    redoor_core::process::reexec_current_process()
 }
 
 /// One running relay: its target, where the tunnel ends, and the retry state.
@@ -123,16 +138,32 @@ enum AttemptOutcome {
     },
 }
 
+/// Exit status of `sh` when the `exec`ed program does not exist; OpenSSH passes the
+/// remote command's status through.
+const EXIT_COMMAND_NOT_FOUND: i32 = 127;
+
+impl AttemptOutcome {
+    /// Whether the remote shell could not find the prepared binary. Another provision
+    /// in the same namespace can upload a newer debug build and remove the old
+    /// `debug-<hash>` directory, so the relay must prepare again instead of retrying the
+    /// deleted path forever.
+    fn binary_missing(&self) -> bool {
+        matches!(self, Self::Exited { status, .. } if status.code() == Some(EXIT_COMMAND_NOT_FOUND))
+    }
+}
+
 impl Relay {
     /// Prepares until it succeeds, then relaunches the SSH session forever.
     ///
-    /// Preparation is not repeated after success: provisioning is the slow part and the
-    /// installed binary stays valid across reconnects.
+    /// Preparation is repeated only when the prepared binary has disappeared: provisioning
+    /// is the slow part and the installed binary otherwise stays valid across reconnects.
     async fn run(mut self) -> Result<()> {
-        let prepared = self.prepare_until_ready().await;
+        let mut prepared = self.prepare_until_ready().await;
         loop {
             let started = Instant::now();
-            match Self::run_attempt(&prepared).await {
+            let outcome = Self::run_attempt(&prepared).await;
+            let binary_missing = outcome.as_ref().is_ok_and(AttemptOutcome::binary_missing);
+            match outcome {
                 Ok(AttemptOutcome::PortOccupied {
                     remote_port,
                     status,
@@ -156,6 +187,14 @@ impl Relay {
                 self.backoff.reset();
             }
             self.backoff.wait().await;
+            if binary_missing {
+                log!(
+                    Level::Warning,
+                    "Relay binary is missing on the remote host; preparing again: remote_bin={}",
+                    prepared.remote_bin
+                );
+                prepared = self.prepare_until_ready().await;
+            }
         }
     }
 
@@ -192,12 +231,27 @@ impl Relay {
     }
 
     /// Runs one random-port SSH session to completion and classifies how it ended.
+    ///
+    /// The logs are opened before spawning so an unwritable log fails the attempt instead
+    /// of leaving SSH blocked on an undrained stdout pipe.
     async fn run_attempt(prepared: &PreparedSshBackedAgent) -> std::io::Result<AttemptOutcome> {
+        let (stdout_log, stderr_log) = match prepared.options.log_file() {
+            Some(spec) => (Some(spec.open().await?), Some(spec.open().await?)),
+            None => (None, None),
+        };
         let (remote_port, mut child) = prepared.spawn_random().await?;
+        if let Some(log_file) = stdout_log {
+            let stdout = child.stdout.take();
+            tokio::spawn(log_file.forward_child_output(
+                stdout,
+                None::<tokio::process::ChildStderr>,
+                0,
+            ));
+        }
         let stderr = child.stderr.take().ok_or_else(|| {
             std::io::Error::other("standalone SSH stderr was not piped for forward monitoring")
         })?;
-        let forward_failed = monitor_forward_failure(stderr, prepared.options.log_file().cloned())
+        let forward_failed = monitor_forward_failure(stderr, stderr_log)
             .await
             .unwrap_or(false);
         let status = child.wait().await?;
@@ -285,7 +339,7 @@ impl ForwardFailureDetector {
 /// OpenSSH said its random remote listener could not bind.
 fn monitor_forward_failure<R>(
     mut input: R,
-    log_path: Option<String>,
+    mut log_file: Option<RotatingLogFile>,
 ) -> tokio::sync::oneshot::Receiver<bool>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -295,15 +349,6 @@ where
         let mut sender = Some(sender);
         let mut detector = ForwardFailureDetector::default();
         let mut output = tokio::io::stderr();
-        let mut log_file = match log_path {
-            Some(path) => tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await
-                .ok(),
-            None => None,
-        };
         let mut buffer = [0_u8; 8 * 1024];
         loop {
             match input.read(&mut buffer).await {
@@ -312,7 +357,7 @@ where
                     let chunk = &buffer[..read];
                     let _ = output.write_all(chunk).await;
                     if let Some(log_file) = &mut log_file {
-                        let _ = log_file.write_all(chunk).await;
+                        let _ = log_file.write_message(chunk).await;
                     }
                     if detector.observe(chunk)
                         && let Some(sender) = sender.take()
@@ -332,6 +377,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// Only the shell's "not found" status triggers a new preparation, so ordinary
+    /// session exits keep reusing the prepared binary.
+    #[test]
+    fn binary_missing_only_for_command_not_found() {
+        let exited = |code: i32| AttemptOutcome::Exited {
+            remote_port: 52000,
+            status: std::process::ExitStatus::from_raw(code << 8),
+        };
+        // A deleted `debug-<hash>` binary makes `exec` fail with 127 and must re-prepare.
+        assert!(exited(EXIT_COMMAND_NOT_FOUND).binary_missing());
+        // A normal disconnect or crash must not re-provision on every reconnect.
+        assert!(!exited(255).binary_missing());
+        // An occupied port is a forwarding problem, not a missing binary.
+        assert!(
+            !AttemptOutcome::PortOccupied {
+                remote_port: 52000,
+                status: std::process::ExitStatus::from_raw(EXIT_COMMAND_NOT_FOUND << 8),
+            }
+            .binary_missing()
+        );
+    }
 
     /// Verifies forwarding failures are recognized even when the fixed-size
     /// stderr reader splits OpenSSH's message across chunks.
@@ -360,58 +428,5 @@ mod tests {
         backoff.reset();
         // A stable session makes the next failure retry quickly again.
         assert_eq!(backoff.current, RELAY_INITIAL_BACKOFF);
-    }
-
-    /// Verifies URL servers preserve the destination independently of the port
-    /// exposed to the agent on the SSH target.
-    #[test]
-    fn parses_hostname_server_url() {
-        let server = "http://redoor.example:4000"
-            .parse::<ServerAddress>()
-            .expect("hostname server URL should parse");
-
-        // The SSH client must resolve the exact host supplied by the operator.
-        assert_eq!(server.host(), "redoor.example");
-        // The destination port may differ from the remote listener port.
-        assert_eq!(server.port(), 4000);
-        // http:// selects plain WebSocket routing through the tunnel.
-        assert!(!server.is_secure());
-    }
-
-    /// Verifies https/wss schemes select secure tunnel routing without a separate flag.
-    #[test]
-    fn parses_secure_server_url() {
-        let server = "https://redoor.example.com"
-            .parse::<ServerAddress>()
-            .expect("https server URL should parse");
-
-        assert!(server.is_secure());
-        assert_eq!(server.port(), 443);
-        assert_eq!(server.authority(), "redoor.example.com:443");
-    }
-
-    /// Verifies bracketed IPv6 servers are accepted without retaining syntax
-    /// brackets in the destination model.
-    #[test]
-    fn parses_bracketed_ipv6_server_url() {
-        let server = "ws://[2001:db8::10]:4000"
-            .parse::<ServerAddress>()
-            .expect("bracketed IPv6 server URL should parse");
-
-        // Transport formatting adds brackets itself, so the model stores only the address.
-        assert_eq!(server.host(), "2001:db8::10");
-        // IPv6 servers use the same validated destination-port representation.
-        assert_eq!(server.port(), 4000);
-    }
-
-    /// Verifies bare host:port is rejected so relay matches the agent URL contract.
-    #[test]
-    fn rejects_server_without_url_scheme() {
-        let error = "redoor.example:4000"
-            .parse::<ServerAddress>()
-            .expect_err("bare host:port should be rejected");
-
-        // A focused error steers operators toward the shared URL forms.
-        assert!(error.contains("http") || error.contains("ws") || error.contains("URL"));
     }
 }

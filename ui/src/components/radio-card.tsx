@@ -1,6 +1,6 @@
 import * as React from "react";
 import { Info } from "lucide-react";
-import { twMerge } from "tailwind-merge";
+import { cn } from "#ui/utils/cn";
 import { Tooltip } from "#ui/components/tooltip";
 
 /** Groups native radios without replacing their browser keyboard and form semantics. */
@@ -16,11 +16,11 @@ export function RadioCardGroup(props: {
     return (
         <fieldset
             disabled={props.disabled}
-            className={twMerge("grid gap-3", props.className)}
+            className={cn("grid gap-3", props.className)}
         >
             <legend className={props.legendClassName}>{props.legend}</legend>
             {props.description ? props.description : null}
-            <div className={twMerge("grid gap-3", props.optionsClassName)}>
+            <div className={cn("grid gap-3", props.optionsClassName)}>
                 {props.children}
             </div>
         </fieldset>
@@ -43,7 +43,7 @@ export function RadioCardOption(props: {
     const inputId = React.useId();
     const inputRef = React.useRef<HTMLInputElement>(null);
 
-    const cardClassName = twMerge(
+    const cardClassName = cn(
         "cursor-pointer rounded-lg border px-4 py-3 transition has-[:disabled]:cursor-default",
         props.checked
             ? props.layout === "compact"
@@ -65,7 +65,7 @@ export function RadioCardOption(props: {
             checked={props.checked}
             disabled={props.disabled}
             onChange={props.onChange}
-            className={twMerge(
+            className={cn(
                 "h-4 w-4 accent-blue-500",
                 props.layout === "descriptive" && "mt-0.5",
             )}
@@ -91,7 +91,7 @@ export function RadioCardOption(props: {
         return (
             <div
                 onClick={selectFromCard}
-                className={twMerge(
+                className={cn(
                     "flex items-center justify-between gap-3",
                     cardClassName,
                 )}
@@ -118,7 +118,7 @@ export function RadioCardOption(props: {
     }
 
     return (
-        <label className={twMerge("flex gap-3", cardClassName)}>
+        <label className={cn("flex gap-3", cardClassName)}>
             {input}
             <span className="min-w-0">
                 <span className="block text-sm font-medium text-slate-100">

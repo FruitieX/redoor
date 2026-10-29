@@ -1,9 +1,11 @@
 import * as React from "react";
 import { X } from "lucide-react";
 import { useAtom } from "jotai";
+import { cn } from "#ui/utils/cn";
 import { IconButton } from "#ui/components/icon-button";
 import { shortcutPriority, useShortcut } from "#ui/shortcuts";
 import {
+    defaultSidebarWidths,
     openSideMenuAtom,
     sideMenuDrawerIds,
     sidebarWidthsAtom,
@@ -14,6 +16,15 @@ import { shouldIgnoreKeyboardShortcut } from "#ui/utils/keyboard";
 import { focusableSelector, useFocusTrap } from "#ui/utils/use-focus-trap";
 
 /**
+ * Hands the drawer's dismiss action to menu content that places the close button in its own
+ * header. It is null in the persistent sidebar, which has nothing to close.
+ */
+const SideMenuCloseContext = React.createContext<{
+    label: string;
+    close: () => void;
+} | null>(null);
+
+/**
  * Provides the shared wide-screen sidebar and responsive drawer behavior for either edge.
  * The menu reads and closes its own open state from the shared atom, so the shell and the
  * controls that open it never have to pass state or focus targets around.
@@ -22,6 +33,16 @@ export function SideMenu(props: {
     menu: SideMenuId;
     placement: "left" | "right";
     label: string;
+    /**
+     * Drops the panel padding for content that draws its own edge-to-edge chrome, such as
+     * an icon rail, which would otherwise float inside a margin.
+     */
+    flush?: boolean;
+    /**
+     * Leaves the drawer's close button to the content, which renders `SideMenuCloseButton`
+     * in its header, so the drawer does not spend a row on the button alone.
+     */
+    closeButtonInContent?: boolean;
     children: React.ReactNode;
 }) {
     const drawerRef = React.useRef<HTMLElement>(null);
@@ -57,10 +78,16 @@ export function SideMenu(props: {
 
         const drawer = drawerRef.current;
 
+        // Start on the close button wherever the content placed it, so opening the drawer
+        // does not land on, and describe, an arbitrary control in the header.
+        const closeButton = drawer?.querySelector<HTMLElement>(
+            "[data-side-menu-close]",
+        );
+
         const focusable =
             drawer?.querySelectorAll<HTMLElement>(focusableSelector);
 
-        focusable?.item(0).focus();
+        (closeButton ?? focusable?.item(0))?.focus();
 
         return () => {
             opener?.focus();
@@ -91,7 +118,12 @@ export function SideMenu(props: {
                 id={panelId}
                 aria-label={props.label}
                 style={{ width: resize.width }}
-                className={`${isPersistent ? "flex" : "hidden"} relative min-w-0 shrink-0 flex-col ${borderClass} border-slate-800 bg-chrome p-3`}
+                className={cn(
+                    isPersistent ? "flex" : "hidden",
+                    "relative min-w-0 shrink-0 flex-col border-slate-800 bg-chrome",
+                    borderClass,
+                    !props.flush && "p-3",
+                )}
             >
                 {props.children}
                 {isPersistent ? (
@@ -131,27 +163,62 @@ export function SideMenu(props: {
                         ref={drawerRef}
                         id={drawerId}
                         tabIndex={-1}
-                        className={`absolute ${edgeClass} flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto ${borderClass} border-slate-700 bg-surface p-3 shadow-2xl shadow-black/50`}
+                        className={cn(
+                            "absolute flex h-full w-72 max-w-[85vw] flex-col overflow-y-auto border-slate-700 bg-surface shadow-2xl shadow-black/50",
+                            edgeClass,
+                            borderClass,
+                            !props.flush && "p-3",
+                        )}
                     >
-                        <div
-                            className={`mb-2 flex ${props.placement === "left" ? "justify-end" : "justify-start"}`}
+                        <SideMenuCloseContext.Provider
+                            value={{ label: props.label, close: onClose }}
                         >
-                            <IconButton
-                                type="button"
-                                label={`Close ${props.label.toLowerCase()}`}
-                                tooltip={false}
-                                variant="ghost"
-                                size="md"
-                                onClick={onClose}
-                            >
-                                <X className="h-4 w-4" />
-                            </IconButton>
-                        </div>
-                        {props.children}
+                            {props.closeButtonInContent ? null : (
+                                <div
+                                    className={cn(
+                                        "mb-2 flex",
+                                        props.placement === "left"
+                                            ? "justify-end"
+                                            : "justify-start",
+                                        props.flush && "px-3 pt-3",
+                                    )}
+                                >
+                                    <SideMenuCloseButton />
+                                </div>
+                            )}
+                            {props.children}
+                        </SideMenuCloseContext.Provider>
                     </aside>
                 </div>
             ) : null}
         </>
+    );
+}
+
+/**
+ * Closes the surrounding drawer, and renders nothing in the persistent sidebar, so menu
+ * content can put it in a header that both presentations share.
+ */
+export function SideMenuCloseButton() {
+    const context = React.useContext(SideMenuCloseContext);
+
+    if (!context) {
+        return null;
+    }
+
+    return (
+        <IconButton
+            type="button"
+            label={`Close ${context.label.toLowerCase()}`}
+            tooltip={false}
+            variant="ghost"
+            size="md"
+            onClick={context.close}
+            data-side-menu-close
+            className="shrink-0"
+        >
+            <X className="h-4 w-4" />
+        </IconButton>
     );
 }
 
@@ -172,7 +239,12 @@ function useSideMenuResize(placement: "left" | "right") {
 
     const width = Math.max(
         180,
-        Math.min(maxWidth, Number.isFinite(storedWidth) ? storedWidth : 224),
+        Math.min(
+            maxWidth,
+            Number.isFinite(storedWidth)
+                ? storedWidth
+                : defaultSidebarWidths[placement],
+        ),
     );
 
     const direction = placement === "left" ? 1 : -1;

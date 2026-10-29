@@ -8,6 +8,7 @@ pub(crate) mod sessions;
 
 use crate::commands::ctx::AgentServices;
 use crate::connection::AgentConnection;
+use crate::device_id::DeviceIdSource;
 use crate::platform::identity::HostIdentity;
 use crate::terminal::TerminalLink;
 use crate::transfers::stream::StreamWriter;
@@ -20,6 +21,7 @@ use links::{
     INTERACTIVE_QUEUE_CAPACITY,
 };
 use redoor_core::{log, log_error};
+use redoor_protocol::wire::handshake::RejectReason;
 use redoor_protocol::wire::registration::{AgentCapabilities, AgentIdentity};
 use redoor_protocol::{
     ids::{AgentId, RequestId},
@@ -145,6 +147,9 @@ impl AgentHandle {
 /// Startup identity that stays stable across reconnects.
 pub(crate) struct AgentProfile {
     pub(crate) agent_id: AgentId,
+    /// Where the id came from; decides whether losing the id to another connection ends
+    /// the process (supervised agents) or is retried (standalone agents).
+    pub(crate) id_source: DeviceIdSource,
     pub(crate) agent_name: String,
     /// Immutable absolute directory used when the UI opens this agent.
     pub(crate) default_directory: String,
@@ -282,9 +287,12 @@ impl AgentRuntime {
                 connection_generation,
                 text,
             } => {
-                if self.control.is_current(connection_generation) && self.control.sender().is_some()
-                {
-                    self.handle_server_text(handle, text).await;
+                if self.control.is_current(connection_generation) {
+                    if self.control.sender().is_some() {
+                        self.handle_server_text(handle, text).await;
+                    } else {
+                        self.handle_text_after_loss(handle, &text).await;
+                    }
                 }
             }
             AgentMsg::StartupNotificationDue {
@@ -340,6 +348,22 @@ impl AgentRuntime {
         }
     }
 
+    /// Handles a frame of the current connection that was read before its loss was
+    /// processed.
+    ///
+    /// The server closes the socket right after `rejected` or `evicted`, and the loss travels
+    /// on the lifecycle lane that the event loop prefers, so it can overtake the frame that
+    /// explains it. Those two frames still decide whether the agent exits and carry the
+    /// instructions for the operator, so they are not dropped; everything else belongs to
+    /// work the loss already canceled.
+    async fn handle_text_after_loss(&mut self, handle: AgentHandle, text: &str) {
+        if let Ok(frame @ (ServerToAgent::Rejected { .. } | ServerToAgent::Evicted { .. })) =
+            serde_json::from_str::<ServerToAgent>(text)
+        {
+            self.handle_server_frame(handle, frame).await;
+        }
+    }
+
     /// Parses one server frame; unparsable commands are answered so callers do not hang.
     async fn handle_server_text(&mut self, handle: AgentHandle, text: String) {
         match serde_json::from_str::<ServerToAgent>(&text) {
@@ -370,7 +394,6 @@ impl AgentRuntime {
         }
     }
 
-    /// Handles one typed server frame; the match is exhaustive so new frames cannot be dropped.
     /// Queues the fatal exit without ever losing it: a dropped exit would make a rejected or
     /// evicted agent reconnect, and waiting here would deadlock on the runtime's own mailbox,
     /// so a task waits for capacity instead.
@@ -380,6 +403,7 @@ impl AgentRuntime {
         });
     }
 
+    /// Handles one typed server frame; the match is exhaustive so new frames cannot be dropped.
     async fn handle_server_frame(&mut self, handle: AgentHandle, frame: ServerToAgent) {
         match frame {
             ServerToAgent::Welcome { connection_id } => {
@@ -391,6 +415,10 @@ impl AgentRuntime {
                 );
                 self.schedule_startup_notification(handle);
             }
+            ServerToAgent::Rejected {
+                reason: RejectReason::DuplicateId,
+                message,
+            } => self.retry_after_duplicate_id(handle, &message).await,
             ServerToAgent::Rejected { reason, message } => {
                 log_error!(
                     anyhow::anyhow!("{message} ({reason:?})"),
@@ -398,13 +426,7 @@ impl AgentRuntime {
                 );
                 Self::request_exit(handle);
             }
-            ServerToAgent::Evicted { message } => {
-                log_error!(
-                    anyhow::Error::msg(message),
-                    "Server ended this agent's connection"
-                );
-                Self::request_exit(handle);
-            }
+            ServerToAgent::Evicted { message } => self.handle_eviction(handle, message).await,
             ServerToAgent::Credit { stream, frames } => self
                 .dispatcher
                 .services()
@@ -446,6 +468,75 @@ impl AgentRuntime {
                 .resize(stream, size),
             ServerToAgent::LogStreamOpen { stream } => self.start_log_stream(stream),
         }
+    }
+
+    /// Explains a `duplicate_id` refusal and keeps retrying.
+    ///
+    /// Another machine holds this id with a healthy connection. Retrying with the normal
+    /// backoff lets this agent take over once that machine is gone or has been given its own
+    /// id, without the operator having to restart anything here.
+    async fn retry_after_duplicate_id(&mut self, handle: AgentHandle, message: &str) {
+        let fix = match &self.profile.id_source {
+            DeviceIdSource::File(path) => format!(
+                "delete '{}' on one of the machines and restart that agent so it gets its own device id",
+                path.display()
+            ),
+            DeviceIdSource::Assigned => {
+                "make sure no two [[agents]] or [[relays]] entries share an id in the server config"
+                    .to_string()
+            }
+        };
+        log_error!(
+            anyhow::anyhow!("{message} (duplicate_id)"),
+            "Another machine is connected with this agent's device id {}. To fix it, {}. Retrying in the background",
+            self.profile.agent_id,
+            fix
+        );
+        self.reconnect_after_refusal(handle, "Server refused the duplicate device id")
+            .await;
+    }
+
+    /// Reacts to the server ending this agent's accepted connection.
+    ///
+    /// A supervised agent (`--agent-id`) exits: the server or relay that started it has
+    /// either stopped it or replaced it with a newer process, and a lingering copy would be a
+    /// zombie holding an SSH tunnel open. A standalone agent holds the single-instance lock
+    /// of its data directory, so a replacement comes from another machine with a copy of its
+    /// id file. Exiting there would hide the conflict for good, since the server only notices
+    /// clones that keep replacing each other; reconnecting lets it detect the loop, refuse
+    /// the newcomers with `duplicate_id` and warn the operator.
+    async fn handle_eviction(&mut self, handle: AgentHandle, message: String) {
+        match &self.profile.id_source {
+            DeviceIdSource::Assigned => {
+                log_error!(
+                    anyhow::Error::msg(message),
+                    "Server ended this agent's connection"
+                );
+                Self::request_exit(handle);
+            }
+            DeviceIdSource::File(path) => {
+                log!(
+                    Level::Warning,
+                    "Server ended this agent's connection: {}. Another machine is probably using a copy of '{}'.",
+                    message,
+                    path.display()
+                );
+                self.reconnect_after_refusal(handle, "Connection replaced by the server")
+                    .await;
+            }
+        }
+    }
+
+    /// Drops a connection the server refused or ended and retries with the normal backoff.
+    ///
+    /// When the socket's loss was already processed, that handler scheduled the retry, so
+    /// scheduling another one here would make the agent connect twice.
+    async fn reconnect_after_refusal(&mut self, handle: AgentHandle, reason: &str) {
+        if self.control.sender().is_none() {
+            return;
+        }
+        self.invalidate_connection().await;
+        self.schedule_reconnect(handle, reason);
     }
 
     /// Starts one terminal on stream `stream`; its registration lives as long as its task.
@@ -548,13 +639,17 @@ impl AgentRuntime {
     fn schedule_reconnect(&mut self, handle: AgentHandle, reason: &str) {
         self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
         let attempt = self.reconnect_attempts;
-        let delay = reconnect_delay(attempt);
+        let delay = self
+            .profile
+            .ws_timeouts
+            .reconnect_delay
+            .unwrap_or_else(|| reconnect_delay(attempt));
         log!(
             Level::Warning,
-            "{}, scheduling reconnect attempt {} in {}s",
+            "{}, scheduling reconnect attempt {} in {:?}",
             reason,
             attempt,
-            delay.as_secs()
+            delay
         );
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
@@ -757,11 +852,18 @@ mod tests {
     use redoor_protocol::wire::request;
     use redoor_protocol::wire::request::CommandError;
 
-    /// Builds a runtime without network side effects for state-transition tests.
+    /// Builds a supervised runtime without network side effects for state-transition tests.
     fn runtime() -> AgentRuntime {
+        runtime_with_source(DeviceIdSource::Assigned)
+    }
+
+    /// Builds a runtime whose id came from `id_source`, which decides how it reacts to
+    /// id conflicts.
+    fn runtime_with_source(id_source: DeviceIdSource) -> AgentRuntime {
         AgentRuntime::new(
             AgentProfile {
-                agent_id: AgentId::from("agent"),
+                agent_id: AgentId::generate(),
+                id_source,
                 agent_name: "agent".to_string(),
                 default_directory: "/tmp".to_string(),
                 token: "test-token".to_string(),
@@ -988,5 +1090,122 @@ mod tests {
         assert!(runtime.dispatcher.is_idle());
         // The control link is detached so a reconnect attaches a fresh generation.
         assert!(runtime.control.sender().is_none());
+    }
+
+    /// A standalone agent's id file, as the runtime would report it to the operator.
+    fn standalone() -> DeviceIdSource {
+        DeviceIdSource::File("/home/user/.local/share/redoor/agent-id".into())
+    }
+
+    /// A `duplicate_id` refusal must not stop the agent: it retries with backoff so it gets
+    /// through once the machine holding the id is gone or fixed.
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_id_rejection_retries_instead_of_exiting() {
+        let mut runtime = runtime_with_source(standalone());
+        let (_control_rx, _bulk_rx) = attach_links(&mut runtime);
+        let (handle, mut receiver, _lifecycle_receiver) = AgentHandle::channel(4);
+
+        runtime
+            .handle_server_frame(
+                handle,
+                ServerToAgent::Rejected {
+                    reason: RejectReason::DuplicateId,
+                    message: "taken".to_string(),
+                },
+            )
+            .await;
+
+        // The refused connection is dropped so the retry attaches a fresh one.
+        assert!(runtime.control.sender().is_none());
+        // The next event is the scheduled reconnect, not an exit.
+        assert!(matches!(receiver.recv().await, Some(AgentMsg::Connect)));
+    }
+
+    /// Other refusals still end the process, since retrying cannot fix them.
+    #[tokio::test(start_paused = true)]
+    async fn invalid_identity_rejection_still_exits() {
+        let mut runtime = runtime_with_source(standalone());
+        let (_control_rx, _bulk_rx) = attach_links(&mut runtime);
+        let (handle, mut receiver, _lifecycle_receiver) = AgentHandle::channel(4);
+
+        runtime
+            .handle_server_frame(
+                handle,
+                ServerToAgent::Rejected {
+                    reason: RejectReason::InvalidIdentity,
+                    message: "bad id".to_string(),
+                },
+            )
+            .await;
+
+        // A misconfigured agent stops with a failure status instead of retrying forever.
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AgentMsg::ExitWithError)
+        ));
+    }
+
+    /// A replaced standalone agent reconnects, so clones keep competing until the server
+    /// detects the shared id; a supervised one exits so it cannot linger as a zombie.
+    #[tokio::test(start_paused = true)]
+    async fn eviction_reconnects_standalone_agents_and_ends_supervised_ones() {
+        for (id_source, exits) in [(standalone(), false), (DeviceIdSource::Assigned, true)] {
+            let mut runtime = runtime_with_source(id_source);
+            let (_control_rx, _bulk_rx) = attach_links(&mut runtime);
+            let (handle, mut receiver, _lifecycle_receiver) = AgentHandle::channel(4);
+
+            runtime
+                .handle_server_frame(
+                    handle,
+                    ServerToAgent::Evicted {
+                        message: "replaced".to_string(),
+                    },
+                )
+                .await;
+
+            let next = receiver.recv().await;
+            if exits {
+                // Supervised agents keep exiting on eviction.
+                assert!(matches!(next, Some(AgentMsg::ExitWithError)));
+            } else {
+                // Standalone agents retry with backoff instead.
+                assert!(matches!(next, Some(AgentMsg::Connect)));
+            }
+        }
+    }
+
+    /// The loss of a socket can overtake the `evicted` frame read just before it; the frame
+    /// must still decide the agent's fate instead of being dropped with the connection.
+    #[tokio::test(start_paused = true)]
+    async fn eviction_read_before_the_loss_is_still_handled() {
+        let mut runtime = runtime();
+        let (_control_rx, _bulk_rx) = attach_links(&mut runtime);
+        let generation = runtime.control.generation();
+        let (handle, mut receiver, _lifecycle_receiver) = AgentHandle::channel(4);
+        runtime
+            .handle_lifecycle_message(
+                handle.clone(),
+                AgentLifecycleMsg::ConnectionLost {
+                    connection_generation: generation,
+                    reason: "server closed connection".to_string(),
+                },
+            )
+            .await;
+
+        runtime
+            .handle_message(
+                handle,
+                AgentMsg::WebSocketMessage {
+                    connection_generation: generation,
+                    text: r#"{"type":"evicted","message":"replaced"}"#.to_string(),
+                },
+            )
+            .await;
+
+        // The supervised agent still exits although its connection was already gone.
+        assert!(matches!(
+            receiver.recv().await,
+            Some(AgentMsg::ExitWithError)
+        ));
     }
 }

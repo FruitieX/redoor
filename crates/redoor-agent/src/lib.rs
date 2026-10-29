@@ -3,6 +3,7 @@
 pub mod args;
 mod commands;
 mod connection;
+mod device_id;
 mod errors;
 mod exec;
 mod logs;
@@ -45,6 +46,7 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     };
     let settings = AgentSettings::resolve(args, file_config.as_ref(), &runtime.paths)?;
     let default_directory = settings.default_directory().await?;
+    let (agent_id, id_source) = settings.device_id(&runtime.paths).await?;
 
     let connection = connection::AgentConnection::new(
         settings.ws_address,
@@ -59,8 +61,12 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         None => None,
     };
 
-    redoor_core::logging::init_with_options(settings.log, settings.log_level, settings.log_format)
-        .await?;
+    redoor_core::logging::init_with_options(
+        Some(settings.log),
+        settings.log_level,
+        settings.log_format,
+    )
+    .await?;
     match &loaded_config_path {
         Some(path) => {
             log!(Level::Info, "Loaded agent config: path={}", path.display());
@@ -74,11 +80,20 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
     }
     log!(
         Level::Info,
-        "Starting agent '{}': ws={}, home={}",
+        "Starting agent '{}': agent_id={}, ws={}, home={}",
         settings.name,
+        agent_id,
         connection.server_url(),
         default_directory
     );
+
+    // Server- and relay-launched agents are restarted by their owner, which also keeps
+    // their binary in step with that owner's version.
+    if std::env::var_os(redoor_core::process::MANAGED_AGENT_ENV).is_none() {
+        let requests = redoor_core::process::listen_for_reexec()
+            .context("Failed to listen for the upgrade re-exec signal")?;
+        tokio::spawn(reexec_on_signal(requests));
+    }
 
     let (handle, receiver, lifecycle_receiver) = AgentHandle::channel(AGENT_MAILBOX_CAPACITY);
     let services = AgentServices::new(
@@ -91,7 +106,8 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         .await;
     let agent = AgentRuntime::new(
         AgentProfile {
-            agent_id: AgentId::from(settings.name.clone()),
+            agent_id,
+            id_source,
             agent_name: settings.name,
             default_directory,
             token: settings.token,
@@ -111,6 +127,19 @@ pub async fn run(args: AgentArgs, runtime: RuntimeContext) -> Result<ExitCode> {
         AgentExit::Shutdown => ExitCode::SUCCESS,
         AgentExit::Rejected => ExitCode::FAILURE,
     })
+}
+
+/// Replaces a standalone agent with its launch binary when `redoor upgrade` asks for it.
+///
+/// Mirrors the agent restart command, which also re-execs at once without draining work, so
+/// an upgrade interrupts running commands exactly like a restart from the UI does.
+async fn reexec_on_signal(mut requests: tokio::signal::unix::Signal) {
+    if requests.recv().await.is_some() {
+        // Printed rather than logged: the log writer is asynchronous and exec would drop the
+        // queued entry, while the restarted agent's startup log records the restart anyway.
+        eprintln!("Re-exec signal received; restarting agent");
+        redoor_core::process::reexec_current_process();
+    }
 }
 
 /// Finds the TOML file this agent should read, importing it from stdin when required.
@@ -154,14 +183,16 @@ struct AgentSettings {
     insecure_tls: bool,
     /// Registration name; the hostname when nothing else is configured.
     name: String,
+    /// Device id from `--agent-id`; `None` for standalone agents, which use their id file.
+    agent_id: Option<AgentId>,
     /// Shared registration secret.
     token: String,
     /// Directory the UI opens first; the account home when unset.
     home: Option<String>,
     /// Optional exact root used instead of platform trash-location discovery.
     trash_directory: Option<String>,
-    /// Log file; always set because agents default to a persistent log.
-    log: Option<String>,
+    /// Size-bounded log file; always set because agents default to a persistent log.
+    log: redoor_core::rotating_log::LogFileSpec,
     /// Effective startup threshold resolved before logger initialization.
     log_level: Level,
     /// Effective process output format resolved before logger initialization.
@@ -192,6 +223,14 @@ impl AgentSettings {
         let name = first_non_empty([args.name, agent_section.name])
             .or_else(System::host_name)
             .context("agent name is not configured and the computer hostname is unavailable")?;
+        // The server would reject the `hello` anyway; failing here explains it at the source.
+        redoor_protocol::ids::validate_device_name(&name)?;
+        let agent_id = args
+            .agent_id
+            .as_deref()
+            .map(AgentId::parse)
+            .transpose()
+            .context("invalid --agent-id")?;
 
         let token = first_non_empty([args.token, file.map(|config| config.agent_token.clone())])
             .context(
@@ -228,15 +267,32 @@ impl AgentSettings {
             connect_address: args.connect_address,
             insecure_tls: args.insecure_tls,
             name,
+            agent_id,
             token,
             home,
             trash_directory: first_non_empty([args.trash_directory]),
-            log: Some(log),
+            log: redoor_core::rotating_log::LogFileSpec::new(log, agent_section.log_max_size),
             log_level,
             log_format,
             notification_delay_seconds,
             partial_max_age_days: agent_section.partial_max_age_days.unwrap_or(7),
         })
+    }
+
+    /// Returns the managed id from `--agent-id`, or the standalone agent's remembered id,
+    /// together with where it came from so the runtime knows how to react to an id conflict.
+    async fn device_id(&self, paths: &AppPaths) -> Result<(AgentId, device_id::DeviceIdSource)> {
+        match &self.agent_id {
+            Some(agent_id) => Ok((agent_id.clone(), device_id::DeviceIdSource::Assigned)),
+            None => {
+                let file = device_id::DeviceIdFile::in_data_dir(&paths.data_dir()?);
+                let agent_id = file.load_or_create().await?;
+                Ok((
+                    agent_id,
+                    device_id::DeviceIdSource::File(file.path().to_path_buf()),
+                ))
+            }
+        }
     }
 
     /// Canonicalizes the UI home directory and insists it is a UTF-8 directory.
@@ -335,7 +391,7 @@ log = "/tmp/file.log"
         assert_eq!(settings.name, "cli-name");
         // Values absent on the CLI come from the file rather than defaults.
         assert_eq!(settings.token, "file-token");
-        assert_eq!(settings.log.as_deref(), Some("/tmp/file.log"));
+        assert_eq!(settings.log.path, std::path::Path::new("/tmp/file.log"));
     }
 
     /// Without any server source the error names every place it can be configured.
@@ -362,8 +418,13 @@ log = "/tmp/file.log"
                 .expect("settings should resolve");
         // A persistent log keeps standalone agents diagnosable after detaching.
         assert_eq!(
-            settings.log.as_deref(),
-            Some("/home/test/.local/share/redoor-dev/agent.log")
+            settings.log.path,
+            std::path::Path::new("/home/test/.local/share/redoor-dev/agent.log")
+        );
+        // Without a configured limit the log is bounded by the shared default.
+        assert_eq!(
+            settings.log.max_bytes,
+            redoor_core::rotating_log::DEFAULT_LOG_MAX_BYTES
         );
     }
 }

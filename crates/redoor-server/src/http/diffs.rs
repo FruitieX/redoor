@@ -7,6 +7,7 @@ use redoor_protocol::{
     api::{
         diffs::{DiffEndpoint, DiffFilesRequest, DiffFilesResponse},
         files::MetadataResponse,
+        git::MAX_FULL_CONTEXT_PATCH_BYTES,
         tokens::Permission,
     },
     wire::command::Command,
@@ -17,12 +18,20 @@ use super::{
     error::ApiError, services::output::OutputStream, state::ServerState,
 };
 
+/// The unchanged lines kept around each change when the files are too large to send whole,
+/// matching `git diff`.
+const DEFAULT_CONTEXT_LINES: usize = 3;
+
 /// Route: `POST /api/v1/diff`; reads both files, so it needs read on both devices.
 pub(crate) async fn diff_files_handler(
     AxumState(state): AxumState<ServerState>,
     Extension(principal): Extension<Principal>,
-    Json(payload): Json<DiffFilesRequest>,
+    Json(mut payload): Json<DiffFilesRequest>,
 ) -> Result<Json<DiffFilesResponse>, ApiError> {
+    // Body fields accept a name or an id; resolving before `require` keeps scope checks on
+    // ids, so a name that now belongs to another device cannot slip past a scope.
+    payload.left.agent = state.agents.resolve(payload.left.agent.as_str()).await?;
+    payload.right.agent = state.agents.resolve(payload.right.agent.as_str()).await?;
     principal.require(&[Permission::FilesRead], &payload.left.agent)?;
     principal.require(&[Permission::FilesRead], &payload.right.agent)?;
     let left = DiffEndpoint {
@@ -48,11 +57,28 @@ pub(crate) async fn diff_files_handler(
         download_editable_file(&state, &right, right_metadata.file_size)
     );
     let (left_content, right_content) = (left_content?, right_content?);
-    let unified_diff = similar::TextDiff::from_lines(&left_content, &right_content)
-        .unified_diff()
-        .header(&left.path, &right.path)
+    let text_diff = similar::TextDiff::from_lines(&left_content, &right_content);
+    let mut patch = text_diff.unified_diff();
+    patch.header(&left.path, &right.path);
+    // A file has no more lines than bytes, so this radius keeps every unchanged line without
+    // the overflow `usize::MAX` would cause inside `similar`.
+    let whole = patch
+        .context_radius(left_content.len().max(right_content.len()))
         .to_string();
-    Ok(Json(DiffFilesResponse { unified_diff }))
+    // Both files are already in memory, so formatting them whole before checking the size
+    // costs little more than the patch the UI would otherwise get.
+    let response = if whole.len() <= MAX_FULL_CONTEXT_PATCH_BYTES {
+        DiffFilesResponse {
+            unified_diff: whole,
+            full_context: true,
+        }
+    } else {
+        DiffFilesResponse {
+            unified_diff: patch.context_radius(DEFAULT_CONTEXT_LINES).to_string(),
+            full_context: false,
+        }
+    };
+    Ok(Json(response))
 }
 
 /// Reuses agent metadata so diff eligibility cannot drift from the file editor's gate.
@@ -97,7 +123,7 @@ async fn download_editable_file(
     )
     .await?;
     let read = stream.read_bounded(capacity).await.map_err(|error| {
-        let message = error.0;
+        let message = error.0.message;
         if message.is_empty() {
             ApiError::bad_request(format!("Failed to download {}", endpoint.path))
         } else {

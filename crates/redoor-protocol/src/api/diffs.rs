@@ -25,4 +25,7 @@ pub struct DiffFilesRequest {
 #[ts(export)]
 pub struct DiffFilesResponse {
     pub unified_diff: String,
+    /// True when the patch holds every unchanged line of the files, so the UI can fold and
+    /// expand context without diffing again.
+    pub full_context: bool,
 }

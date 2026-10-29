@@ -1,11 +1,16 @@
-import { useState, type ComponentProps } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import { Link } from "@tanstack/react-router";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isMap, isNode, parseDocument, stringify, type Node } from "yaml";
-import { getBrowserUrl } from "#ui/api-paths";
+import { browserRoute } from "#ui/browser-route";
 import { FoldingSection } from "#ui/components/folding-section";
-import { syntaxHighlighter } from "#ui/utils/syntax-highlighting";
+import { HighlightedLines } from "#ui/components/highlighted-tokens";
+import {
+    highlightLines,
+    languageForName,
+    useLoadedLanguage,
+} from "#ui/utils/code-highlight";
 
 /** Opening `---` must be the first line so thematic breaks later in the file stay markdown. */
 const YAML_FRONTMATTER_OPENING = /^---[ \t]*\r?\n/;
@@ -123,33 +128,37 @@ function YamlFrontmatterTable(props: { headers: string[]; values: string[] }) {
     );
 }
 
-/** Highlights only explicitly labeled fences so inline and unknown code remain predictable. */
+/**
+ * Highlights only explicitly labeled fences so inline and unknown code remain predictable.
+ * Languages the editor bundles colour at once; others load their grammar and colour the
+ * fence once it arrives, showing the plain source until then.
+ */
 function MarkdownCode(props: ComponentProps<"code"> & ExtraProps) {
-    const className = props.className ?? "";
-    const language = /(?:^|\s)language-([^\s]+)/.exec(className)?.[1];
+    const label = /(?:^|\s)language-([^\s]+)/.exec(props.className ?? "")?.[1];
 
-    if (
-        language === undefined ||
-        syntaxHighlighter.getLanguage(language) === undefined
-    ) {
-        return <code className={props.className}>{props.children}</code>;
-    }
+    const language = useLoadedLanguage(
+        label === undefined ? null : languageForName(label),
+    );
 
     const source = (props.node?.children ?? [])
         .map((child) => (child.type === "text" ? child.value : ""))
         .join("")
         .replace(/\n$/, "");
 
-    const highlighted = syntaxHighlighter.highlight(source, {
-        language,
-        ignoreIllegals: true,
-    }).value;
+    // Fences re-render with the document, so a long fence is not parsed again each time.
+    const lines = useMemo(
+        () => (language === null ? null : highlightLines(source, language)),
+        [source, language],
+    );
+
+    if (lines === null) {
+        return <code className={props.className}>{props.children}</code>;
+    }
 
     return (
-        <code
-            className={`${className} hljs`}
-            dangerouslySetInnerHTML={{ __html: highlighted }}
-        />
+        <code className={props.className}>
+            <HighlightedLines lines={lines} />
+        </code>
     );
 }
 
@@ -180,19 +189,27 @@ function decodeMarkdownPath(path: string): string {
     }
 }
 
-/** Resolves a Markdown file link against its directory or the active repository root. */
+/** A Markdown file link resolved to a file-browser destination on the same device. */
+type MarkdownFileLink = { path: string; hash: string | undefined };
+
+/**
+ * Resolves a Markdown file link against its directory or the active repository root. It
+ * returns the filesystem path and the fragment rather than a URL, so the router builds the
+ * device URL and encodes the device name itself. A query string has no meaning for the file
+ * browser and is dropped.
+ */
 export function resolveMarkdownFileLink(options: {
     href: string;
-    agentId: string;
     filePath: string;
     repositoryRoot: string | null;
-}): string {
+}): MarkdownFileLink {
     const suffixIndex = options.href.search(/[?#]/);
 
     const hrefPath =
         suffixIndex === -1 ? options.href : options.href.slice(0, suffixIndex);
 
-    const suffix = suffixIndex === -1 ? "" : options.href.slice(suffixIndex);
+    const hashIndex = options.href.indexOf("#");
+    const hash = hashIndex === -1 ? "" : options.href.slice(hashIndex + 1);
     const decodedPath = decodeMarkdownPath(hrefPath);
 
     const fileDirectory = options.filePath.slice(
@@ -204,17 +221,17 @@ export function resolveMarkdownFileLink(options: {
         ? `${options.repositoryRoot ?? ""}/${decodedPath.slice(1)}`
         : `${fileDirectory}/${decodedPath}`;
 
-    return `${getBrowserUrl(
-        options.agentId,
-        normalizeFilesystemPath(destination),
-    )}${suffix}`;
+    return {
+        path: normalizeFilesystemPath(destination),
+        hash: hash === "" ? undefined : hash,
+    };
 }
 
 /** Keeps web and document links native while routing remote filesystem links in-app. */
 function MarkdownLink(
     props: ComponentProps<"a"> &
         ExtraProps & {
-            agentId: string;
+            deviceName: string;
             filePath: string;
             repositoryRoot: string | null;
         },
@@ -229,14 +246,17 @@ function MarkdownLink(
         );
     }
 
+    const link = resolveMarkdownFileLink({
+        href,
+        filePath: props.filePath,
+        repositoryRoot: props.repositoryRoot,
+    });
+
     return (
         <Link
-            to={resolveMarkdownFileLink({
-                href,
-                agentId: props.agentId,
-                filePath: props.filePath,
-                repositoryRoot: props.repositoryRoot,
-            })}
+            {...browserRoute({ name: props.deviceName }, link.path)}
+            search={{}}
+            hash={link.hash}
             title={props.title}
             className={props.className}
         >
@@ -248,7 +268,8 @@ function MarkdownLink(
 /** Renders an untrusted markdown draft without enabling raw HTML execution. */
 export function MarkdownPreview(props: {
     content: string;
-    agentId: string;
+    /** The current name of the file's device, which in-app links carry in their URL. */
+    deviceName: string;
     filePath: string;
     repositoryRoot: string | null;
 }) {
@@ -259,7 +280,7 @@ export function MarkdownPreview(props: {
         <section
             role="region"
             aria-label="Markdown preview"
-            className="min-h-0 max-w-none flex-1 overflow-auto px-5 py-6 sm:px-8 sm:py-8"
+            className="min-h-0 max-w-none flex-1 overflow-auto px-5 py-6 @xl:px-8 @xl:py-8"
         >
             {frontmatter !== null && frontmatter.headers.length > 0 ? (
                 <YamlFrontmatterTable
@@ -267,7 +288,7 @@ export function MarkdownPreview(props: {
                     values={frontmatter.values}
                 />
             ) : null}
-            <div className="syntax-highlight prose prose-invert max-w-none prose-a:text-blue-400 prose-blockquote:border-slate-700 prose-code:rounded prose-code:bg-slate-800 prose-code:px-1 prose-code:py-0.5 prose-headings:tracking-tight prose-hr:border-slate-700 prose-pre:border prose-pre:border-slate-700 prose-pre:bg-slate-900 prose-table:block prose-table:overflow-x-auto">
+            <div className="syntax-highlight prose prose-invert @max-xl:prose-sm max-w-none prose-a:text-blue-400 prose-blockquote:border-slate-700 prose-code:rounded prose-code:bg-slate-800 prose-code:px-1 prose-code:py-0.5 prose-headings:tracking-tight prose-hr:border-slate-700 prose-pre:border prose-pre:border-slate-700 prose-pre:bg-slate-900 prose-table:block prose-table:overflow-x-auto">
                 <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
@@ -275,7 +296,7 @@ export function MarkdownPreview(props: {
                         a: (linkProps) => (
                             <MarkdownLink
                                 {...linkProps}
-                                agentId={props.agentId}
+                                deviceName={props.deviceName}
                                 filePath={props.filePath}
                                 repositoryRoot={props.repositoryRoot}
                             />

@@ -7,7 +7,7 @@ pub(crate) mod content_grep;
 pub(crate) mod ctx;
 pub(crate) mod file_search;
 mod fs;
-mod git;
+pub(crate) mod git;
 mod host;
 mod metadata;
 
@@ -231,6 +231,7 @@ impl RunCommand for Command {
                 path,
                 on_existing,
                 ownership,
+                executable,
             }) => {
                 let prepared = RawFileSink::prepare(
                     ctx.responder.request_id(),
@@ -238,6 +239,7 @@ impl RunCommand for Command {
                     on_existing,
                     ownership,
                     partial,
+                    executable,
                     &ctx.services,
                 )
                 .await
@@ -367,14 +369,53 @@ impl RunCommand for Command {
                 fs::directory_size(path, timeout_seconds, &ctx.cancel).await,
             ),
             Command::GitContext(request::GitContext { path }) => {
-                Reply::of::<request::GitContext>(git::context(path).await)
+                Reply::of::<request::GitContext>(git::status::context(path).await)
             }
             Command::GitStatus(request::GitStatus { path }) => {
-                Reply::of::<request::GitStatus>(git::status(path).await)
+                Reply::of::<request::GitStatus>(git::status::status(path).await)
             }
             Command::GitDiff(request::GitDiff { files, mode }) => {
-                Reply::of::<request::GitDiff>(git::diff(files, mode).await)
+                Reply::of::<request::GitDiff>(git::diff::diff(files, mode).await)
             }
+            Command::GitRevisionTree(request::GitRevisionTree { path, rev }) => {
+                Reply::of::<request::GitRevisionTree>(git::tree::tree(path, rev).await)
+            }
+            Command::GitRevisionContent(request::GitRevisionContent { path, rev }) => {
+                Reply::of::<request::GitRevisionContent>(git::tree::content(path, rev).await)
+            }
+            Command::GitCommitDiff(request::GitCommitDiff { path, rev }) => {
+                Reply::of::<request::GitCommitDiff>(git::commit_diff::commit_diff(path, rev).await)
+            }
+            Command::GitLog(request::GitLog { path, rev, page }) => {
+                Reply::of::<request::GitLog>(git::history::log(path, rev, page).await)
+            }
+            Command::GitCommitNeighbors(request::GitCommitNeighbors { path, rev }) => {
+                Reply::of::<request::GitCommitNeighbors>(git::history::neighbors(path, rev).await)
+            }
+            Command::GitRefList(request::GitRefList {
+                path,
+                kind,
+                sort,
+                page,
+            }) => Reply::of::<request::GitRefList>(git::refs::list(path, kind, sort, page).await),
+            Command::GitWorktreeList(request::GitWorktreeList { path }) => {
+                Reply::of::<request::GitWorktreeList>(git::worktree_list::list(path).await)
+            }
+            Command::GitWorktreeStatus(request::GitWorktreeStatus { path }) => {
+                Reply::of::<request::GitWorktreeStatus>(git::worktree_status::status(path).await)
+            }
+            Command::GitRevisionStat(request::GitRevisionStat {
+                path,
+                rev,
+                replace_target,
+            }) => Reply::of::<request::GitRevisionStat>(
+                git::export::stat(path, rev, replace_target).await,
+            ),
+            Command::GitDownload(request::GitDownload {
+                path,
+                rev,
+                include_root,
+            }) => download::download_git_revision(path, rev, include_root, ctx).await,
             Command::MoveMetadata(request::MoveMetadata { path }) => {
                 Reply::of::<request::MoveMetadata>(fs::move_metadata(path).await)
             }
@@ -421,10 +462,7 @@ mod tests {
     use redoor_core::identity::current_binary_identity;
     use redoor_core::test_support::TempDir;
     use redoor_protocol::{
-        api::{
-            agents::{EchoRequest, MountPoint},
-            files::CreationOwnershipOptions,
-        },
+        api::{agents::MountPoint, files::CreationOwnershipOptions},
         ids::RequestId,
         wire::{
             command::{Command, CommandErrorKind},
@@ -551,24 +589,6 @@ mod tests {
                 );
             }
             _ => panic!("Expected RawDelete"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_echo_command() {
-        let result = run(request::Echo {
-            request: EchoRequest {
-                message: "hello world".to_string(),
-                random_sleep: false,
-            },
-        })
-        .await;
-
-        match result {
-            Ok(echo_result) => {
-                assert_eq!(echo_result.message, "hello world");
-            }
-            _ => panic!("Expected EchoResult"),
         }
     }
 

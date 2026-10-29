@@ -17,6 +17,7 @@ import { Button } from "#ui/components/button";
 import { Checkbox } from "#ui/components/checkbox";
 import { PathActionMenu } from "#ui/components/browser/path-actions";
 import { DeletePathDialog } from "#ui/components/browser/delete-path-dialog";
+import { CreateArchiveDialog } from "#ui/components/browser/create-archive-dialog";
 import { InputControl } from "#ui/components/input-control";
 import { Dialog } from "#ui/components/dialog";
 import { DialogActions } from "#ui/components/dialog-actions";
@@ -24,6 +25,7 @@ import { RadioCardGroup, RadioCardOption } from "#ui/components/radio-card";
 import { TextField } from "#ui/components/text-field";
 import { Tooltip } from "#ui/components/tooltip";
 import {
+    getSelectedFileKey,
     selectedFileKeysAtom,
     toggleSelectedFileAtom,
 } from "#ui/selected-files";
@@ -54,6 +56,11 @@ import {
     type UnarchiveDestination,
 } from "#ui/utils/archive";
 import { useTerminals } from "#ui/use-terminals";
+import type { RevisionListing } from "#ui/components/browser/revision";
+import {
+    HistoryEntryStore,
+    useHistoryEntryState,
+} from "#ui/history-entry-state";
 
 /**
  * One displayed row: a listed entry, or an incoming transfer whose `entry` is a stand-in so it
@@ -85,11 +92,29 @@ function orderRowsWithoutSort(rows: FileListRow[]): FileListRow[] {
 /** Identifies the destination that should restore filter focus after Enter navigation. */
 const filterFocusPathAtom = atom<string | null>(null);
 
+const filterQueries = new HistoryEntryStore<string>();
+
+/**
+ * The name filter of one directory listing. It is kept per history entry, so coming back
+ * from a file shows the same narrowed list, whose height the restored scroll position
+ * depends on. Each directory starts unfiltered, because a filter for one directory's names
+ * rarely means anything in another.
+ */
+function useFileListFilter(scope: string) {
+    const [filter, update] = useHistoryEntryState<string>({
+        store: filterQueries,
+        scope,
+        initial: () => "",
+    });
+
+    return [filter, (next: string) => update(() => next)] as const;
+}
+
 /** Handles shortcuts that only exist while the file list is mounted. */
 function useFileListShortcuts(props: {
     filterInputRef: React.RefObject<HTMLInputElement | null>;
     filter: string;
-    setFilter: React.Dispatch<React.SetStateAction<string>>;
+    setFilter: (filter: string) => void;
 }) {
     // Both keys stay out of text controls, so typing an f or leaving the filter box with
     // Escape never triggers them; Escape clears the filter only once focus is elsewhere.
@@ -131,12 +156,26 @@ export function FileList(props: {
     /** Comes from the URL so the order survives a reload; null keeps the listing order. */
     sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
+    /**
+     * Lists a committed Git revision: row write actions are disabled, selection and
+     * downloads read the commit, no uploads are pending into it, and modification times are
+     * not shown because Git does not record them.
+     */
+    revision?: RevisionListing;
 }) {
     const navigate = useNavigate();
+    const readOnly = props.revision !== undefined;
     const agent = props.agent;
     const [filterFocusPath, setFilterFocusPath] = useAtom(filterFocusPathAtom);
     const filterInputRef = React.useRef<HTMLInputElement>(null);
-    const [filter, setFilter] = React.useState("");
+
+    const [filter, setFilter] = useFileListFilter(
+        JSON.stringify([
+            props.agent.id,
+            props.directoryPath,
+            props.revision?.commitId,
+        ]),
+    );
 
     const normalizedFilter = filter.toLowerCase();
     // A leading dot is a hidden-name query, so include those entries without flipping the toggle.
@@ -150,10 +189,13 @@ export function FileList(props: {
         entry.name.toLowerCase().includes(normalizedFilter),
     );
 
-    const pendingTransfers = usePendingTransfers(
+    const worktreePendingTransfers = usePendingTransfers(
         props.agent.id,
         props.directoryPath,
     );
+
+    // Uploads land in the working directory, never in a committed revision.
+    const pendingTransfers = readOnly ? [] : worktreePendingTransfers;
 
     // Pending names follow the same hidden-file and filter rules as listed entries.
     const pendingRows = pendingTransfers.flatMap((pending) =>
@@ -220,13 +262,13 @@ export function FileList(props: {
 
         event.preventDefault();
         setFilterFocusPath(destinationPath);
-        await navigate(browserRoute(agent.id, destinationPath));
+        await navigate(browserRoute(agent, destinationPath));
     };
 
     return (
         <div className="overflow-hidden bg-surface">
             {props.actions}
-            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800 bg-slate-900/35 p-1.5 sm:gap-2 sm:p-2">
+            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800 bg-slate-900/35 p-1.5 @xl:gap-2 @xl:p-2">
                 <label className="relative min-w-0 flex-1">
                     <span className="sr-only">Filter files</span>
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
@@ -238,7 +280,7 @@ export function FileList(props: {
                         onChange={(event) => setFilter(event.target.value)}
                         onKeyDown={handleFilterKeyDown}
                         placeholder="Filter files (f)"
-                        className="w-full bg-slate-900 py-1.5 pl-9 text-sm placeholder:text-slate-500 focus:ring-1 focus:ring-blue-500 sm:py-2"
+                        className="w-full bg-slate-900 py-1.5 pl-9 text-sm placeholder:text-slate-500 focus:ring-1 focus:ring-blue-500 @xl:py-2"
                     />
                 </label>
             </div>
@@ -248,6 +290,7 @@ export function FileList(props: {
                 rows={displayedRows}
                 sort={sort}
                 onSort={props.onSort}
+                revision={props.revision}
             />
             <FilesystemFooter mountPoint={props.mountPoint} />
         </div>
@@ -295,6 +338,7 @@ function FileTable(props: {
     rows: FileListRow[];
     sort: FileSort | null;
     onSort: (column: FileSortColumn) => void;
+    revision: RevisionListing | undefined;
 }) {
     const tableRef = React.useRef<HTMLTableElement>(null);
 
@@ -313,7 +357,7 @@ function FileTable(props: {
             <table ref={tableRef} className="w-full min-w-[55rem]">
                 <thead>
                     <tr className="border-b border-slate-800 bg-surface-raised">
-                        <th className="p-1.5 text-left text-sm font-medium text-slate-400 sm:p-2">
+                        <th className="p-1.5 text-left text-sm font-medium text-slate-400 @xl:p-2">
                             Select
                         </th>
                         <SortableFileColumnHeader
@@ -352,7 +396,7 @@ function FileTable(props: {
                             sort={props.sort}
                             onSort={props.onSort}
                         />
-                        <th className="p-1.5 text-right text-sm font-medium text-slate-400 sm:p-2">
+                        <th className="p-1.5 text-right text-sm font-medium text-slate-400 @xl:p-2">
                             Actions
                         </th>
                     </tr>
@@ -370,6 +414,7 @@ function FileTable(props: {
                                 agent={props.agent}
                                 directoryPath={props.directoryPath}
                                 entry={row.entry}
+                                revision={props.revision}
                             />
                         ),
                     )}
@@ -558,6 +603,7 @@ function FileEntryActions(props: {
     fullPath: string;
     directoryPath: string;
     isDirectory: boolean;
+    revision: RevisionListing | undefined;
 }) {
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
 
@@ -567,11 +613,17 @@ function FileEntryActions(props: {
     const [isUnarchiveDialogOpen, setIsUnarchiveDialogOpen] =
         React.useState(false);
 
+    const [isCreateArchiveDialogOpen, setIsCreateArchiveDialogOpen] =
+        React.useState(false);
+
     const entryType = props.isDirectory ? "directory" : "file";
 
-    const downloadUrl = props.agent.getRawUrl(props.fullPath, {
-        download: true,
-    });
+    const revision = props.revision;
+
+    const downloadUrl =
+        revision === undefined
+            ? props.agent.getRawUrl(props.fullPath, { download: true })
+            : props.agent.getGitDownloadUrl(props.fullPath, revision.commitId);
 
     const downloadName = props.isDirectory
         ? getDirectoryArchiveName(props.entryName)
@@ -595,7 +647,19 @@ function FileEntryActions(props: {
                 onDownloadDirectory={() => setIsDownloadDialogOpen(true)}
                 showUnarchive={archive !== null}
                 onUnarchive={() => setIsUnarchiveDialogOpen(true)}
+                onCreateArchive={() => setIsCreateArchiveDialogOpen(true)}
                 onDelete={() => setIsDeleteDialogOpen(true)}
+                triggerClassName="@max-xl:h-7 @max-xl:w-7"
+                revision={
+                    revision === undefined
+                        ? undefined
+                        : {
+                              commitId: revision.commitId,
+                              transferable: !revision.nonTransferableNames.has(
+                                  props.entryName,
+                              ),
+                          }
+                }
             />
             {isUnarchiveDialogOpen ? (
                 <UnarchiveDialog
@@ -603,6 +667,16 @@ function FileEntryActions(props: {
                     entryName={props.entryName}
                     directoryPath={props.directoryPath}
                     onClose={() => setIsUnarchiveDialogOpen(false)}
+                />
+            ) : null}
+            {isCreateArchiveDialogOpen ? (
+                <CreateArchiveDialog
+                    agent={props.agent}
+                    directoryPath={props.directoryPath}
+                    sources={[
+                        { agentId: props.agent.id, path: props.fullPath },
+                    ]}
+                    onClose={() => setIsCreateArchiveDialogOpen(false)}
                 />
             ) : null}
             <Dialog
@@ -654,21 +728,36 @@ function FileEntry(props: {
     agent: Agent;
     directoryPath: string;
     entry: LsEntry;
+    /**
+     * A committed entry is selected at its commit and has no recorded time; symlinks and
+     * submodules cannot be selected at all.
+     */
+    revision: RevisionListing | undefined;
 }) {
     const toggleSelectedFile = useSetAtom(toggleSelectedFileAtom);
     const selectedFileKeys = useAtomValue(selectedFileKeysAtom);
     const entry = props.entry;
     const isDirectory = entry.type === "directory";
     const fullPath = joinBrowserPath(props.directoryPath, entry.name);
-    const isSelected = selectedFileKeys.has(`${props.agent.id}:${fullPath}`);
+    const rev = props.revision?.commitId;
+    const readOnly = props.revision !== undefined;
+
+    const isSelected = selectedFileKeys.has(
+        getSelectedFileKey({ agentId: props.agent.id, path: fullPath, rev }),
+    );
+
     const entryType = isDirectory ? "directory" : "file";
+
+    const selectable =
+        props.revision === undefined ||
+        !props.revision.nonTransferableNames.has(entry.name);
 
     return (
         <tr
-            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint"
+            className="border-b border-slate-800/60 last:border-b-0 hover:bg-tint @max-xl:text-sm"
             aria-label={`${isDirectory ? "Directory" : "File"} entry ${entry.name}`}
         >
-            <td className="p-1.5 sm:p-2" aria-label="">
+            <td className="px-1.5 py-0.5 @xl:p-2" aria-label="">
                 <Checkbox
                     role="checkbox"
                     label={
@@ -677,6 +766,7 @@ function FileEntry(props: {
                             : `Select ${entryType} ${entry.name}`
                     }
                     checked={isSelected}
+                    disabled={!selectable}
                     onCheckedChange={() =>
                         toggleSelectedFile({
                             agentId: props.agent.id,
@@ -684,20 +774,21 @@ function FileEntry(props: {
                             path: fullPath,
                             fileName: entry.name,
                             entryType,
+                            rev,
                         })
                     }
                 />
             </td>
-            <td className="p-1.5 sm:p-2">
+            <td className="px-1.5 py-0.5 @xl:p-2">
                 {isDirectory ? (
-                    <Folder className="h-5 w-5 text-blue-400" />
+                    <Folder className="h-4 w-4 text-blue-400 @xl:h-5 @xl:w-5" />
                 ) : (
-                    <File className="h-5 w-5 text-slate-500" />
+                    <File className="h-4 w-4 text-slate-500 @xl:h-5 @xl:w-5" />
                 )}
             </td>
-            <td className="p-1.5 sm:p-2">
+            <td className="px-1.5 py-0.5 @xl:p-2">
                 <Link
-                    {...browserRoute(props.agent.id, fullPath)}
+                    {...browserRoute(props.agent, fullPath)}
                     data-keyboard-focus-entry="true"
                     className="block min-w-0 truncate font-medium text-blue-400 hover:underline"
                 >
@@ -707,43 +798,53 @@ function FileEntry(props: {
             <td
                 className={
                     isDirectory
-                        ? "p-1.5 text-slate-600 sm:p-2"
-                        : "p-1.5 text-slate-400 sm:p-2"
+                        ? "px-1.5 py-0.5 text-slate-600 @xl:p-2"
+                        : "px-1.5 py-0.5 text-slate-400 @xl:p-2"
                 }
                 aria-label={`Size for ${entry.name}`}
             >
                 {isDirectory ? "-" : formatSize(entry.size)}
             </td>
             <td
-                className="p-1.5 text-slate-400 sm:p-2"
+                className="px-1.5 py-0.5 text-slate-400 @xl:p-2"
                 aria-label={`Modified ${entry.name}`}
             >
-                <Tooltip
-                    content={formatModifiedAge(entry.modified_at, Date.now())}
-                >
-                    <time
-                        className="whitespace-nowrap"
-                        dateTime={new Date(
-                            entry.modified_at * 1000,
-                        ).toISOString()}
+                {readOnly ? (
+                    "-"
+                ) : (
+                    <Tooltip
+                        content={formatModifiedAge(
+                            entry.modified_at,
+                            Date.now(),
+                        )}
                     >
-                        {new Date(entry.modified_at * 1000).toLocaleString()}
-                    </time>
-                </Tooltip>
+                        <time
+                            className="whitespace-nowrap"
+                            dateTime={new Date(
+                                entry.modified_at * 1000,
+                            ).toISOString()}
+                        >
+                            {new Date(
+                                entry.modified_at * 1000,
+                            ).toLocaleString()}
+                        </time>
+                    </Tooltip>
+                )}
             </td>
-            <td className="p-1.5 text-slate-400 sm:p-2">
+            <td className="px-1.5 py-0.5 text-slate-400 @xl:p-2">
                 {entry.owner || "-"}
             </td>
-            <td className="p-1.5 text-slate-400 sm:p-2">
+            <td className="px-1.5 py-0.5 text-slate-400 @xl:p-2">
                 {entry.group || "-"}
             </td>
-            <td className="p-1.5 text-right sm:p-2">
+            <td className="px-1.5 py-0.5 text-right @xl:p-2">
                 <FileEntryActions
                     agent={props.agent}
                     entryName={entry.name}
                     fullPath={fullPath}
                     directoryPath={props.directoryPath}
                     isDirectory={isDirectory}
+                    revision={props.revision}
                 />
             </td>
         </tr>

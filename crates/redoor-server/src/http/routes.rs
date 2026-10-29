@@ -26,9 +26,21 @@ use super::{
     auth::{login_handler, logout_handler},
     copy::copy_file_handler,
     diffs::diff_files_handler,
+    editor_buffers::{
+        delete_editor_buffer_handler, get_editor_buffer_handler, put_editor_buffer_handler,
+    },
     file_edit::file_edit_handler,
     files::{create_directory_handler, raw_agent_delete_handler, rename_path_handler},
-    git::{git_context_handler, git_diff_handler, git_status_handler},
+    git::{
+        commit::git_commit_diff_handler,
+        download::git_download_handler,
+        history::{git_commit_neighbors_handler, git_log_handler},
+        refs::{git_branches_handler, git_tags_handler},
+        revision::{git_revision_content_handler, git_revision_tree_handler},
+        worktree::{git_context_handler, git_diff_handler, git_status_handler},
+        worktree_list::git_worktrees_handler,
+        worktree_status::git_worktree_status_handler,
+    },
     logging_levels::{
         get_agent_logging_level_handler, get_server_logging_level_handler,
         update_agent_logging_level_handler, update_server_logging_level_handler,
@@ -111,6 +123,16 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
             get(get_user_state_handler).put(update_user_state_handler),
         )
         .route(
+            "/api/v1/user/editor-buffers/{key}",
+            get(get_editor_buffer_handler)
+                .put(put_editor_buffer_handler)
+                .delete(delete_editor_buffer_handler)
+                // A buffer carries a whole document and its history, above axum's 2 MiB default.
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    redoor_protocol::api::editor_buffers::MAX_EDITOR_BUFFER_BYTES,
+                )),
+        )
+        .route(
             "/api/v1/transfers/progress",
             get(list_transfer_progress_handler),
         )
@@ -127,6 +149,18 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route(
             "/api/v1/agents/{agent}/configuration",
             get(get_ssh_agent_configuration_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/ssh-host-key",
+            get(super::ssh_keys::get_host_key_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/ssh-host-key/pin",
+            post(super::ssh_keys::pin_host_key_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/ssh-key",
+            post(super::ssh_keys::enroll_handler).delete(super::ssh_keys::remove_handler),
         )
         .route("/api/v1/local-agents", post(create_local_agent_handler))
         .route(
@@ -205,6 +239,80 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         )
         .route("/api/v1/agents/{agent}/git/diff", post(git_diff_handler))
         .route(
+            "/api/v1/agents/{agent}/git/tree",
+            get(git_revision_tree_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/tree/{*path}",
+            get(git_revision_tree_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/blob",
+            get(git_revision_content_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/blob/{*path}",
+            get(git_revision_content_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/download",
+            get(git_download_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/download/{*path}",
+            get(git_download_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/commit-diff",
+            get(git_commit_diff_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/commit-diff/{*path}",
+            get(git_commit_diff_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/commit-neighbors",
+            get(git_commit_neighbors_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/commit-neighbors/{*path}",
+            get(git_commit_neighbors_handler),
+        )
+        .route("/api/v1/agents/{agent}/git/log", get(git_log_handler))
+        .route(
+            "/api/v1/agents/{agent}/git/log/{*path}",
+            get(git_log_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/branches",
+            get(git_branches_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/branches/{*path}",
+            get(git_branches_handler),
+        )
+        .route("/api/v1/agents/{agent}/git/tags", get(git_tags_handler))
+        .route(
+            "/api/v1/agents/{agent}/git/tags/{*path}",
+            get(git_tags_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/worktrees",
+            get(git_worktrees_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/worktrees/{*path}",
+            get(git_worktrees_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/worktree-status",
+            get(git_worktree_status_handler),
+        )
+        .route(
+            "/api/v1/agents/{agent}/git/worktree-status/{*path}",
+            get(git_worktree_status_handler),
+        )
+        .route(
             "/api/v1/agents/{agent}/one-time-token",
             post(create_one_time_token_handler),
         )
@@ -278,6 +386,10 @@ pub(crate) fn build_app(server_state: ServerState) -> Router {
         .route("/api/v1/diff", post(diff_files_handler))
         .route("/api/v1/agents/{agent}/echo", post(echo_agent_handler))
         .route("/api/v1/server/restart", post(restart_server_handler))
+        .route(
+            "/api/v1/server/upgrade",
+            post(super::server_upgrade::upgrade_server_handler),
+        )
         .route(
             "/api/v1/tokens",
             get(super::tokens::handlers::list).post(super::tokens::handlers::create),

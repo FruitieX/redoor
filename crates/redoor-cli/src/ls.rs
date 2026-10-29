@@ -30,7 +30,7 @@ enum Listing {
 pub(crate) async fn ls(store: CredentialStore, args: PathArgs) -> Result<()> {
     let endpoint = Location::remote(&args.path).await?;
     let client = RemoteClient::load(&store).await?;
-    client.ensure_agent_running(&endpoint.agent.0).await?;
+    client.ensure_agent_running(endpoint.agent.as_str()).await?;
     let listing: Listing = client
         .get_json(&client.agent_path(&endpoint, "ls")?)
         .await?;
@@ -79,7 +79,7 @@ fn format_entry(entry: &LsEntry) -> String {
 pub(crate) async fn stat(store: CredentialStore, args: PathArgs) -> Result<()> {
     let endpoint = Location::remote(&args.path).await?;
     let client = RemoteClient::load(&store).await?;
-    client.ensure_agent_running(&endpoint.agent.0).await?;
+    client.ensure_agent_running(endpoint.agent.as_str()).await?;
     let metadata: MetadataResponse = client
         .get_json(&client.agent_path(&endpoint, "metadata")?)
         .await?;

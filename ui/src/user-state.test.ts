@@ -3,16 +3,17 @@ import { expect, test } from "vitest";
 import {
     commitDeviceOrder,
     defaultUserState,
+    openFileAtLine,
     reorderBookmarks,
-    reorderPinnedFiles,
+    reorderOpenFiles,
     resolveDeviceOrder,
     userStateSchema,
     type Bookmark,
-    type PinnedFile,
+    type OpenFile,
 } from "#ui/user-state";
 
 /** Supplies metadata so movement tests also exercise object preservation. */
-function pin(agentId: string, name: string): PinnedFile {
+function openEntry(agentId: string, name: string): OpenFile {
     return { agentId, path: `/${name}`, name, agentName: agentId };
 }
 
@@ -97,16 +98,24 @@ test("renames do not affect id-based device placement", () => {
     ]);
 });
 
-test("reorders pins and one bookmark scope against the latest arrays", () => {
-    const pins = [pin("a", "one"), pin("b", "two"), pin("a", "three")];
+test("reorders open files and one bookmark scope against the latest arrays", () => {
+    const files = [
+        openEntry("a", "one"),
+        openEntry("b", "two"),
+        openEntry("a", "three"),
+    ];
 
-    const movedPins = reorderPinnedFiles(pins, {
+    const movedFiles = reorderOpenFiles(files, {
         activeId: "a:/three",
         overId: "a:/one",
     });
 
-    expect(movedPins.map((file) => file.name)).toEqual(["three", "one", "two"]);
-    expect(movedPins[1]).toBe(pins[0]);
+    expect(movedFiles.map((file) => file.name)).toEqual([
+        "three",
+        "one",
+        "two",
+    ]);
+    expect(movedFiles[1]).toBe(files[0]);
 
     const bookmarks = [
         bookmark("a", "a1"),
@@ -136,19 +145,52 @@ test("reorders pins and one bookmark scope against the latest arrays", () => {
     ).toEqual(["/b/b1", "/b/b2"]);
 });
 
-test("a stale pin move cannot restore a removed pin or discard a new one", () => {
-    const current = [pin("a", "one"), pin("a", "three"), pin("b", "fresh")];
+test("a stale open file move cannot restore a closed file or discard a new one", () => {
+    const current = [
+        openEntry("a", "one"),
+        openEntry("a", "three"),
+        openEntry("b", "fresh"),
+    ];
 
     expect(
-        reorderPinnedFiles(current, {
+        reorderOpenFiles(current, {
             activeId: "a:/two",
             overId: "a:/one",
         }),
     ).toBe(current);
     expect(
-        reorderPinnedFiles(current, {
+        reorderOpenFiles(current, {
             activeId: "a:/three",
             overId: "a:/one",
         }).map((file) => file.name),
     ).toEqual(["three", "one", "fresh"]);
+});
+
+test("opens a file at a line without moving an already open file", () => {
+    const files = [openEntry("a", "one"), openEntry("a", "two")];
+    const reveal = { line: 42, id: "r1" };
+
+    const appended = openFileAtLine(files, openEntry("b", "three"), reveal);
+    // A newly opened file goes last, carrying the line to show when it is visited.
+    expect(appended.map((file) => file.name)).toEqual(["one", "two", "three"]);
+    expect(appended[2]?.reveal).toEqual(reveal);
+
+    const moved = openFileAtLine(files, openEntry("a", "one"), reveal);
+    // An open file keeps its place and only gets the new line.
+    expect(moved.map((file) => file.name)).toEqual(["one", "two"]);
+    expect(moved[0]?.reveal).toEqual(reveal);
+    // The other files are untouched, so React keeps their rows.
+    expect(moved[1]).toBe(files[1]);
+
+    // Without a line, opening an open file changes nothing, so no settings write follows.
+    expect(openFileAtLine(files, openEntry("a", "two"), undefined)).toBe(files);
+});
+
+test("a malformed line request keeps the open file", () => {
+    const parsed = userStateSchema.parse({
+        openFiles: [{ ...openEntry("a", "one"), reveal: { line: "x" } }],
+    });
+
+    // Only the line is lost; dropping the whole list would close every open file.
+    expect(parsed.openFiles).toEqual([openEntry("a", "one")]);
 });

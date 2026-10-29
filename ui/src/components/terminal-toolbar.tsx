@@ -9,7 +9,7 @@ export function TerminalToolbar(props: {
 }) {
     return (
         <div
-            className={`flex shrink-0 items-center gap-1 ${props.isFullWindow ? "p-2 sm:px-4" : "pb-2"}`}
+            className={`flex shrink-0 items-center gap-1 ${props.isFullWindow ? "p-2 @xl:px-4" : "pb-2"}`}
         >
             <div className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain">
                 {props.children}

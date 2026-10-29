@@ -7,6 +7,7 @@ import {
     onTestFinished,
 } from "vitest";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 
 import type { CreateSshAgentRequest } from "#bindings/CreateSshAgentRequest";
 import type { UpdateSshAgentRequest } from "#bindings/UpdateSshAgentRequest";
@@ -19,6 +20,8 @@ import {
     TEST_PASSWORD,
     TEST_USERNAME,
     VITEST_SERVER_PORT,
+    DEVICE_ID_REGEXP,
+    getAvailablePort,
     restartServerAndWait,
     waitForPort,
     waitForValue,
@@ -120,7 +123,8 @@ describe("SSH agent configuration API", () => {
 
         // The response must be immediately usable without restarting or contacting SSH.
         expect(response.agent).toMatchObject({
-            id: AGENT_NAME,
+            // The server creates an opaque id for the new device; the name stays separate.
+            id: expect.stringMatching(DEVICE_ID_REGEXP),
             name: AGENT_NAME,
             cwd: "/srv/app",
             managed: true,
@@ -136,7 +140,7 @@ describe("SSH agent configuration API", () => {
         ).toHaveLength(1);
         // Local TOML agents are also configuration-editable, but stay out of the SSH APIs.
         expect(
-            inventory.find((agent) => agent.id === LOCAL_AGENT_NAME)
+            inventory.find((agent) => agent.name === LOCAL_AGENT_NAME)
                 ?.configurationEditable,
         ).toBe(true);
         // List inventory must carry the SSH destination so UI chips need no extra fetch.
@@ -144,7 +148,8 @@ describe("SSH agent configuration API", () => {
             inventory.find((agent) => agent.name === AGENT_NAME)?.sshTarget,
         ).toBe("example-host");
         expect(
-            inventory.find((agent) => agent.id === LOCAL_AGENT_NAME)?.sshTarget,
+            inventory.find((agent) => agent.name === LOCAL_AGENT_NAME)
+                ?.sshTarget,
         ).toBeNull();
 
         const editedConfig = readFileSync(configPath, "utf8");
@@ -157,10 +162,17 @@ describe("SSH agent configuration API", () => {
         expect(editedConfig).toContain("ssh_port = 2222");
         expect(editedConfig).toContain(`name = "${AGENT_NAME}"`);
         expect(editedConfig).toContain('password = "ssh-secret"');
+        // The id is created on add and stored with the entry, so it survives restarts.
+        expect(editedConfig).toContain(`id = "${response.agent.id}"`);
 
         await restartServerAndWait({ apiClient, serverLog });
 
         const afterRestart = await apiClient.listAgents();
+
+        // The reloaded entry is the same device, not a new one with the same name.
+        expect(
+            afterRestart.find((agent) => agent.name === AGENT_NAME)?.id,
+        ).toBe(response.agent.id);
 
         // Persistence must reconstruct the same dormant agent after a full config reload.
         expect(
@@ -220,7 +232,7 @@ describe("SSH agent configuration API", () => {
         const renamed = "updated-ssh-agent";
 
         const configuredAgent = (await apiClient.listAgents()).find(
-            (agent) => agent.id === AGENT_NAME,
+            (agent) => agent.name === AGENT_NAME,
         );
 
         if (!configuredAgent) throw new Error("Created SSH agent missing");
@@ -243,15 +255,19 @@ describe("SSH agent configuration API", () => {
             updateRequest,
         );
 
-        // Save must settle a delayed restart before replacing the identity, rather than racing it.
+        // Save must settle a delayed restart before applying the rename, rather than racing it.
+        // A rename changes only the name; the id stays so stored references keep working.
         expect(update.agent).toMatchObject({
-            id: renamed,
+            id: configuredAgent.id,
+            name: renamed,
             cwd: "/srv/updated",
             status: "stopped",
         });
         const inventory = await apiClient.listAgents();
-        expect(inventory.some((agent) => agent.id === AGENT_NAME)).toBe(false);
-        expect(inventory.some((agent) => agent.id === renamed)).toBe(true);
+        expect(inventory.some((agent) => agent.name === AGENT_NAME)).toBe(
+            false,
+        );
+        expect(inventory.some((agent) => agent.name === renamed)).toBe(true);
         const afterUpdate = await apiClient.getSshAgentConfiguration(renamed);
         // Clearing optional paths on PUT must persist as omitted settings, not leftover values.
         expect(afterUpdate.remote_bin).toBeNull();
@@ -269,18 +285,64 @@ describe("SSH agent configuration API", () => {
         // A typed password on PUT must replace the durable secret, not keep the old one.
         expect(editedConfig).toContain('password = "updated-secret"');
         expect(editedConfig).not.toContain('password = "ssh-secret"');
+        // The edit handler rebuilds the entry, so it must carry the id over explicitly.
+        expect(editedConfig).toContain(`id = "${configuredAgent.id}"`);
 
         const deletion = await apiClient.deleteManagedAgent(renamed, "ssh");
         expect(deletion.deleted).toBe(true);
         // Deletion must remove both durable TOML and retained runtime inventory.
         expect(
             (await apiClient.listAgents()).some(
-                (agent) => agent.id === renamed,
+                (agent) => agent.name === renamed,
             ),
         ).toBe(false);
         expect(readFileSync(configPath, "utf8")).not.toContain(
             `name = "${renamed}"`,
         );
+    });
+
+    it("keeps the id in config.toml when another field is edited", async () => {
+        const name = "ssh-edit-keeps-id";
+
+        const created = await apiClient.createSshAgent(
+            sshRequest({ target: "before-host", name, ssh_port: 22 }),
+        );
+
+        onTestFinished(async () => {
+            try {
+                await apiClient.deleteManagedAgent(created.agent.id, "ssh");
+            } catch {
+                // Cleanup must tolerate an already-removed leftover from a failed assertion.
+            }
+        });
+
+        const update = await apiClient.updateSshAgent(
+            created.agent.id,
+            sshUpdateRequest({
+                target: "after-host",
+                name,
+                username: "operator",
+                ssh_port: 2022,
+                home: "/srv/after",
+            }),
+        );
+
+        // Editing by id works, and the device keeps its id while its settings change.
+        expect(update.agent).toMatchObject({
+            id: created.agent.id,
+            name,
+            ssh_target: "after-host",
+        });
+
+        const table = readFileSync(configPath, "utf8")
+            .split("[[agents]]")
+            .find((entry) => entry.includes(`name = "${name}"`));
+
+        // The rewritten entry still carries the original id, so the next startup does not
+        // assign a new one and break token scopes.
+        expect(table).toContain(`id = "${created.agent.id}"`);
+        // The edit itself was applied to the same entry.
+        expect(table).toContain('target = "after-host"');
     });
 
     it("returns 404 for unknown and local agents without converting them", async () => {
@@ -295,7 +357,9 @@ describe("SSH agent configuration API", () => {
                 sshUpdateRequest({ target: "nobody", name: missing }),
             ),
         ).rejects.toMatchObject({ status: 404 } satisfies Partial<ApiError>);
-        await expect(apiClient.deleteManagedAgent(missing, "ssh")).rejects.toMatchObject({
+        await expect(
+            apiClient.deleteManagedAgent(missing, "ssh"),
+        ).rejects.toMatchObject({
             status: 404,
         } satisfies Partial<ApiError>);
         // Local agents are managed but SSH GET/PUT must not convert them into SSH rows.
@@ -316,7 +380,7 @@ describe("SSH agent configuration API", () => {
         ).rejects.toMatchObject({ status: 404 } satisfies Partial<ApiError>);
 
         const local = (await apiClient.listAgents()).find(
-            (agent) => agent.id === LOCAL_AGENT_NAME,
+            (agent) => agent.name === LOCAL_AGENT_NAME,
         );
 
         // A rejected SSH mutation must not convert or remove the local fixture.
@@ -351,7 +415,7 @@ describe("SSH agent configuration API", () => {
         });
 
         const original = (await apiClient.listAgents()).find(
-            (agent) => agent.id === originalName,
+            (agent) => agent.name === originalName,
         );
 
         if (!original) throw new Error("Rename source agent missing");
@@ -359,7 +423,7 @@ describe("SSH agent configuration API", () => {
         // Start is accepted immediately so uniqueness can be checked while desired-running is true.
         expect(
             (await apiClient.listAgents()).find(
-                (agent) => agent.id === originalName,
+                (agent) => agent.name === originalName,
             )?.status,
         ).not.toBe("stopped");
 
@@ -371,14 +435,14 @@ describe("SSH agent configuration API", () => {
         ).rejects.toMatchObject({ status: 409 } satisfies Partial<ApiError>);
 
         const afterConflict = (await apiClient.listAgents()).find(
-            (agent) => agent.id === originalName,
+            (agent) => agent.name === originalName,
         );
 
         // A 409 must not leave the original stopped after a uniqueness failure.
         expect(afterConflict?.status).not.toBe("stopped");
         expect(
             (await apiClient.listAgents()).some(
-                (agent) => agent.id === takenName,
+                (agent) => agent.name === takenName,
             ),
         ).toBe(true);
     });
@@ -400,13 +464,17 @@ describe("SSH agent configuration API", () => {
             }
         });
 
+        const before = (await apiClient.listAgents()).find(
+            (agent) => agent.name === name,
+        );
+
         const updated = await apiClient.updateSshAgent(
             name,
             sshUpdateRequest({ target: "secret-host-2", name }),
         );
 
         // Identity stays the same so only the password-preservation path is under test.
-        expect(updated.agent.id).toBe(name);
+        expect(updated.agent.id).toBe(before?.id);
         const kept = await apiClient.getSshAgentConfiguration(name);
         // GET still must not echo the secret after an update that kept it.
         expect(kept.password).toBeNull();
@@ -492,14 +560,14 @@ describe("SSH agent configuration API", () => {
         });
 
         const created = (await apiClient.listAgents()).find(
-            (agent) => agent.id === name,
+            (agent) => agent.name === name,
         );
 
         if (!created) throw new Error("Delete-running agent missing");
         await created.start();
         // The API must accept delete while desired-running instead of asking the client to stop first.
         expect(
-            (await apiClient.listAgents()).find((agent) => agent.id === name)
+            (await apiClient.listAgents()).find((agent) => agent.name === name)
                 ?.status,
         ).not.toBe("stopped");
 
@@ -507,17 +575,42 @@ describe("SSH agent configuration API", () => {
         expect(deletion.deleted).toBe(true);
         // Both inventory and TOML must be gone after an auto-stop delete.
         expect(
-            (await apiClient.listAgents()).some((agent) => agent.id === name),
+            (await apiClient.listAgents()).some((agent) => agent.name === name),
         ).toBe(false);
         expect(readFileSync(configPath, "utf8")).not.toContain(
             `name = "${name}"`,
         );
     });
 
-    it("publishes sniffing progress for an unreachable SSH target", async () => {
+    it("publishes sniffing progress for an SSH target that never answers", async () => {
         const name = "unreachable-ssh-progress";
+        // Accepting TCP but never sending an SSH banner keeps the sniff pending for as long as
+        // the test needs, without waiting out ssh's connect timeout on an unroutable address.
+        const pendingSockets = new Set<Socket>();
+        let answering = true;
+
+        const silentServer = createServer((socket) => {
+            if (answering) {
+                pendingSockets.add(socket);
+            } else {
+                socket.destroy();
+            }
+        });
+
+        const port = await getAvailablePort();
+
+        await new Promise<void>((resolve) =>
+            silentServer.listen(port, "127.0.0.1", resolve),
+        );
+        onTestFinished(async () => {
+            for (const socket of pendingSockets) socket.destroy();
+            await new Promise<void>((resolve) =>
+                silentServer.close(() => resolve()),
+            );
+        });
+
         await apiClient.createSshAgent(
-            sshRequest({ target: "192.0.2.1", name }),
+            sshRequest({ target: "127.0.0.1", ssh_port: port, name }),
         );
         onTestFinished(async () => {
             try {
@@ -528,7 +621,7 @@ describe("SSH agent configuration API", () => {
         });
 
         const created = (await apiClient.listAgents()).find(
-            (agent) => agent.id === name,
+            (agent) => agent.name === name,
         );
 
         if (!created) throw new Error("Unreachable SSH agent missing");
@@ -536,10 +629,13 @@ describe("SSH agent configuration API", () => {
 
         const sniffing = await waitForValue({
             timeoutMs: 10_000,
-            description: "SSH sniffing status on the unreachable target",
+            description:
+                "SSH sniffing status while ssh waits on the silent target",
             predicate: async () => {
+                if (pendingSockets.size === 0) return undefined;
+
                 const agent = (await apiClient.listAgents()).find(
-                    (entry) => entry.id === name,
+                    (entry) => entry.name === name,
                 );
 
                 return agent?.provisioningStatus.some((step) =>
@@ -550,17 +646,24 @@ describe("SSH agent configuration API", () => {
             },
         });
 
-        // Progress must appear on inventory before the TCP connect times out.
+        // Progress must appear on inventory while the SSH connection is still pending.
         expect(
             sniffing.provisioningStatus.map((step) => step.message),
         ).toContain("Sniffing the SSH target");
+        // No connection issue yet: the sniff is still waiting for the target to answer.
+        expect(sniffing.connectionIssue).toBeFalsy();
+
+        // Hanging up now makes the sniff fail, as a target that times out eventually would.
+        answering = false;
+
+        for (const socket of pendingSockets) socket.destroy();
 
         const failed = await waitForValue({
-            timeoutMs: 25_000,
-            description: "connection_issue after unreachable SSH sniff",
+            timeoutMs: 10_000,
+            description: "connection_issue after the silent SSH target hung up",
             predicate: async () => {
                 const agent = (await apiClient.listAgents()).find(
-                    (entry) => entry.id === name,
+                    (entry) => entry.name === name,
                 );
 
                 const hasSniff = agent?.provisioningStatus.some((step) =>
@@ -573,5 +676,5 @@ describe("SSH agent configuration API", () => {
 
         // Failures stay on connection_issue rather than replacing the progress list.
         expect(failed.connectionIssue).toBeTruthy();
-    }, 40_000);
+    });
 });

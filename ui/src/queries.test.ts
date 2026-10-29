@@ -1,5 +1,6 @@
 import { CancelledError, QueryClient } from "@tanstack/react-query";
-import { expect, test } from "vitest";
+import { isNotFound } from "@tanstack/react-router";
+import { expect, test, vi } from "vitest";
 
 import type { AgentInfoResponse } from "#bindings/AgentInfoResponse";
 import { ApiClient } from "#ui/api-client";
@@ -9,6 +10,7 @@ import {
     fileContentQueryOptions,
     invalidateAgentData,
     invalidateAllAgentData,
+    loadAgentByName,
     queryKeys,
 } from "./queries";
 import { agentsWithReplacedConnection } from "./refresh-listener";
@@ -37,6 +39,7 @@ function agentInfo(
         supports_trash: false,
         uid: 1000,
         is_root: false,
+        duplicate_id: null,
         ...overrides,
     };
 }
@@ -275,4 +278,79 @@ test("only a replaced or ended connection counts as a connection change", () => 
         "reconnected",
         "dropped",
     ]);
+});
+
+/** Builds a loader context whose inventory request answers with `serverInventory`. */
+function deviceContext(
+    cached: AgentInfoResponse[] | null,
+    serverInventory: AgentInfoResponse[],
+) {
+    const queryClient = new QueryClient();
+    const api = new ApiClient("http://localhost");
+
+    const listAgentInfos = vi
+        .spyOn(api, "listAgentInfos")
+        .mockResolvedValue(serverInventory);
+
+    if (cached !== null) {
+        queryClient.setQueryData(agentsQueryOptions(api).queryKey, cached);
+    }
+
+    return { context: { api, queryClient }, listAgentInfos };
+}
+
+test("a device URL resolves its name to the device id", async () => {
+    const { context } = deviceContext(
+        [agentInfo("dev_aaaaaaaaaaaaaaaaaaaa", { name: "pi" })],
+        [],
+    );
+
+    const agent = await loadAgentByName(context, "pi");
+
+    // Everything after the URL acts on the id, so the name must map to the right device.
+    expect(agent.id).toBe("dev_aaaaaaaaaaaaaaaaaaaa");
+});
+
+test("an exact id in a device URL wins over a name", async () => {
+    const { context } = deviceContext(
+        [
+            agentInfo("dev_aaaaaaaaaaaaaaaaaaaa", { name: "pi" }),
+            agentInfo("dev_bbbbbbbbbbbbbbbbbbbb", {
+                name: "dev_aaaaaaaaaaaaaaaaaaaa",
+            }),
+        ],
+        [],
+    );
+
+    const agent = await loadAgentByName(context, "dev_aaaaaaaaaaaaaaaaaaaa");
+
+    // The REST API resolves an exact id first, and links built from an id must agree.
+    expect(agent.name).toBe("pi");
+});
+
+test("a name missing from the cached inventory is looked up on the server", async () => {
+    const { context, listAgentInfos } = deviceContext(
+        [agentInfo("dev_aaaaaaaaaaaaaaaaaaaa", { name: "old" })],
+        [agentInfo("dev_aaaaaaaaaaaaaaaaaaaa", { name: "renamed" })],
+    );
+
+    const agent = await loadAgentByName(context, "renamed");
+
+    // A rename or add in another tab must not be reported as "device not found".
+    expect(listAgentInfos).toHaveBeenCalledTimes(1);
+    expect(agent.id).toBe("dev_aaaaaaaaaaaaaaaaaaaa");
+});
+
+test("an unknown device name is reported as not found", async () => {
+    const { context } = deviceContext(
+        [agentInfo("dev_aaaaaaaaaaaaaaaaaaaa", { name: "pi" })],
+        [agentInfo("dev_aaaaaaaaaaaaaaaaaaaa", { name: "pi" })],
+    );
+
+    const error = await loadAgentByName(context, "unknown").catch(
+        (cause: unknown) => cause,
+    );
+
+    // The device route renders its "device not found" page for this outcome, not an error.
+    expect(isNotFound(error)).toBe(true);
 });
