@@ -724,11 +724,20 @@ test.describe.serial("Open files", () => {
         await expect.poll(linkNames).toEqual(names);
         expect(puts).toBe(0);
 
+        const reorderPersisted = page.waitForResponse(
+            (response) =>
+                response.request().method() === "PUT" &&
+                response.url().includes("/api/v1/user/state"),
+        );
+
         await keyboardReorder(page, handle, { key: "ArrowUp", times: 2 });
         await expect
             .poll(linkNames)
             .toEqual(["file3.txt", "file1.txt", "file2.txt"]);
         await expect(handle).toBeFocused();
+        // The new order paints before its background write lands, and the page.goto() below
+        // would abort a write still in flight and reload the old order.
+        await reorderPersisted;
         const editor = page.getByLabel("File editor", { exact: true });
         await page.goto(
             `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(path.join(ctx.testDirPath, "file1.txt"))}`,
