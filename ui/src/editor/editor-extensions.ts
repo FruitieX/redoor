@@ -24,6 +24,7 @@ import {
     Compartment,
     EditorState,
     Facet,
+    Prec,
     type Extension,
     type StateEffect,
 } from "@codemirror/state";
@@ -104,6 +105,32 @@ export class EditorConfiguration {
     private readonly wrapOff: Extension = EditorView.contentAttributes.of({
         "data-wrap-lines": "false",
     });
+
+    /**
+     * Tokyo Night paints selection matches darker than its own background, so search hits
+     * all but vanish. The overrides use the amber tones of the light theme, which readers
+     * already spot easily, at a strength that keeps the light text legible. High precedence
+     * makes them win over Tokyo Night's equally specific rules.
+     */
+    private readonly darkTheme: Extension = [
+        Prec.high(
+            EditorView.theme(
+                {
+                    ".cm-selectionMatch": {
+                        backgroundColor: "rgb(250 204 21 / 0.3)",
+                    },
+                    ".cm-searchMatch": {
+                        backgroundColor: "rgb(250 204 21 / 0.4)",
+                    },
+                    ".cm-searchMatch-selected": {
+                        backgroundColor: "rgb(249 115 22 / 0.6)",
+                    },
+                },
+                { dark: true },
+            ),
+        ),
+        tokyoNight,
+    ];
 
     private readonly notEditable: Extension = EditorView.editable.of(false);
     private readonly editable: Extension = [];
@@ -215,7 +242,7 @@ export class EditorConfiguration {
 
     /** Matches the editor colours to the resolved application theme. */
     private themeContent(settings: EditorSettings) {
-        return settings.theme === "light" ? bbedit : tokyoNight;
+        return settings.theme === "light" ? bbedit : this.darkTheme;
     }
 
     /** Keeps read-only revisions and unloaded files from accepting input. */
