@@ -132,23 +132,36 @@ async function freeReservedPort(port: number): Promise<void> {
     throw new Error(`Test port ${port} remains occupied after cleanup`);
 }
 
-/** Clears leftover listeners on the already-reserved worktree ports. */
-async function freeExistingTestPorts(): Promise<void> {
+/** Reserved port of each test suite, named as on the command line. */
+type Suite = keyof z.infer<typeof reservedPortsSchema>;
+
+/**
+ * Reads which suites to clean from the command line, defaulting to both. A suite's lifecycle
+ * hook names only its own suite so that starting it cannot kill the other suite's server
+ * while that suite is running.
+ */
+function suitesToClean(): Suite[] {
+    const requested = z
+        .array(z.enum(["vitest", "playwright"]))
+        .parse(process.argv.slice(2));
+
+    return requested.length === 0 ? ["vitest", "playwright"] : requested;
+}
+
+/** Clears leftover listeners on the already-reserved worktree ports of the given suites. */
+async function freeExistingTestPorts(suites: Suite[]): Promise<void> {
     const ports = reservedPortsSchema.parse(
         JSON.parse(await readFile(TEST_PORTS_PATH, "utf8")),
     );
 
-    await Promise.all([
-        freeReservedPort(ports.vitest),
-        freeReservedPort(ports.playwright),
-    ]);
+    await Promise.all(suites.map((suite) => freeReservedPort(ports[suite])));
 }
 
 /** Creates stable per-worktree ports once while tolerating concurrent invocations. */
 async function ensureTestPorts(): Promise<void> {
     try {
         await access(TEST_PORTS_PATH);
-        await freeExistingTestPorts();
+        await freeExistingTestPorts(suitesToClean());
 
         return;
     } catch (error) {

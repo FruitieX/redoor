@@ -45,7 +45,7 @@ playwright_unless_error() {
 }
 
 # Overlap suites with independent ports, homes, logs, and staged executables.
-# Bypass lifecycle hooks here: each hook cleans BOTH ports and would kill the other suite.
+# Both ports are cleaned once up front, so the suites run without their lifecycle hooks.
 run_test_suites() {
     silent_unless_error node scripts/test/ensure-test-ports.mts
     silent_unless_error pn exec node scripts/test/run-integration-tests.mts &
