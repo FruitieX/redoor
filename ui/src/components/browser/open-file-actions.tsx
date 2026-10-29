@@ -212,8 +212,8 @@ export function useBackgroundOpen(
 }
 
 /**
- * A small icon button that opens a file without leaving the page. Its icon and color show
- * whether the file is already open; an open file can still be sent to another line, while
+ * A small icon button that opens a file without leaving the page. Its icon and a tinted chip
+ * show whether the file is already open; an open file can still be sent to another line, while
  * opening one that is already open without a line would do nothing, so it says so instead.
  */
 export function OpenInBackgroundButton(props: {
@@ -258,7 +258,10 @@ export function OpenInBackgroundButton(props: {
             }}
             className={cn(
                 "shrink-0",
-                isOpen && "text-blue-300 hover:text-blue-200",
+                // A tinted, outlined chip rather than a color shift alone, so an open file
+                // stands out from a closed one when scanning a long list of rows.
+                isOpen &&
+                    "bg-blue-500/15 text-blue-300 ring-1 ring-blue-500/50 ring-inset hover:bg-blue-500/25 hover:text-blue-200",
                 props.className,
             )}
         >
