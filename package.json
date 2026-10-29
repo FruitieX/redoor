@@ -2,11 +2,11 @@
     "name": "redoor-ui",
     "private": true,
     "type": "module",
-    "packageManager": "pnpm@12.15.0",
+    "packageManager": "pnpm@12.16.1",
     "devEngines": {
         "runtime": {
             "name": "node",
-            "version": "26.12.1",
+            "version": "26.13.0",
             "onFail": "download"
         }
     },
