@@ -57,6 +57,10 @@ import {
 } from "#ui/utils/archive";
 import { useTerminals } from "#ui/use-terminals";
 import type { RevisionListing } from "#ui/components/browser/revision";
+import {
+    HistoryEntryStore,
+    useHistoryEntryState,
+} from "#ui/history-entry-state";
 
 /**
  * One displayed row: a listed entry, or an incoming transfer whose `entry` is a stand-in so it
@@ -88,11 +92,29 @@ function orderRowsWithoutSort(rows: FileListRow[]): FileListRow[] {
 /** Identifies the destination that should restore filter focus after Enter navigation. */
 const filterFocusPathAtom = atom<string | null>(null);
 
+const filterQueries = new HistoryEntryStore<string>();
+
+/**
+ * The name filter of one directory listing. It is kept per history entry, so coming back
+ * from a file shows the same narrowed list, whose height the restored scroll position
+ * depends on. Each directory starts unfiltered, because a filter for one directory's names
+ * rarely means anything in another.
+ */
+function useFileListFilter(scope: string) {
+    const [filter, update] = useHistoryEntryState<string>({
+        store: filterQueries,
+        scope,
+        initial: () => "",
+    });
+
+    return [filter, (next: string) => update(() => next)] as const;
+}
+
 /** Handles shortcuts that only exist while the file list is mounted. */
 function useFileListShortcuts(props: {
     filterInputRef: React.RefObject<HTMLInputElement | null>;
     filter: string;
-    setFilter: React.Dispatch<React.SetStateAction<string>>;
+    setFilter: (filter: string) => void;
 }) {
     // Both keys stay out of text controls, so typing an f or leaving the filter box with
     // Escape never triggers them; Escape clears the filter only once focus is elsewhere.
@@ -146,7 +168,14 @@ export function FileList(props: {
     const agent = props.agent;
     const [filterFocusPath, setFilterFocusPath] = useAtom(filterFocusPathAtom);
     const filterInputRef = React.useRef<HTMLInputElement>(null);
-    const [filter, setFilter] = React.useState("");
+
+    const [filter, setFilter] = useFileListFilter(
+        JSON.stringify([
+            props.agent.id,
+            props.directoryPath,
+            props.revision?.commitId,
+        ]),
+    );
 
     const normalizedFilter = filter.toLowerCase();
     // A leading dot is a hidden-name query, so include those entries without flipping the toggle.

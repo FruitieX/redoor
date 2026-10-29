@@ -341,6 +341,14 @@ test.describe.serial("File Browser Navigation", () => {
                 exact: true,
             }),
         ).toBeVisible();
+        // Each directory starts unfiltered, since one directory's filter rarely fits another.
+        await expect(destinationFilterInput).toHaveValue("");
+
+        await page.goBack();
+
+        // Coming back restores the filter, so the same narrowed list is on screen.
+        await expect(filterInput).toHaveValue("DIR2");
+        await expect(page.locator("main tbody tr")).toHaveCount(1);
     });
 
     test("should support file browser keyboard shortcuts", async ({ page }) => {
