@@ -1266,8 +1266,9 @@ The route tree separates the authenticated application from the public login for
 - **Back and forward restore the view.** The router restores the scroll position of the
   shell's scroll area (`data-scroll-restoration-id="app-main"`) per history entry. That
   position only lands where the reader left if the page has the same height, so view state
-  that changes it, such as which diffs of a list are expanded, their layout choices and the
-  file filter, is kept per history entry too (`useHistoryEntryState`). It lives in
+  that changes it, such as which diffs of a list are expanded, their layout choices, the
+  folded lines revealed in them, the diff list's file filter and the directory listing's name
+  filter, is kept per history entry too (`useHistoryEntryState`). It lives in
   module-level stores instead of component state, because opening a file unmounts the view.
   Its key mirrors the router's scroll key (`__TSR_key`), read once when the view mounts or
   changes scope: the live location already points at the next entry while the old view is

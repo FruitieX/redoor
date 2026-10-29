@@ -38,6 +38,10 @@ import {
     type HighlightToken,
 } from "#ui/utils/code-highlight";
 import { cn } from "#ui/utils/cn";
+import {
+    HistoryEntryStore,
+    useHistoryEntryState,
+} from "#ui/history-entry-state";
 
 /** Where the editor opens the diffed file, as built by `browserRoute`. */
 export type DiffEditorRoute = ReturnType<typeof browserRoute>;
@@ -721,42 +725,51 @@ function Fold(props: {
     );
 }
 
+/** How far each fold is revealed, by fold index, for every file a history entry showed. */
+type FoldRevealsByFile = ReadonlyMap<string, ReadonlyMap<number, Reveal>>;
+
+const foldRevealStates = new HistoryEntryStore<FoldRevealsByFile>();
+
 /**
  * Remembers how far each fold of a file is revealed. The folds are identified by the file's
- * hunk layout rather than the parsed object, so switching the inline layout, which parses
- * the patch again, keeps what the reader opened, while a patch whose hunks moved starts over.
+ * paths and hunk layout rather than the parsed object, so switching the inline layout, which
+ * parses the patch again, keeps what the reader opened, while a patch whose hunks moved starts
+ * over. Every file of a history entry shares one stored map, because a store keeps a bounded
+ * number of values and a long diff list would otherwise push out other entries' state. It is
+ * kept per history entry because revealed lines change the list's height, which the restored
+ * scroll position depends on when the reader comes back from a file.
  */
 function useFoldReveals(file: DiffFile) {
-    const layout = React.useMemo(
+    const fileKey = React.useMemo(
         () =>
-            file.hunks
-                .map((hunk) =>
+            JSON.stringify([
+                file.oldPath,
+                file.newPath,
+                file.hunks.map((hunk) =>
                     hunk.type === "hunk" ? hunk.header : String(hunk.count),
-                )
-                .join("|"),
+                ),
+            ]),
         [file],
     );
 
-    const [state, setState] = React.useState<{
-        layout: string;
-        reveals: ReadonlyMap<number, Reveal>;
-    }>({ layout, reveals: new Map() });
+    const [revealsByFile, update] = useHistoryEntryState<FoldRevealsByFile>({
+        store: foldRevealStates,
+        // One scope for the whole entry, since the file key already tells the files apart.
+        scope: "diff-folds",
+        initial: () => new Map(),
+    });
 
-    const reveals =
-        state.layout === layout ? state.reveals : new Map<number, Reveal>();
+    const reveals = revealsByFile.get(fileKey);
 
     return {
-        get: (index: number) => reveals.get(index) ?? NOTHING_REVEALED,
+        get: (index: number) => reveals?.get(index) ?? NOTHING_REVEALED,
         set: (index: number, reveal: Reveal) =>
-            setState((previous) => {
-                const next = new Map(
-                    previous.layout === layout ? previous.reveals : [],
-                );
-
-                next.set(index, reveal);
-
-                return { layout, reveals: next };
-            }),
+            update((previous) =>
+                new Map(previous).set(
+                    fileKey,
+                    new Map(previous.get(fileKey)).set(index, reveal),
+                ),
+            ),
     };
 }
 

@@ -29,9 +29,8 @@ test.describe("Diff context expansion", () => {
         testDirPath = "";
     });
 
-    test("reveals folded lines and the whole file without fetching again", async ({
-        page,
-    }) => {
+    /** A repository whose only file has line 30 of 60 edited, so the folds are known. */
+    async function setupEditedRepository() {
         const ctx = await setupTestDir("diff-expand-context");
         testDirPath = ctx.testDirPath;
         const repositoryPath = path.join(ctx.testDirPath, "repository");
@@ -44,6 +43,14 @@ test.describe("Diff context expansion", () => {
         await $`git -C ${repositoryPath} add notes.txt`;
         await $`git -C ${repositoryPath} commit -m baseline`;
         await fs.writeFile(filePath, numberedLines(60, 30));
+
+        return { ctx, filePath };
+    }
+
+    test("reveals folded lines and the whole file without fetching again", async ({
+        page,
+    }) => {
+        const { ctx, filePath } = await setupEditedRepository();
 
         // The request count below must only see fetches this page's own clicks caused.
         await ignoreServerEvents(page);
@@ -113,5 +120,41 @@ test.describe("Diff context expansion", () => {
 
         // Every line came with the first patch, so expanding never asked the server again.
         expect(diffRequests).toBe(requestsAfterLoad);
+    });
+
+    test("keeps revealed lines when coming back from the editor", async ({
+        page,
+    }) => {
+        const { ctx, filePath } = await setupEditedRepository();
+
+        await page.goto(
+            `${WEB_BASE_URL}/agents/${ctx.agentName}/browser/${encodeFilesystemPath(filePath)}?view=git`,
+        );
+
+        const diff = page.getByRole("region", { name: "Full Git diff" });
+        const topFold = diff.locator("tr[data-skip-block]").first();
+
+        const row = (line: number) =>
+            diff.locator(`tr[data-line-new="${line}"]`);
+
+        await topFold.getByRole("button", { name: "Expand up" }).click();
+        // One step reveals the twenty lines just above the visible context.
+        await expect(row(7)).toBeVisible();
+
+        await diff
+            .getByRole("link", { name: "Open line 30 in editor" })
+            .click();
+        // Opening the editor leaves the diff, which unmounts it with its folds.
+        await expect(page).not.toHaveURL(/\bview=git\b/);
+        await expect(
+            page.getByLabel("File editor", { exact: true }),
+        ).toBeVisible();
+
+        await page.goBack();
+
+        // The revealed lines come back, so the diff has the height the scroll position expects.
+        await expect(row(7)).toBeVisible();
+        await expect(row(6)).toHaveCount(0);
+        await expect(topFold).toHaveText(/6 unchanged lines hidden/);
     });
 });
