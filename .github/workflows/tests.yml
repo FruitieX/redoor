@@ -51,6 +51,11 @@ jobs:
             - name: Run Cargo tests
               run: cargo test --locked
 
+            # vitest.config.ts reads the generated test_ports.json, which only the integration
+            # and Playwright pre-hooks create.
+            - name: Reserve test ports
+              run: pnpm exec node scripts/test/ensure-test-ports.mts
+
             - name: Run UI unit tests
               run: pnpm run test:unit
 
