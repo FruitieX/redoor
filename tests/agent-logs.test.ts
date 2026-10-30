@@ -143,7 +143,8 @@ async function waitForPing(socket: WebSocket): Promise<void> {
     });
 }
 
-describe.sequential("dedicated agent log tunnel", () => {
+// The cases change the shared runtime logging level, so they must never run concurrently.
+describe("dedicated agent log tunnel", { concurrent: false }, () => {
     it("authenticates and changes server and agent logging levels at runtime", async () => {
         const unauthenticated = await fetch(
             `${apiClient.baseUrl}/api/v1/server/logging-level`,
