@@ -8,10 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-};
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use axum::{
     Json,
     extract::{ConnectInfo, State},
@@ -538,21 +535,17 @@ fn hash_password(password: &str) -> anyhow::Result<String> {
     let mut salt_bytes = [0_u8; 16];
     getrandom::fill(&mut salt_bytes)
         .map_err(|error| anyhow::anyhow!("failed to read OS randomness: {error}"))?;
-    let salt = SaltString::encode_b64(&salt_bytes)
-        .map_err(|error| anyhow::anyhow!("failed to encode password salt: {error}"))?;
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_with_salt(password.as_bytes(), &salt_bytes)
         .map(|hash| hash.to_string())
         .map_err(|error| anyhow::anyhow!("failed to hash password: {error}"))
 }
 
 /// Constant-time password verification against a stored PHC string.
 fn verify_password_hash(candidate: &str, password_hash: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(password_hash) else {
-        return false;
-    };
+    // A malformed PHC string fails verification instead of being treated as a match.
     Argon2::default()
-        .verify_password(candidate.as_bytes(), &parsed)
+        .verify_password(candidate.as_bytes(), password_hash)
         .is_ok()
 }
 

@@ -124,5 +124,5 @@ pub async fn create_default_config_if_missing(path: &Path) -> Result<Option<Crea
 /// name without the operator having to configure it. The server imports this
 /// helper so the name it shows matches the one the spawned agent registers with.
 pub fn default_local_agent_name() -> String {
-    sysinfo::System::host_name().unwrap_or_else(|| "local".to_string())
+    sysinfo::System::host_name().unwrap_or_else(|_| "local".to_string())
 }

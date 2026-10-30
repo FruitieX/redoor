@@ -21,7 +21,7 @@ impl HostIdentity {
         Self {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
-            hostname: System::host_name().unwrap_or_else(|| "unknown".to_string()),
+            hostname: System::host_name().unwrap_or_else(|_| "unknown".to_string()),
             username: std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()),
             uid: effective_uid.as_raw(),
             is_root: effective_uid.is_root(),

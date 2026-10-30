@@ -221,7 +221,7 @@ impl AgentSettings {
             .websocket_url();
 
         let name = first_non_empty([args.name, agent_section.name])
-            .or_else(System::host_name)
+            .or_else(|| System::host_name().ok())
             .context("agent name is not configured and the computer hostname is unavailable")?;
         // The server would reject the `hello` anyway; failing here explains it at the source.
         redoor_protocol::ids::validate_device_name(&name)?;

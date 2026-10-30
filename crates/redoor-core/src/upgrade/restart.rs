@@ -55,7 +55,7 @@ impl Restarter {
         let own_pid = ProcessId(std::process::id());
         let snapshots = tokio::task::spawn_blocking(ProcessSnapshot::all)
             .await
-            .context("Failed to list running processes")?;
+            .context("Failed to list running processes")??;
         let ancestors = ProcessSnapshot::ancestors_of(own_pid, &snapshots);
         let mut processes = Vec::new();
         for snapshot in snapshots {
@@ -186,8 +186,10 @@ struct ProcessSnapshot {
 
 impl ProcessSnapshot {
     /// Reads the process table; blocking, so callers run it off the async workers.
-    fn all() -> Vec<Self> {
-        let mut system = System::new();
+    /// Fails when the platform cannot list processes, so a restart is not mistaken for
+    /// having found nothing to restart.
+    fn all() -> Result<Vec<Self>> {
+        let mut system = System::new().context("Failed to read the process table")?;
         system.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
@@ -197,7 +199,7 @@ impl ProcessSnapshot {
                 .with_cmd(UpdateKind::Always)
                 .with_environ(UpdateKind::Always),
         );
-        system
+        let snapshots = system
             .processes()
             .values()
             .filter(|process| process.thread_kind().is_none())
@@ -213,7 +215,8 @@ impl ProcessSnapshot {
                     .join(" "),
                 environ: process.environ().to_vec(),
             })
-            .collect()
+            .collect();
+        Ok(snapshots)
     }
 
     /// Collects the ancestors of `pid`, guarding against cycles from PID reuse.

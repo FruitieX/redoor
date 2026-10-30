@@ -41,8 +41,10 @@ pub(super) async fn get_agent_details(
 
     // Load and uptime are cheap OS reads; a full `System` refresh would scan every process
     // on an async worker for nothing.
-    let load_avg = System::load_average();
-    let system_uptime = System::uptime();
+    // Platforms without these readings report zeros, as before, rather than failing the
+    // whole details request.
+    let load_avg = System::load_average().unwrap_or_default();
+    let system_uptime = System::uptime().unwrap_or_default();
     let host = HostIdentity::current();
     let mount_points = match crate::platform::mounts::capacities().await {
         Ok(mount_points) => mount_points,
